@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload};
 use crate::types::events::GameEvent;
+use crate::types::format::SideboardPolicy;
 use crate::types::game_state::{GameState, PlayerDeckPool, WaitingFor};
 use crate::types::match_config::{DeckCardCount, MatchPhase, MatchType};
 use crate::types::player::PlayerId;
@@ -262,11 +263,66 @@ pub fn handle_game_over_transition(state: &mut GameState) {
                 .or(Some(state.current_starting_player)),
         }
     };
-    state.waiting_for = WaitingFor::BetweenGamesSideboard {
-        player: PlayerId(0),
+    state.waiting_for = between_games_sideboard_prompt(state, PlayerId(0));
+}
+
+/// CR 100.2a / CR 100.4a / CR 100.5: the size bounds a between-games
+/// submission must satisfy for `player`.
+///
+/// Single authority for the sideboarding gate: `handle_submit_sideboard`
+/// validates against it, and `WaitingFor::BetweenGamesSideboard` publishes it
+/// so the client's submit button enforces the engine's own predicate rather
+/// than a reimplementation of it.
+///
+/// Returns `(min_main_deck_size, max_sideboard_size)`; a `None` sideboard cap
+/// means the format imposes none.
+pub(crate) fn sideboard_submission_bounds(
+    state: &GameState,
+    player: PlayerId,
+) -> (u32, Option<u32>) {
+    // CR 100.2a / CR 100.2b: `deck_size` is a *minimum* deck size, and CR 100.5
+    // adds that there is no maximum deck size for non-Commander decks.
+    // Sideboarding is therefore not a one-for-one swap: a player who registered
+    // 60/15 may legally present 61, 70, or all 75 cards in their main deck. The
+    // registered total bounds the *pool* (checked separately), never the
+    // main-deck size.
+    //
+    // Clamping to the registered total keeps the floor satisfiable: a match
+    // whose deck was registered below the format minimum (scenario decks, and
+    // any deck the session admitted without a legality gate) would otherwise
+    // have no legal submission at all, softlocking the between-games step. The
+    // clamp still forbids shrinking the deck below what was already in play,
+    // which is the property the minimum exists to protect.
+    let registered_main_total = state
+        .deck_pools
+        .iter()
+        .find(|p| p.player == player)
+        .map_or(0, |pool| total_count(&pool.registered_main));
+    let min_main_deck_size = u32::from(state.format_config.deck_size).min(registered_main_total);
+
+    // CR 100.4a: the sideboard cap is per-format. `Forbidden` formats (the
+    // Commander family) have no sideboard at all, which bounds it at zero and
+    // therefore pins the whole pool in the main deck.
+    let max_sideboard_size = match state.format_config.format.sideboard_policy() {
+        SideboardPolicy::Forbidden => Some(0),
+        SideboardPolicy::Limited(max) => Some(max),
+        SideboardPolicy::Unlimited => None,
+    };
+
+    (min_main_deck_size, max_sideboard_size)
+}
+
+/// Build the between-games prompt for `player`, stamping the submission bounds
+/// the client gates on.
+fn between_games_sideboard_prompt(state: &GameState, player: PlayerId) -> WaitingFor {
+    let (min_main_deck_size, max_sideboard_size) = sideboard_submission_bounds(state, player);
+    WaitingFor::BetweenGamesSideboard {
+        player,
         game_number: state.game_number,
         score: state.match_score,
-    };
+        min_main_deck_size,
+        max_sideboard_size,
+    }
 }
 
 pub fn handle_submit_sideboard(
@@ -280,17 +336,26 @@ pub fn handle_submit_sideboard(
         return Err("Cannot submit sideboard outside BetweenGames phase".to_string());
     }
 
+    // Resolve the bounds before borrowing `state.deck_pools` mutably below.
+    let (min_main_deck_size, max_sideboard_size) = sideboard_submission_bounds(state, player);
+
     let Some(pool) = state.deck_pools.iter_mut().find(|p| p.player == player) else {
         return Err("Deck pool not found for player".to_string());
     };
 
     let submitted_main_total: u32 = main.iter().map(|c| c.count).sum();
-    let registered_main_total = total_count(&pool.registered_main);
-    if submitted_main_total != registered_main_total {
+    if submitted_main_total < min_main_deck_size {
         return Err(format!(
-            "Main deck size mismatch: expected {}, got {}",
-            registered_main_total, submitted_main_total
+            "Main deck has {submitted_main_total} cards (minimum {min_main_deck_size})"
         ));
+    }
+    let submitted_sideboard_total: u32 = sideboard.iter().map(|c| c.count).sum();
+    if let Some(max) = max_sideboard_size {
+        if submitted_sideboard_total > max {
+            return Err(format!(
+                "Sideboard has {submitted_sideboard_total} cards (maximum {max})"
+            ));
+        }
     }
 
     let submitted_pool_map = {
@@ -330,11 +395,10 @@ pub fn handle_submit_sideboard(
             score: state.match_score,
         }
     } else {
-        WaitingFor::BetweenGamesSideboard {
-            player: next_unsubmitted_sideboard_player(state).unwrap_or_else(|| opponent(player)),
-            game_number: state.game_number,
-            score: state.match_score,
-        }
+        between_games_sideboard_prompt(
+            state,
+            next_unsubmitted_sideboard_player(state).unwrap_or_else(|| opponent(player)),
+        )
     };
     state.waiting_for = waiting_for.clone();
     Ok(waiting_for)
@@ -533,20 +597,33 @@ mod tests {
         }];
 
         let mut events = Vec::new();
-        let bad_main_size = handle_submit_sideboard(
+        // CR 100.2a: shrinking the main deck below the minimum is illegal. The
+        // minimum here is the registered 2 (clamped down from Standard's 60),
+        // so dropping to 1 main card must be rejected. The pool is kept intact
+        // so this isolates the minimum check from the pool-equality check.
+        let below_minimum = handle_submit_sideboard(
             &mut state,
             PlayerId(0),
             vec![DeckCardCount {
                 name: "A".to_string(),
                 count: 1,
             }],
-            vec![DeckCardCount {
-                name: "B".to_string(),
-                count: 1,
-            }],
+            vec![
+                DeckCardCount {
+                    name: "A".to_string(),
+                    count: 1,
+                },
+                DeckCardCount {
+                    name: "B".to_string(),
+                    count: 1,
+                },
+            ],
             &mut events,
         );
-        assert!(bad_main_size.is_err());
+        assert_eq!(
+            below_minimum,
+            Err("Main deck has 1 cards (minimum 2)".to_string())
+        );
 
         let bad_pool = handle_submit_sideboard(
             &mut state,
@@ -562,6 +639,80 @@ mod tests {
             &mut events,
         );
         assert!(bad_pool.is_err());
+    }
+
+    /// CR 100.2a + CR 100.5: `deck_size` is a minimum, not an exact size, so a
+    /// player may side a card *in* without siding one out and submit a larger
+    /// main deck than they registered. This is the case the old exact-equality
+    /// check rejected.
+    #[test]
+    fn sideboard_accepts_main_deck_larger_than_registered() {
+        let mut state = GameState::new_two_player(3);
+        state.match_phase = MatchPhase::BetweenGames;
+        state.deck_pools = vec![PlayerDeckPool {
+            player: PlayerId(0),
+            registered_main: std::sync::Arc::new(vec![entry("A", 2)]),
+            registered_sideboard: std::sync::Arc::new(vec![entry("B", 1)]),
+            current_main: std::sync::Arc::new(vec![entry("A", 2)]),
+            current_sideboard: std::sync::Arc::new(vec![entry("B", 1)]),
+            ..Default::default()
+        }];
+
+        let mut events = Vec::new();
+        let accepted = handle_submit_sideboard(
+            &mut state,
+            PlayerId(0),
+            vec![
+                DeckCardCount {
+                    name: "A".to_string(),
+                    count: 2,
+                },
+                DeckCardCount {
+                    name: "B".to_string(),
+                    count: 1,
+                },
+            ],
+            Vec::new(),
+            &mut events,
+        );
+        assert!(accepted.is_ok(), "{accepted:?}");
+
+        let pool = &state.deck_pools[0];
+        assert_eq!(total_count(&pool.current_main), 3);
+        assert!(pool.current_sideboard.is_empty());
+    }
+
+    /// CR 100.4a: the sideboard may not exceed the format's cap. Standard is
+    /// `Limited(15)`, so a 16-card sideboard is rejected even though the
+    /// combined pool matches what was registered.
+    #[test]
+    fn sideboard_rejects_submission_over_the_format_cap() {
+        let mut state = GameState::new_two_player(3);
+        state.match_phase = MatchPhase::BetweenGames;
+        state.deck_pools = vec![PlayerDeckPool {
+            player: PlayerId(0),
+            registered_main: std::sync::Arc::new(vec![entry("A", 60), entry("B", 16)]),
+            registered_sideboard: std::sync::Arc::new(vec![]),
+            current_main: std::sync::Arc::new(vec![entry("A", 60), entry("B", 16)]),
+            current_sideboard: std::sync::Arc::new(vec![]),
+            ..Default::default()
+        }];
+
+        let mut events = Vec::new();
+        let over_cap = handle_submit_sideboard(
+            &mut state,
+            PlayerId(0),
+            vec![DeckCardCount {
+                name: "A".to_string(),
+                count: 60,
+            }],
+            vec![DeckCardCount {
+                name: "B".to_string(),
+                count: 16,
+            }],
+            &mut events,
+        );
+        assert!(over_cap.is_err());
     }
 
     #[test]
@@ -624,6 +775,8 @@ mod tests {
             player: PlayerId(0),
             game_number: 2,
             score: state.match_score,
+            min_main_deck_size: 0,
+            max_sideboard_size: None,
         };
 
         let submit_p0 = apply_as_current(
@@ -746,6 +899,8 @@ mod tests {
             player: PlayerId(0),
             game_number: 2,
             score: state.match_score,
+            min_main_deck_size: 0,
+            max_sideboard_size: None,
         };
 
         apply_as_current(
@@ -827,6 +982,8 @@ mod tests {
             player: PlayerId(0),
             game_number: 2,
             score: state.match_score,
+            min_main_deck_size: 0,
+            max_sideboard_size: None,
         };
 
         apply_as_current(

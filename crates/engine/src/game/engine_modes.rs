@@ -346,13 +346,7 @@ pub(super) fn resolve_random_modal_trigger(
         // CR 603.3c: No legal mode — drop the trigger. The interactive branches
         // already removed the in-flight stack entry before this point, so just
         // clear the cursor here.
-        if let Some(entry_id) = state.pending_trigger_entry.take() {
-            if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                state.stack.pop_back();
-                state.stack_paid_facts.remove(&entry_id);
-                state.stack_trigger_event_batches.remove(&entry_id);
-            }
-        }
+        super::stack::pop_uncommitted_pending_trigger_entry(state);
         state.pending_trigger = None;
         return Ok(None);
     };

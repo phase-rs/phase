@@ -85,6 +85,8 @@ export function DeckBuilder({
     handleAddCard,
     handleAddCardByName,
     handleRemoveCard,
+    handleIncrementCard,
+    canIncrement,
     handleMoveCard,
     handleImport,
     handleSave,
@@ -423,6 +425,8 @@ export function DeckBuilder({
                       <DeckList
                         deck={currentDeck}
                         onRemoveCard={handleRemoveCard}
+                        onIncrementCard={handleIncrementCard}
+                        canIncrementCard={canIncrement}
                         onMoveCard={handleMoveCard}
                         onImport={handleImport}
                         onCardHover={onCardHover}
@@ -445,6 +449,7 @@ export function DeckBuilder({
                       cardDataCache={cardDataCache}
                       groupMode={groupMode}
                       onAddCard={handleAddCardByName}
+                      canAddCard={canIncrement}
                       onRemoveCard={handleRemoveCard}
                       onMoveCard={handleMoveCard}
                       onRemoveCommander={handleRemoveCommander}

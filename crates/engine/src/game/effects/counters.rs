@@ -567,7 +567,7 @@ fn apply_pending_counter_post_action(
             }
             push_token_entry_events(state, events, object_id, name, source_id);
             if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
-                state.delayed_triggers.push(DelayedTrigger {
+                let sacrifice_token = DelayedTrigger {
                     condition: DelayedTriggerCondition::AtNextPhase {
                         phase: crate::types::phase::Phase::EndCombat,
                     },
@@ -584,7 +584,8 @@ fn apply_pending_counter_post_action(
                     controller,
                     source_id,
                     one_shot: true,
-                });
+                };
+                crate::game::triggers::install_delayed_trigger(state, sacrifice_token);
             }
             state.last_created_token_ids.push(object_id);
             true

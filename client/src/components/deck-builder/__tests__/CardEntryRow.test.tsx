@@ -73,6 +73,47 @@ describe("CardEntryRow", () => {
     ).toBeInTheDocument();
   });
 
+  it("fires onIncrement with (name, section) when the add button is clicked", () => {
+    const onIncrement = vi.fn();
+    render(
+      <CardEntryRow
+        entry={entry}
+        section="sideboard"
+        onMove={vi.fn()}
+        onRemove={vi.fn()}
+        onIncrement={onIncrement}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /add one lightning bolt/i }));
+    expect(onIncrement).toHaveBeenCalledWith("Lightning Bolt", "sideboard");
+  });
+
+  // CR 100.2a: the ceiling is engine-resolved; the row only reflects it.
+  it("disables the add button when the card is at its copy limit", () => {
+    const onIncrement = vi.fn();
+    render(
+      <CardEntryRow
+        entry={entry}
+        section="main"
+        onMove={vi.fn()}
+        onRemove={vi.fn()}
+        onIncrement={onIncrement}
+        canIncrement={() => false}
+      />,
+    );
+    const button = screen.getByRole("button", { name: /at the copy limit/i });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(onIncrement).not.toHaveBeenCalled();
+  });
+
+  it("omits the add button when onIncrement is not provided (partition-only mode)", () => {
+    render(<CardEntryRow entry={entry} section="main" onMove={vi.fn()} onRemove={vi.fn()} />);
+    expect(
+      screen.queryByRole("button", { name: /add one lightning bolt/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders an unsupported-mechanics badge with expandable details", () => {
     render(
       <CardEntryRow

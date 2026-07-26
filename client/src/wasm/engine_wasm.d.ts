@@ -280,6 +280,20 @@ export function load_card_database(json_str: string): number;
 export function load_replay_for_playback(json_str: string): number;
 
 /**
+ * CR 100.2a / CR 903.5b: How many copies of the named card a `format` deck may
+ * legally contain across main deck, sideboard, and command zone combined
+ * (CR 100.4a). Unlike `deckCopyLimit`, this is the *resolved* ceiling — it
+ * already applies the basic-land exemption, the card's printed override, and
+ * the format default, so the caller compares a count against it directly.
+ *
+ * Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or
+ * `{"type":"UpTo","data":N}`); switch on `.type`. Returns `{"type":"Unlimited"}`
+ * when the card database isn't loaded, so a not-yet-hydrated frontend never
+ * blocks a legal add.
+ */
+export function maxDeckCopies(name: string, format: any): any;
+
+/**
  * Verify WASM integration works.
  */
 export function ping(): string;
@@ -478,6 +492,7 @@ export interface InitOutput {
     readonly legal_targets_for_castables_js: (a: any) => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
+    readonly maxDeckCopies: (a: number, b: number, c: any) => any;
     readonly ping: () => [number, number];
     readonly preview_action_js: (a: number, b: any) => any;
     readonly preview_mana_payment_js: (a: number, b: any) => any;

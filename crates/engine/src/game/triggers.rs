@@ -27,6 +27,7 @@ use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
 use crate::types::resolved_commands::{
+    ResolvedDelayedTriggerCommand, ResolvedDelayedTriggerReplayInvariantError,
     ResolvedTriggerCollection, ResolvedTriggerCollectionCommand,
     ResolvedTriggerCollectionReplayInvariantError,
 };
@@ -306,6 +307,59 @@ impl PendingTriggerContext {
             dispatch_origin: PendingTriggerDispatchOrigin::Delayed,
         }
     }
+}
+
+/// Installs one CR 603.7 delayed triggered ability and journals it.
+///
+/// SINGLE AUTHORITY for adding to `GameState::delayed_triggers`. Every rules
+/// path that creates a delayed triggered ability — CR 603.7a names all three
+/// origins (the resolution of a spell or ability, a replacement effect being
+/// applied, and a static ability that allows a player to take an action) — goes
+/// through here rather than pushing onto the vector directly, so the creation is
+/// recorded exactly once, in execution order, with the operands the creating
+/// effect already bound.
+///
+/// The caller has already resolved everything the trigger needs: its condition,
+/// its controller (CR 603.7d/e: the player who controlled the creating spell or
+/// ability as it resolved), its source, and its `ResolvedAbility` with targets
+/// chosen. This function reads only the live install position, so it cannot
+/// fail — the precondition it records is the one it just observed.
+pub fn install_delayed_trigger(state: &mut GameState, trigger: DelayedTrigger) {
+    let command = ResolvedDelayedTriggerCommand {
+        trigger,
+        expected_installed_count: state.delayed_triggers.len(),
+        cause: state.current_or_begin_rules_execution_node(),
+    };
+    apply_resolved_delayed_trigger(state, &command)
+        .expect("the freshly read install position must satisfy its own precondition");
+    state
+        .resolved_rules_journal
+        .record_delayed_trigger_install(command)
+        .expect("resolved delayed-trigger install must have a live journal cause");
+}
+
+/// Installs one already-resolved CR 603.7 delayed triggered ability verbatim.
+///
+/// Deliberately re-derives nothing: the trigger's condition, controller, source,
+/// and bound targets are installed exactly as the creating effect resolved them
+/// (CR 603.7c — a delayed triggered ability that refers to a particular object
+/// still refers to that object). Replay never re-runs target selection and never
+/// re-reads the source, which may already have changed zones.
+pub fn apply_resolved_delayed_trigger(
+    state: &mut GameState,
+    command: &ResolvedDelayedTriggerCommand,
+) -> Result<(), ResolvedDelayedTriggerReplayInvariantError> {
+    let found = state.delayed_triggers.len();
+    if found != command.expected_installed_count {
+        return Err(
+            ResolvedDelayedTriggerReplayInvariantError::InstalledCountPreconditionMismatch {
+                expected: command.expected_installed_count,
+                found,
+            },
+        );
+    }
+    state.delayed_triggers.push(command.trigger.clone());
+    Ok(())
 }
 
 /// Applies exact trigger/LKI collection output without rerunning trigger matching.

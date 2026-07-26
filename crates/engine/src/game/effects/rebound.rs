@@ -54,7 +54,7 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
     // CR 702.88a: "you may cast" is an optional effect.
     inner.optional = true;
 
-    state.delayed_triggers.push(DelayedTrigger {
+    let rebound_cast = DelayedTrigger {
         // CR 603.7b: fires once at the controller's next upkeep.
         condition: crate::types::ability::DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::Upkeep,
@@ -71,7 +71,8 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
         source_id: exiled_id,
         // CR 603.7b: one-shot — removed after it fires.
         one_shot: true,
-    });
+    };
+    crate::game::triggers::install_delayed_trigger(state, rebound_cast);
     true
 }
 

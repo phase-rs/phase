@@ -1909,7 +1909,7 @@ mod tests {
         Box::new(PendingManaAbility {
             player,
             source_id,
-            ability_index: 0,
+            ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,

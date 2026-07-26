@@ -1627,6 +1627,8 @@ mod tests {
                 p1_wins: 0,
                 draws: 0,
             },
+            min_main_deck_size: 0,
+            max_sideboard_size: None,
         };
 
         mgr.handle_disconnect(&code, PlayerId(0));
@@ -3001,6 +3003,326 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(&library[..3], &[c, a, b]);
+    }
+
+    /// CR 103.5: mulligan bottoming allows the selected hand cards in any
+    /// order. The server forwards that order to the engine-owned action
+    /// admission and `handle_mulligan_bottom` preserves it at library bottom.
+    #[test]
+    fn reordered_mulligan_bottom_selection_is_accepted_not_rejected_as_illegal() {
+        use engine::game::zones::create_object;
+        use engine::types::game_state::{
+            MulliganDecisionEntry, MulliganDecisionPhase, PendingMulliganAction,
+        };
+        use engine::types::identifiers::{CardId, ObjectId};
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        let bottom_player = PlayerId(if session.state.active_player == PlayerId(0) {
+            1
+        } else {
+            0
+        });
+        let token = if bottom_player == PlayerId(0) {
+            &token0
+        } else {
+            &token1
+        };
+
+        let mut hand = Vec::new();
+        for i in 0..2 {
+            let id = create_object(
+                &mut session.state,
+                CardId(3000 + i),
+                bottom_player,
+                format!("Bottom Card {i}"),
+                Zone::Hand,
+            );
+            hand.push(id);
+        }
+        let (a, b): (ObjectId, ObjectId) = (hand[0], hand[1]);
+        session.state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: bottom_player,
+                mulligan_count: 1,
+                phase: MulliganDecisionPhase::BottomCards {
+                    count: 2,
+                    then: PendingMulliganAction::Keep,
+                },
+            }],
+            free_first_mulligan: false,
+        };
+
+        let token = token.to_string();
+        let result =
+            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![b, a] });
+        assert!(
+            result.is_ok(),
+            "reordered mulligan bottom selection should be accepted, got: {result:?}"
+        );
+
+        let session = mgr.sessions.get(&code).unwrap();
+        let player_idx = bottom_player.0 as usize;
+        let hand_after: Vec<ObjectId> = session.state.players[player_idx]
+            .hand
+            .iter()
+            .copied()
+            .collect();
+        assert!(!hand_after.contains(&a));
+        assert!(!hand_after.contains(&b));
+        let library_after: Vec<ObjectId> = session.state.players[player_idx]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(&library_after[library_after.len() - 2..], &[b, a]);
+    }
+
+    /// A duplicate card id must not be able to satisfy a multi-card bottoming
+    /// obligation — `[b, b]` for a 2-card obligation has the right length but
+    /// only ever moves one physical card, leaving the other owed card
+    /// stranded in hand. `validate_bottom_selection` (mulligan.rs) must reject
+    /// it before anything is moved; hand, library, and the pending obligation
+    /// must all be left exactly as they were.
+    #[test]
+    fn duplicate_mulligan_bottom_selection_is_rejected() {
+        use engine::game::zones::create_object;
+        use engine::types::game_state::{
+            MulliganDecisionEntry, MulliganDecisionPhase, PendingMulliganAction,
+        };
+        use engine::types::identifiers::{CardId, ObjectId};
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        let bottom_player = PlayerId(if session.state.active_player == PlayerId(0) {
+            1
+        } else {
+            0
+        });
+        let token = if bottom_player == PlayerId(0) {
+            &token0
+        } else {
+            &token1
+        };
+
+        let mut hand = Vec::new();
+        for i in 0..2 {
+            let id = create_object(
+                &mut session.state,
+                CardId(3100 + i),
+                bottom_player,
+                format!("Dup Bottom Card {i}"),
+                Zone::Hand,
+            );
+            hand.push(id);
+        }
+        let (a, b): (ObjectId, ObjectId) = (hand[0], hand[1]);
+        let pending_before = vec![MulliganDecisionEntry {
+            player: bottom_player,
+            mulligan_count: 1,
+            phase: MulliganDecisionPhase::BottomCards {
+                count: 2,
+                then: PendingMulliganAction::Keep,
+            },
+        }];
+        session.state.waiting_for = WaitingFor::MulliganDecision {
+            pending: pending_before.clone(),
+            free_first_mulligan: false,
+        };
+
+        let token = token.to_string();
+        let result =
+            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![b, b] });
+        assert!(
+            result.is_err(),
+            "duplicate mulligan bottom selection must be rejected, got: {result:?}"
+        );
+
+        let session = mgr.sessions.get(&code).unwrap();
+        assert_eq!(
+            session.state.waiting_for,
+            WaitingFor::MulliganDecision {
+                pending: pending_before,
+                free_first_mulligan: false,
+            },
+            "pending obligation must be unchanged after a rejected selection"
+        );
+        let player_idx = bottom_player.0 as usize;
+        let hand_after: Vec<ObjectId> = session.state.players[player_idx]
+            .hand
+            .iter()
+            .copied()
+            .collect();
+        assert!(hand_after.contains(&a));
+        assert!(hand_after.contains(&b));
+        let library_after: Vec<ObjectId> = session.state.players[player_idx]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert!(!library_after.contains(&a));
+        assert!(!library_after.contains(&b));
+    }
+
+    /// The Tiny Leaders format extension's forced opening-hand bottoming (for
+    /// example, extra commanders) is likewise an order-preserving selection;
+    /// `handle_opening_hand_bottom` validates and places the submitted order.
+    #[test]
+    fn reordered_opening_hand_bottom_selection_is_accepted_not_rejected_as_illegal() {
+        use engine::game::zones::create_object;
+        use engine::types::game_state::{MulliganBottomEntry, OpeningHandBottomReason};
+        use engine::types::identifiers::{CardId, ObjectId};
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        let bottom_player = PlayerId(if session.state.active_player == PlayerId(0) {
+            1
+        } else {
+            0
+        });
+        let token = if bottom_player == PlayerId(0) {
+            &token0
+        } else {
+            &token1
+        };
+
+        let mut hand = Vec::new();
+        for i in 0..2 {
+            let id = create_object(
+                &mut session.state,
+                CardId(4000 + i),
+                bottom_player,
+                format!("Opening Bottom Card {i}"),
+                Zone::Hand,
+            );
+            hand.push(id);
+        }
+        let (a, b): (ObjectId, ObjectId) = (hand[0], hand[1]);
+        session.state.waiting_for = WaitingFor::OpeningHandBottomCards {
+            pending: vec![MulliganBottomEntry {
+                player: bottom_player,
+                count: 2,
+            }],
+            reason: OpeningHandBottomReason::TinyLeadersMultiCommander,
+        };
+
+        let token = token.to_string();
+        let result =
+            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![b, a] });
+        assert!(
+            result.is_ok(),
+            "reordered opening-hand bottom selection should be accepted, got: {result:?}"
+        );
+
+        let session = mgr.sessions.get(&code).unwrap();
+        let player_idx = bottom_player.0 as usize;
+        let hand_after: Vec<ObjectId> = session.state.players[player_idx]
+            .hand
+            .iter()
+            .copied()
+            .collect();
+        assert!(!hand_after.contains(&a));
+        assert!(!hand_after.contains(&b));
+        let library_after: Vec<ObjectId> = session.state.players[player_idx]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(&library_after[library_after.len() - 2..], &[b, a]);
+    }
+
+    /// Same duplicate-rejection guarantee as
+    /// `duplicate_mulligan_bottom_selection_is_rejected`, for the
+    /// `OpeningHandBottomCards` sibling state (e.g. Tiny Leaders forced
+    /// pregame bottoming) — `[b, b]` must not satisfy a 2-card obligation.
+    #[test]
+    fn duplicate_opening_hand_bottom_selection_is_rejected() {
+        use engine::game::zones::create_object;
+        use engine::types::game_state::{MulliganBottomEntry, OpeningHandBottomReason};
+        use engine::types::identifiers::{CardId, ObjectId};
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        let bottom_player = PlayerId(if session.state.active_player == PlayerId(0) {
+            1
+        } else {
+            0
+        });
+        let token = if bottom_player == PlayerId(0) {
+            &token0
+        } else {
+            &token1
+        };
+
+        let mut hand = Vec::new();
+        for i in 0..2 {
+            let id = create_object(
+                &mut session.state,
+                CardId(4100 + i),
+                bottom_player,
+                format!("Dup Opening Bottom Card {i}"),
+                Zone::Hand,
+            );
+            hand.push(id);
+        }
+        let (a, b): (ObjectId, ObjectId) = (hand[0], hand[1]);
+        let pending_before = vec![MulliganBottomEntry {
+            player: bottom_player,
+            count: 2,
+        }];
+        session.state.waiting_for = WaitingFor::OpeningHandBottomCards {
+            pending: pending_before.clone(),
+            reason: OpeningHandBottomReason::TinyLeadersMultiCommander,
+        };
+
+        let token = token.to_string();
+        let result =
+            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![b, b] });
+        assert!(
+            result.is_err(),
+            "duplicate opening-hand bottom selection must be rejected, got: {result:?}"
+        );
+
+        let session = mgr.sessions.get(&code).unwrap();
+        assert_eq!(
+            session.state.waiting_for,
+            WaitingFor::OpeningHandBottomCards {
+                pending: pending_before,
+                reason: OpeningHandBottomReason::TinyLeadersMultiCommander,
+            },
+            "pending obligation must be unchanged after a rejected selection"
+        );
+        let player_idx = bottom_player.0 as usize;
+        let hand_after: Vec<ObjectId> = session.state.players[player_idx]
+            .hand
+            .iter()
+            .copied()
+            .collect();
+        assert!(hand_after.contains(&a));
+        assert!(hand_after.contains(&b));
+        let library_after: Vec<ObjectId> = session.state.players[player_idx]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert!(!library_after.contains(&a));
+        assert!(!library_after.contains(&b));
     }
 
     /// CR 702.19b: a single-blocker trample attacker's controller may keep all

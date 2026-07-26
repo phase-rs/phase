@@ -50,12 +50,13 @@ use super::resolution::{
     ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
 use super::resolved_commands::{
-    ManaPaymentRecipient, ResolvedFrameTransition, ResolvedFrameTransitionCommand,
-    ResolvedFrameTransitionReplayInvariantError, ResolvedInformationAudience,
-    ResolvedInformationCommand, ResolvedInformationEdit, ResolvedInformationLifetime,
-    ResolvedInformationReplayInvariantError, ResolvedManaInsertCommand,
-    ResolvedManaReplayInvariantError, ResolvedManaSpendCommand, ResolvedPlayerEdit,
-    ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
+    ManaPaymentRecipient, ResolvedContinuousEffectCommand,
+    ResolvedContinuousEffectReplayInvariantError, ResolvedFrameTransition,
+    ResolvedFrameTransitionCommand, ResolvedFrameTransitionReplayInvariantError,
+    ResolvedInformationAudience, ResolvedInformationCommand, ResolvedInformationEdit,
+    ResolvedInformationLifetime, ResolvedInformationReplayInvariantError,
+    ResolvedManaInsertCommand, ResolvedManaReplayInvariantError, ResolvedManaSpendCommand,
+    ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
     ResolvedRngReplayInvariantError, ResolvedRulesJournal, RulesExecutionNodeRef,
 };
 use super::zones::EtbTapState;
@@ -6021,7 +6022,10 @@ pub enum ManaChoiceContext {
 pub struct PendingManaAbility {
     pub player: PlayerId,
     pub source_id: ObjectId,
-    pub ability_index: usize,
+    /// The live definition index when this activation originated from an
+    /// enumerated ability. Runtime-synthesized mana abilities retain their
+    /// snapshot but intentionally have no definition index.
+    pub ability_index: Option<usize>,
     /// The P1 execution scope assigned when this activation begins. It survives
     /// player-choice suspension so exact produced and spent mana keep the same
     /// causal node after resumption.
@@ -8039,6 +8043,20 @@ pub enum WaitingFor {
         player: PlayerId,
         game_number: u8,
         score: MatchScore,
+        /// CR 100.2a / CR 100.5: fewest cards this player's main deck may hold
+        /// when they submit. `deck_size` is a *minimum* — there is no maximum
+        /// deck size — so sideboarding need not be a one-for-one swap.
+        ///
+        /// Published here (rather than left for the UI to derive) so the
+        /// submit gate is the engine's own acceptance predicate. Computed by
+        /// `match_flow::sideboard_submission_bounds`, the single authority
+        /// `handle_submit_sideboard` also validates against.
+        #[serde(default)]
+        min_main_deck_size: u32,
+        /// CR 100.4a: most cards the sideboard may hold, or `None` when the
+        /// format imposes no cap. `Forbidden`-sideboard formats report `0`.
+        #[serde(default)]
+        max_sideboard_size: Option<u32>,
     },
     BetweenGamesChoosePlayDraw {
         player: PlayerId,
@@ -15770,6 +15788,16 @@ impl GameState {
         })
     }
 
+    /// CR 800.4: Begin the distinct execution node for one player leaving the
+    /// game, so every mutation the leave sweep performs is attributed to the
+    /// leave rather than to whatever rules work was in flight when the
+    /// state-based action fired.
+    pub(crate) fn begin_player_leave_journal_node(&mut self) -> RulesExecutionNodeRef {
+        self.resolved_rules_journal
+            .begin_player_leave()
+            .expect("resolved-rules journal command ordinal overflow")
+    }
+
     /// CR 605.3b: Begin the distinct, immediate execution node for one
     /// activated mana ability. A nested activation records its active parent as
     /// the causal dependency without changing activation behavior.
@@ -16359,6 +16387,24 @@ impl GameState {
         ts
     }
 
+    /// CR 613.7: carry the timestamp allocator past a timestamp that a CR 733
+    /// replay *installed* rather than drew.
+    ///
+    /// Every applier that stamps an object with a recorded timestamp must call
+    /// this. [`GameState::next_timestamp`] is the draw counter, so an applier
+    /// that installs a recorded value without advancing it leaves the counter
+    /// behind a timestamp already in use, and a later draw hands that same
+    /// timestamp to a second object. CR 613.7 orders effects within a layer
+    /// solely by timestamp, so the two are then unordered — a corruption that
+    /// needs no forged journal, only an honest replay.
+    ///
+    /// `max` keeps the counter monotone when commands replay in an order other
+    /// than the one they were drawn in. `saturating_add` is total; its clamp is
+    /// unreachable because no game performs `u64::MAX` draws.
+    pub(crate) fn adopt_replayed_timestamp(&mut self, timestamp: u64) {
+        self.next_timestamp = self.next_timestamp.max(timestamp.saturating_add(1));
+    }
+
     pub fn may_trigger_auto_choice(&self, key: &MayTriggerAutoChoiceKey) -> Option<AutoMayChoice> {
         self.may_trigger_auto_choices
             .iter()
@@ -16564,6 +16610,10 @@ impl GameState {
     }
 
     /// Register a transient continuous effect and mark layers dirty.
+    ///
+    /// SINGLE AUTHORITY for adding to `transient_continuous_effects`. Resolves
+    /// the CR 613.7b timestamp and the effect id, installs the effect, and
+    /// journals the settled CR 611.2a creation through its owning family.
     pub fn add_transient_continuous_effect(
         &mut self,
         source_id: ObjectId,
@@ -16575,6 +16625,8 @@ impl GameState {
     ) -> u64 {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
+        // CR 613.7b: a continuous effect generated by the resolution of a spell
+        // or ability receives a timestamp at the time it is created.
         let timestamp = self.next_timestamp();
         // CR 400.7 + CR 603.10: When a triggered ability creates a transient
         // continuous effect AFTER its source has left a public zone (e.g., a
@@ -16589,8 +16641,8 @@ impl GameState {
             .map(|o| o.name.clone())
             .or_else(|| self.lki_cache.get(&source_id).map(|lki| lki.name.clone()))
             .unwrap_or_default();
-        self.transient_continuous_effects
-            .push_back(TransientContinuousEffect {
+        let command = ResolvedContinuousEffectCommand {
+            effect: TransientContinuousEffect {
                 id,
                 source_id,
                 controller,
@@ -16602,9 +16654,77 @@ impl GameState {
                 condition,
                 duration_subject: None,
                 source_name,
-            });
-        self.layers_dirty.mark_full();
+            },
+            expected_installed_count: self.transient_continuous_effects.len(),
+            resulting_next_continuous_effect_id: self.next_continuous_effect_id,
+            resulting_next_timestamp: self.next_timestamp,
+            cause: self.current_or_begin_rules_execution_node(),
+        };
+        self.apply_resolved_continuous_effect(&command).expect(
+            "the freshly drawn effect id and install position must satisfy their own preconditions",
+        );
+        self.resolved_rules_journal
+            .record_continuous_effect_install(command)
+            .expect("resolved continuous-effect install must have a live journal cause");
         id
+    }
+
+    /// Installs one already-resolved CR 611.2a continuous effect verbatim.
+    ///
+    /// Re-derives nothing. Per CR 611.2c the affected set was fixed when the
+    /// effect began, and per CR 613.7b its timestamp was drawn then, so replay
+    /// installs both rather than recomputing them — recomputing the timestamp
+    /// would silently reorder the effect within its CR 613 layer.
+    pub fn apply_resolved_continuous_effect(
+        &mut self,
+        command: &ResolvedContinuousEffectCommand,
+    ) -> Result<(), ResolvedContinuousEffectReplayInvariantError> {
+        let found = self.transient_continuous_effects.len();
+        if found != command.expected_installed_count {
+            return Err(
+                ResolvedContinuousEffectReplayInvariantError::InstalledCountPreconditionMismatch {
+                    expected: command.expected_installed_count,
+                    found,
+                },
+            );
+        }
+        if command.effect.id >= command.resulting_next_continuous_effect_id {
+            return Err(
+                ResolvedContinuousEffectReplayInvariantError::IdAboveHighWater {
+                    id: command.effect.id,
+                    high_water: command.resulting_next_continuous_effect_id,
+                },
+            );
+        }
+        if command.effect.timestamp >= command.resulting_next_timestamp {
+            return Err(
+                ResolvedContinuousEffectReplayInvariantError::TimestampAboveHighWater {
+                    timestamp: command.effect.timestamp,
+                    high_water: command.resulting_next_timestamp,
+                },
+            );
+        }
+        // Two live effects sharing one id are indistinguishable to every later
+        // id-addressed lookup, so reject before mutating anything.
+        if self
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == command.effect.id)
+        {
+            return Err(
+                ResolvedContinuousEffectReplayInvariantError::DuplicateEffectId(command.effect.id),
+            );
+        }
+
+        self.transient_continuous_effects
+            .push_back(command.effect.clone());
+        // Replay must not hand the same id or timestamp out to a later draw.
+        self.next_continuous_effect_id = self
+            .next_continuous_effect_id
+            .max(command.resulting_next_continuous_effect_id);
+        self.next_timestamp = self.next_timestamp.max(command.resulting_next_timestamp);
+        self.layers_dirty.mark_full();
+        Ok(())
     }
 
     /// Bind a transient effect to the exact recipient resolved by a one-shot
@@ -21080,7 +21200,7 @@ mod tests {
                 mana_ability: Box::new(PendingManaAbility {
                     player: PlayerId(0),
                     source_id: ObjectId(1),
-                    ability_index: 0,
+                    ability_index: None,
                     rules_execution_node: None,
                     ability_snapshot: None,
                     color_override: None,

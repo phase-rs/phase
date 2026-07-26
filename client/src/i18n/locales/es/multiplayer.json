@@ -53,16 +53,18 @@
     "matchScore": "Marcador de la serie {{p0}}-{{p1}}{{draws}}. Mueve cartas entre el mazo principal y el banquillo, luego envía.",
     "draws_one": " ({{count}} empate)",
     "draws_other": " ({{count}} empates)",
-    "main": "Principal ({{count}}/{{total}})",
+    "main": "Principal ({{count}}, mín. {{min}})",
     "sideboard": "Banquillo ({{count}})",
+    "sideboardCapped": "Banquillo ({{count}}/{{max}})",
     "moveFromSideboard": "Mueve cartas del banquillo.",
     "moveFromMain": "Mueve cartas del mazo principal.",
-    "matchesRegistered": "El mazo principal coincide con el tamaño registrado ({{total}}).",
-    "submitDisabled": "El mazo principal tiene {{count}} / {{total}} — envío deshabilitado.",
     "resetAria": "Restablecer al mazo registrado",
     "reset": "Restablecer",
     "submitAria": "Enviar el mazo para el siguiente juego",
-    "submitDeck": "Enviar mazo"
+    "submitDeck": "Enviar mazo",
+    "readyToSubmit": "El mazo es legal: listo para enviar.",
+    "belowMinimum": "El mazo principal necesita al menos {{min}} cartas — ahora tiene {{count}}.",
+    "overSideboardCap": "El banquillo tiene {{count}} cartas — máximo {{max}}."
   },
   "brokerOfflinePrompt": {
     "title": "Servidor de salas inaccesible",

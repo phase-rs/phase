@@ -1121,7 +1121,11 @@ struct SideboardCardProjection {
 #[derive(Debug, Clone)]
 struct SideboardProjection {
     cards: Vec<SideboardCardProjection>,
-    main_total: u32,
+    /// CR 100.2a / CR 100.4a: inclusive bounds on the main-deck total. The pool
+    /// is invariant across the partition, so the minimum deck size and the
+    /// sideboard cap both reduce to limits on this one number.
+    min_main_total: u32,
+    max_main_total: u32,
 }
 
 fn target_sequence_projection(
@@ -2096,12 +2100,23 @@ fn sideboard_projection(
             .checked_add(entry.count)
             .ok_or(InteractionReasonCode::PayloadTooLarge)?;
     }
-    let main_total = pool
-        .registered_main
-        .iter()
-        .try_fold(0u32, |total, entry| total.checked_add(entry.count));
-    let Some(main_total) = main_total else {
+    // The partition is over the whole registered pool, so the main-deck total
+    // can range up to every card the player owns for this match.
+    let pool_total = totals
+        .values()
+        .try_fold(0u32, |total, count| total.checked_add(*count));
+    let Some(max_main_total) = pool_total else {
         return Err(InteractionReasonCode::PayloadTooLarge);
+    };
+    // CR 100.2a / CR 100.4a: `handle_submit_sideboard` is the authority; take
+    // its bounds verbatim so this projection can never be stricter than what
+    // the engine will actually accept. Because the pool is invariant, the
+    // sideboard cap is equivalent to a floor on the main-deck total.
+    let (min_main_deck_size, max_sideboard_size) =
+        crate::game::match_flow::sideboard_submission_bounds(state, semantic_owner);
+    let min_main_total = match max_sideboard_size {
+        Some(max) => min_main_deck_size.max(max_main_total.saturating_sub(max)),
+        None => min_main_deck_size,
     };
     let cards = totals
         .into_iter()
@@ -2111,7 +2126,11 @@ fn sideboard_projection(
             total,
         })
         .collect();
-    Ok(Some(SideboardProjection { cards, main_total }))
+    Ok(Some(SideboardProjection {
+        cards,
+        min_main_total,
+        max_main_total,
+    }))
 }
 
 fn attack_target_ref(target: &AttackTarget) -> TargetRef {
@@ -3641,6 +3660,11 @@ fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionMan
                 count: *count,
             }
         }
+        ManaRestriction::OnlyForSpellColor(color) => {
+            InteractionManaRestriction::OnlyForSpellColor {
+                color: mana_color_dto(*color),
+            }
+        }
         ManaRestriction::OnlyForSpellFromZone(zone_spend) => {
             InteractionManaRestriction::OnlyForSpellFromZone {
                 zone: zone_code(zone_spend.zone),
@@ -3662,6 +3686,7 @@ fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionMan
                 action: interaction_mana_special_action(*action),
             }
         }
+        ManaRestriction::Impossible => InteractionManaRestriction::Impossible,
         ManaRestriction::ConvokePayment => InteractionManaRestriction::ConvokePayment,
     }
 }
@@ -6569,22 +6594,27 @@ fn opportunity_for_slot(
                     interaction_id: slot.interaction_id.clone(),
                     response: InteractionOpportunityResponse::Schema {
                         spec: InteractionResponseSpec::DeckPartition {
-                            main_total: projection.main_total,
+                            min_main_total: projection.min_main_total,
+                            max_main_total: projection.max_main_total,
                             confirm: ConfirmSemantics::Explicit,
                         },
                         candidates: sideboard_choices(&slot.interaction_id, &projection),
                     },
+                    // `total` carries an *exact* required aggregate; CR 100.5
+                    // leaves the main-deck size a range, so there is none to
+                    // assert and `min`/`max` carry the whole constraint. Same
+                    // encoding the range-valued shortcut surface uses.
                     surfaces: vec![InteractionPresentationSurface::Amount {
-                        min: projection.main_total,
-                        max: projection.main_total,
-                        total: Some(projection.main_total),
+                        min: projection.min_main_total,
+                        max: projection.max_main_total,
+                        total: None,
                     }],
                     progress: InteractionProgress {
                         selected: 0,
-                        minimum: projection.main_total,
-                        maximum: Some(projection.main_total),
+                        minimum: projection.min_main_total,
+                        maximum: Some(projection.max_main_total),
                         aggregate: Some(0),
-                        confirmable: projection.main_total == 0,
+                        confirmable: projection.min_main_total == 0,
                     },
                 },
                 InteractionAvailability::InputRequired,
@@ -7202,6 +7232,7 @@ fn bound_outbound_mana_restriction(
         | InteractionManaRestriction::OnlyForActivation
         | InteractionManaRestriction::OnlyForXCosts
         | InteractionManaRestriction::OnlyForFaceDownSpell
+        | InteractionManaRestriction::Impossible
         | InteractionManaRestriction::ConvokePayment => {}
         InteractionManaRestriction::OnlyForSpellType { spell_type }
         | InteractionManaRestriction::OnlyForCreatureType {
@@ -7230,6 +7261,7 @@ fn bound_outbound_mana_restriction(
         }
         InteractionManaRestriction::OnlyForSpellWithManaValue { .. }
         | InteractionManaRestriction::OnlyForSpellWithColorCount { .. }
+        | InteractionManaRestriction::OnlyForSpellColor { .. }
         | InteractionManaRestriction::OnlyForSpellFromZone { .. }
         | InteractionManaRestriction::OnlyForSpecialAction { .. } => {}
         InteractionManaRestriction::OnlyForAny { restrictions } => {
@@ -8068,10 +8100,16 @@ fn materialize_sideboard_response(
         }
         main_counts[index] = assignment.amount;
     }
-    let main_total = main_counts
+    // CR 100.2a / CR 100.4a / CR 100.5: the main deck must land inside the
+    // projected interval, not on an exact size — a larger main deck is legal
+    // as long as the sideboard still fits under its cap.
+    let Some(main_total) = main_counts
         .iter()
-        .try_fold(0u32, |total, count| total.checked_add(*count));
-    if main_total != Some(projection.main_total) {
+        .try_fold(0u32, |total, count| total.checked_add(*count))
+    else {
+        return Err(InteractionReasonCode::ConstraintUnsatisfied);
+    };
+    if main_total < projection.min_main_total || main_total > projection.max_main_total {
         return Err(InteractionReasonCode::ConstraintUnsatisfied);
     }
     let main = projection
@@ -8100,9 +8138,9 @@ fn materialize_sideboard_response(
         GameAction::SubmitSideboard { main, sideboard },
         InteractionProgress {
             selected: assignments.len().min(u32::MAX as usize) as u32,
-            minimum: projection.main_total,
-            maximum: Some(projection.main_total),
-            aggregate: i32::try_from(projection.main_total).ok(),
+            minimum: projection.min_main_total,
+            maximum: Some(projection.max_main_total),
+            aggregate: i32::try_from(main_total).ok(),
             confirmable: true,
         },
     ))

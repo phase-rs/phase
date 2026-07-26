@@ -4,6 +4,7 @@ import type { PanInfo } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { CompanionInfo } from "../../adapter/types.ts";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -101,6 +102,7 @@ const CompanionFanCard = memo(function CompanionFanCard({
         {src ? (
           <img
             src={src}
+            {...getCardImageSrcSetProps(src)}
             alt={cardName}
             draggable={false}
             className="!h-[var(--hand-card-h)] !w-[var(--hand-card-w)] object-cover"

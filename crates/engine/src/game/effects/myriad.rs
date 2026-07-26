@@ -70,7 +70,7 @@ pub fn resolve(
     }
 
     if !created.is_empty() {
-        state.delayed_triggers.push(DelayedTrigger {
+        let exile_tokens = DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase {
                 phase: Phase::EndCombat,
             },
@@ -101,7 +101,8 @@ pub fn resolve(
             controller: ability.controller,
             source_id: ability.source_id,
             one_shot: true,
-        });
+        };
+        crate::game::triggers::install_delayed_trigger(state, exile_tokens);
     }
 
     events.push(GameEvent::EffectResolved {

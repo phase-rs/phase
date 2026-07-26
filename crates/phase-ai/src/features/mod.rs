@@ -12,6 +12,7 @@ pub mod artifacts;
 pub mod blink;
 pub mod commitment;
 pub mod control;
+pub mod devotion;
 pub mod enchantments;
 pub mod energy;
 pub mod equipment;
@@ -35,6 +36,7 @@ pub use aristocrats::AristocratsFeature;
 pub use artifacts::ArtifactsFeature;
 pub use blink::BlinkFeature;
 pub use control::ControlFeature;
+pub use devotion::DevotionFeature;
 pub use enchantments::EnchantmentsFeature;
 pub use energy::EnergyFeature;
 pub use equipment::EquipmentFeature;
@@ -81,6 +83,7 @@ pub struct DeckFeatures {
     pub spellslinger_prowess: SpellslingerProwessFeature,
     pub reanimator: ReanimatorFeature,
     pub mill: MillFeature,
+    pub devotion: DevotionFeature,
     pub energy: EnergyFeature,
     /// CR 104.3d: the alternate poison win clock (toxic / infect / proliferate).
     pub poison: PoisonFeature,
@@ -129,6 +132,7 @@ impl DeckFeatures {
             spellslinger_prowess: spellslinger_prowess::detect(deck),
             reanimator: reanimator::detect(deck),
             mill: mill::detect(deck),
+            devotion: devotion::detect(deck),
             energy: energy::detect(deck),
             poison: poison::detect(deck),
             graveyard_types: graveyard_types::detect(deck),

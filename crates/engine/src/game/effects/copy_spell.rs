@@ -138,30 +138,12 @@ pub fn resolve(
     // CR 707.10 / CR 707.10b: spell copies source themselves; ability copies
     // have the same source as the original ability.
     let copy_source_id = stack_entry_source_id_for_copy(&copy_kind, copy_id);
-    let mut copy_entry = StackEntry {
+    let copy_entry = StackEntry {
         id: copy_id,
         source_id: copy_source_id,
         controller: copy_controller,
         kind: copy_kind,
     };
-
-    // CR 707.10 + CR 701.27f: copying an activated or triggered ability puts
-    // a new ability onto the stack. A self-transform instruction in that copy
-    // compares against the source at copy-creation time, not the original
-    // ability's earlier stack-entry time.
-    if matches!(
-        copy_entry.kind,
-        StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
-    ) {
-        let source_transformation_count = state
-            .objects
-            .get(&copy_source_id)
-            .filter(|object| object.back_face.is_some())
-            .map(|object| object.transformation_count);
-        if let Some(copied_ability) = copy_entry.ability_mut() {
-            copied_ability.set_source_transformation_count_recursive(source_transformation_count);
-        }
-    }
 
     // CR 707.10: Capture the copied spell's card id before the entry is moved
     // onto the stack. Only spell copies emit `SpellCopied` — copying an
@@ -174,8 +156,9 @@ pub fn resolve(
         | StackEntryKind::KeywordAction { .. } => None,
     };
 
-    state.stack.push_back(copy_entry);
-    events.push(GameEvent::StackPushed { object_id: copy_id });
+    // CR 707.10: the copy-onto-stack authority stamps the CR 701.27f
+    // copy-creation generation and emits `StackPushed`.
+    crate::game::stack::push_copy_to_stack(state, copy_entry, events);
 
     // CR 707.10d: Zada — each copy is put on the stack targeting the current
     // iteration member; no controller choice to change targets.

@@ -5388,7 +5388,11 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
             transform_sub.condition,
         );
     match &*transform_sub.effect {
-        Effect::Transform { target } => {
+        Effect::Transform {
+            target,
+            scope: EffectScope::Single,
+            ..
+        } => {
             // The parser today emits `ParentTarget` here — "transform it"
             // refers back to the Untap target (the trigger source).
             assert_eq!(
@@ -5397,7 +5401,7 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
                 "Transform.target must be ParentTarget — 'transform it' inherits the Untap target",
             );
         }
-        other => panic!("nested sub_ability effect must be Transform, got {other:?}"),
+        other => panic!("nested sub_ability effect must be a single Transform, got {other:?}"),
     }
     // The Transform clause is the inner-most sub_ability and inherits the
     // default `ContinuationStep` link — the chain shape is
@@ -17684,6 +17688,50 @@ fn trigger_enchanted_player_attacked() {
     assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
     // CR 508.3b: only fires when the player themselves is attacked.
     assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player),);
+    assert!(def.execute.is_some());
+}
+
+#[test]
+fn trigger_one_or_more_of_your_opponents_are_attacked() {
+    // Issue #6643 (Party Dude, level 3): CR 508.3b + CR 102.3 — fires when any
+    // creature attacks a player who is an opponent of the controller.
+    let def = parse_trigger_line(
+        "Whenever one or more of your opponents are attacked, up to one target attacking creature gets +X/+X until end of turn, where X is the number of cards in your hand.",
+        "Party Dude",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_target, Some(TargetFilter::Opponent));
+    // CR 508.3b: only fires when the opponent player themselves is attacked,
+    // not when a planeswalker they control or battle they protect is.
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    // CR 603.2c: the aggregate "one or more ... are attacked" phrasing is a
+    // single trigger event even if it contains multiple occurrences (e.g. two
+    // distinct opponents attacked in the same declaration), so it must be
+    // batched — otherwise the ordinary per-defending-player split would fire
+    // this once per attacked opponent.
+    assert!(
+        def.batched,
+        "aggregate 'one or more ... are attacked' must be batched (CR 603.2c)"
+    );
+    assert!(def.execute.is_some());
+}
+
+#[test]
+fn trigger_one_of_your_opponents_is_attacked() {
+    // Singular counterpart of the same CR 508.3b class: CR 603.2c's "trigger
+    // repeatedly if one event contains multiple occurrences" clause applies
+    // here instead, so this form is intentionally NOT batched.
+    let def = parse_trigger_line(
+        "Whenever one of your opponents is attacked, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_target, Some(TargetFilter::Opponent));
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert!(
+        !def.batched,
+        "singular 'one of your opponents is attacked' must not be batched"
+    );
     assert!(def.execute.is_some());
 }
 

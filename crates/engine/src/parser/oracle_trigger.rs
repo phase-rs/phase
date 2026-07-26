@@ -12138,6 +12138,64 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
+    // CR 508.3b + CR 102.3: "one or more of your opponents are attacked" /
+    // "one of your opponents is attacked" — fires when any creature attacks a
+    // player who is an opponent of this permanent's controller. Mirrors
+    // "enchanted player is attacked" above but scopes `valid_target` to
+    // `Opponent` (any player other than the controller, CR 102.3) instead of
+    // `AttachedTo`.
+    //
+    // CR 603.2c: the aggregate "one or more ... are attacked" phrasing is a
+    // single trigger event even when it contains multiple occurrences, so a
+    // declaration that simultaneously attacks two or more distinct opponents
+    // (a real shape only reachable through `Opponent`, since `AttachedTo`
+    // above can only ever name one specific player) must still fire exactly
+    // once — `batched: true` routes it through `matching_batched_trigger_events`
+    // / `contextual_batched_trigger_event`, which aggregate every matching
+    // defending player's attackers into one context instead of the ordinary
+    // per-defending-player singleton split `matching_attack_events` performs
+    // for the non-batched path. The singular "one of your opponents is
+    // attacked" counterpart names a single occurrence per the CR 603.2c
+    // "trigger repeatedly if one event contains multiple occurrences" clause,
+    // so it is intentionally left non-batched (unchanged from before).
+    fn parse_your_opponents_are_attacked_plural(input: &str) -> OracleResult<'_, ()> {
+        let (rest, _) =
+            alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))).parse(input)?;
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("one or more of your opponents are attacked"),
+        )
+        .parse(rest)
+    }
+    fn parse_your_opponents_are_attacked_singular(input: &str) -> OracleResult<'_, ()> {
+        let (rest, _) =
+            alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))).parse(input)?;
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("one of your opponents is attacked"),
+        )
+        .parse(rest)
+    }
+    if parse_your_opponents_are_attacked_plural(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::Attacks;
+        def.valid_target = Some(TargetFilter::Opponent);
+        // CR 508.3b: only fires when the opponent player themselves is
+        // attacked, not when a planeswalker they control or battle they
+        // protect is (the ability names "opponents", not the CR's broader
+        // "player, planeswalker, or battle" bracket).
+        def.attack_target_filter = Some(AttackTargetFilter::Player);
+        def.batched = true;
+        return Some((TriggerMode::Attacks, def));
+    }
+    if parse_your_opponents_are_attacked_singular(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::Attacks;
+        def.valid_target = Some(TargetFilter::Opponent);
+        def.attack_target_filter = Some(AttackTargetFilter::Player);
+        return Some((TriggerMode::Attacks, def));
+    }
+
     // CR 601.2a + CR 707.10: all "cast or copy a spell" trigger variants —
     // covers "you", "an opponent", and "a player" actor phrases.
     if let Some(result) = try_parse_casts_or_copies_trigger(lower) {

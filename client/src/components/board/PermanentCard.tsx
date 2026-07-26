@@ -11,7 +11,6 @@ import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
 import { useCardHover } from "../../hooks/useCardHover.ts";
-import { useCanHover } from "../../hooks/useCanHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
@@ -277,7 +276,6 @@ export const PermanentCard = memo(function PermanentCard({
 }: PermanentCardProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
-  const canHover = useCanHover();
   const playerId = usePlayerId();
   const gameObjects = useGameStore((s) => s.gameState?.objects);
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -429,21 +427,6 @@ export const PermanentCard = memo(function PermanentCard({
 
   const isUndoableTap = undoableTapObjectIds.has(objectId);
 
-  // On touch-only devices, skip mouse events — synthesized mouseenter from touch fires
-  // inspectObject every touch, opening the full-screen MobilePreviewOverlay
-  // and blocking combat interactions (blocker/attacker selection).
-  const handleMouseEnter = useCallback(() => {
-    if (isMobile || !canHover) return;
-    hoverObject(objectId); inspectObject(objectId);
-  }, [canHover, hoverObject, inspectObject, isMobile, objectId]);
-
-  const handleMouseLeave = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    if (isMobile || !canHover) return;
-    const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
-    hoverObject(nextObjectId);
-    inspectObject(nextObjectId);
-  }, [canHover, hoverObject, inspectObject, isMobile]);
-
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
     useCallback(() => {
@@ -451,6 +434,32 @@ export const PermanentCard = memo(function PermanentCard({
       setPreviewSticky(true);
     }, [inspectObject, setPreviewSticky, objectId]),
   );
+
+  // Gate on the event's own `pointerType`, not on a `(any-hover: hover)` media
+  // query. The hazard is a touch-synthesized enter — it fires inspectObject on
+  // every touch, opening the full-screen MobilePreviewOverlay and blocking
+  // combat interactions (blocker/attacker selection) — and `pointerType`
+  // reports that per-event. Capability metadata lies on hosts that still
+  // deliver honest pointer events: a remote-desktop session advertises no
+  // hover-capable input while sending `pointerType: "mouse"`. See useCardHover
+  // for why this is a denylist on "touch" rather than a "mouse" allowlist.
+  const handlePointerEnter = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (isMobile || event.pointerType === "touch") return;
+    hoverObject(objectId); inspectObject(objectId);
+  }, [hoverObject, inspectObject, isMobile, objectId]);
+
+  // Composes with useLongPress's own `onPointerLeave` instead of replacing it —
+  // this handler wins the key collision in the spread below, so dropping the
+  // delegation would leave the long-press timer running after the pointer
+  // slides off the card.
+  const cancelLongPress = longPressHandlers.onPointerLeave;
+  const handlePointerLeave = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    cancelLongPress(event);
+    if (isMobile || event.pointerType === "touch") return;
+    const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
+    hoverObject(nextObjectId);
+    inspectObject(nextObjectId);
+  }, [cancelLongPress, hoverObject, inspectObject, isMobile]);
 
   const controllerIdentity = useGameStore(
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
@@ -777,9 +786,9 @@ export const PermanentCard = memo(function PermanentCard({
       }}
       transition={{ type: "spring", stiffness: 300, damping: 20 }}
       onClick={handleClick}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
       {...longPressHandlers}
+      onPointerEnter={handlePointerEnter}
+      onPointerLeave={handlePointerLeave}
     >
       {isManaPaymentPreviewSource && (
         <div

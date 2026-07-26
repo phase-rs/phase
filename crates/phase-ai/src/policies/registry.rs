@@ -13,6 +13,7 @@ use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
 use super::crew_timing::CrewTimingPolicy;
 use super::cycling_discipline::CyclingDisciplinePolicy;
+use super::devotion::DevotionPolicy;
 use super::effect_timing::EffectTimingPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
@@ -133,6 +134,8 @@ pub enum PolicyId {
     SeparatePilesTiming,
     XCastGate,
     LoopShortcut,
+    /// CR 700.5: mono-color devotion pip density.
+    Devotion,
     /// CR 104.3d: the alternate poison win clock.
     PoisonClock,
     /// CR 207.2c + CR 205.2a: delirium / descend graveyard type-diversity.
@@ -330,6 +333,7 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&ARTIFACT_SYNERGY)),
             Box::new(BoardDevelopmentPolicy),
             Box::new(EtbValuePolicy),
+            Box::new(DevotionPolicy),
             Box::new(PoisonClockPolicy),
             Box::new(GraveyardTypesPolicy),
             Box::new(PayoffPolicy::new(&ENCHANTMENTS_PAYOFF)),

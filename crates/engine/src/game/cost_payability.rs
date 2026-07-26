@@ -20,9 +20,9 @@
 //! the enumerations.
 
 use crate::types::ability::{
-    is_variable_remove_counter_cost_count, AbilityCost, AbilityTag, Comparator,
-    CounterCostSelection, FilterProp, QuantityExpr, QuantityRef, TapCreaturesAggregateStat,
-    TapCreaturesRequirement, TargetFilter, TypedFilter,
+    is_variable_remove_counter_cost_count, AbilityCost, Comparator, CounterCostSelection,
+    FilterProp, QuantityExpr, QuantityRef, TapCreaturesAggregateStat, TapCreaturesRequirement,
+    TargetFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
@@ -216,6 +216,7 @@ impl AbilityCost {
         state: &GameState,
         player: PlayerId,
         source: ObjectId,
+        ability_index: usize,
     ) -> bool {
         match self {
             AbilityCost::Mana { cost } => {
@@ -224,6 +225,7 @@ impl AbilityCost {
                     state,
                     player,
                     source,
+                    Some(ability_index),
                     cost,
                     &excluded_sources,
                 )
@@ -239,7 +241,9 @@ impl AbilityCost {
                     } if has_tap => {
                         has_enough_tap_creatures(state, player, source, requirement, filter, true)
                     }
-                    other => other.is_payable_for_mana_ability(state, player, source),
+                    other => {
+                        other.is_payable_for_mana_ability(state, player, source, ability_index)
+                    }
                 })
             }
             // Every other kind has no mana-pool component — defer to the
@@ -258,8 +262,8 @@ impl AbilityCost {
     /// Mana affordability is NOT checked here; CR 601.2g handles the mana step
     /// separately through the mana-payment flow.
     ///
-    /// Tag-agnostic entry point: delegates to [`Self::is_payable_for_activation`]
-    /// with no activation tag. Callers that KNOW the ability whose cost this is
+    /// Ability-agnostic entry point: delegates to [`Self::is_payable_for_activation`]
+    /// with no activation index. Callers that KNOW the ability whose cost this is
     /// (the activation pipeline) must use that method instead so CR 106.6
     /// tag-scoped mana is judged the same way the real payment step judges it.
     pub fn is_payable(&self, state: &GameState, player: PlayerId, source: ObjectId) -> bool {
@@ -267,15 +271,14 @@ impl AbilityCost {
     }
 
     /// CR 118.3 + CR 601.2h + CR 106.6: [`Self::is_payable`] with the activated
-    /// ability's `ability_tag` in hand.
+    /// ability's exact index in hand.
     ///
-    /// Only the sub-costs that consult a `PaymentContext` care about the tag
-    /// (today: `Waterbend`, whose affordability probe funds a mana cost). The
-    /// tag must reach them because `PaymentContext::Activation` carries it, and
-    /// `ManaRestriction::OnlyForTaggedActivation` admits mana only for a
-    /// matching tag — passing `None` from the early gate would hide mana the
-    /// real payment step (which receives `ability_def.ability_tag`) would
-    /// happily spend, suppressing a legally activatable ability.
+    /// Only sub-costs that consult a `PaymentContext` care about this identity
+    /// today: `Waterbend`, whose affordability probe funds a mana cost. The
+    /// index must reach it because `PaymentContext::Activation` derives the
+    /// exact ability tag from the same definition. Otherwise,
+    /// `ManaRestriction::OnlyForTaggedActivation` could hide mana that the real
+    /// payment step may spend, suppressing a legally activatable ability.
     ///
     /// Single body for both entry points, so the composite/disjunctive
     /// traversal is not duplicated across a tagged and an untagged authority.
@@ -284,7 +287,7 @@ impl AbilityCost {
         state: &GameState,
         player: PlayerId,
         source: ObjectId,
-        ability_tag: Option<AbilityTag>,
+        ability_index: Option<usize>,
     ) -> bool {
         match self {
             // CR 601.2g: Mana affordability is checked by the mana payment step,
@@ -644,7 +647,7 @@ impl AbilityCost {
                     } if has_tap => {
                         has_enough_tap_creatures(state, player, source, requirement, filter, true)
                     }
-                    other => other.is_payable_for_activation(state, player, source, ability_tag),
+                    other => other.is_payable_for_activation(state, player, source, ability_index),
                 })
             }
             // CR 118.12a: Disjunctive — payable if **any** sub-cost is
@@ -653,7 +656,7 @@ impl AbilityCost {
             // gate only needs at least one branch to be reachable.
             AbilityCost::OneOf { costs } => costs
                 .iter()
-                .any(|c| c.is_payable_for_activation(state, player, source, ability_tag)),
+                .any(|c| c.is_payable_for_activation(state, player, source, ability_index)),
             // CR 601.2b + CR 701.67a: Waterbend composes a mana cost with a
             // tap-creature-or-artifact-to-help option (the whole point of the
             // keyword). The plain auto-tap pre-check (`can_pay_cost_after_auto_tap`)
@@ -674,9 +677,9 @@ impl AbilityCost {
             // affordability and spell-only mana must not — a spell context
             // here would disagree with the actual payment step
             // (`PaymentContext::Activation`) in both directions. The
-            // activation's own `ability_tag` is threaded through for the same
-            // reason: the real payment step receives `ability_def.ability_tag`
-            // (`casting.rs`), so CR 106.6 tag-scoped mana
+            // activation's own exact index is threaded through for the same
+            // reason: the real payment step resolves its tag and color rider
+            // from that same definition (`casting.rs`), so CR 106.6 tag-scoped mana
             // (`ManaRestriction::OnlyForTaggedActivation`, Quinjet's power-up
             // mana) must be visible to this gate too — otherwise a Waterbend
             // cost fundable only by that mana is suppressed before the player
@@ -688,7 +691,7 @@ impl AbilityCost {
                     source,
                     cost,
                     crate::types::game_state::ConvokeMode::Waterbend,
-                    ability_tag,
+                    ability_index,
                 )
             }
             // CR 702.49: Ninjutsu requires at least one returnable creature for
@@ -1545,12 +1548,27 @@ mod tests {
     /// discriminate purely on the tag.
     #[test]
     fn waterbend_payability_sees_tag_scoped_activation_mana() {
+        use crate::types::ability::AbilityTag;
         use crate::types::mana::{ManaRestriction, ManaType, ManaUnit};
 
         let mut scenario = GameScenario::new();
         let source = scenario
             .add_creature(P0, "Waterbender Ascension", 0, 0)
+            .as_enchantment()
+            .from_oracle_text(
+                "Power-up — Waterbend {4}: Target creature can't be blocked this turn.\n{4}: Draw a card.",
+            )
             .id();
+        let abilities = std::sync::Arc::make_mut(
+            &mut scenario
+                .state
+                .objects
+                .get_mut(&source)
+                .expect("Waterbender source exists")
+                .abilities,
+        );
+        abilities[0].ability_tag = Some(AbilityTag::PowerUp);
+        abilities[1].ability_tag = Some(AbilityTag::Equip);
         // Four colorless mana usable ONLY for a Power-up-tagged activation.
         for _ in 0..4 {
             scenario.state.add_mana_to_pool(
@@ -1570,11 +1588,11 @@ mod tests {
         };
 
         assert!(
-            cost.is_payable_for_activation(&scenario.state, P0, source, Some(AbilityTag::PowerUp)),
+            cost.is_payable_for_activation(&scenario.state, P0, source, Some(0)),
             "power-up-restricted mana must fund a Power-up-tagged Waterbend activation"
         );
         assert!(
-            !cost.is_payable_for_activation(&scenario.state, P0, source, Some(AbilityTag::Equip)),
+            !cost.is_payable_for_activation(&scenario.state, P0, source, Some(1)),
             "a DIFFERENT tag must not unlock power-up-restricted mana (CR 106.6)"
         );
         assert!(

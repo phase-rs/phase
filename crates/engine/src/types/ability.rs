@@ -2350,6 +2350,10 @@ pub enum ManaSpendRestriction {
     /// colors" (also "N or more / N or fewer"; colorless = 0). Parameterized over
     /// [`Comparator`] — one variant per color-count reading. `count` is N.
     SpellWithColorCount { comparator: Comparator, count: u32 },
+    /// CR 105.2 + CR 106.6: "Spend this mana only to cast spells of the
+    /// source's chosen color." Resolved when the mana is produced; a missing
+    /// choice lowers to `ManaRestriction::Impossible`, never to no restriction.
+    SpellOfSourceChosenColor,
     /// CR 106.6 + CR 400.7: "Spend this mana only to cast spells from your
     /// graveyard" / "from exile" ([`From`](super::mana::ZoneSpendPolarity::From))
     /// and "from anywhere other than your hand"
@@ -2455,6 +2459,7 @@ impl ManaSpendRestriction {
             | ManaSpendRestriction::SpellWithManaValue { .. }
             | ManaSpendRestriction::SpellMatchingCostCriteria { .. }
             | ManaSpendRestriction::SpellWithColorCount { .. }
+            | ManaSpendRestriction::SpellOfSourceChosenColor
             | ManaSpendRestriction::SpellFromZone(_)
             | ManaSpendRestriction::UnlockDoor => true,
             // CR 106.6: coverage for a disjunction requires every named branch to
@@ -11362,9 +11367,27 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
     },
+    /// CR 701.27a: Transform — turn a double-faced permanent to its other face.
+    ///
+    /// `scope` mirrors `Effect::SetTapState`'s single-vs-mass parameterization
+    /// (CR 701.26a/b) instead of proliferating a `TransformAll` sibling:
+    ///   - `Single` (default) == the legacy targeted/anaphoric transform
+    ///     ("transform target creature" / "transform it" / self-ref "transform
+    ///     ~"). `target` is a selectable target filter; `target_filter()`
+    ///     exposes it so a target slot is built (CR 115.1).
+    ///   - `All` == a non-targeting mass transform ("Transform all Humans" —
+    ///     Moonmist). Per CR 115.10/115.10a "all X" is NOT a target; `target`
+    ///     is a population filter enumerated over the battlefield at resolution
+    ///     and `target_filter()` returns `None` (no prompt).
+    ///
+    /// Keeps Transform's legacy `SelfRef` serde default (NOT SetTapState's
+    /// `Any`) so old serialized single Transforms stay byte-compatible, and the
+    /// `Single` scope serde default so they deserialize as targeted.
     Transform {
         #[serde(default = "default_target_filter_self_ref")]
         target: TargetFilter,
+        #[serde(default = "default_effect_scope_single")]
+        scope: EffectScope,
     },
     /// CR 710.4: Flip a Kamigawa flip permanent — a one-way status change
     /// (CR 110.5) after which the card's alternative name, text box, type line,
@@ -14335,9 +14358,8 @@ impl Effect {
             | Effect::Animate { target, .. }
             | Effect::Discard { target, .. }
             | Effect::Shuffle { target, .. }
-            | Effect::Transform { target, .. }
             // CR 710.4: the flipping permanent is named by the effect's target
-            // slot exactly like `Transform`'s.
+            // slot exactly like `Transform`'s single scope (below).
             | Effect::FlipPermanent { target, .. }
             | Effect::RevealHand { target, .. }
             | Effect::Reveal { target, .. }
@@ -14538,6 +14560,23 @@ impl Effect {
                 ..
             } => Some(target),
             Effect::SetTapState {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
+            // CR 701.27a + CR 115.1 / CR 115.10a: `Transform` exposes its target
+            // only for the single-permanent scope (legacy "transform target
+            // creature" / "transform it" / self-ref "transform ~"). The `All`
+            // scope ("Transform all Humans" — Moonmist) is a non-targeting
+            // population filter enumerated at resolution, so — like `SetTapState`
+            // above and `DestroyAll` — its `target_filter()` is `None` and no
+            // target slot / prompt is built.
+            Effect::Transform {
+                scope: EffectScope::Single,
+                target,
+                ..
+            } => Some(target),
+            Effect::Transform {
                 scope: EffectScope::All,
                 ..
             } => None,
@@ -17024,6 +17063,17 @@ pub enum ActivationRestriction {
     MatchesCardCastTiming,
 }
 
+/// CR 106.6: A restriction on which actual mana colors may pay this activated
+/// ability's mana cost. Kept separate from `ActivationRestriction`: timing and
+/// frequency gates determine whether an ability may be activated, while this
+/// gate determines whether its announced cost can be paid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActivationManaPaymentRestriction {
+    /// "Spend only mana of the chosen color to activate this ability." The
+    /// source's live chosen color is resolved at payment time.
+    OnlySourceChosenColor,
+}
+
 /// Structured spell-casting restrictions parsed from Oracle text.
 /// These describe when — and, for `CantSpendMana`, how — a spell may be cast.
 /// Runtime enforcement can be added independently of parsing/export support.
@@ -17144,6 +17194,9 @@ pub struct AbilityDefinition {
     /// single authority for sorcery-speed timing. The legacy `sorcery_speed`
     /// JSON field is migrated into this `Vec` by the hand-written `Deserialize`.
     pub activation_restrictions: Vec<ActivationRestriction>,
+    /// CR 106.6: Mana-color payment riders attached to this activated ability.
+    /// `None` has the legacy unrestricted meaning.
+    pub activation_mana_payment_restriction: Option<ActivationManaPaymentRestriction>,
     /// CR 602.2a: Who may begin to activate this ability. `None` = only the
     /// permanent's controller. `Some(All)` = any player. `Some(Opponent)` =
     /// only opponents of the permanent's controller.
@@ -17293,6 +17346,8 @@ struct AbilityDefinitionRepr<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     activation_restrictions: &'a Vec<ActivationRestriction>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    activation_mana_payment_restriction: &'a Option<ActivationManaPaymentRestriction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     activator_filter: &'a Option<PlayerFilter>,
     #[serde(skip_serializing_if = "Option::is_none")]
     activation_zone: &'a Option<Zone>,
@@ -17361,6 +17416,7 @@ impl Serialize for AbilityDefinition {
             description,
             target_prompt,
             activation_restrictions,
+            activation_mana_payment_restriction,
             activator_filter,
             activation_zone,
             ability_tag,
@@ -17401,6 +17457,7 @@ impl Serialize for AbilityDefinition {
             description,
             target_prompt,
             activation_restrictions,
+            activation_mana_payment_restriction,
             activator_filter,
             activation_zone,
             ability_tag,
@@ -17484,6 +17541,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     activation_restrictions: Vec<ActivationRestriction>,
     #[serde(default)]
+    activation_mana_payment_restriction: Option<ActivationManaPaymentRestriction>,
+    #[serde(default)]
     activator_filter: Option<PlayerFilter>,
     #[serde(default)]
     activation_zone: Option<Zone>,
@@ -17561,6 +17620,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             description: de.description,
             target_prompt: de.target_prompt,
             activation_restrictions,
+            activation_mana_payment_restriction: de.activation_mana_payment_restriction,
             activator_filter: de.activator_filter,
             activation_zone: de.activation_zone,
             ability_tag: de.ability_tag,
@@ -17756,6 +17816,7 @@ impl AbilityDefinition {
             description: None,
             target_prompt: None,
             activation_restrictions: Vec::new(),
+            activation_mana_payment_restriction: None,
             activator_filter: None,
             activation_zone: None,
             ability_tag: None,
@@ -17919,6 +17980,14 @@ impl AbilityDefinition {
 
     pub fn activation_restrictions(mut self, restrictions: Vec<ActivationRestriction>) -> Self {
         self.activation_restrictions = restrictions;
+        self
+    }
+
+    pub fn activation_mana_payment_restriction(
+        mut self,
+        restriction: ActivationManaPaymentRestriction,
+    ) -> Self {
+        self.activation_mana_payment_restriction = Some(restriction);
         self
     }
 

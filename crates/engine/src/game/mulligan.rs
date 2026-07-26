@@ -551,7 +551,15 @@ fn validate_bottom_selection(
         .iter()
         .find(|p| p.id == player)
         .expect("player exists");
+    // CR 103.5: A mulligan puts the owed number of those hand cards on the
+    // bottom. Each selected object must therefore be distinct; this shared
+    // validator also protects the Tiny Leaders format-extension bottoming path.
+    // It mirrors `validate_keep_on_top_selection` / `validate_dig_selection`.
+    let mut seen = std::collections::HashSet::new();
     for &card_id in cards {
+        if !seen.insert(card_id) {
+            return Err(format!("Duplicate card {:?} in bottom selection", card_id));
+        }
         if !player_data.hand.contains(&card_id) {
             return Err(format!("Card {:?} is not in player's hand", card_id));
         }

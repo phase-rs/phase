@@ -205,18 +205,22 @@ pub fn cast_paradigm_copy(
     // used by normal casting (see `ability_utils`).
     let resolved = build_resolved_from_def(&ability_def, copy_id, controller);
 
-    state.stack.push_back(StackEntry {
-        id: copy_id,
-        source_id: copy_id,
-        controller,
-        kind: StackEntryKind::Spell {
-            card_id,
-            ability: Some(resolved),
-            casting_variant: CastingVariant::Normal,
-            actual_mana_spent: 0,
+    // CR 707.10: the copy-onto-stack authority emits `StackPushed`.
+    crate::game::stack::push_copy_to_stack(
+        state,
+        StackEntry {
+            id: copy_id,
+            source_id: copy_id,
+            controller,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: Some(resolved),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
         },
-    });
-    events.push(GameEvent::StackPushed { object_id: copy_id });
+        events,
+    );
 
     Ok(copy_id)
 }

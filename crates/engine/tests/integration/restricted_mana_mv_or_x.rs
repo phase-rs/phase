@@ -37,6 +37,7 @@ fn spell_meta(types: &[&str], cost: &ManaCost) -> SpellMeta {
         cast_from_zone: None,
         mana_value: Some(cost.mana_value()),
         color_count: None,
+        colors: Vec::new(),
         has_x_in_cost: cost.has_x(),
         is_face_down: false,
         cant_spend_mana: false,

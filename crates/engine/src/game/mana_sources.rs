@@ -1835,9 +1835,61 @@ fn activatable_mana_profiles_for_object(
             let resolved =
                 super::ability_utils::build_resolved_from_def(ability, object_id, controller);
             profile_kind_from_production(state, object_id, controller, produced, &resolved)
+                .and_then(|kind| profile_kind_allowed_for_context(kind, payment_context))
                 .map(|kind| ActivatableManaProfile { object_id, kind })
         })
         .collect()
+}
+
+/// CR 106.6: An activation's mana-color rider constrains actual produced mana,
+/// not merely each unit's spend restriction. Keep feasibility profiles aligned
+/// with auto-tap's concrete source-option gate.
+fn profile_kind_allowed_for_context(
+    kind: ActivatableManaProfileKind,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> Option<ActivatableManaProfileKind> {
+    let Some(ctx) = payment_context else {
+        return Some(kind);
+    };
+    match kind {
+        ActivatableManaProfileKind::Exact(types) => {
+            let types: Vec<_> = types
+                .into_iter()
+                .filter(|mana_type| ctx.permits_actual_mana_type(*mana_type))
+                .collect();
+            (!types.is_empty()).then_some(ActivatableManaProfileKind::Exact(types))
+        }
+        ActivatableManaProfileKind::AnyOneColor { count, options } => {
+            let options: Vec<_> = options
+                .into_iter()
+                .filter(|mana_type| ctx.permits_actual_mana_type(*mana_type))
+                .collect();
+            (!options.is_empty())
+                .then_some(ActivatableManaProfileKind::AnyOneColor { count, options })
+        }
+        ActivatableManaProfileKind::AnyCombination { count, options } => {
+            let options: Vec<_> = options
+                .into_iter()
+                .filter(|mana_type| ctx.permits_actual_mana_type(*mana_type))
+                .collect();
+            (!options.is_empty())
+                .then_some(ActivatableManaProfileKind::AnyCombination { count, options })
+        }
+        ActivatableManaProfileKind::CombinationChoices(options) => {
+            let options: Vec<_> = options
+                .into_iter()
+                .map(|combination| {
+                    combination
+                        .iter()
+                        .copied()
+                        .filter(|mana_type| ctx.permits_actual_mana_type(*mana_type))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|combination| !combination.is_empty())
+                .collect();
+            (!options.is_empty()).then_some(ActivatableManaProfileKind::CombinationChoices(options))
+        }
+    }
 }
 
 fn collect_activatable_mana_profiles(

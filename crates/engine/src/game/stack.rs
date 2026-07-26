@@ -14,6 +14,10 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::{
+    ResolvedStackEntryFinalizeCommand, ResolvedStackEntryFinalizeReplayInvariantError,
+    ResolvedStackPushCommand, ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError,
+};
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
@@ -65,7 +69,236 @@ pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut 
     events.push(GameEvent::StackPushed {
         object_id: entry.id,
     });
+    // CR 733: journal the settled push after every source-referential stamp
+    // above has been written into the entry, so the record carries the stamped
+    // values themselves rather than the state they were derived from.
+    journal_stack_push(state, &entry, ResolvedStackPushOrigin::Put);
     state.stack.push_back(entry);
+}
+
+/// CR 707.10: Put a *copy* of a spell or ability onto the stack.
+///
+/// This is the copy-family sibling of [`push_to_stack`], not a wrapper around
+/// it. Putting an object onto the stack (CR 405.1 / CR 601.2a) and copying one
+/// onto it (CR 707.10) agree that exactly one `StackPushed` is emitted, but
+/// they disagree on the two source-referential stamps, so they are separate
+/// authorities rather than one funnel:
+///
+/// * CR 701.27f generation — a copy captures the source's generation at
+///   *copy-creation* time and must overwrite whatever the copied ability
+///   inherited from the original's earlier stack push. [`push_to_stack`]
+///   deliberately guards its stamp with `is_none()` (delayed triggered
+///   abilities carry a creation-time generation that firing must not clobber);
+///   applying that guard here would leave the copy comparing against the
+///   *original's* generation instead of its own.
+/// * Force-block binding — deliberately NOT re-bound here. A copied ability
+///   already carries the `force_block_attacker` its original was bound to
+///   (`ResolvedAbility` is cloned wholesale by the copy effects), and that
+///   binding came from the trigger's captured `trigger_source` provenance in
+///   `triggers::bind_force_block_attacker_recursive`. Calling
+///   `bind_force_block_source_recursive` here would overwrite that exact
+///   choice-time referent with a fresh live `state.objects` lookup — a global
+///   rescan where CR 707.10b says the copy has the same source as the original.
+///   Do not add it.
+pub(crate) fn push_copy_to_stack(
+    state: &mut GameState,
+    mut entry: StackEntry,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 701.27f: an activated or triggered ability of a permanent may transform
+    // that permanent only if it hasn't transformed since the ability was put
+    // onto the stack. Copying such an ability puts a NEW ability onto the stack,
+    // so the copy compares against the source at copy-creation time rather than
+    // the original ability's earlier stack-entry time. Spell copies are outside
+    // the rule entirely — CR 701.27f covers only "an activated or triggered
+    // ability of a permanent" — so this stamp is inert for spell-copy callers.
+    if matches!(
+        entry.kind,
+        StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
+    ) {
+        let count = state
+            .objects
+            .get(&entry.source_id)
+            .filter(|object| object.back_face.is_some())
+            .map(|object| object.transformation_count);
+        if let Some(ability) = entry.ability_mut() {
+            ability.set_source_transformation_count_recursive(count);
+        }
+    }
+    events.push(GameEvent::StackPushed {
+        object_id: entry.id,
+    });
+    // CR 733: same journal point as [`push_to_stack`]. The copy's deliberately
+    // different stamping is already baked into `entry`, so this records the same
+    // operand set under a different origin rather than a sibling command.
+    journal_stack_push(state, &entry, ResolvedStackPushOrigin::Copy);
+    state.stack.push_back(entry);
+}
+
+/// Records one settled stack push for both stack authorities.
+///
+/// CR 405.2: an object goes on top of everything already on the stack, so the
+/// index it will occupy is the current depth. Reading that here — before either
+/// caller's `push_back` — is the one piece of shared logic the two authorities
+/// could otherwise get out of step on.
+fn journal_stack_push(state: &mut GameState, entry: &StackEntry, origin: ResolvedStackPushOrigin) {
+    let resulting_position = state.stack.len();
+    let cause = state.current_or_begin_rules_execution_node();
+    let command = ResolvedStackPushCommand {
+        entry: Box::new(entry.clone()),
+        origin,
+        resulting_position,
+        cause,
+    };
+    state
+        .resolved_rules_journal
+        .record_stack_push(command)
+        .expect("resolved stack push must have a live journal cause");
+}
+
+/// Installs one already-resolved stack push verbatim.
+///
+/// CR 405.1 / CR 707.10: the recorded entry is pushed exactly as it was
+/// recorded. Nothing is restamped — the CR 701.27f generation, the CR 400.7
+/// incarnation, and the CR 509.1c force-block referent all travel inside the
+/// entry, so replay never repeats the live `state.objects` lookups that produced
+/// them. Re-deriving the force-block binding in particular would swap a
+/// choice-time referent for a global rescan (see [`push_copy_to_stack`]).
+///
+/// Deliberately does NOT require the source object to exist: the ordinary path
+/// tolerates a missing source (synthetic game-rule triggers push with
+/// `ObjectId(0)`), so a source-existence precondition would reject pushes the
+/// engine legitimately performs.
+///
+/// `StackDepthMismatch` is a deliberate fail-closed canary, not a bug to route
+/// around. Stack POPS are not journaled yet (CR 608.1 resolve-pop, CR 603.3c/d
+/// abort-pop, CR 701.6a counter-removal, CR 601.2a cast-abort), so once any
+/// un-journaled removal runs, the replayed depth diverges from every later
+/// recorded position and this check refuses instead of installing an entry
+/// somewhere the recording never described. Do not weaken it to make a replay
+/// pass; see [`ResolvedStackPushCommand`] for the scheduled gap.
+pub fn apply_resolved_stack_push(
+    state: &mut GameState,
+    command: &ResolvedStackPushCommand,
+) -> Result<(), ResolvedStackPushReplayInvariantError> {
+    if state.stack.len() != command.resulting_position {
+        return Err(ResolvedStackPushReplayInvariantError::StackDepthMismatch {
+            expected: command.resulting_position,
+            found: state.stack.len(),
+        });
+    }
+    if state.stack.iter().any(|entry| entry.id == command.entry.id) {
+        return Err(ResolvedStackPushReplayInvariantError::DuplicateStackEntry(
+            command.entry.id,
+        ));
+    }
+    if !state
+        .players
+        .iter()
+        .any(|player| player.id == command.entry.controller)
+    {
+        return Err(ResolvedStackPushReplayInvariantError::UnknownController(
+            command.entry.controller,
+        ));
+    }
+
+    state.stack.push_back(command.entry.as_ref().clone());
+    Ok(())
+}
+
+/// Installs one already-resolved CR 601.2i cast finalization verbatim.
+///
+/// CR 601.2i: the recorded finalized entry and paid-facts snapshot are written
+/// back exactly as they were recorded. Nothing is re-derived — in particular the
+/// entry is located by its recorded CR 405.2 position rather than by repeating
+/// the authority's last-match scan, and `distinct_colors_spent` is taken from
+/// the snapshot rather than re-read from the object's `colors_spent_to_cast`,
+/// which a replayed predecessor need not still agree with.
+///
+/// Fails closed on any disagreement with the predecessor state: a position past
+/// the stack depth, a different entry at that position, a pre-finalize entry
+/// that is not the one recorded, or different pre-existing paid facts.
+pub fn apply_resolved_stack_entry_finalize(
+    state: &mut GameState,
+    command: &ResolvedStackEntryFinalizeCommand,
+) -> Result<(), ResolvedStackEntryFinalizeReplayInvariantError> {
+    let depth = state.stack.len();
+    let entry = state.stack.get(command.entry_position).ok_or(
+        ResolvedStackEntryFinalizeReplayInvariantError::PositionOutOfRange {
+            position: command.entry_position,
+            depth,
+        },
+    )?;
+    if entry.id != command.object {
+        return Err(
+            ResolvedStackEntryFinalizeReplayInvariantError::EntryIdentityMismatch {
+                position: command.entry_position,
+                expected: command.object,
+                found: entry.id,
+            },
+        );
+    }
+    if entry.kind != *command.expected_old_kind {
+        return Err(
+            ResolvedStackEntryFinalizeReplayInvariantError::EntryKindMismatch(
+                command.entry_position,
+            ),
+        );
+    }
+    // CR 601.2i settles the entry retag and the paid-facts snapshot together, so
+    // the snapshot precondition is checked BEFORE either is installed — a replay
+    // must not leave a finalized entry behind when the snapshot side is the half
+    // that disagrees.
+    if state.stack_paid_facts.get(&command.object) != command.expected_old_paid_facts.as_deref() {
+        return Err(
+            ResolvedStackEntryFinalizeReplayInvariantError::PaidFactsMismatch(command.object),
+        );
+    }
+
+    state
+        .stack
+        .get_mut(command.entry_position)
+        .expect("the entry was just read at this position")
+        .kind = command.resulting_kind.as_ref().clone();
+    state.stack_paid_facts.insert(
+        command.object,
+        command.resulting_paid_facts.as_ref().clone(),
+    );
+    Ok(())
+}
+
+/// CR 603.3d: removes an uncommitted triggered ability from the stack.
+///
+/// The "push first, choose second" invariant (see
+/// [`GameState::pending_trigger_entry`]) puts a triggered ability on the stack
+/// BEFORE its choices are gathered, so the entry is live while a `WaitingFor`
+/// fills its slots. CR 603.3d: "If a choice is required when the triggered
+/// ability goes on the stack but no legal choices can be made for it, or if a
+/// rule or a continuous effect otherwise makes the ability illegal, the ability
+/// is simply removed from the stack." This is the single authority for that
+/// removal.
+///
+/// The two side tables are cleared here rather than by the callers because they
+/// are keyed on the entry and settle WITH the pop — a removal that dropped the
+/// entry but left `stack_paid_facts` or `stack_trigger_event_batches` behind
+/// would strand rows against an id no longer on the stack.
+///
+/// Guarded on the entry still being topmost: the cursor can outlive the entry
+/// when another path already removed it, and popping unconditionally would then
+/// discard an unrelated stack object.
+///
+/// Note this deliberately does NOT clear `pending_trigger`; that is a separate
+/// piece of construction state owned by
+/// `engine::drop_mid_construction_pending_trigger`, which calls this and then
+/// clears it.
+pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
+    if let Some(entry_id) = state.pending_trigger_entry.take() {
+        if state.stack.back().map(|e| e.id) == Some(entry_id) {
+            state.stack.pop_back();
+            state.stack_paid_facts.remove(&entry_id);
+            state.stack_trigger_event_batches.remove(&entry_id);
+        }
+    }
 }
 
 /// The ability currently represented by a stack entry for presentation.
@@ -3820,15 +4053,16 @@ pub(crate) fn create_warp_delayed_trigger(
         );
     }
 
-    state
-        .delayed_triggers
-        .push(crate::types::game_state::DelayedTrigger {
+    super::triggers::install_delayed_trigger(
+        state,
+        crate::types::game_state::DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
             ability: delayed_ability,
             controller,
             source_id: object_id,
             one_shot: true,
-        });
+        },
+    );
 }
 
 #[cfg(test)]
