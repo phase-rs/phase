@@ -89,10 +89,20 @@ pub(crate) struct ParseContext {
     /// `DealDamage`. The reset is required because `parse_imperative_effect` is
     /// also called from sites that never consume this field (the shared-`ctx`
     /// `try_parse_reanimate_self_and_target` sub-parse) and from speculative
-    /// sub-parses that mutate `ctx` and then discard their result (the
-    /// radiance/chain/general damage-compound splitters). The compound
-    /// *continuation* sites are not a leak risk — they parse into a cloned
-    /// `ParseContext`, so a spec set there is dropped, not propagated.
+    /// sub-parses that mutate `ctx` and then discard their result.
+    ///
+    /// Two seams need more than the reset, because the reset alone is wrong in
+    /// both directions:
+    /// - The speculative recognizers that can abandon a parse mid-way
+    ///   (`try_parse_multi_target_damage_chain`,
+    ///   `try_parse_radiance_color_fanout_damage`) run against a cloned
+    ///   `ParseContext` and commit with `*ctx = tentative_ctx` only on success,
+    ///   so an abandoned attempt cannot leak a count forward.
+    /// - `try_split_damage_compound` re-enters `lower_imperative_clause` for the
+    ///   continuation, and that nested frame clears this field on entry. It
+    ///   therefore saves the primary clause's count before the sub-parse and
+    ///   restores it after, alongside the `target_chooser` save/restore.
+    ///
     /// Set and consumed within a single chunk parse; never serialized.
     pub pending_damage_multi_target: Option<MultiTargetSpec>,
     /// CR 608.2c + CR 109.4: Count of `Effect::Choose { choice_type: Player }`

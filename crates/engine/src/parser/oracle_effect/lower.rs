@@ -5982,9 +5982,18 @@ fn parse_each_of_target_noun(input: &str) -> OracleResult<'_, EachOfTargetNoun> 
 }
 
 /// CR 601.2c + CR 115.4: The parameterized "⟨cardinality⟩ ⟨noun⟩" head that
-/// follows "to each of ". Spans the full cardinality × noun matrix (bounded /
+/// follows "to each of ". Spans the cardinality × noun matrix (bounded /
 /// optional / exact × bare-plural / typed) that two single-leaf strippers
 /// previously covered one cell each.
+///
+/// One printed cell is deliberately excluded: `other`/`another` on the
+/// BARE-PLURAL arm ("each of up to two other targets", Drakuseth, Maw of
+/// Flames). On the typed arm the modifier survives into `parse_target_with_ctx`
+/// as `FilterProp::Another`, but the bare-plural arm consumes the noun and
+/// synthesizes `TargetFilter::Any`, so there is nowhere for the CR 115.3
+/// cross-slot distinctness to land — accepting it would silently drop the
+/// constraint. Drakuseth's clause is dropped upstream today anyway, so this
+/// changes nothing for it; the cell is left to whoever threads that constraint.
 ///
 /// Each `alt` arm is a COMPLETE `(cardinality, multispace1, noun)` tuple so a
 /// noun failure backtracks the whole arm: `"one or two targets"` would
