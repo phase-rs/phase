@@ -26,7 +26,8 @@
 use engine::game::effects::deal_damage;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
-    DamageModification, Effect, QuantityExpr, ResolvedAbility, ShieldKind, TargetFilter, TargetRef,
+    DamageModification, Effect, GameRestriction, QuantityExpr, ResolvedAbility, RestrictionExpiry,
+    ShieldKind, TargetFilter, TargetRef,
 };
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
@@ -162,6 +163,36 @@ fn heart_shaped_herb_prevents_one_from_opponent_sources_not_own_and_never_deplet
             .iter()
             .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
         "no prevention event should fire for a source the shield's controller controls"
+    );
+
+    // Damage that can't be prevented must bypass the typed
+    // `PreventionMinus` replacement while still allowing ordinary damage.
+    runner
+        .state_mut()
+        .restrictions
+        .push(GameRestriction::DamagePreventionDisabled {
+            source: herb,
+            expiry: RestrictionExpiry::EndOfTurn,
+            scope: None,
+        });
+    let p0_life_before = runner.life(P0);
+    let mut events = Vec::new();
+    deal_damage::resolve(
+        runner.state_mut(),
+        &damage_to_player_ability(opponent_source_a, P1, TargetRef::Player(P0), 3),
+        &mut events,
+    )
+    .expect("unpreventable opponent damage resolves");
+    assert_eq!(
+        runner.life(P0),
+        p0_life_before - 3,
+        "damage that can't be prevented must not be reduced by PreventionMinus"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
+        "unpreventable damage must emit no DamagePrevented event"
     );
 }
 

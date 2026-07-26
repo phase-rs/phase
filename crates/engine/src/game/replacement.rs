@@ -4784,7 +4784,15 @@ fn is_damage_prevention_replacement(
         return false;
     };
 
-    // CR 614.1a: Damage boost/reduction replacements are definitively not prevention effects
+    // Ordinary damage modifications are not prevention, but `PreventionMinus`
+    // carries explicit prevention provenance and must be suppressed when damage
+    // can't be prevented.
+    if matches!(
+        repl.damage_modification,
+        Some(DamageModification::PreventionMinus { .. })
+    ) {
+        return true;
+    }
     if repl.damage_modification.is_some() {
         return false;
     }

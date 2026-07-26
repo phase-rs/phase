@@ -411,27 +411,27 @@ fn damage_action_to_modification(
     match act {
         // CR 615.1: "Prevent that damage." / "If a source would deal damage
         // ... prevent that damage." Continuous prevent-all replacement encoded
-        // as `Minus { value: u32::MAX }` — saturating-subtraction yields 0 for
-        // any amount and the replacement is not consumed.
+        // as `PreventionMinus { value: u32::MAX }` — saturating-subtraction
+        // yields 0 for any amount and the replacement is not consumed.
         ReplacementActionWouldDealDamage::PreventThatDamage
         | ReplacementActionWouldDealDamage::CancelThatDamage => {
-            Ok(DamageModification::Minus { value: u32::MAX })
+            Ok(DamageModification::PreventionMinus { value: u32::MAX })
         }
         // "Prevent N of that damage."
         ReplacementActionWouldDealDamage::PreventSomeOfThatDamage(g) => {
             let qty = quantity::convert(g)?;
             match qty {
                 QuantityExpr::Fixed { value } if (0..=u32::MAX as i32).contains(&value) => {
-                    Ok(DamageModification::Minus {
+                    Ok(DamageModification::PreventionMinus {
                         value: value as u32,
                     })
                 }
                 // CR 615.1: Dynamic prevention amount ("prevent X damage,
-                // where X is …") — engine `DamageModification::Minus`
+                // where X is …") — engine `DamageModification::PreventionMinus`
                 // takes only `u32`, not `QuantityExpr`.
                 _ => Err(ConversionGap::EnginePrerequisiteMissing {
                     engine_type: "DamageModification",
-                    needed_variant: "Minus { count: QuantityExpr }".into(),
+                    needed_variant: "PreventionMinus { count: QuantityExpr }".into(),
                 }),
             }
         }
@@ -3284,8 +3284,8 @@ fn expiration_tag(e: &Expiration) -> String {
 #[cfg(test)]
 mod tests {
     use engine::types::ability::{
-        AbilityCost, ContinuousModification, Duration, Effect, QuantityExpr, ReplacementMode,
-        TargetFilter,
+        AbilityCost, ContinuousModification, DamageModification, Duration, Effect, QuantityExpr,
+        ReplacementMode, TargetFilter,
     };
     use engine::types::card_type::{CoreType, Supertype};
     use engine::types::keywords::Keyword;
@@ -3294,9 +3294,32 @@ mod tests {
     use crate::schema::types::{
         CardInExile, CardType, Condition, CopyEffect, CopyEffects,
         FutureReplacableEventWouldDealDamage, GameNumber, Permanent, Permanents, Player, Players,
-        ReplacementActionWouldDealDamage, ReplacementActionWouldEnter, Rule, SingleDamageSource,
-        SuperType,
+        ReplacableEventWouldDealDamage, ReplacementActionWouldDealDamage,
+        ReplacementActionWouldEnter, Rule, SingleDamageSource, SuperType,
     };
+
+    #[test]
+    fn would_deal_damage_prevention_actions_keep_prevention_provenance() {
+        let defs = convert_replace_would_deal_damage(
+            &ReplacableEventWouldDealDamage::CombatDamageWouldBeDealt,
+            &[
+                ReplacementActionWouldDealDamage::PreventThatDamage,
+                ReplacementActionWouldDealDamage::PreventSomeOfThatDamage(Box::new(
+                    GameNumber::Integer(2),
+                )),
+            ],
+        )
+        .expect("fixed prevention actions should convert");
+
+        assert!(matches!(
+            defs[0].damage_modification.as_ref(),
+            Some(DamageModification::PreventionMinus { value: u32::MAX })
+        ));
+        assert!(matches!(
+            defs[1].damage_modification.as_ref(),
+            Some(DamageModification::PreventionMinus { value: 2 })
+        ));
+    }
 
     #[test]
     fn as_enters_may_pay_life_unless_tapped_lowers_to_single_cost_gate() {
