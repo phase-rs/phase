@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::game::combat::{AttackTarget, CombatParticipation};
 use crate::game::game_object::AttachTarget;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
@@ -322,6 +323,108 @@ pub enum ResolvedContinuousEffectReplayInvariantError {
         "continuous-effect timestamp {timestamp} is not below its recorded high-water {high_water}"
     )]
     TimestampAboveHighWater { timestamp: u64, high_water: u64 },
+}
+/// One exact effect-driven combat-membership edit (CR 506.3 / CR 506.4).
+///
+/// The five production authorities — `enter_attacking`,
+/// `place_attacking_alongside`, `place_blocking`, `mark_attacker_blocked`, and
+/// `remove_object_from_combat` — all edit the one membership structure
+/// (`CombatState.attackers` plus the two blocker maps), so they share a single
+/// parameterized command rather than five sibling variants.
+///
+/// The parameterization axis stays inside one CR section, as the categorical
+/// boundary rule requires: CR 506.3a-g govern putting a permanent onto the
+/// battlefield "attacking or blocking" in one breath, CR 506.4 governs removal,
+/// and the declaration-side rules delegate back to it — CR 509.1g ends with
+/// "See rule 506.4." CR 508.4 and CR 509.1g/h are the entry points; CR 506 is
+/// the section that actually defines membership.
+///
+/// Turn-based declaration (CR 508.1 / CR 509.1) is deliberately NOT part of this
+/// family: it does not use the stack and validates before mutating.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedCombatMembershipCommand {
+    pub object: ObjectIncarnationRef,
+    pub edit: ResolvedCombatMembershipEdit,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Which membership edit one [`ResolvedCombatMembershipCommand`] settled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedCombatMembershipEdit {
+    /// CR 508.4: the object became an attacking creature.
+    ///
+    /// CR 508.4 assigns the defender to a CHOICE ("its controller chooses which
+    /// defending player, planeswalker a defending player controls, or battle a
+    /// defending player protects it's attacking"). The resolve-time authority
+    /// derives it from ambient state — `state.current_trigger_event`, the
+    /// source's own attacker entry, and a controller-scan of the live attacker
+    /// list. None of that is reconstructible at replay time, so both halves of
+    /// the chosen pair are RECORDED and installed verbatim. Re-deriving would
+    /// silently seat the creature against a different defender.
+    Attack {
+        resulting_defending_player: PlayerId,
+        resulting_attack_target: AttackTarget,
+    },
+    /// CR 509.1g + CR 506.3e: the object became a blocking creature for the
+    /// recorded attacker, which becomes blocked per CR 509.1h.
+    ///
+    /// `expected_attacker_blocked` pins the attacker's sticky blocked bit as it
+    /// stood before this block, so a replay installing a second blocker onto an
+    /// already-blocked attacker is distinguishable from the first one.
+    Block {
+        resulting_attacker: ObjectId,
+        expected_attacker_blocked: bool,
+    },
+    /// CR 509.1h: the object became a blocked creature purely by effect, with no
+    /// blocking creature assigned. Recorded only on a false-to-true transition,
+    /// so the applier can require the bit is still clear.
+    MarkBlocked,
+    /// CR 506.4: the object stopped being an attacking, blocking, and/or blocked
+    /// creature. Records the exact roles it held so the applier can verify it is
+    /// pruning the same edges, then re-runs the structural prune — which is a
+    /// consequence of the recorded participation, not a re-selection.
+    Remove {
+        expected_participation: CombatParticipation,
+    },
+}
+
+/// Typed failure while applying one already-resolved combat-membership edit.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedCombatMembershipReplayInvariantError {
+    #[error("combat-membership command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("combat-membership occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("combat-membership command applies to a state with no combat")]
+    NoCombat,
+    #[error("combat-membership command would attack twice with {0:?}")]
+    AlreadyAttacking(ObjectId),
+    #[error("combat-membership command references a non-attacking creature {0:?}")]
+    NotAttacking(ObjectId),
+    #[error(
+        "combat-membership blocked precondition mismatch for {attacker:?}: expected {expected}, found {found}"
+    )]
+    BlockedPreconditionMismatch {
+        attacker: ObjectId,
+        expected: bool,
+        found: bool,
+    },
+    #[error("combat-membership command would repeat the block of {attacker:?} by {blocker:?}")]
+    DuplicateBlock {
+        attacker: ObjectId,
+        blocker: ObjectId,
+    },
+    #[error(
+        "combat-membership participation mismatch for {object:?}: expected {expected:?}, found {found:?}"
+    )]
+    ParticipationMismatch {
+        object: ObjectId,
+        expected: Box<CombatParticipation>,
+        found: Box<CombatParticipation>,
+    },
 }
 
 /// One exact CR 110.2a + CR 603.6a "under your control" battlefield-entry
@@ -764,6 +867,7 @@ pub enum ResolvedRulesCommand {
     Attachment(ResolvedAttachmentCommand),
     DelayedTriggerInstall(Box<ResolvedDelayedTriggerCommand>),
     ContinuousEffectInstall(Box<ResolvedContinuousEffectCommand>),
+    CombatMembership(ResolvedCombatMembershipCommand),
     ControllerOverride(ResolvedControllerOverrideCommand),
     EntryProvenance(ResolvedEntryProvenanceCommand),
     ObjectCease(ResolvedObjectCeaseCommand),
@@ -1736,6 +1840,17 @@ impl ResolvedRulesJournal {
             ResolvedRulesCommand::ContinuousEffectInstall(Box::new(command)),
         )
     }
+    /// Records one exact CR 506.3 / CR 506.4 combat-membership edit under its
+    /// causal node.
+    pub fn record_combat_membership(
+        &mut self,
+        command: ResolvedCombatMembershipCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::CombatMembership(command),
+        )
+    }
 
     /// Records one exact CR 110.2a controller override under its causal node.
     pub fn record_controller_override(
@@ -2010,6 +2125,7 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::Attachment(_)
                 | ResolvedRulesCommand::DelayedTriggerInstall(_)
                 | ResolvedRulesCommand::ContinuousEffectInstall(_)
+                | ResolvedRulesCommand::CombatMembership(_)
                 | ResolvedRulesCommand::ControllerOverride(_)
                 | ResolvedRulesCommand::EntryProvenance(_)
                 | ResolvedRulesCommand::ObjectCease(_)
@@ -2313,6 +2429,44 @@ impl ResolvedRulesJournal {
                          or an unrelated cause"
                             .to_string(),
                     ));
+                }
+            }
+            ResolvedRulesCommand::CombatMembership(command) => {
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "combat-membership command has an unrelated cause".to_string(),
+                    ));
+                }
+                // CR 400.7: combat membership is per-incarnation, so a re-entered
+                // object must never satisfy a command recorded for its predecessor.
+                if command.object.incarnation == LEGACY_INCARNATION {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "combat-membership command cannot use a legacy object identity".to_string(),
+                    ));
+                }
+                match &command.edit {
+                    // CR 509.1a: a creature is chosen to block an attacking
+                    // creature, which is never itself.
+                    ResolvedCombatMembershipEdit::Block {
+                        resulting_attacker, ..
+                    } if *resulting_attacker == command.object.object_id => {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership command blocks its own blocker".to_string(),
+                        ));
+                    }
+                    // CR 506.4: removing an object that held no combat role
+                    // pruned nothing, so it is not a removal that ever happened.
+                    ResolvedCombatMembershipEdit::Remove {
+                        expected_participation,
+                    } if expected_participation.is_empty() => {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership removal prunes no combat role".to_string(),
+                        ));
+                    }
+                    ResolvedCombatMembershipEdit::Attack { .. }
+                    | ResolvedCombatMembershipEdit::Block { .. }
+                    | ResolvedCombatMembershipEdit::MarkBlocked
+                    | ResolvedCombatMembershipEdit::Remove { .. } => {}
                 }
             }
             ResolvedRulesCommand::ControllerOverride(command) => {

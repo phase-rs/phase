@@ -56,6 +56,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
                 .apply_resolved_continuous_effect(command.as_ref())
                 .unwrap();
         }
+        ResolvedRulesCommand::CombatMembership(command) => {
+            engine::game::combat::apply_resolved_combat_membership(state, command).unwrap();
+        }
         ResolvedRulesCommand::ControllerOverride(command) => {
             engine::game::zones::apply_resolved_controller_override(state, command).unwrap();
         }
