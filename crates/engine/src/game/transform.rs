@@ -1,6 +1,9 @@
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::resolved_commands::{
+    ResolvedObjectTransformCommand, ResolvedObjectTransformReplayInvariantError,
+};
 use crate::types::zones::Zone;
 
 use super::engine::EngineError;
@@ -49,6 +52,22 @@ pub fn transform_permanent(
         return Ok(());
     }
 
+    // CR 701.27a + CR 701.27c: only permanents represented by double-faced
+    // tokens and double-faced cards can transform; if a spell or ability
+    // instructs a player to transform anything else, nothing happens. A CR 710
+    // flip card is a SINGLE-faced card whose alternative characteristics are
+    // reached by flipping (CR 710.4), never by transforming — and applying the
+    // double-faced applicator to one would swap the mana cost and color that
+    // CR 710.1c holds fixed. `flip::is_flip_permanent` is the single authority:
+    // `flip::stash_flip_face` re-stamps `LayoutKind::Flip` on WHICHEVER half is
+    // parked in `back_face`, so the tag survives a flip, a zone exit (which
+    // reverts the flip and re-stashes the alternative half), and a later return
+    // to the battlefield. The `flipped` status is kept as a redundant second
+    // arm so a stash that some other path zeroed still cannot be transformed.
+    if obj.flipped || crate::game::flip::is_flip_permanent(obj) {
+        return Ok(());
+    }
+
     let back_face = obj
         .back_face
         .clone()
@@ -81,24 +100,96 @@ pub fn transform_permanent(
     // self-transform instructions from abilities already on the stack.
     obj.transformation_count = obj.transformation_count.wrapping_add(1);
 
+    let reference = ObjectIncarnationRef::from_object(obj);
+    let resulting_transformed = obj.transformed;
+    let resulting_transformation_count = obj.transformation_count;
+
     crate::game::layers::mark_layers_full(state);
+
+    // CR 733: journal the settled transform through its owning family. Every
+    // no-op guard above returned before the swap, so only a transform that
+    // actually changed the displayed face is recorded.
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_object_transform(ResolvedObjectTransformCommand {
+            object: reference,
+            expected_old_transformed: !resulting_transformed,
+            resulting_transformed,
+            resulting_timestamp: ts,
+            resulting_transformation_count,
+            cause,
+        })
+        .expect("resolved transform must have a live journal cause");
 
     events.push(GameEvent::Transformed { object_id });
 
     Ok(())
 }
 
+/// CR 701.27a + CR 613.7g: Apply one exact already-resolved transform.
+///
+/// This installs the recorded face swap, displayed-face flag, timestamp, and
+/// transformation count. It re-runs none of `transform_permanent`'s CR 701.27
+/// eligibility guards — those decided at resolve time, and a command only
+/// exists because the transform actually happened.
+pub fn apply_resolved_transform(
+    state: &mut GameState,
+    command: &ResolvedObjectTransformCommand,
+) -> Result<(), ResolvedObjectTransformReplayInvariantError> {
+    let object = state.objects.get(&command.object.object_id).ok_or(
+        ResolvedObjectTransformReplayInvariantError::UnknownObject(command.object.object_id),
+    )?;
+    let found = ObjectIncarnationRef::from_object(object);
+    if found != command.object {
+        return Err(ResolvedObjectTransformReplayInvariantError::StaleObject {
+            expected: command.object,
+            found,
+        });
+    }
+    if object.transformed != command.expected_old_transformed {
+        return Err(
+            ResolvedObjectTransformReplayInvariantError::TransformedPreconditionMismatch {
+                expected: command.expected_old_transformed,
+                found: object.transformed,
+            },
+        );
+    }
+    let back_face = object.back_face.clone().ok_or(
+        ResolvedObjectTransformReplayInvariantError::MissingBackFace(command.object.object_id),
+    )?;
+
+    let obj = state
+        .objects
+        .get_mut(&command.object.object_id)
+        .expect("validated transform command object remains live");
+    let displayed = snapshot_object_face(obj);
+    apply_back_face_to_object(obj, back_face);
+    obj.back_face = Some(displayed);
+    obj.transformed = command.resulting_transformed;
+    obj.timestamp = command.resulting_timestamp;
+    obj.transformation_count = command.resulting_transformation_count;
+
+    crate::game::layers::mark_layers_full(state);
+
+    Ok(())
+}
+
 /// CR 712.16 + CR 730.2j: True when `obj` is a double-faced permanent
 /// (transform/modal/meld DFC) or a melded permanent — none of which can be
-/// turned face down. Used by `effects::turn_face_down` to enforce the no-op.
+/// turned face down. Used by `effects::turn_face_down` to enforce the no-op,
+/// and by presentation adapters that need the engine's authoritative
+/// "is this permanent double-faced?" answer instead of re-deriving one.
 ///
 /// Keys on the typed layout/merge discriminants rather than `back_face.is_some()`
 /// so that single-faced layouts that may legally be turned face down — Adventure,
 /// Omen, Split, Flip — are NOT blocked (they carry no Transform/Modal/Meld
-/// `layout_kind`). A DFC currently showing its back face is caught by the
+/// `layout_kind`). CR 710 flip cards in particular put their alternative half in
+/// the same `back_face` slot, so `back_face.is_some()` would report all 21 of
+/// them as double-faced. A DFC currently showing its back face is caught by the
 /// `transformed` flag, because `snapshot_object_face` zeroes `layout_kind` when
 /// the front face is stashed in `back_face` during a transform.
-pub(crate) fn is_double_faced_permanent(obj: &crate::game::game_object::GameObject) -> bool {
+pub fn is_double_faced_permanent(obj: &crate::game::game_object::GameObject) -> bool {
     use crate::types::card::LayoutKind;
     // CR 730.2j: a face-up melded permanent contains a double-faced component.
     if obj.merge_kind == Some(crate::game::game_object::MergeKind::Meld) {
@@ -167,6 +258,7 @@ mod tests {
             power: Some(4),
             toughness: Some(4),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: CardType {
                 supertypes: vec![],

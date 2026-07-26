@@ -248,6 +248,7 @@
     "target": "Ziel",
     "copy": "Kopie",
     "copyTooltip": "Spielstein-Kopie einer echten Karte",
+    "cantBeBlocked": "Kann nicht geblockt werden",
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ringträger",
     "hiddenAttachments": "+{{count}} more attached",
@@ -499,13 +500,22 @@
     "clickToFocus": "zum Fokussieren klicken"
   },
   "manaPool": {
+    "onlyForSpell": "Nur zum Wirken von Zaubersprüchen ausgeben",
     "onlyForSpellType": "Nur zum Wirken von Zaubersprüchen eines bestimmten Typs ausgeben",
     "onlyForCreatureType": "Nur zum Wirken eines Kreaturenzauberspruchs des gewählten Typs ausgeben",
     "onlyForTypeSpellsOrAbilities": "Nur für Zaubersprüche oder Fähigkeiten eines bestimmten Typs ausgeben",
+    "onlyForTaggedActivation": "Nur zum Aktivieren von Fähigkeiten einer bestimmten Art ausgeben",
     "onlyForSpellWithKeywordKind": "Nur zum Wirken von Zaubersprüchen mit einem bestimmten Schlüsselwort ausgeben",
     "onlyForSpellWithKeywordKindFromZone": "Nur zum Wirken von Schlüsselwort-Zaubersprüchen aus einem Friedhof ausgeben",
+    "onlyForSpellWithManaValue": "Nur zum Wirken von Zaubersprüchen ausgeben, die eine Anforderung an den Manabetrag erfüllen",
+    "onlyForSpellMatchingCostCriteria": "Nur zum Wirken von Zaubersprüchen ausgeben, die eine Kostenanforderung erfüllen",
+    "onlyForSpellWithColorCount": "Nur zum Wirken von Zaubersprüchen ausgeben, die eine Anforderung an die Anzahl der Farben erfüllen",
+    "onlyForSpellFromZone": "Nur zum Wirken von Zaubersprüchen aus einer erlaubten Zone ausgeben",
+    "onlyForFaceDownSpell": "Nur zum Wirken verdeckter Zaubersprüche ausgeben",
     "onlyForActivation": "Nur zum Aktivieren von Fähigkeiten ausgeben",
     "onlyForXCosts": "Nur für Kosten ausgeben, die {X} enthalten",
+    "onlyForAny": "Nur für eine der aufgeführten Verwendungen ausgeben",
+    "onlyForSpecialAction": "Nur für eine bestimmte Sonderaktion ausgeben",
     "convokePayment": "Beschwörbeitrag-Bezahlung",
     "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft",
     "grantCantBeCountered": "Für diesen Zauberspruch ausgeben, damit er nicht neutralisiert werden kann"
@@ -653,6 +663,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Muss {{attacker}} blocken",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -999,6 +1010,31 @@
       "subtitleActivate": "Diese Fähigkeit aktivieren?",
       "subtitlePlay": "Wähle, wie du diese Karte spielst",
       "subtitleChoose": "Wähle eine zu aktivierende Fähigkeit"
+    },
+    "manaRestrictions": {
+      "tapForMana": "Für Mana tappen",
+      "tapFor": "Für {{mana}} tappen",
+      "onlyForSpell": "Nur für Zaubersprüche.",
+      "onlyForSpellType": "Nur für {{spellType}}-Zaubersprüche.",
+      "onlyForCreatureType": "Nur für {{creatureType}}-Zaubersprüche.",
+      "onlyForTypeSpellsOrAbilitiesOfSpellType": "Nur für {{spellType}}-Zaubersprüche oder Fähigkeiten von {{spellType}}s.",
+      "onlyForTypeSpellsOrAbilitiesAny": "Nur für {{spellType}}-Zaubersprüche oder -Fähigkeiten.",
+      "onlyForActivation": "Nur zum Aktivieren von Fähigkeiten.",
+      "onlyForTaggedActivation": "Nur zum Aktivieren von {{tag}}-Fähigkeiten.",
+      "onlyForXCosts": "Nur für Kosten, die X enthalten.",
+      "onlyForSpellWithKeywordKind": "Nur für Zaubersprüche mit {{keyword}}.",
+      "onlyForSpellWithKeywordKindFromZone": "Nur für Zaubersprüche mit {{keyword}}, die aus {{zone}} gewirkt wurden.",
+      "onlyForSpellWithManaValue": "Nur für Zaubersprüche mit Manawert {{comparator}} {{value}}.",
+      "onlyForSpellMatchingCostCriteria": "Nur für {{spellType}}-Zaubersprüche, die {{criteria}} entsprechen.",
+      "manaValueCriterion": "Manawert {{comparator}} {{value}}",
+      "hasXInCostCriterion": "ein X in ihren Kosten",
+      "onlyForSpellWithColorCount": "Nur für Zaubersprüche mit {{comparator}} {{count}} Farben.",
+      "onlyForSpellFromZone": "Nur für Zaubersprüche {{polarity}} {{zone}}.",
+      "onlyForFaceDownSpell": "Nur für verdeckte Zaubersprüche.",
+      "onlyForAny": "Nur für eine dieser Verwendungen: {{restrictions}}",
+      "onlyForSpecialAction": "Nur für die Sonderaktion {{action}}.",
+      "convokePayment": "Nur für diese Einberufen-Zahlung.",
+      "anySpell": "beliebige"
     },
     "defiler": {
       "title": "Defiler-Kostenreduktion",
@@ -1701,9 +1737,30 @@
     "targetCreature": "das Kreaturenziel",
     "targetChoice": "diese Zielwahl"
   },
+  "giftRecipient": {
+    "title": "Geschenk-Empfänger wählen",
+    "subtitle": "Wähle, welcher Gegner das versprochene Geschenk erhält."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Ein Geschenk versprechen?",
+      "pay": "{{gift}} versprechen",
+      "decline": "Wirken ohne zu versprechen",
+      "kind": {
+        "card": "eine Karte",
+        "treasure": "einen Schatz",
+        "food": "eine Nahrung",
+        "tappedFish": "einen getappten Fisch"
+      }
+    }
+  },
   "clashOpponent": {
     "title": "Kampf-Gegner wählen",
     "subtitle": "Wähle, welcher Gegner mit dir kämpft."
+  },
+  "zoneOpponentChooser": {
+    "title": "Gegner wählen",
+    "subtitle": "Wähle, welcher Gegner die Wahl trifft."
   },
   "pileOpponent": {
     "title": "Choose Opponent",

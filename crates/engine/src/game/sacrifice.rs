@@ -23,6 +23,16 @@ pub(crate) enum SacrificeOutcome {
     NeedsReplacementChoice(PlayerId),
 }
 
+/// Signed current power of the selected permanents. Aggregate sacrifice costs
+/// count every selected permanent, including zero- and negative-power objects.
+pub(crate) fn selected_total_power(state: &GameState, selected: &[ObjectId]) -> i32 {
+    selected
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .map(|object| object.power.unwrap_or(0))
+        .sum()
+}
+
 /// CR 701.21 + CR 118.3: Sacrifice a permanent — move to graveyard as a cost or effect.
 /// Routes through replacement pipeline (e.g., Rest in Peace → exile).
 ///

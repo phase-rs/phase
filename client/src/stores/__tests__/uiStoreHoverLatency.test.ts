@@ -54,7 +54,9 @@ describe("uiStore inspectObject hover latency", () => {
   });
 
   it("cancels a pending show when the cursor leaves before the delay elapses", () => {
-    vi.spyOn(document, "elementFromPoint").mockReturnValue(null);
+    // The clear path asks the browser for its `:hover` element; null = the
+    // cursor is over nothing inspectable, so the deferred show is cancelled.
+    vi.spyOn(document, "querySelector").mockReturnValue(null);
     usePreferencesStore.setState({ cardPreviewHoverDelayMs: 300 });
     useUiStore.getState().inspectObject(5);
     vi.advanceTimersByTime(100);
@@ -66,7 +68,10 @@ describe("uiStore inspectObject hover latency", () => {
   it("keeps a pending show through a transient leave while the pointer remains over a card", () => {
     const hoveredCard = document.createElement("div");
     hoveredCard.dataset.cardHover = "true";
-    vi.spyOn(document, "elementFromPoint").mockReturnValue(hoveredCard);
+    // `:hover` resolves to a card element → the transient leave is ignored.
+    vi.spyOn(document, "querySelector").mockImplementation((sel) =>
+      sel === "[data-card-hover]:hover" ? hoveredCard : null,
+    );
     usePreferencesStore.setState({ cardPreviewHoverDelayMs: 300 });
 
     useUiStore.getState().inspectObject(5);
@@ -82,7 +87,11 @@ describe("uiStore inspectObject hover latency", () => {
   it("does not clear an open preview on a stale leave while the pointer remains over a card", () => {
     const hoveredCard = document.createElement("div");
     hoveredCard.dataset.cardHover = "true";
-    vi.spyOn(document, "elementFromPoint").mockReturnValue(hoveredCard);
+    // The card is still the browser's `:hover` target, so the stale mouseleave
+    // must not dismiss the open preview.
+    vi.spyOn(document, "querySelector").mockImplementation((sel) =>
+      sel === "[data-card-hover]:hover" ? hoveredCard : null,
+    );
     usePreferencesStore.setState({ cardPreviewHoverDelayMs: 300 });
 
     useUiStore.getState().inspectObject(5);

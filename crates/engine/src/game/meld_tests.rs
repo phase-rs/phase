@@ -475,6 +475,7 @@ fn meld_renamed_non_meld_partner_is_noop() {
             timestamp: ts,
             duration: Duration::Permanent,
             affected: TargetFilter::SelfRef,
+            affected_recipient: None,
             modifications: vec![ContinuousModification::SetName {
                 name: "Bruna, the Fading Light".to_string(),
             }],

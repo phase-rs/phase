@@ -6,7 +6,7 @@ use crate::types::ability::{
     ReplacementMode, RestrictionExpiry, StaticDefinition, TargetFilter, TriggerDefinition,
     VoteSubject,
 };
-use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
+use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef, PrintedLoyalty};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{GameState, MeldPairRecord};
@@ -100,10 +100,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
 
     let power = parse_pt(&card_face.power);
     let toughness = parse_pt(&card_face.toughness);
-    let loyalty = card_face
-        .loyalty
-        .as_ref()
-        .and_then(|value| value.parse::<u32>().ok());
+    let printed_loyalty = PrintedLoyalty::from_raw(card_face.loyalty.as_deref());
+    let loyalty = printed_loyalty.map(PrintedLoyalty::off_stack_value);
     // CR 310.4a: Printed defense number for battles.
     let defense = card_face
         .defense
@@ -120,6 +118,7 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // enters the battlefield, through the CR 614.1c intrinsic replacement
     // channel (`enter_with_counters` on the ZoneChange ProposedEvent).
     obj.loyalty = loyalty;
+    obj.printed_loyalty = printed_loyalty;
     // CR 310.4a: `obj.defense` is the face's printed defense, stored as base
     // data. Defense counters are seeded through the CR 614.1c intrinsic
     // replacement when the battle enters the battlefield.
@@ -146,6 +145,7 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.base_toughness = toughness;
     obj.base_name = card_face.name.clone();
     obj.base_loyalty = loyalty;
+    obj.base_printed_loyalty = printed_loyalty;
     obj.base_defense = defense;
     obj.base_card_types = card_face.card_type.clone();
     obj.base_mana_cost = card_face.mana_cost.clone();
@@ -253,10 +253,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {
     let power = parse_pt(&card_face.power);
     let toughness = parse_pt(&card_face.toughness);
-    let loyalty = card_face
-        .loyalty
-        .as_ref()
-        .and_then(|value| value.parse::<u32>().ok());
+    let printed_loyalty = PrintedLoyalty::from_raw(card_face.loyalty.as_deref());
+    let loyalty = printed_loyalty.map(PrintedLoyalty::off_stack_value);
     // CR 310.4a: Back-face printed defense for DFCs that transform into battles.
     let defense = card_face
         .defense
@@ -268,6 +266,7 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
     back_face.power = power;
     back_face.toughness = toughness;
     back_face.loyalty = loyalty;
+    back_face.printed_loyalty = printed_loyalty;
     back_face.defense = defense;
     back_face.card_types = card_face.card_type.clone();
     back_face.mana_cost = card_face.mana_cost.clone();
@@ -290,6 +289,7 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.power = back_face.power;
     obj.toughness = back_face.toughness;
     obj.loyalty = back_face.loyalty;
+    obj.printed_loyalty = back_face.printed_loyalty;
     obj.defense = back_face.defense;
     obj.card_types = back_face.card_types.clone();
     obj.mana_cost = back_face.mana_cost.clone();
@@ -302,6 +302,7 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.base_toughness = back_face.toughness;
     obj.base_name = back_face.name.clone();
     obj.base_loyalty = back_face.loyalty;
+    obj.base_printed_loyalty = back_face.printed_loyalty;
     obj.base_defense = back_face.defense;
     obj.base_card_types = back_face.card_types;
     obj.base_mana_cost = back_face.mana_cost.clone();
@@ -385,10 +386,20 @@ fn intrinsic_saga_lore_counter(card_types: &CardType) -> Option<(CounterType, u3
 /// the Saga lore counter when the entering face is a Saga (CR 712.14a
 /// transformed entry reads the back face here before the physical swap).
 pub fn intrinsic_entry_counters_for_face(
-    loyalty: Option<u32>,
+    printed_loyalty: Option<PrintedLoyalty>,
+    fallback_loyalty: Option<u32>,
+    resolving_spell_x: Option<u32>,
     defense: Option<u32>,
     card_types: &CardType,
 ) -> Vec<(CounterType, u32)> {
+    // `printed_loyalty` is authoritative when present: in particular, an
+    // explicit printed X must remain zero outside the resolving-spell path.
+    // Older serialized objects and lightweight engine constructors predate that
+    // provenance field, but their fixed `loyalty` baseline is still the printed
+    // loyalty number required by CR 306.5b.
+    let loyalty = printed_loyalty
+        .map(|value| value.entry_counter_count(resolving_spell_x))
+        .or(fallback_loyalty);
     let mut counters = intrinsic_face_counters(loyalty, defense);
     if let Some(lore) = intrinsic_saga_lore_counter(card_types) {
         counters.push(lore);
@@ -396,8 +407,15 @@ pub fn intrinsic_entry_counters_for_face(
     counters
 }
 
-pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(CounterType, u32)> {
-    let mut counters = intrinsic_face_counters(obj.loyalty, obj.defense);
+pub fn intrinsic_etb_counters(
+    obj: &GameObject,
+    resolving_spell_x: Option<u32>,
+) -> Vec<(CounterType, u32)> {
+    let loyalty = obj
+        .printed_loyalty
+        .map(|value| value.entry_counter_count(resolving_spell_x))
+        .or(obj.loyalty);
+    let mut counters = intrinsic_face_counters(loyalty, obj.defense);
     // CR 702.156a + CR 107.3m: Ravenous is an intrinsic ETB replacement
     // effect. The paid X is stamped on the object when the spell leaves the
     // stack, before the ZoneChange replacement pipeline applies counters.
@@ -456,6 +474,13 @@ pub fn self_etb_counter_replacements(
 }
 
 pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
+    // CR 707.2 + CR 710.2: a flipped flip permanent's `base_*` fields hold the
+    // ALTERNATIVE half (written there by `flip::apply_flipped_face_to_object`),
+    // but flipped is a status (CR 110.5) and status is not copied. The copiable
+    // values are the normal half, which `flip` keeps stashed in `back_face`.
+    if let Some(values) = crate::game::flip::flipped_normal_copiable_values(obj) {
+        return values;
+    }
     CopiableValues {
         name: obj.base_name.clone(),
         mana_cost: obj.base_mana_cost.clone(),
@@ -464,6 +489,7 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
         power: obj.base_power,
         toughness: obj.base_toughness,
         loyalty: obj.base_loyalty,
+        printed_loyalty: obj.base_printed_loyalty,
         keywords: obj.base_keywords.clone(),
         // CopiableValues now shares `Arc<Vec<_>>` with the source object —
         // a copy-effect never mutates the ability set, so refcount sharing
@@ -537,8 +563,22 @@ pub(crate) fn is_runtime_target_die_exile_replacement(def: &ReplacementDefinitio
         })
 }
 
+/// CR 614.1a + CR 400.7 + CR 707.2: True for a runtime replacement bound to the
+/// lifetime of the OBJECT hosting it — the "if it would leave the battlefield,
+/// exile it instead" rider installed by Unearth (CR 702.84a) and the
+/// parser-driven reanimation cards (Gruesome Encore, Whip of Erebos, …). It is
+/// stamped `RestrictionExpiry::UntilHostLeavesPlay`. Like the die-exile rider it
+/// is persisted in base only to survive CR 613.1 layer reseeds; it is NOT a
+/// copiable value (a copy of the host must not inherit the exile redirect,
+/// CR 707.2) and must lapse when the host leaves the battlefield (CR 400.7).
+pub(crate) fn is_runtime_host_lifetime_replacement(def: &ReplacementDefinition) -> bool {
+    matches!(def.expiry, Some(RestrictionExpiry::UntilHostLeavesPlay))
+}
+
 pub(crate) fn is_runtime_non_copiable_replacement(def: &ReplacementDefinition) -> bool {
-    is_runtime_control_gated_replacement(def) || is_runtime_target_die_exile_replacement(def)
+    is_runtime_control_gated_replacement(def)
+        || is_runtime_target_die_exile_replacement(def)
+        || is_runtime_host_lifetime_replacement(def)
 }
 
 /// CR 707.2 + CR 712.4b: Build the copiable values for a melded permanent
@@ -560,10 +600,9 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
         card_types: result_face.card_type.clone(),
         power: parse_pt(&result_face.power),
         toughness: parse_pt(&result_face.toughness),
-        loyalty: result_face
-            .loyalty
-            .as_ref()
-            .and_then(|value| value.parse::<u32>().ok()),
+        loyalty: PrintedLoyalty::from_raw(result_face.loyalty.as_deref())
+            .map(PrintedLoyalty::off_stack_value),
+        printed_loyalty: PrintedLoyalty::from_raw(result_face.loyalty.as_deref()),
         keywords: result_face.keywords.clone(),
         abilities: Arc::new(result_face.abilities.clone()),
         trigger_definitions: Arc::new(result_face.triggers.clone()),
@@ -608,6 +647,7 @@ pub fn apply_copiable_values(
     obj.power = values.power;
     obj.toughness = values.toughness;
     obj.loyalty = values.loyalty;
+    obj.printed_loyalty = values.printed_loyalty;
     obj.keywords = values.keywords.clone();
     // All four ability sets are Arc-shared — refcount bumps, no deep copy.
     obj.abilities = Arc::clone(&values.abilities);
@@ -642,6 +682,7 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
     obj.power = values.power;
     obj.toughness = values.toughness;
     obj.loyalty = values.loyalty;
+    obj.printed_loyalty = values.printed_loyalty;
     obj.keywords = values.keywords.clone();
     obj.abilities = Arc::clone(&values.abilities);
     obj.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
@@ -654,6 +695,7 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
     obj.base_power = values.power;
     obj.base_toughness = values.toughness;
     obj.base_loyalty = values.loyalty;
+    obj.base_printed_loyalty = values.printed_loyalty;
     obj.base_keywords = values.keywords.clone();
     obj.base_abilities = Arc::clone(&values.abilities);
     obj.base_replacement_definitions = Arc::clone(&values.replacement_definitions);
@@ -669,6 +711,7 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         power: obj.power,
         toughness: obj.toughness,
         loyalty: obj.loyalty,
+        printed_loyalty: obj.printed_loyalty,
         defense: obj.defense,
         card_types: obj.card_types.clone(),
         mana_cost: obj.mana_cost.clone(),
@@ -716,6 +759,7 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
         power: obj.base_power,
         toughness: obj.base_toughness,
         loyalty: obj.base_loyalty,
+        printed_loyalty: obj.base_printed_loyalty,
         defense: obj.base_defense,
         card_types: obj.base_card_types.clone(),
         mana_cost: obj.base_mana_cost.clone(),
@@ -841,6 +885,9 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
     match modification {
         ContinuousModification::GrantAbility { definition } => walk_ability_def(definition, out),
         ContinuousModification::GrantTrigger { trigger } => walk_trigger(trigger, out),
+        ContinuousModification::GrantReplacement { replacement } => {
+            walk_replacement(replacement, out)
+        }
         ContinuousModification::GrantStaticAbility { definition } => walk_static(definition, out),
         ContinuousModification::CopyValues { values, .. } => walk_copiable_values(values, out),
         // Remaining modifications carry no nested ability/effect carriers.
@@ -849,6 +896,9 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         // from the provider objects at layer collection time, not nested here.
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        // CR 707.2c (Metamorphic Alteration): inert parse-time copy marker — no
+        // nested ability/effect carrier to walk (the copy grant is the runtime TCE).
+        | ContinuousModification::CopyChosen
         | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
@@ -1184,6 +1234,9 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c (Metamorphic Alteration): filter-only copy choice; no nested
+        // ability carrier to walk — a leaf for printed-card collection.
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
@@ -1202,12 +1255,15 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: no nested ability carrier and no conjured card name.
+        | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealHand { .. }
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }
@@ -1422,6 +1478,13 @@ pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_f
             CardLayout::Modal(_, back) => Some((LayoutKind::Modal, back)),
             CardLayout::Meld(_, back) => Some((LayoutKind::Meld, back)),
             CardLayout::Omen(_, back) => Some((LayoutKind::Omen, back)),
+            // CR 710.1b: a flip card's alternative name, text box, type line,
+            // power, and toughness live on its bottom half. Stored in the same
+            // `back_face` slot so `flip::flip_permanent` can apply it — the
+            // `LayoutKind::Flip` tag is what keeps it out of every double-faced
+            // path (`transform::is_double_faced_permanent`,
+            // `transform::transform_permanent`, MDFC/Adventure face choice).
+            CardLayout::Flip(_, back) => Some((LayoutKind::Flip, back)),
             // CR 722: Preparation cards expose prepare-spell characteristics.
             CardLayout::Prepare(_, back) => Some((LayoutKind::Prepare, back)),
             _ => None,
@@ -1446,6 +1509,7 @@ pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_f
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: Default::default(),
         mana_cost: Default::default(),
@@ -1755,6 +1819,10 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                             CardLayout::Modal(..) => Some(LayoutKind::Modal),
                             CardLayout::Meld(..) => Some(LayoutKind::Meld),
                             CardLayout::Omen(..) => Some(LayoutKind::Omen),
+                            // CR 710.1b: restore the flip tag so a reloaded
+                            // flip permanent's stashed alternative face stays
+                            // excluded from the double-faced paths.
+                            CardLayout::Flip(..) => Some(LayoutKind::Flip),
                             // CR 702.xxx: Prepare (Strixhaven) — treat like Adventure for
                             // back-face layout tracking. Assign when WotC publishes SOS CR update.
                             CardLayout::Prepare(..) => Some(LayoutKind::Prepare),
@@ -1769,6 +1837,15 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                         });
                 }
             }
+
+            // CR 710.1c: a flip card's color and mana cost don't change if the
+            // permanent is flipped. A flipped permanent's `printed_ref` names
+            // the ALTERNATIVE half, which carries no printed mana cost, so the
+            // `apply_card_face_to_object` reapply above would blank it on every
+            // reload. Restore both from the (just-refreshed) normal half stashed
+            // in `back_face` — the same values `flip::flip_permanent`
+            // deliberately left untouched when it flipped the permanent.
+            crate::game::flip::restore_normal_cost_and_color_if_flipped(obj);
 
             if is_face_down_battlefield {
                 // CR 708.2a: This reload path only runs while `printed_ref` is
@@ -1950,6 +2027,88 @@ mod tests {
             TriggerDefinition::new(TriggerMode::Attacks),
         ]);
         intrinsic_copiable_values(&source)
+    }
+
+    /// A bare "Moved SelfRef -> Exile" redirect with NO expiry stamp — the
+    /// Personal Decoy printed-static shape (CMB1 playtest card). This is the
+    /// fixture that kills shape-widening: the runtime detectors must key on the
+    /// `UntilHostLeavesPlay` expiry stamp, NOT on the redirect shape, so a
+    /// printed-static exile redirect is never misclassified as a runtime rider.
+    fn bare_moved_selfref_exile_rider() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+    }
+
+    /// R10 (issue #5976): a redirect that lacks the `UntilHostLeavesPlay` stamp
+    /// must be classified as NEITHER a host-lifetime rider NOR non-copiable — the
+    /// detectors key on the expiry stamp, not the Moved->Exile shape, so a
+    /// printed-static exile redirect (Personal Decoy) is never widened into a
+    /// runtime rider.
+    #[test]
+    fn r10_bare_exile_redirect_without_expiry_is_not_runtime_rider() {
+        let def = bare_moved_selfref_exile_rider();
+        assert!(
+            !is_runtime_host_lifetime_replacement(&def),
+            "a redirect with no UntilHostLeavesPlay stamp is NOT a host-lifetime rider"
+        );
+        assert!(
+            !is_runtime_non_copiable_replacement(&def),
+            "a printed-static exile redirect must stay copiable (shape must not widen)"
+        );
+    }
+
+    /// R6 (issue #5976): the same redirect, now stamped `UntilHostLeavesPlay`, IS
+    /// a runtime rider (CR 702.84a) and must be excluded from the host's copiable
+    /// values so a copy does not inherit the exile redirect (CR 707.2). This is
+    /// the production seam the runtime token-copy path
+    /// (`compute_current_copiable_values` -> `copiable_replacement_definitions`)
+    /// consumes.
+    #[test]
+    fn host_lifetime_rider_is_non_copiable_and_excluded_from_copiable_values() {
+        let rider = bare_moved_selfref_exile_rider()
+            .expiry(crate::types::ability::RestrictionExpiry::UntilHostLeavesPlay);
+        assert!(is_runtime_host_lifetime_replacement(&rider));
+        assert!(is_runtime_non_copiable_replacement(&rider));
+
+        let mut obj = GameObject::new(
+            ObjectId(7),
+            CardId(7),
+            PlayerId(0),
+            "Unearthed".to_string(),
+            Zone::Battlefield,
+        );
+        obj.base_replacement_definitions = Arc::new(vec![rider]);
+
+        let copiable = intrinsic_copiable_values(&obj);
+        assert!(
+            copiable
+                .replacement_definitions
+                .iter()
+                .all(|r| !is_runtime_host_lifetime_replacement(r)),
+            "CR 707.2: a copy must not inherit the host-lifetime exile rider"
+        );
+        assert!(
+            copiable.replacement_definitions.is_empty(),
+            "the only rider was the non-copiable host-lifetime one, so copiable defs are empty"
+        );
     }
 
     fn copy_recipient(id: u64) -> GameObject {
@@ -2139,6 +2298,106 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    /// CR 710.1c: a flip card's color and mana cost don't change if the
+    /// permanent is flipped — including across a state reload.
+    ///
+    /// A flipped permanent's `printed_ref` names the ALTERNATIVE half, which (on
+    /// every real flip card) has no printed mana cost. Without the
+    /// `restore_normal_cost_and_color_if_flipped` call in
+    /// `reapply_printed_faces_from_card_db`, the reapply blanks the cost and the
+    /// permanent silently becomes a {0} object on load. Reverting that call
+    /// fails the mana-cost assertion below.
+    #[test]
+    fn rehydrate_keeps_a_flipped_permanents_mana_cost_and_color() {
+        let normal_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        };
+        let mut normal_half = test_face(
+            "Rehydrate Flip Normal",
+            "rehydrate-flip-oracle-id",
+            vec![CoreType::Creature],
+            normal_cost.clone(),
+        );
+        normal_half.color_override = Some(vec![ManaColor::White]);
+        // CR 710.1b: the alternative half has no printed mana cost and no
+        // printed color indicator — exactly as MTGJSON reports face b.
+        let mut alternative_half = test_face(
+            "Rehydrate Flip Alternative",
+            "rehydrate-flip-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        alternative_half.color_override = Some(vec![]);
+        let db = db_from_faces(&[normal_half.clone(), alternative_half.clone()]);
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "Rehydrate Flip Alternative".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        // Post-flip state, exactly as `flip::flip_permanent` leaves it: the
+        // alternative half is displayed, the normal half is stashed, and the
+        // mana cost / color are still the normal half's (CR 710.1c).
+        object.flipped = true;
+        object.printed_ref = printed_ref_from_face(&alternative_half);
+        object.base_printed_ref = object.printed_ref.clone();
+        object.mana_cost = normal_cost.clone();
+        object.base_mana_cost = normal_cost.clone();
+        object.color = vec![ManaColor::White];
+        object.base_color = vec![ManaColor::White];
+        object.back_face = Some(BackFaceData {
+            name: normal_half.name.clone(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            printed_loyalty: None,
+            defense: None,
+            card_types: normal_half.card_type.clone(),
+            mana_cost: normal_cost.clone(),
+            keywords: vec![],
+            abilities: vec![],
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: vec![ManaColor::White],
+            printed_ref: printed_ref_from_face(&normal_half),
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
+            layout_kind: None,
+        });
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        let object = &state.objects[&id];
+        assert!(
+            object.flipped,
+            "reach guard: the permanent is still flipped"
+        );
+        assert_eq!(
+            object.name, "Rehydrate Flip Alternative",
+            "reach guard: the reapply really did run over the alternative half"
+        );
+        assert_eq!(
+            object.mana_cost, normal_cost,
+            "CR 710.1c: reloading must not blank a flipped permanent's mana cost"
+        );
+        assert_eq!(object.base_mana_cost, normal_cost);
+        assert_eq!(
+            object.color,
+            vec![ManaColor::White],
+            "CR 710.1c: reloading must not blank a flipped permanent's color"
+        );
+        assert_eq!(object.base_color, vec![ManaColor::White]);
     }
 
     /// CR 604.3: explicit all-zone color data is authoritative even when a face
@@ -2496,8 +2755,51 @@ mod tests {
         obj.cost_x_paid = Some(4);
 
         assert_eq!(
-            intrinsic_etb_counters(&obj),
+            intrinsic_etb_counters(&obj, None),
             vec![(CounterType::Plus1Plus1, 4)]
+        );
+    }
+
+    #[test]
+    fn x_loyalty_uses_the_resolving_spell_x_and_survives_copying() {
+        let resolving = intrinsic_entry_counters_for_face(
+            Some(PrintedLoyalty::X),
+            Some(0),
+            Some(3),
+            None,
+            &CardType::default(),
+        );
+        assert_eq!(resolving, vec![(CounterType::Loyalty, 3)]);
+
+        let mut source = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "X Walker".to_string(),
+            Zone::Battlefield,
+        );
+        source.base_printed_loyalty = Some(PrintedLoyalty::X);
+        source.printed_loyalty = Some(PrintedLoyalty::X);
+        source.base_loyalty = Some(0);
+        source.loyalty = Some(0);
+
+        let values = intrinsic_copiable_values(&source);
+        assert_eq!(values.printed_loyalty, Some(PrintedLoyalty::X));
+
+        let mut copy = GameObject::new(
+            ObjectId(2),
+            CardId(2),
+            PlayerId(0),
+            "Copy".to_string(),
+            Zone::Battlefield,
+        );
+        install_copiable_values_as_base(&mut copy, &values);
+        assert_eq!(copy.printed_loyalty, Some(PrintedLoyalty::X));
+        assert_eq!(copy.base_printed_loyalty, Some(PrintedLoyalty::X));
+        assert_eq!(
+            intrinsic_etb_counters(&copy, None),
+            Vec::new(),
+            "CR 107.3g: a copied X-loyalty permanent that is not resolving a spell has X=0"
         );
     }
 

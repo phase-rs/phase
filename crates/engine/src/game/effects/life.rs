@@ -12,6 +12,7 @@ use crate::types::game_state::{
 };
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::resolved_commands::ResolvedPlayerEdit;
 
 /// Signals that a replacement effect requires player choice before the event can proceed.
 /// Callers receiving this must yield control (the engine will re-enter after the choice).
@@ -67,31 +68,7 @@ pub fn resolve_gain(
     // CR 614.1a: Route life gain through replacement pipeline.
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            if let ProposedEvent::LifeGain {
-                player_id,
-                amount: gain_amount,
-                ..
-            } = event
-            {
-                let player = state
-                    .players
-                    .iter_mut()
-                    .find(|p| p.id == player_id)
-                    .ok_or(EffectError::PlayerNotFound)?;
-                player.life += gain_amount as i32;
-                // CR 119.9: Track life gained this turn for triggered ability matching.
-                player.life_gained_this_turn += gain_amount;
-                // CR 611.3a + CR 119: escalate layers only if a live continuous
-                // static reads the life family (life total / life-above-starting
-                // / per-turn life counters); otherwise this life change cannot
-                // flip any derived board.
-                crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
-
-                events.push(GameEvent::LifeChanged {
-                    player_id,
-                    amount: gain_amount as i32,
-                });
-            }
+            apply_life_gain_after_replacement(state, event, events);
         }
         ReplacementResult::Prevented => {
             // CR 614.1a + CR 614.6 — Issue #317: Cross-event-type
@@ -211,9 +188,17 @@ pub fn apply_life_gain_after_replacement(
         );
         return 0;
     };
-    if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
-        player.life += gain_amount as i32;
-        player.life_gained_this_turn += gain_amount;
+    // CR 119.8: gaining 0 life doesn't count as gaining life — no state
+    // mutation and no journal command; the event below still fires as before.
+    if gain_amount != 0 {
+        state
+            .resolve_and_apply_player_edit(
+                pid,
+                ResolvedPlayerEdit::Life {
+                    delta: gain_amount as i32,
+                },
+            )
+            .expect("post-replacement life gain must target a live player");
     }
     // CR 611.3a + CR 119: gate escalation on a live life-reading static.
     crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
@@ -288,9 +273,17 @@ pub fn apply_life_loss_after_replacement(
         );
         return 0;
     };
-    if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
-        player.life -= loss_amount as i32;
-        player.life_lost_this_turn += loss_amount;
+    // CR 119.8: losing 0 life doesn't count as losing life — no state
+    // mutation and no journal command; the event below still fires as before.
+    if loss_amount != 0 {
+        state
+            .resolve_and_apply_player_edit(
+                pid,
+                ResolvedPlayerEdit::Life {
+                    delta: -(loss_amount as i32),
+                },
+            )
+            .expect("post-replacement life loss must target a live player");
     }
     // CR 611.3a + CR 119 + CR 120.3a: gate escalation on a live life-reading
     // static. Also the sink for non-infect player damage (deal_damage.rs).
@@ -481,27 +474,7 @@ pub fn resolve_lose(
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            if let ProposedEvent::LifeLoss {
-                player_id,
-                amount: loss_amount,
-                ..
-            } = event
-            {
-                let player = state
-                    .players
-                    .iter_mut()
-                    .find(|p| p.id == player_id)
-                    .ok_or(EffectError::PlayerNotFound)?;
-                player.life -= loss_amount as i32;
-                player.life_lost_this_turn += loss_amount;
-                // CR 611.3a + CR 119: gate escalation on a live life-reading static.
-                crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
-
-                events.push(GameEvent::LifeChanged {
-                    player_id,
-                    amount: -(loss_amount as i32),
-                });
-            }
+            apply_life_loss_after_replacement(state, event, events);
         }
         ReplacementResult::Prevented => {
             // CR 614.1a + CR 614.6 — Issue #317: Drain substitute effect

@@ -47,6 +47,11 @@ pub type ActionResult = (
     HashMap<ObjectId, Vec<GameAction>>,
 );
 
+/// One completed authoritative transition paired with the server revision
+/// allocated while the session lock was held. The transport must keep this
+/// pairing intact when it fans a snapshot out to multiple viewers.
+pub type RevisionedActionResult = (u64, ActionResult);
+
 /// Broadcast-ready fields for a state snapshot taken outside the normal
 /// `handle_action` flow (e.g. an approved takeback rollback): the raw state,
 /// legal actions, auto-pass flag, spell costs, and per-object action grouping.
@@ -100,6 +105,10 @@ pub fn is_acting(state: &GameState, player: PlayerId) -> bool {
 
 pub struct GameSession {
     pub game_code: String,
+    /// Monotonic server-authored revision of the current authoritative state.
+    /// Read-only snapshots reuse this value; mutators advance it before their
+    /// per-viewer views are captured for transport.
+    pub state_revision: u64,
     pub state: GameState,
     /// Player tokens indexed by seat (0..player_count). Empty string = seat not yet claimed.
     pub player_tokens: Vec<String>,
@@ -151,6 +160,12 @@ pub struct GameSession {
 }
 
 impl GameSession {
+    /// Allocates the revision for one completed authoritative state transition.
+    pub fn advance_state_revision(&mut self) -> u64 {
+        self.state_revision = self.state_revision.saturating_add(1);
+        self.state_revision
+    }
+
     /// Returns the player index for the given token, if valid.
     pub fn player_for_token(&self, token: &str) -> Option<PlayerId> {
         self.player_tokens
@@ -512,6 +527,7 @@ impl GameSession {
         let result = start_game(&mut self.state);
         self.start_events = result.events;
         self.game_started = true;
+        self.advance_state_revision();
         self.ai_session = Some(AiSession::arc_from_game(&self.state));
         self.lobby_meta = None;
         Ok(())
@@ -530,7 +546,7 @@ impl GameSession {
     /// turn — out from under the snapshot the table is voting to roll back
     /// to. Every call site (join-fills-the-room, reconnect, fresh AI-game
     /// creation) is gated here once rather than at each caller.
-    pub fn run_ai(&mut self) -> Vec<ActionResult> {
+    pub fn run_ai(&mut self) -> Vec<RevisionedActionResult> {
         if self.ai_seats.is_empty() || self.pending_takeback.is_some() {
             return vec![];
         }
@@ -556,14 +572,18 @@ impl GameSession {
             .map(|r| {
                 let (legal, spell_costs, by_object) = engine_legal_actions_full(&r.state);
                 let auto_pass = auto_pass_recommended(&r.state, &legal);
+                let revision = self.advance_state_revision();
                 (
-                    r.state,
-                    r.events,
-                    legal,
-                    r.log_entries,
-                    auto_pass,
-                    spell_costs,
-                    by_object,
+                    revision,
+                    (
+                        r.state,
+                        r.events,
+                        legal,
+                        r.log_entries,
+                        auto_pass,
+                        spell_costs,
+                        by_object,
+                    ),
                 )
             })
             .collect()
@@ -596,6 +616,7 @@ impl GameSession {
 
         PersistedSession {
             game_code: self.game_code.clone(),
+            state_revision: self.state_revision,
             state: PersistedGameState::capture(self.state.clone()),
             player_tokens: self.player_tokens.clone(),
             display_names: self.display_names.clone(),
@@ -657,6 +678,7 @@ impl GameSession {
 
         GameSession {
             game_code: ps.game_code,
+            state_revision: ps.state_revision,
             state,
             player_tokens: ps.player_tokens,
             connected: vec![false; pc],
@@ -777,6 +799,7 @@ impl SessionManager {
 
         let session = GameSession {
             game_code: game_code.clone(),
+            state_revision: 0,
             state,
             player_tokens,
             connected,
@@ -1076,259 +1099,16 @@ impl SessionManager {
             _ => {}
         }
 
-        // CancelAutoPass: any valid player can cancel their own flag regardless of whose turn it is.
-        // This allows canceling UntilEndOfTurn while the opponent has priority.
-        if matches!(action, GameAction::CancelAutoPass) {
-            session.state.auto_pass.remove(&player);
-            let (new_legal_actions, spell_costs, by_object) =
-                engine_legal_actions_full(&session.state);
-            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
-            return Ok((
-                session.state.clone(),
-                vec![],
-                new_legal_actions,
-                vec![],
-                auto_pass,
-                spell_costs,
-                by_object,
-            ));
-        }
+        // The engine is the sole admission authority for game actions. Session
+        // policy above authenticates the actor and controls takeback/debug
+        // access; the engine validates actor authorization and action shape.
+        // Candidate enumeration is advisory for clients and AI, not a second
+        // legality gate: several legal action classes are combinatorial.
+        let records_takeback = !action.is_actor_scoped_preference();
 
-        // SetPhaseStops / SetPriorityPassingMode: per-player preferences keyed
-        // to the authenticated player,
-        // not the priority holder. Bypasses the turn/legal-action prechecks (any
-        // player may adjust their own stops at any time) and delegates the
-        // mutation to the engine (single authority — the write handler keys by
-        // `actor`, i.e. the authenticated player). Not an undo point → no
-        // takeback snapshot. CR 102.1 (scope resolves against the active player).
-        if matches!(
-            action,
-            GameAction::SetPhaseStops { .. } | GameAction::SetPriorityPassingMode { .. }
-        ) {
-            let result = apply(&mut session.state, player, action).map_err(|e| {
-                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
-                format!("Engine error: {}", e)
-            })?;
-            let (new_legal_actions, spell_costs, by_object) =
-                engine_legal_actions_full(&session.state);
-            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
-            return Ok((
-                session.state.clone(),
-                result.events,
-                new_legal_actions,
-                result.log_entries,
-                auto_pass,
-                spell_costs,
-                by_object,
-            ));
-        }
+        let pre_action_state = records_takeback.then(|| session.state.clone());
 
-        // SetPriorityYield: per-player standing priority-yield preference keyed
-        // to the authenticated player, not the priority holder. Bypasses the
-        // turn/legal-action prechecks (any player may adjust their own yields at
-        // any time) and delegates the mutation to the engine (single authority).
-        // A preference toggle is not an undo point, so — unlike ReorderHand — it
-        // takes NO takeback snapshot. CR 117.3d.
-        if matches!(action, GameAction::SetPriorityYield { .. }) {
-            let result = apply(&mut session.state, player, action).map_err(|e| {
-                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
-                format!("Engine error: {}", e)
-            })?;
-            let (new_legal_actions, spell_costs, by_object) =
-                engine_legal_actions_full(&session.state);
-            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
-            return Ok((
-                session.state.clone(),
-                result.events,
-                new_legal_actions,
-                result.log_entries,
-                auto_pass,
-                spell_costs,
-                by_object,
-            ));
-        }
-
-        // SetMayTriggerAutoChoice: per-player "don't ask again" auto-choice
-        // preference for optional ("may") triggers, keyed to the authenticated
-        // player, not the priority holder. Bypasses the turn/legal-action
-        // prechecks (any player may adjust their own auto-choices at any time)
-        // and delegates the mutation to the engine (single authority — the write
-        // handler enforces actor scoping). Not an undo point → no takeback
-        // snapshot, mirroring SetPriorityYield. CR 603.5.
-        if matches!(action, GameAction::SetMayTriggerAutoChoice { .. }) {
-            let result = apply(&mut session.state, player, action).map_err(|e| {
-                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
-                format!("Engine error: {}", e)
-            })?;
-            let (new_legal_actions, spell_costs, by_object) =
-                engine_legal_actions_full(&session.state);
-            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
-            return Ok((
-                session.state.clone(),
-                result.events,
-                new_legal_actions,
-                result.log_entries,
-                auto_pass,
-                spell_costs,
-                by_object,
-            ));
-        }
-
-        // SetTriggerOrderTemplate: per-player saved trigger-ordering preference, keyed
-        // to the authenticated player, not the priority holder. Bypasses the turn/legal
-        // prechecks (any player may adjust their own templates at any time) and delegates
-        // the mutation to the engine (single authority — the write handler enforces actor
-        // scoping). Not an undo point → no takeback snapshot, mirroring
-        // SetMayTriggerAutoChoice. CR 603.3b.
-        if matches!(action, GameAction::SetTriggerOrderTemplate { .. }) {
-            let result = apply(&mut session.state, player, action).map_err(|e| {
-                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
-                format!("Engine error: {}", e)
-            })?;
-            let (new_legal_actions, spell_costs, by_object) =
-                engine_legal_actions_full(&session.state);
-            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
-            return Ok((
-                session.state.clone(),
-                result.events,
-                new_legal_actions,
-                result.log_entries,
-                auto_pass,
-                spell_costs,
-                by_object,
-            ));
-        }
-
-        // ReorderHand: per-player display-preference update keyed to the
-        // authenticated player, not the priority holder. Mirrors
-        // CancelAutoPass / SetPhaseStops by bypassing the turn/legal-action
-        // prechecks, but still delegates validation and mutation to the engine
-        // so all adapters share one authoritative contract.
-        //
-        // CR 402.3: The order of cards in a player's hand is not defined by
-        // the rules; players may arrange them as they choose. Hand reordering
-        // has no game-rules consequence.
-        if matches!(action, GameAction::ReorderHand { .. }) {
-            session.push_takeback_snapshot(player);
-            let result = apply(&mut session.state, player, action).map_err(|e| {
-                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
-                format!("Engine error: {}", e)
-            })?;
-            let (new_legal_actions, spell_costs, by_object) =
-                engine_legal_actions_full(&session.state);
-            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
-            return Ok((
-                session.state.clone(),
-                result.events,
-                new_legal_actions,
-                result.log_entries,
-                auto_pass,
-                spell_costs,
-                by_object,
-            ));
-        }
-
-        // Debug / Grant / Revoke bypass the priority-holder and legal-action
-        // gates entirely — they're out-of-band sandbox controls already gated
-        // by `debug_permitted` (Debug) and host-only checks (Grant/Revoke)
-        // above. Mirror the ReorderHand path: delegate to engine, broadcast
-        // the audit event.
-        if matches!(
-            action,
-            GameAction::Debug(_)
-                | GameAction::GrantDebugPermission { .. }
-                | GameAction::RevokeDebugPermission { .. }
-        ) {
-            session.push_takeback_snapshot(player);
-            let result = apply(&mut session.state, player, action).map_err(|e| {
-                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
-                format!("Engine error: {}", e)
-            })?;
-            let (new_legal_actions, spell_costs, by_object) =
-                engine_legal_actions_full(&session.state);
-            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
-            return Ok((
-                session.state.clone(),
-                result.events,
-                new_legal_actions,
-                result.log_entries,
-                auto_pass,
-                spell_costs,
-                by_object,
-            ));
-        }
-
-        // Validate it's this player's turn to act.
-        // CR 103.5: For simultaneous mulligan states, every pending player is
-        // an authorized actor — use set membership rather than equality with
-        // the (None-returning) representative.
-        let authorized = acting_players(&session.state);
-        if authorized.is_empty() {
-            warn!(game = %game_code, player = ?player, reason = "game_over", "action rejected");
-            return Err("Game is over".to_string());
-        }
-        if !authorized.contains(&player) {
-            warn!(game = %game_code, player = ?player, reason = "not_your_turn", "action rejected");
-            return Err("Not your turn to act".to_string());
-        }
-
-        // Mana abilities skip the legal_actions pre-check — they are excluded from
-        // legal_actions() for auto-pass purposes but validated by apply() directly.
-        // SetAutoPass also skips (always legal when you have priority).
-        // Scry/surveil keep-on-top selections (CR 701.22a / CR 701.25a) also skip:
-        // their legal set is every duplicate-free subset in any order, which cannot
-        // be enumerated as candidate actions — apply() validates the submitted
-        // selection structurally instead (see handle_resolution_choice). The
-        // engine owns this classification via accepts_freeform_card_selection.
-        // Combat-damage assignment (CR 510.1c/d, CR 702.19b) likewise has too many
-        // legal divisions to enumerate (candidates.rs lists only the greedy
-        // trample-through split) — apply() validates conservation and the
-        // lethal-before-excess precondition, so the gate is bypassed here too.
-        let skip_legality = action.is_mana_ability()
-            || matches!(action, GameAction::SetAutoPass { .. })
-            || (matches!(action, GameAction::SelectCards { .. })
-                && session.state.waiting_for.accepts_freeform_card_selection())
-            || (matches!(action, GameAction::ChooseCounterMoveDistribution { .. })
-                && session
-                    .state
-                    .waiting_for
-                    .accepts_freeform_counter_move_distribution())
-            || (matches!(action, GameAction::AssignCombatDamage { .. })
-                && session
-                    .state
-                    .waiting_for
-                    .accepts_freeform_combat_damage_assignment())
-            // CR 510.1d + CR 702.22k: a banded blocker's free damage division
-            // has too many legal splits to enumerate as candidates, so the
-            // server bypasses its legality gate and the engine handler
-            // (handle_assign_blocker_damage) validates the submission.
-            || (matches!(action, GameAction::AssignBlockerDamage { .. })
-                && session
-                    .state
-                    .waiting_for
-                    .accepts_freeform_blocker_damage_assignment())
-            // CR 107.1c: "remove any number of counters" has a combinatorial legal
-            // space the coarse AI candidates cannot enumerate; the engine handler
-            // (validate_counter_selection) is the real validation boundary, so the
-            // server bypasses its candidate gate for a human's intermediate submit.
-            || (matches!(action, GameAction::ChooseCountersToRemove { .. })
-                && session
-                    .state
-                    .waiting_for
-                    .accepts_freeform_counter_removal());
-        if !skip_legality {
-            let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
-            // CR 601.2g: candidates are enumerated with the canonical `Auto`
-            // payment mode, so the player's `Manual` payment preference must
-            // be erased before membership matching (GH #6275). The action
-            // applied below keeps the submitted mode.
-            if !legal_actions.contains(action.with_canonical_payment_mode().as_ref()) {
-                warn!(game = %game_code, player = ?player, reason = "illegal_action", "action rejected");
-                return Err(format!("Illegal action: {:?}", action));
-            }
-        }
-
-        // Set player names for log resolution
+        // Set player names for log resolution.
         session.state.log_player_names = session.display_names.clone();
 
         // Apply action. `player` is the PlayerId authenticated from the
@@ -1337,11 +1117,13 @@ impl SessionManager {
         // `player == authorized_submitter(state)`, so a spoofed action at the
         // wire is rejected inside the engine as well as here.
         let action_type = action.variant_name();
-        session.push_takeback_snapshot(player);
         let result = apply(&mut session.state, player, action).map_err(|e| {
             warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
             format!("Engine error: {}", e)
         })?;
+        if let Some(snapshot) = pre_action_state {
+            session.push_takeback_state(player, snapshot);
+        }
 
         info!(
             game = %game_code,
@@ -2055,6 +1837,7 @@ mod tests {
     #[test]
     fn reorder_hand_succeeds_while_opponent_has_priority() {
         let (mut mgr, code, token0, token1) = setup_two_player_game();
+        let history_before = mgr.sessions.get(&code).unwrap().takeback_history.len();
 
         // Determine which player has priority; inject two ObjectIds into the
         // *other* player's hand so we can test off-priority reordering.
@@ -2098,6 +1881,11 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(hand, vec![id_b, id_a]);
+        assert_eq!(
+            session.takeback_history.len(),
+            history_before,
+            "a cosmetic hand reorder must not create a takeback checkpoint"
+        );
     }
 
     /// `ReorderHand` with a non-permutation (wrong element) is rejected by the
@@ -2123,6 +1911,7 @@ mod tests {
             let session = mgr.sessions.get_mut(&code).unwrap();
             session.state.players[off_priority_id].hand = engine::im::vector![id_a, id_b];
         }
+        let history_before = mgr.sessions.get(&code).unwrap().takeback_history.len();
 
         // Send [a, bogus] — not a permutation of [a, b].
         let result = mgr.handle_action(
@@ -2145,41 +1934,29 @@ mod tests {
             vec![id_a, id_b],
             "Hand should be unchanged after invalid reorder"
         );
+        assert_eq!(
+            session.takeback_history.len(),
+            history_before,
+            "a rejected engine action must not create a takeback checkpoint"
+        );
     }
 
-    /// GH #6275: candidates are enumerated with `CastPaymentMode::Auto`, so
-    /// the legality gate must erase a submitted `Manual` payment preference
-    /// before membership matching — otherwise every manual-mana cast in a
-    /// Full-mode game is rejected as illegal.
+    /// Manual payment remains accepted and reaches the engine unchanged.
     #[test]
-    fn legality_gate_accepts_manual_payment_mode_casts() {
+    fn engine_apply_accepts_manual_payment_mode_casts() {
         let (mut mgr, code, token0, _token1) = setup_two_player_game();
 
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let spell = scenario
             .add_spell_to_hand_from_oracle(P0, "Gate Probe", false, "Draw a card.")
+            .with_mana_cost(ManaCost::generic(1))
             .id();
         let runner = scenario.build();
         let card_id = runner.state().objects[&spell].card_id;
 
         let session = mgr.sessions.get_mut(&code).unwrap();
         session.state = runner.state().clone();
-
-        // Reach guard: the Auto twin must be an enumerated candidate, so the
-        // Manual acceptance below flows through payment-mode canonicalization
-        // rather than any legality bypass.
-        let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
-        let auto_twin = GameAction::CastSpell {
-            object_id: spell,
-            card_id,
-            targets: Vec::new(),
-            payment_mode: CastPaymentMode::Auto,
-        };
-        assert!(
-            legal_actions.contains(&auto_twin),
-            "scenario must make the cast an enumerated candidate; got {legal_actions:?}"
-        );
 
         let result = mgr.handle_action(
             &code,
@@ -2193,8 +1970,19 @@ mod tests {
         );
         assert!(
             result.is_ok(),
-            "Manual-mode cast must pass the legality gate: {:?}",
+            "Manual-mode cast must be validated by the engine: {:?}",
             result.err()
+        );
+        assert_eq!(
+            mgr.sessions
+                .get(&code)
+                .unwrap()
+                .state
+                .pending_cast
+                .as_ref()
+                .map(|cast| cast.payment_mode),
+            Some(CastPaymentMode::Manual),
+            "the engine must receive the submitted manual payment mode unchanged"
         );
     }
 
@@ -2750,11 +2538,9 @@ mod tests {
 
     // CR 107.1c: "remove any number of counters" — a human's intermediate submit
     // ("remove 2 of 3") is not one of the coarse AI candidates (remove-none /
-    // remove-all), so the session must bypass its candidate legality gate via
-    // accepts_freeform_counter_removal + the skip_legality arm. Reverting either
-    // (#9 / #10) makes the intermediate submission fail as "Illegal action".
+    // remove-all), but the engine validates the full legal space directly.
     #[test]
-    fn remove_counters_intermediate_submit_bypasses_candidate_gate() {
+    fn remove_counters_intermediate_submit_is_validated_by_engine() {
         use engine::types::ability::{
             Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
         };
@@ -2801,18 +2587,21 @@ mod tests {
         mgr.sessions.get_mut(&code).unwrap().state = state;
 
         // Discriminating: this "remove 2 of 3" submit is absent from the coarse
-        // candidate set ({[], remove-all}); only the accepts_freeform bypass makes
-        // it legal (revert accepts_freeform_counter_removal -> false => rejected).
-        let result = mgr.handle_action(
-            &code,
-            &token,
-            GameAction::ChooseCountersToRemove {
-                selections: vec![CounterRemoveChoice {
-                    counter_type: CounterType::Plus1Plus1,
-                    count: 2,
-                }],
-            },
+        // candidate set ({[], remove-all}) but is legal under the engine's
+        // structural validation.
+        let intermediate_removal = GameAction::ChooseCountersToRemove {
+            selections: vec![CounterRemoveChoice {
+                counter_type: CounterType::Plus1Plus1,
+                count: 2,
+            }],
+        };
+        let session = mgr.sessions.get(&code).unwrap();
+        let (candidates, _, _) = engine_legal_actions_full(&session.state);
+        assert!(
+            !candidates.contains(&intermediate_removal),
+            "the intermediate removal must be absent from coarse candidates"
         );
+        let result = mgr.handle_action(&code, &token, intermediate_removal);
 
         assert!(
             result.is_ok(),
@@ -3020,6 +2809,7 @@ mod tests {
 
         let mut session = GameSession {
             game_code: "TEST01".to_string(),
+            state_revision: 0,
             state,
             player_tokens: vec!["host_token".to_string(), String::new()],
             connected: vec![true, true],
@@ -3294,9 +3084,22 @@ mod tests {
             pw_controller: None,
         };
 
-        // Illegal division first: wrong total (4 != 5). The gate is bypassed, so
-        // this reaches apply() and is rejected there as an engine error — proving
-        // we did NOT weaken validation, only skipped candidate enumeration.
+        let legal_non_candidate = GameAction::AssignCombatDamage {
+            mode: CombatDamageAssignmentMode::Normal,
+            assignments: vec![(blocker, 5)],
+            trample_damage: 0,
+            controller_damage: 0,
+        };
+        let (candidates, _, _) = engine_legal_actions_full(&session.state);
+        assert!(
+            !candidates.contains(&legal_non_candidate),
+            "the legal keep-on-blocker split must be absent from the greedy candidates"
+        );
+        let history_before_illegal = session.takeback_history.len();
+
+        // Illegal division first: wrong total (4 != 5). It reaches apply() and
+        // is rejected by the engine, proving candidate removal does not weaken
+        // structural validation.
         let illegal = mgr.handle_action(
             &code,
             &token,
@@ -3314,19 +3117,15 @@ mod tests {
             ),
             Ok(_) => panic!("wrong-total combat damage division must be rejected"),
         }
+        assert_eq!(
+            mgr.sessions.get(&code).unwrap().takeback_history.len(),
+            history_before_illegal,
+            "rejected engine action must not add a takeback snapshot"
+        );
 
         // Legal-but-non-enumerated division: keep all 5 on the blocker, trample
         // nothing through (CR 702.19b). Pre-fix this was rejected as illegal.
-        let legal = mgr.handle_action(
-            &code,
-            &token,
-            GameAction::AssignCombatDamage {
-                mode: CombatDamageAssignmentMode::Normal,
-                assignments: vec![(blocker, 5)],
-                trample_damage: 0,
-                controller_damage: 0,
-            },
-        );
+        let legal = mgr.handle_action(&code, &token, legal_non_candidate);
         assert!(
             legal.is_ok(),
             "keep-on-blocker combat damage division (CR 702.19b) should be accepted, got: {legal:?}"
@@ -3336,5 +3135,123 @@ mod tests {
         // declined-excess division resolved as submitted (life unchanged at 20).
         let session = mgr.sessions.get(&code).unwrap();
         assert_eq!(session.state.players[defending_player.0 as usize].life, 20);
+    }
+
+    /// CR 508.1a–e: each attacker independently chooses a defender. The
+    /// candidate enumerator only samples that combinatorial space (it lists
+    /// single-target alpha strikes), so a split declaration is legal but absent
+    /// from it — the session must admit it and let `apply()` validate. Guards
+    /// against reintroducing a candidate-membership legality gate at the
+    /// session boundary, while CR 508.1a duplicate rejection stays enforced by
+    /// `validate_attackers`.
+    #[test]
+    fn split_attack_declaration_is_admitted_and_validated_by_the_engine() {
+        use engine::game::combat::AttackTarget;
+        use engine::game::zones::create_object;
+        use engine::types::card_type::CoreType;
+        use engine::types::identifiers::CardId;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game_n_players(
+            make_deck(),
+            "Host".to_string(),
+            None,
+            3,
+            MatchConfig::default(),
+            Some(FormatConfig::standard()),
+        );
+        let _ = mgr.join_game(&code, make_deck()).unwrap();
+        let _ = mgr.join_game(&code, make_deck()).unwrap();
+
+        let attacks = {
+            let session = mgr.sessions.get_mut(&code).unwrap();
+            let first = create_object(
+                &mut session.state,
+                CardId(4000),
+                PlayerId(0),
+                "First attacker".to_string(),
+                Zone::Battlefield,
+            );
+            let second = create_object(
+                &mut session.state,
+                CardId(4001),
+                PlayerId(0),
+                "Second attacker".to_string(),
+                Zone::Battlefield,
+            );
+            for id in [first, second] {
+                session
+                    .state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+            }
+
+            session.state.active_player = PlayerId(0);
+            session.state.priority_player = PlayerId(0);
+            session.state.phase = Phase::DeclareAttackers;
+            session.state.waiting_for = WaitingFor::DeclareAttackers {
+                player: PlayerId(0),
+                valid_attacker_ids: vec![first, second],
+                valid_attack_targets: vec![
+                    AttackTarget::Player(PlayerId(1)),
+                    AttackTarget::Player(PlayerId(2)),
+                ],
+                valid_attack_targets_by_attacker: None,
+                attacker_constraints: Default::default(),
+            };
+
+            vec![
+                (first, AttackTarget::Player(PlayerId(1))),
+                (second, AttackTarget::Player(PlayerId(2))),
+            ]
+        };
+        let action = GameAction::DeclareAttackers {
+            attacks: attacks.clone(),
+            bands: vec![],
+        };
+
+        let enumerated = engine::ai_support::legal_actions(&mgr.sessions[&code].state);
+        assert!(
+            !enumerated.contains(&action),
+            "the finite candidate set intentionally omits this split attack: {enumerated:?}"
+        );
+
+        // The bypass must not weaken validation: a malformed freeform declaration
+        // reaches the engine and is rejected there rather than by candidate lookup.
+        let duplicate = mgr.handle_action(
+            &code,
+            &token0,
+            GameAction::DeclareAttackers {
+                attacks: vec![
+                    attacks[0],
+                    (attacks[0].0, AttackTarget::Player(PlayerId(2))),
+                ],
+                bands: vec![],
+            },
+        );
+        assert!(
+            matches!(duplicate, Err(ref error) if error.starts_with("Engine error:")),
+            "a duplicate attacker must be rejected by the engine, got: {duplicate:?}"
+        );
+
+        let result = mgr.handle_action(&code, &token0, action);
+        assert!(
+            result.is_ok(),
+            "a legal split attack must be validated by apply(), got: {result:?}"
+        );
+        let attackers = &mgr.sessions[&code].state.combat.as_ref().unwrap().attackers;
+        assert_eq!(attackers.len(), 2);
+        assert!(attackers.iter().any(|attacker| {
+            attacker.object_id == attacks[0].0
+                && attacker.attack_target == AttackTarget::Player(PlayerId(1))
+        }));
+        assert!(attackers.iter().any(|attacker| {
+            attacker.object_id == attacks[1].0
+                && attacker.attack_target == AttackTarget::Player(PlayerId(2))
+        }));
     }
 }

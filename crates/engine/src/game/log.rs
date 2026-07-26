@@ -179,6 +179,9 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::CounterRemoved { .. }
         | GameEvent::ControllerChanged { .. }
         | GameEvent::Transformed { .. }
+        // CR 710.4: flipping is an object-status change, grouped with transform
+        // and face up/down.
+        | GameEvent::Flipped { .. }
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::TurnedFaceDown { .. }
         | GameEvent::Regenerated { .. }
@@ -751,6 +754,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::Transformed { object_id } => {
             vec![card_seg(state, *object_id), text(" transforms")]
+        }
+
+        // CR 710.4: the log names the permanent by its (now alternative,
+        // CR 710.1b) characteristics, which `card_seg` reads live.
+        GameEvent::Flipped { object_id } => {
+            vec![card_seg(state, *object_id), text(" flips")]
         }
 
         GameEvent::Specialized { object_id, color } => {

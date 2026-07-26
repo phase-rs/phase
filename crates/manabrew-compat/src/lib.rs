@@ -1025,7 +1025,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
     &UNSUPPORTED_PROTOCOL_CAPABILITIES
 }
 
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 18] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 19] = [
     UnsupportedCapability {
         code: "upstream.response-envelope-mismatch",
         area: "transport",
@@ -1133,6 +1133,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 18] = [
         area: "combat",
         reason: "The pinned protocol has no response shape for choosing the player, planeswalker, or battle attacked by an entering creature.",
         suggested_protocol_extension: "Add an entry-attack destination choice using the existing attack-target reference shape.",
+    },
+    UnsupportedCapability {
+        code: "local.zone-opponent-chooser-unsupported",
+        area: "prompts",
+        reason: "The pinned protocol has no typed choice for the controller picking which opponent makes a zone choice (CR 608.2d, e.g. Plargg and Nassari's 'an opponent chooses').",
+        suggested_protocol_extension: "Add a non-target opponent-picker choice carrying candidate player ids, mirroring the clash opponent selection shape.",
     },
 ];
 
@@ -1661,12 +1667,12 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
                 produced_mana: None,
             }),
         }),
-        GameAction::TapLandForMana { object_id } => {
+        GameAction::TapLandForMana { selection } => {
             AvailableActionConversion::Available(AvailableAction {
                 id,
                 kind: AvailableActionKind::ActivateAbility(ActivatableAbilityInfo {
-                    card_id: encode_object_id(*object_id),
-                    ability_index: 0,
+                    card_id: encode_object_id(selection.source.object_id),
+                    ability_index: selection.ability_index.unwrap_or(0),
                     description: "Activate mana ability".to_string(),
                     is_mana_ability: true,
                     cost: None,
@@ -1711,8 +1717,14 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::ChooseClashOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.clash-unsupported")
         }
+        GameAction::ChooseZoneOpponentChooser { .. } => {
+            AvailableActionConversion::Unsupported("local.zone-opponent-chooser-unsupported")
+        }
         GameAction::ChooseAnnouncingOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.announcing-opponent-unsupported")
+        }
+        GameAction::ChooseGiftRecipient { .. } => {
+            AvailableActionConversion::Unsupported("local.gift-recipient-unsupported")
         }
         GameAction::ChoosePileOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.pile-opponent-unsupported")
@@ -2147,7 +2159,11 @@ fn build_card_dto<L: CardTextLookup>(
         },
         summoning_sick: !redacted && object.has_summoning_sickness,
         is_copy: false,
-        is_double_faced: !redacted && object.back_face.is_some(),
+        // CR 712.16 + CR 710.1b: the engine owns "is this permanent
+        // double-faced?". `back_face.is_some()` is not that predicate — a CR 710
+        // flip card parks its alternative half in the same slot (as do Adventure
+        // and Omen cards), so the raw check reports every flip card as a DFC.
+        is_double_faced: !redacted && engine::game::transform::is_double_faced_permanent(object),
         is_transformed: !redacted && object.transformed,
         is_face_down: object.face_down,
         is_bestowed: !redacted && object.bestow_form.is_some(),
@@ -4275,13 +4291,12 @@ mod protocol_wire_tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 18);
-
+        assert_eq!(capabilities.len(), 19);
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 18, "capability codes must be unique");
+        assert_eq!(codes.len(), 19, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

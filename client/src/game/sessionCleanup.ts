@@ -2,10 +2,10 @@ import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 
 /**
- * Drop engine prompt + UI-dialog overlay state without disposing the WASM
- * adapter. Used on game-session boundaries (concede, provider unmount/remount)
- * so deferred store resets or async `initGame` cannot leave `ManaPayment` /
- * `pendingAbilityChoice` bleed into the next session (issue #2369).
+ * Drop engine prompt + UI overlay state without disposing the WASM adapter.
+ * Used on game-session boundaries (concede, provider unmount/remount) so
+ * deferred store resets or async `initGame` cannot leave `ManaPayment`,
+ * `pendingAbilityChoice`, or a roll animation bleeding into the next session.
  *
  * Documented exemption from the `commitEngineSnapshot` single-writer invariant:
  * this is a session-boundary CLEAR, not a live-game commit. It writes the prompt
@@ -19,6 +19,7 @@ export function clearPromptOverlayState(): void {
     waitingFor: null,
     legalActions: [],
     autoPassRecommended: false,
+    manaPaymentShortcutActions: [],
     spellCosts: {},
     legalActionsByObject: {},
     resolutionProgress: null,
@@ -27,6 +28,8 @@ export function clearPromptOverlayState(): void {
   useUiStore.getState().setPendingAbilityChoice(null);
   useUiStore.getState().setEnchantmentsDialogPlayer(null);
   useUiStore.getState().setAttachmentFanHost(null);
+  useUiStore.getState().setMobileHandGesture(null);
+  useUiStore.getState().resetDiceRoll();
   // The per-game "Manual mana" toggle must never leak into the next game.
   useUiStore.getState().setManualManaOverride(false);
   // The ephemeral hand hide-filter is a per-game focus aid — reset it too.

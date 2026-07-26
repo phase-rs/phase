@@ -5,13 +5,42 @@ import {
   WIRE_PROTOCOL_VERSION,
   decodeWireMessage,
   encodeWireMessage,
+  legalActionsFromWire,
   validateMessage,
 } from "../protocol";
 import type { P2PMessage } from "../protocol";
 
+const viewerInteractionWithProducedMana = {
+  waitingForKind: { simultaneous: null, terminal: false, code: "choose" },
+  authorizedSubmitters: [1],
+  canSubmit: true,
+  autoPassRecommended: false,
+  opportunities: [{
+    interactionId: "interaction-1",
+    response: {
+      type: "exactChoices",
+      data: { choices: [{
+        id: "choice-1",
+        status: { type: "available" },
+        surfaces: [
+          { type: "action", data: { code: "tapLandForMana", actionId: "action-1" } },
+          { type: "mana", data: { role: "producedMana", index: 0, symbols: ["G"], restrictions: [] } },
+        ],
+      }] },
+    },
+    surfaces: [],
+    progress: { selected: 0, minimum: 1, maximum: 1, aggregate: null, confirmable: false },
+  }],
+  availability: { type: "inputRequired" },
+} as never;
+
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v13", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(13);
+  it("pins the P2P wire protocol to v15", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(15);
+  });
+
+  it("defaults shortcut actions for a v15 payload created before the additive field", () => {
+    expect(legalActionsFromWire({ legalActions: [] }).manaPaymentShortcutActions).toEqual([]);
   });
 
   // (a) Round-trip across P2PMessage variants.
@@ -88,6 +117,16 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       }),
       events: [],
       legalActions: [{ type: "RollPlanarDie" }],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    },
+    {
+      type: "state_update",
+      state: buildGameState(),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
     },
     {
       type: "reconnect_ack",
@@ -104,6 +143,8 @@ describe("encodeWireMessage / decodeWireMessage", () => {
         },
       }),
       legalActions: [{ type: "RollPlanarDie" }],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
     },
   ];
 
@@ -153,6 +194,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       state: buildGameState(),
       events: [],
       legalActions: [],
+      manaPaymentShortcutActions: [],
     })).toThrow(/Wire protocol mismatch/);
   });
 

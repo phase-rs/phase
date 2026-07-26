@@ -1,6 +1,8 @@
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useMultiplayerStore } from "../../stores/multiplayerStore";
+
 type NativeAdapterEvent =
   | { type: "reconnectFailed" }
   | { type: "error"; message: string };
@@ -11,11 +13,15 @@ const {
   WasmAdapter,
   clearActiveGame,
   ensureNativeEngine,
+  fetchAvatarArtUrl,
   gameStoreState,
   getSharedAdapter,
+  loadActiveGame,
   nativeAdapterInitialize,
   nativeAdapters,
+  multiplayerDraftGetState,
   multiplayerGetState,
+  multiplayerState,
   preferences,
   saveActiveGame,
   useGameStore,
@@ -29,6 +35,7 @@ const {
   }
 
   const nativeAdapterInitialize = vi.fn<() => Promise<void>>();
+  const fetchAvatarArtUrl = vi.fn<() => Promise<string | null>>();
   const preferences = {
     aiArchetypeFilter: "Any",
     aiCoverageFloor: 0,
@@ -36,9 +43,16 @@ const {
     cedhMode: false,
     nativeEngineEnabled: true,
   };
+  type NativePregameReconnect = {
+    kind: string;
+    gameCode: string;
+    playerId: number;
+    playerToken: string;
+  };
   class WebSocketAdapter {
     private listener: ((event: NativeAdapterEvent) => void) | null = null;
     readonly nativeAiOptions: { aiSeats: Array<{ difficulty: string }> } | undefined;
+    readonly nativePregameOptions: NativePregameReconnect | undefined;
     dispose = vi.fn();
     onEvent = vi.fn((listener: (event: NativeAdapterEvent) => void) => {
       this.listener = listener;
@@ -55,14 +69,30 @@ const {
       _joinPassword?: string,
       _reservationToken?: string,
       _displayName?: string,
-      options?: { nativeAi?: { aiSeats: Array<{ difficulty: string }> } },
+      options?: {
+        nativeAi?: { aiSeats: Array<{ difficulty: string }> };
+        nativePregame?: NativePregameReconnect;
+      },
     ) {
       this.nativeAiOptions = options?.nativeAi;
+      this.nativePregameOptions = options?.nativePregame;
       nativeAdapters.push(this);
     }
 
     initialize(): Promise<void> {
       return nativeAdapterInitialize();
+    }
+
+    // Reconnect adapters echo their supplied creds; a fresh game gets a stable
+    // server-issued session so the resume pointer can be persisted.
+    get nativeSession(): { gameCode: string; playerId: number; playerToken: string } {
+      return this.nativePregameOptions
+        ? {
+            gameCode: this.nativePregameOptions.gameCode,
+            playerId: this.nativePregameOptions.playerId,
+            playerToken: this.nativePregameOptions.playerToken,
+          }
+        : { gameCode: "NATIVE-SESSION", playerId: 0, playerToken: "native-token" };
     }
 
     emit(event: NativeAdapterEvent): void {
@@ -94,6 +124,11 @@ const {
     }),
     resumeGame: vi.fn(),
     resumeP2PHost: vi.fn(),
+    resumeNativeSolo: vi.fn(async (gameId: string, adapter: { initialize: () => Promise<void> }) => {
+      gameStoreState.gameId = gameId;
+      gameStoreState.adapter = adapter;
+      await adapter.initialize();
+    }),
     reset: vi.fn(),
     setEngineMode: vi.fn(),
     setGameMode: vi.fn(),
@@ -103,10 +138,22 @@ const {
     {
       getState: () => gameStoreState,
       setState: (partial: Record<string, unknown>) => Object.assign(gameStoreState, partial),
-      subscribe: vi.fn(() => () => {}),
+      subscribe: vi.fn<(listener: (state: typeof gameStoreState) => void) => () => void>(
+        () => () => {},
+      ),
     },
   );
-  const multiplayerGetState = vi.fn();
+  const multiplayerState = {
+    displayName: "Player",
+    setActionPending: vi.fn(),
+    setConnectionStatus: vi.fn(),
+    setIsSpectator: vi.fn(),
+    setLatency: vi.fn(),
+    setSpectators: vi.fn(),
+    showToast: vi.fn(),
+  };
+  const multiplayerGetState = vi.fn(() => multiplayerState);
+  const multiplayerDraftGetState = vi.fn(() => ({ matchPairing: null }));
 
   return {
     NativeEngineVersionMismatchError,
@@ -114,11 +161,15 @@ const {
     WasmAdapter,
     clearActiveGame: vi.fn(),
     ensureNativeEngine: vi.fn(),
+    fetchAvatarArtUrl,
     gameStoreState,
     getSharedAdapter,
+    loadActiveGame: vi.fn<() => Record<string, unknown> | null>(() => null),
     nativeAdapterInitialize,
     nativeAdapters,
+    multiplayerDraftGetState,
     multiplayerGetState,
+    multiplayerState,
     preferences,
     saveActiveGame: vi.fn(),
     useGameStore,
@@ -150,7 +201,7 @@ vi.mock("../../stores/gameStore", () => ({
   clearActiveGame,
   clearGame: vi.fn(),
   clearP2PHostSession: vi.fn(),
-  loadActiveGame: vi.fn(() => null),
+  loadActiveGame,
   loadGame: vi.fn(async () => null),
   loadP2PHostSession: vi.fn(),
   nextGameSessionGeneration: vi.fn(() => 1),
@@ -229,13 +280,16 @@ vi.mock("../../stores/multiplayerStore", () => ({
 }));
 
 vi.mock("../../stores/multiplayerDraftStore", () => ({
-  useMultiplayerDraftStore: { getState: vi.fn() },
+  useMultiplayerDraftStore: { getState: multiplayerDraftGetState },
 }));
 
 vi.mock("../../services/playerAvatars", () => ({
-  assignRandomAvatars: vi.fn(),
+  assignRandomAvatars: vi.fn(() => [
+    { name: "Jace", cardName: "Jace, the Mind Sculptor" },
+    { name: "Liliana", cardName: "Liliana of the Veil" },
+  ]),
   avatarCardNameForName: vi.fn(),
-  fetchAvatarArtUrl: vi.fn(),
+  fetchAvatarArtUrl,
 }));
 
 vi.mock("../../services/multiplayerSession", () => ({
@@ -252,29 +306,49 @@ vi.mock("../../services/quickDraftPersistence", () => ({
   loadDraftRun: vi.fn(),
 }));
 
+vi.mock("../../services/serverDetection", () => ({
+  detectServerUrl: vi.fn(async () => "ws://test-server"),
+}));
+
 import { GameProvider } from "../GameProvider";
+import { AdapterError, AdapterErrorCode } from "../../adapter/types";
+import { clearPromptOverlayState } from "../../game/sessionCleanup";
 
 describe("GameProvider native AI routing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useGameStore.subscribe.mockReset();
+    useGameStore.subscribe.mockImplementation(() => () => {});
     clearActiveGame.mockReset();
     ensureNativeEngine.mockReset();
+    fetchAvatarArtUrl.mockReset();
     nativeAdapterInitialize.mockReset();
     saveActiveGame.mockReset();
+    loadActiveGame.mockReset();
+    loadActiveGame.mockReturnValue(null);
+    gameStoreState.resumeNativeSolo.mockClear();
+    gameStoreState.initGame.mockClear();
     nativeAdapters.splice(0);
     wasmAdapters.splice(0);
+    multiplayerDraftGetState.mockReset();
+    multiplayerDraftGetState.mockReturnValue({ matchPairing: null });
     multiplayerGetState.mockReset();
+    multiplayerGetState.mockReturnValue(multiplayerState);
     preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
     preferences.cedhMode = false;
     gameStoreState.adapter = null;
     gameStoreState.gameId = null;
     gameStoreState.gameState = null;
     ensureNativeEngine.mockResolvedValue({ port: 9375 });
+    fetchAvatarArtUrl.mockResolvedValue(null);
     nativeAdapterInitialize.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
     cleanup();
+    gameStoreState.adapter = null;
+    gameStoreState.gameId = null;
+    gameStoreState.gameState = null;
   });
 
   it("falls back to WASM when release parity rejects the native engine", async () => {
@@ -297,11 +371,16 @@ describe("GameProvider native AI routing", () => {
       expect.objectContaining({ id: "native-parity", mode: "ai" }),
     );
     expect(wasmAdapters).toHaveLength(1);
+    // The fallback is otherwise silent, and a version mismatch is a different
+    // user problem than an engine that could not start at all.
+    expect(multiplayerState.showToast).toHaveBeenCalledWith(
+      "Native engine version mismatch — this game is running in-browser.",
+    );
   });
 
-  it("does not write a resume pointer for a native game and concedes on exit", async () => {
+  it("writes a native resume pointer and suspends (no concede) on exit", async () => {
     const view = render(
-      <GameProvider gameId="native-no-resume" mode="ai">
+      <GameProvider gameId="native-resume-write" mode="ai">
         <div />
       </GameProvider>,
     );
@@ -316,13 +395,165 @@ describe("GameProvider native AI routing", () => {
     expect(gameStoreState.setEngineMode.mock.invocationCallOrder[nativeEngineModeCall]).toBeLessThan(
       gameStoreState.initGame.mock.invocationCallOrder[0],
     );
-    expect(clearActiveGame).toHaveBeenCalledOnce();
-    expect(saveActiveGame).not.toHaveBeenCalled();
-    expect(multiplayerGetState).not.toHaveBeenCalled();
+
+    // A live native game persists a server-authoritative resume pointer carrying
+    // the reconnect credentials — the old no-resume contract cleared it instead.
+    await waitFor(() => {
+      expect(saveActiveGame).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "native-resume-write",
+          mode: "ai",
+          nativeSession: expect.objectContaining({
+            gameCode: "NATIVE-SESSION",
+            playerToken: "native-token",
+          }),
+        }),
+      );
+    });
+    expect(clearActiveGame).not.toHaveBeenCalled();
 
     view.unmount();
     expect(nativeAdapters).toHaveLength(1);
-    expect(nativeAdapters[0].dispose).toHaveBeenCalledWith({ concede: true });
+    // Suspend, not concede: leaving keeps the server session resumable. Only an
+    // explicit Concede (useConcedeHandler) ends the game.
+    expect(nativeAdapters[0].dispose).toHaveBeenCalledWith();
+  });
+
+  it("reconnects to a suspended native game via its resume pointer", async () => {
+    loadActiveGame.mockReturnValue({
+      id: "native-resume-read",
+      mode: "ai",
+      difficulty: "Medium",
+      nativeSession: { gameCode: "GAME-XYZ", playerId: 0, playerToken: "tok-xyz" },
+    });
+
+    render(
+      <GameProvider gameId="native-resume-read" mode="ai">
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.resumeNativeSolo).toHaveBeenCalled();
+    });
+
+    // The adapter is built with a reconnect pregame frame carrying the persisted
+    // credentials, and the fresh-game `initGame` path is never taken.
+    expect(nativeAdapters).toHaveLength(1);
+    expect(nativeAdapters[0].nativePregameOptions).toEqual(
+      expect.objectContaining({
+        kind: "reconnect",
+        gameCode: "GAME-XYZ",
+        playerId: 0,
+        playerToken: "tok-xyz",
+      }),
+    );
+    expect(gameStoreState.resumeNativeSolo).toHaveBeenCalledWith(
+      "native-resume-read",
+      nativeAdapters[0],
+    );
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a terminal error when a native resume fails, without a WASM fallback", async () => {
+    loadActiveGame.mockReturnValue({
+      id: "native-resume-fail",
+      mode: "ai",
+      difficulty: "Medium",
+      nativeSession: { gameCode: "GONE", playerId: 0, playerToken: "tok" },
+    });
+    // The reconnect handshake fails (e.g. the server no longer holds the game).
+    nativeAdapterInitialize.mockRejectedValue(new Error("Reconnect grace period expired"));
+    const onWsEvent = vi.fn();
+
+    render(
+      <GameProvider gameId="native-resume-fail" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(onWsEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "error", message: "Reconnect grace period expired" }),
+      );
+    });
+    // A resume has no local snapshot, so it must NOT silently fall back to a
+    // fresh WASM game (which would look like the suspended game vanished).
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(wasmAdapters).toHaveLength(0);
+    // The pointer is kept so the player can retry once the engine is back.
+    expect(clearActiveGame).not.toHaveBeenCalled();
+  });
+
+  it("uses each commander's name for native AI opponents", async () => {
+    gameStoreState.gameId = "native-commander-names";
+    gameStoreState.gameState = {
+      command_zone: [1, 2],
+      objects: {
+        1: { name: "Aesi, Tyrant of Gyre Strait", owner: 0, is_commander: true },
+        2: { name: "Muldrotha, the Gravetide", owner: 1, is_commander: true },
+      },
+    } as never;
+
+    render(
+      <GameProvider gameId="native-commander-names" mode="ai">
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(useMultiplayerStore.setState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          playerNames: new Map([[0, "Aesi"], [1, "Muldrotha"]]),
+        }),
+      );
+    });
+  });
+
+  it("waits for the new AI game state before assigning commander names", async () => {
+    let gameStateListener: ((state: typeof gameStoreState) => void) | undefined;
+    useGameStore.subscribe.mockImplementation((listener) => {
+      gameStateListener = listener;
+      return () => {};
+    });
+    gameStoreState.gameId = "previous-ai-game";
+    gameStoreState.gameState = {
+      command_zone: [1, 2],
+      objects: {
+        1: { name: "Aesi, Tyrant of Gyre Strait", owner: 0, is_commander: true },
+        2: { name: "Muldrotha, the Gravetide", owner: 1, is_commander: true },
+      },
+    } as never;
+
+    render(
+      <GameProvider gameId="next-ai-game" mode="ai">
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.initGame.mock.calls.some(([id]) => id === "next-ai-game")).toBe(true);
+    });
+    expect(useMultiplayerStore.setState).not.toHaveBeenCalled();
+
+    gameStoreState.gameId = "next-ai-game";
+    gameStoreState.gameState = {
+      command_zone: [3, 4],
+      objects: {
+        3: { name: "Tatyova, Benthic Druid", owner: 0, is_commander: true },
+        4: { name: "Krenko, Mob Boss", owner: 1, is_commander: true },
+      },
+    } as never;
+    expect(gameStateListener).toBeDefined();
+    gameStateListener!(gameStoreState);
+
+    await waitFor(() => {
+      expect(useMultiplayerStore.setState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          playerNames: new Map([[0, "Tatyova"], [1, "Krenko"]]),
+        }),
+      );
+    });
   });
 
   it("preserves every exact server AI difficulty label from buildLocalAiDeckList", async () => {
@@ -364,8 +595,11 @@ describe("GameProvider native AI routing", () => {
       </GameProvider>,
     );
 
+    // `native-ai` is set immediately before the game loop starts, so it is the
+    // signal that the session is live — the point from which a terminal socket
+    // event is a real lost connection rather than a setup failure.
     await waitFor(() => {
-      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith("native-ai");
       expect(nativeAdapters).toHaveLength(1);
     });
 
@@ -383,5 +617,96 @@ describe("GameProvider native AI routing", () => {
 
   it("disposes a native game and surfaces bridge errors as terminal", async () => {
     await expectNativeTerminalEvent({ type: "error", message: "WebSocket connection failed" });
+  });
+
+  it("keeps a native setup failure off the terminal connection surface", async () => {
+    // The socket dying during the native handshake emits a terminal event and
+    // then rejects initialization. The rejection is handled by falling back to
+    // WASM, so forwarding the event would leave GamePage's connection-lost
+    // banner pinned over the local game that took over.
+    const onWsEvent = vi.fn();
+    nativeAdapterInitialize.mockImplementation(async () => {
+      nativeAdapters[0]!.emit({ type: "reconnectFailed" });
+      throw new Error("Connection closed before game started");
+    });
+
+    render(
+      <GameProvider gameId="native-setup-failure" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("wasm", expect.anything());
+    });
+    expect(wasmAdapters).toHaveLength(1);
+    expect(onWsEvent).not.toHaveBeenCalled();
+    // Silent to the banner, but not silent to the player.
+    expect(multiplayerState.showToast).toHaveBeenCalledWith(
+      "Native engine unavailable — this game is running in-browser.",
+    );
+  });
+
+  it("clears prompt overlays when a draft match unmounts", () => {
+    gameStoreState.gameId = "draft-match";
+    gameStoreState.adapter = {} as never;
+    gameStoreState.gameState = {} as never;
+
+    const view = render(
+      <GameProvider gameId="draft-match" mode="draft-match">
+        <div />
+      </GameProvider>,
+    );
+
+    vi.mocked(clearPromptOverlayState).mockClear();
+    view.unmount();
+
+    expect(clearPromptOverlayState).toHaveBeenCalledOnce();
+  });
+});
+
+describe("GameProvider online deck rejection", () => {
+  it("surfaces only typed deck rejections from online initialization", async () => {
+    const onWsEvent = vi.fn();
+    nativeAdapterInitialize.mockRejectedValue(
+      new AdapterError(AdapterErrorCode.DECK_REJECTED, "Invalid deck contents", false),
+    );
+
+    render(
+      <GameProvider gameId="online-deck-rejected" mode="online" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(onWsEvent).toHaveBeenCalledWith({
+        type: "deckRejected",
+        reason: "Invalid deck contents",
+      });
+    });
+
+    cleanup();
+    onWsEvent.mockClear();
+    const connectionStatusCallCount = multiplayerState.setConnectionStatus.mock.calls.length;
+    nativeAdapterInitialize.mockRejectedValue(
+      new AdapterError(
+        AdapterErrorCode.ACTION_REJECTED,
+        "Deck not legal for this format",
+        true,
+      ),
+    );
+
+    render(
+      <GameProvider gameId="online-action-rejected" mode="online" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(
+        multiplayerState.setConnectionStatus.mock.calls.slice(connectionStatusCallCount),
+      ).toContainEqual(["disconnected"]);
+    });
+    expect(onWsEvent).not.toHaveBeenCalledWith(expect.objectContaining({ type: "deckRejected" }));
   });
 });

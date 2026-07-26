@@ -244,6 +244,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ChooseFromZone { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::ChoosePermanent { .. }
         | Effect::Clash
         | Effect::Cleanup { .. }
         | Effect::Cloak { .. }
@@ -282,6 +283,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ExileHaunting { .. }
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::Exploit { .. }
         | Effect::ExploreAll { .. }
         | Effect::FlipCoin { .. }
@@ -368,6 +370,9 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::TargetOnly { .. }
         | Effect::TimeTravel
         | Effect::Transform { .. }
+        // CR 710.4: like Transform, flipping swaps a permanent's characteristics
+        // wholesale — whether the alternative half is better is card-specific.
+        | Effect::FlipPermanent { .. }
         | Effect::Tribute { .. }
         | Effect::TurnFaceDown { .. }
         | Effect::TurnFaceUp { .. }

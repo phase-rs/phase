@@ -130,4 +130,17 @@ pub(crate) enum LinkedChoiceKind {
     /// exists, so a resolution-scoped choice with no durable reader stays
     /// non-persisted.
     PersistedPlayer { choosers: Vec<OracleItemId> },
+    /// CR 607.2d + CR 707.2c + CR 614.12a: An as-enters permanent-object choice
+    /// gap (`chooser` — an Unimplemented ability whose Oracle text is
+    /// "As … enters, choose <permanent>") linked to a
+    /// `ContinuousModification::CopyChosen` static (`copy_static`). Applying
+    /// removes the gap ability and injects `Effect::ChoosePermanent` —
+    /// Metamorphic Alteration's Aura-host copy. Without this consumer relation
+    /// the choose line stays an ordinary Unimplemented ability (no Moved claim),
+    /// so non-CopyChosen cards (Dauntless Bodyguard, Scheming Fence) keep their
+    /// pre-existing unsupported shape.
+    CopyChosenHost {
+        chooser: OracleItemId,
+        copy_static: OracleItemId,
+    },
 }

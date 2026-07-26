@@ -46,11 +46,22 @@ jobs:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Clippy
         run: cargo clippy --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
+
+      - name: Interaction bindings are current
+        run: ./scripts/check-interaction-bindings.sh --check
 
       - name: Parser combinator gate
         # Diff-based gate: new parser code must use nom combinators, not
@@ -137,6 +148,14 @@ jobs:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -163,6 +182,14 @@ jobs:
         with:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
+
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
       - name: Set cache keys
         id: cache-keys

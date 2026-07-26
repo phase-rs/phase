@@ -46,6 +46,12 @@ fn community_ai_scenarios_choose_expected_action_type() {
         let mut rng = StdRng::seed_from_u64(42);
         let action = choose_action(&state, player, &config, &mut rng)
             .unwrap_or_else(|| panic!("{} ({}) returned no action", spec.id, spec.thread_id));
+        // This saved state has three legal land drops plus a castable Harmonize
+        // (draw three). Ambiguous land choices now correctly reach scoring;
+        // preserving an arbitrary first-land fast path would hide that value.
+        if spec.id == "saheeli-legend-loop" {
+            assert!(matches!(action, GameAction::CastSpell { .. }));
+        }
         let action_type: &'static str = action_type(action);
 
         assert_eq!(

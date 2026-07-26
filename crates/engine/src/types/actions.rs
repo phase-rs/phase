@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use serde::{Deserialize, Serialize};
 
 use super::ability::{LibraryPosition, TargetRef};
@@ -11,7 +9,7 @@ use super::game_state::{
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
-use super::mana::{ManaPipId, ManaType};
+use super::mana::{ManaPipId, ManaSourceSelection, ManaType};
 use super::match_config::DeckCardCount;
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -201,6 +199,13 @@ pub enum GameAction {
     ChooseClashOpponent {
         opponent: PlayerId,
     },
+    /// CR 608.2d: The controller's choice of which opponent makes a resolving
+    /// "an opponent chooses …" zone selection, answering a pending
+    /// `WaitingFor::ChooseFromZoneOpponentChooser`. `opponent` must be one of
+    /// that prompt's `candidates`.
+    ChooseZoneOpponentChooser {
+        opponent: PlayerId,
+    },
     /// CR 608.2d + CR 700.3: "An opponent separates" — the controller's answer
     /// to `WaitingFor::SeparatePilesChooseOpponent`.
     ChoosePileOpponent {
@@ -211,6 +216,12 @@ pub enum GameAction {
     /// "of an opponent's choice" target slot. `opponent` must be one of that
     /// prompt's `candidates`.
     ChooseAnnouncingOpponent {
+        opponent: PlayerId,
+    },
+    /// CR 702.174a: The spell controller's answer to
+    /// `WaitingFor::ChooseGiftRecipient` — which opponent receives the promised
+    /// gift. `opponent` must be one of that prompt's `candidates`.
+    ChooseGiftRecipient {
         opponent: PlayerId,
     },
     /// CR 702.132a: Assist — the caster's answer to `WaitingFor::AssistChoosePlayer`.
@@ -243,7 +254,7 @@ pub enum GameAction {
         order: Vec<ObjectId>,
     },
     TapLandForMana {
-        object_id: ObjectId,
+        selection: ManaSourceSelection,
     },
     /// CR 605.3a: Undo a manual mana ability activation — untap source, remove produced mana.
     /// Only valid for lands in `lands_tapped_for_mana` whose mana hasn't been spent.
@@ -1427,6 +1438,24 @@ impl GameAction {
         self.into()
     }
 
+    /// Whether this is an actor-scoped UI preference action.
+    ///
+    /// These mutations are legal in every `WaitingFor` state, do not change game
+    /// progression, and must not trigger auto-pass advancement at the engine
+    /// boundary. The authenticated actor is the only preference owner.
+    pub fn is_actor_scoped_preference(&self) -> bool {
+        matches!(
+            self,
+            GameAction::CancelAutoPass
+                | GameAction::SetPhaseStops { .. }
+                | GameAction::SetPriorityPassingMode { .. }
+                | GameAction::SetPriorityYield { .. }
+                | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::SetTriggerOrderTemplate { .. }
+                | GameAction::ReorderHand { .. }
+        )
+    }
+
     /// Issue #4878: allocation-free total order over `GameAction`, used for
     /// deterministic AI candidate / legal-action sorting. Orders by the
     /// `GameActionKind` discriminant first, then by payload fields, so equal
@@ -1449,8 +1478,8 @@ impl GameAction {
             GameAction::TapLandForMana { .. }
                 | GameAction::UntapLandForMana { .. }
                 // CR 118.3a: pinning/unpinning a pool unit is a mana-payment-window
-                // action; classifying it here grants MP skip_legality acceptance and
-                // AI-exclusion via the single !is_mana_ability authority.
+                // action; classifying it here keeps it out of AI priority-action
+                // candidates via the single !is_mana_ability authority.
                 | GameAction::SpendPoolMana { .. }
                 | GameAction::UnspendPoolMana { .. }
         )
@@ -1458,7 +1487,7 @@ impl GameAction {
 
     /// The cast payment preference carried by this action, if it is one of
     /// the cast-family variants (CR 601.2g).
-    fn payment_mode_mut(&mut self) -> Option<&mut CastPaymentMode> {
+    pub(crate) fn payment_mode_mut(&mut self) -> Option<&mut CastPaymentMode> {
         match self {
             GameAction::CastSpell { payment_mode, .. }
             | GameAction::CastSpellForFree { payment_mode, .. }
@@ -1467,51 +1496,6 @@ impl GameAction {
             | GameAction::CastSpellAsSneak { payment_mode, .. }
             | GameAction::CastSpellAsWebSlinging { payment_mode, .. } => Some(payment_mode),
             _ => None,
-        }
-    }
-
-    /// CR 601.2g: `CastPaymentMode` selects whether the engine auto-pays an
-    /// unambiguous mana cost or pauses after announcement for manual mana
-    /// activation — a per-player payment preference, not part of whether the
-    /// cast itself is legal. Candidate enumeration (`ai_support::candidates`)
-    /// emits every cast candidate with the canonical `Auto` mode, so any
-    /// membership test of a submitted action against the enumerated legal set
-    /// must erase the preference first (GH #6275: the multiplayer server's
-    /// legality gate rejected every `Manual`-mode cast). Borrows `self`
-    /// unchanged unless a `Manual` mode has to be rewritten.
-    pub fn with_canonical_payment_mode(&self) -> Cow<'_, Self> {
-        match self {
-            GameAction::CastSpell {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellForFree {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellAsMiracle {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellAsMadness {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellAsSneak {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellAsWebSlinging {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            } => {
-                let mut canonical = self.clone();
-                if let Some(mode) = canonical.payment_mode_mut() {
-                    *mode = CastPaymentMode::Auto;
-                }
-                Cow::Owned(canonical)
-            }
-            _ => Cow::Borrowed(self),
         }
     }
 
@@ -1545,7 +1529,7 @@ impl GameAction {
             | GameAction::CastSpellAsMiracle { object_id, .. }
             | GameAction::CastSpellAsMadness { object_id, .. } => Some(*object_id),
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
-            GameAction::TapLandForMana { object_id } => Some(*object_id),
+            GameAction::TapLandForMana { selection } => Some(selection.source.object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),
             // CR 118.3a: act on a pool pip, not a battlefield object.
             GameAction::SpendPoolMana { .. } | GameAction::UnspendPoolMana { .. } => None,
@@ -1622,8 +1606,10 @@ impl GameAction {
             | GameAction::ChooseMutateMergeSide { .. }
             | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
+            | GameAction::ChooseZoneOpponentChooser { .. }
             | GameAction::ChoosePileOpponent { .. }
             | GameAction::ChooseAnnouncingOpponent { .. }
+            | GameAction::ChooseGiftRecipient { .. }
             | GameAction::ChooseAssistPlayer { .. }
             | GameAction::CommitAssistPayment { .. }
             | GameAction::ChooseBattleProtector { .. }
@@ -1667,81 +1653,6 @@ impl GameAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// GH #6275: every cast-family variant must canonicalize `Manual` to
-    /// `Auto` so legality-gate membership checks match the enumerated
-    /// candidates; everything else must pass through borrowed and unchanged.
-    #[test]
-    fn with_canonical_payment_mode_erases_manual_on_every_cast_variant() {
-        use crate::types::game_state::CastPaymentMode;
-
-        let oid = ObjectId(1);
-        let cid = CardId(2);
-        let other = ObjectId(3);
-        let make = |payment_mode: CastPaymentMode| -> Vec<GameAction> {
-            vec![
-                GameAction::CastSpell {
-                    object_id: oid,
-                    card_id: cid,
-                    targets: vec![other],
-                    payment_mode,
-                },
-                GameAction::CastSpellForFree {
-                    object_id: oid,
-                    card_id: cid,
-                    source_id: other,
-                    payment_mode,
-                },
-                GameAction::CastSpellAsMiracle {
-                    object_id: oid,
-                    card_id: cid,
-                    payment_mode,
-                },
-                GameAction::CastSpellAsMadness {
-                    object_id: oid,
-                    card_id: cid,
-                    payment_mode,
-                },
-                GameAction::CastSpellAsSneak {
-                    hand_object: oid,
-                    card_id: cid,
-                    creature_to_return: other,
-                    payment_mode,
-                },
-                GameAction::CastSpellAsWebSlinging {
-                    hand_object: oid,
-                    card_id: cid,
-                    creature_to_return: other,
-                    payment_mode,
-                },
-            ]
-        };
-
-        for (manual, auto) in make(CastPaymentMode::Manual)
-            .iter()
-            .zip(&make(CastPaymentMode::Auto))
-        {
-            let canonical = manual.with_canonical_payment_mode();
-            assert!(
-                matches!(canonical, Cow::Owned(_)),
-                "Manual {} must be rewritten",
-                manual.variant_name()
-            );
-            assert_eq!(canonical.as_ref(), auto);
-
-            let unchanged = auto.with_canonical_payment_mode();
-            assert!(
-                matches!(unchanged, Cow::Borrowed(_)),
-                "Auto {} must stay borrowed",
-                auto.variant_name()
-            );
-        }
-
-        assert!(matches!(
-            GameAction::PassPriority.with_canonical_payment_mode(),
-            Cow::Borrowed(_)
-        ));
-    }
 
     #[test]
     fn pass_priority_serializes_as_tagged_union() {
@@ -1924,7 +1835,23 @@ mod tests {
                 },
                 Some(oid),
             ),
-            (GameAction::TapLandForMana { object_id: oid }, Some(oid)),
+            (
+                GameAction::TapLandForMana {
+                    selection: crate::types::mana::ManaSourceSelection {
+                        source: crate::types::identifiers::ObjectIncarnationRef {
+                            object_id: oid,
+                            incarnation: 0,
+                        },
+                        ability_index: None,
+                        mana_type: crate::types::mana::ManaType::Green,
+                        atomic_combination: None,
+                        restrictions: Vec::new(),
+                        penalty: crate::types::mana::ManaSourcePenalty::None,
+                        taps_for_mana: Vec::new(),
+                    },
+                },
+                Some(oid),
+            ),
             (GameAction::UntapLandForMana { object_id: oid }, Some(oid)),
             (
                 GameAction::Equip {

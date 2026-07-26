@@ -88,7 +88,7 @@ export function MenuActionTile({
       initial="rest"
       animate="rest"
       whileHover={disabled ? undefined : "hover"}
-      className={`group relative flex flex-col gap-2 rounded-[10px] border p-[7px] text-left transition-colors duration-150 surface-card ${
+      className={`group relative flex flex-col items-stretch gap-2 rounded-[10px] border p-[7px] text-left transition-colors duration-150 surface-card ${
         disabled ? "cursor-not-allowed opacity-50" : `cursor-pointer ${t.border} hover:border-hairline-hover hover:bg-slate-900/88`
       }`}
     >
@@ -100,9 +100,9 @@ export function MenuActionTile({
           {renderIcon("h-4 w-4")}
         </span>
       </div>
-      <div className="relative flex min-h-[120px] flex-1 items-center justify-center overflow-hidden rounded-[6px] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(0,0,0,0.32))] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.35)]">
+      <div className="relative flex min-h-[120px] flex-1 items-center justify-center overflow-hidden rounded-[6px] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(0,0,0,0.32))] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.35)] [@media(max-height:540px)]:min-h-[64px]">
         <span className={`relative -rotate-6 opacity-[0.14] transition-all duration-300 ${ghostHover}`}>
-          {renderIcon("h-28 w-28")}
+          {renderIcon("h-28 w-28 [@media(max-height:540px)]:h-16 [@media(max-height:540px)]:w-16")}
         </span>
         {/* Particle field renders in front of the icon so motes sparkle over it. */}
         {showMotif && <TileMotifLayer motif={motif!} color={`rgb(${t.rgb})`} />}

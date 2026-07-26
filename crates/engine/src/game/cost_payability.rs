@@ -20,9 +20,9 @@
 //! the enumerations.
 
 use crate::types::ability::{
-    is_variable_remove_counter_cost_count, AbilityCost, Comparator, CounterCostSelection,
-    FilterProp, QuantityExpr, QuantityRef, TapCreaturesAggregateStat, TapCreaturesRequirement,
-    TargetFilter, TypedFilter,
+    is_variable_remove_counter_cost_count, AbilityCost, AbilityTag, Comparator,
+    CounterCostSelection, FilterProp, QuantityExpr, QuantityRef, TapCreaturesAggregateStat,
+    TapCreaturesRequirement, TargetFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
@@ -73,6 +73,7 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -154,6 +155,7 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -255,7 +257,35 @@ impl AbilityCost {
     ///
     /// Mana affordability is NOT checked here; CR 601.2g handles the mana step
     /// separately through the mana-payment flow.
+    ///
+    /// Tag-agnostic entry point: delegates to [`Self::is_payable_for_activation`]
+    /// with no activation tag. Callers that KNOW the ability whose cost this is
+    /// (the activation pipeline) must use that method instead so CR 106.6
+    /// tag-scoped mana is judged the same way the real payment step judges it.
     pub fn is_payable(&self, state: &GameState, player: PlayerId, source: ObjectId) -> bool {
+        self.is_payable_for_activation(state, player, source, None)
+    }
+
+    /// CR 118.3 + CR 601.2h + CR 106.6: [`Self::is_payable`] with the activated
+    /// ability's `ability_tag` in hand.
+    ///
+    /// Only the sub-costs that consult a `PaymentContext` care about the tag
+    /// (today: `Waterbend`, whose affordability probe funds a mana cost). The
+    /// tag must reach them because `PaymentContext::Activation` carries it, and
+    /// `ManaRestriction::OnlyForTaggedActivation` admits mana only for a
+    /// matching tag — passing `None` from the early gate would hide mana the
+    /// real payment step (which receives `ability_def.ability_tag`) would
+    /// happily spend, suppressing a legally activatable ability.
+    ///
+    /// Single body for both entry points, so the composite/disjunctive
+    /// traversal is not duplicated across a tagged and an untagged authority.
+    pub fn is_payable_for_activation(
+        &self,
+        state: &GameState,
+        player: PlayerId,
+        source: ObjectId,
+        ability_tag: Option<AbilityTag>,
+    ) -> bool {
         match self {
             // CR 601.2g: Mana affordability is checked by the mana payment step,
             // not the 601.2b choice-of-object gate.
@@ -614,20 +644,52 @@ impl AbilityCost {
                     } if has_tap => {
                         has_enough_tap_creatures(state, player, source, requirement, filter, true)
                     }
-                    other => other.is_payable(state, player, source),
+                    other => other.is_payable_for_activation(state, player, source, ability_tag),
                 })
             }
             // CR 118.12a: Disjunctive — payable if **any** sub-cost is
             // payable. The interactive choice is surfaced at resolution via
             // `WaitingFor::UnlessPaymentChooseCost`; the activation-time
             // gate only needs at least one branch to be reachable.
-            AbilityCost::OneOf { costs } => {
-                costs.iter().any(|c| c.is_payable(state, player, source))
-            }
-            // CR 601.2b: Waterbend composes a mana cost with a tap-creature option.
-            // Affordability is checked via the standard auto-tap pre-check.
+            AbilityCost::OneOf { costs } => costs
+                .iter()
+                .any(|c| c.is_payable_for_activation(state, player, source, ability_tag)),
+            // CR 601.2b + CR 701.67a: Waterbend composes a mana cost with a
+            // tap-creature-or-artifact-to-help option (the whole point of the
+            // keyword). The plain auto-tap pre-check (`can_pay_cost_after_auto_tap`)
+            // only considers real mana-producing sources (lands, mana rocks) and
+            // has no notion of Waterbend's own tap-to-help mechanic, so it wrongly
+            // rejected activation whenever the player lacked N generic mana from
+            // real mana sources even with plenty of untapped eligible creatures to
+            // tap (issue #4966) — silently suppressing the ability (and its
+            // effect) before the player ever got a chance to pay via tapping.
+            // `can_feasibly_pay_activation_mana_cost_with_tap_payment_mode` is
+            // the ACTIVATION-context sibling of the helper the spell-cast
+            // "additional cost: you may waterbend N" path uses; it falls back
+            // to the plain auto-tap check first, so payment from a mana
+            // pool/sources alone is unaffected. The activation context matters
+            // for CR 106.6 restricted mana: this gate is probing an activated
+            // ability's cost, so activation-only mana
+            // (`ManaRestriction::OnlyForActivation`) must count toward
+            // affordability and spell-only mana must not — a spell context
+            // here would disagree with the actual payment step
+            // (`PaymentContext::Activation`) in both directions. The
+            // activation's own `ability_tag` is threaded through for the same
+            // reason: the real payment step receives `ability_def.ability_tag`
+            // (`casting.rs`), so CR 106.6 tag-scoped mana
+            // (`ManaRestriction::OnlyForTaggedActivation`, Quinjet's power-up
+            // mana) must be visible to this gate too — otherwise a Waterbend
+            // cost fundable only by that mana is suppressed before the player
+            // is offered the ability.
             AbilityCost::Waterbend { cost } => {
-                super::casting::can_pay_cost_after_auto_tap(state, player, source, cost)
+                super::casting::can_feasibly_pay_activation_mana_cost_with_tap_payment_mode(
+                    state,
+                    player,
+                    source,
+                    cost,
+                    crate::types::game_state::ConvokeMode::Waterbend,
+                    ability_tag,
+                )
             }
             // CR 702.49: Ninjutsu requires at least one returnable creature for
             // the variant. Mana affordability is deferred to payment (per CR 601.2g).
@@ -1465,5 +1527,63 @@ mod tests {
             "the escape card itself must not be eligible exile material"
         );
         assert_eq!(eligible.len(), 5, "exactly five other cards are eligible");
+    }
+
+    /// CR 106.6 + CR 601.2g (issue #4966 follow-up): the Waterbend affordability
+    /// probe must judge tag-scoped mana with the ACTIVATION'S OWN tag.
+    ///
+    /// `ManaRestriction::OnlyForTaggedActivation(PowerUp)` (Quinjet's power-up
+    /// mana) is spendable at the real payment step, which receives
+    /// `ability_def.ability_tag`. If the early gate probes without that tag,
+    /// the mana is invisible and a legally activatable Waterbend ability is
+    /// suppressed before it is ever offered — the same class of false
+    /// unactivatable verdict issue #4966 reported.
+    ///
+    /// The scenario deliberately leaves too few untapped permanents to fund
+    /// the {4} by tap-to-help alone (one source creature pays at most {1}), so
+    /// the restricted mana is the ONLY funding route and the assertions
+    /// discriminate purely on the tag.
+    #[test]
+    fn waterbend_payability_sees_tag_scoped_activation_mana() {
+        use crate::types::mana::{ManaRestriction, ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P0, "Waterbender Ascension", 0, 0)
+            .id();
+        // Four colorless mana usable ONLY for a Power-up-tagged activation.
+        for _ in 0..4 {
+            scenario.state.add_mana_to_pool(
+                P0,
+                ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(9_999),
+                    false,
+                    vec![ManaRestriction::OnlyForTaggedActivation(
+                        AbilityTag::PowerUp,
+                    )],
+                ),
+            );
+        }
+        let cost = AbilityCost::Waterbend {
+            cost: ManaCost::generic(4),
+        };
+
+        assert!(
+            cost.is_payable_for_activation(&scenario.state, P0, source, Some(AbilityTag::PowerUp)),
+            "power-up-restricted mana must fund a Power-up-tagged Waterbend activation"
+        );
+        assert!(
+            !cost.is_payable_for_activation(&scenario.state, P0, source, Some(AbilityTag::Equip)),
+            "a DIFFERENT tag must not unlock power-up-restricted mana (CR 106.6)"
+        );
+        assert!(
+            !cost.is_payable_for_activation(&scenario.state, P0, source, None),
+            "an untagged activation must not spend power-up-restricted mana"
+        );
+        assert!(
+            !cost.is_payable(&scenario.state, P0, source),
+            "the tag-agnostic entry point stays conservative"
+        );
     }
 }

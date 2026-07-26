@@ -157,6 +157,13 @@ pub fn build_resolved_from_def_with_targets(
     // CR 608.2c: Carry the parent-link kind through so the decline classifier can
     // distinguish a separate-sentence sibling from a within-clause continuation.
     resolved.sub_link = def.sub_link;
+    // CR 702.1c ("the same is true") + CR 608.2c (written order): Carry the
+    // replication marker through so `resolve_chain_body` evaluates a
+    // `ReplicatedOrBranch` per-item OR-branch (Mutable Pupa, Kathril)
+    // independently of a preceding sibling's failed gate. Without this copy the
+    // parser-stamped `SiblingCondition` never reaches the resolved sub and the
+    // keyword list collapses after the first false gate.
+    resolved.sibling_condition = def.sibling_condition;
     // CR 700.2b + CR 603.3c: Carry the reflexive modal choice + per-mode abilities
     // through so try_begin_reflexive_target_selection can route a gated modal
     // trigger (Caesar) to AbilityModeChoice instead of resolving the modes
@@ -432,17 +439,25 @@ pub fn additional_cost_instead_spell_has_legal_targets(
     if !has_kicker_cost && !has_queue_cost {
         return false;
     }
-    let Some(sub) = ability_def.sub_ability.as_deref() else {
-        return false;
-    };
-    if !matches!(
-        sub.condition,
-        Some(AbilityCondition::AdditionalCostPaidInstead)
-    ) {
+    // Walk past GiftDelivery wrappers to find AdditionalCostPaidInstead.
+    let mut instead_node = ability_def.sub_ability.as_deref();
+    let mut found_instead = false;
+    while let Some(sub) = instead_node {
+        if matches!(
+            sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        ) {
+            found_instead = true;
+            break;
+        }
+        instead_node = sub.sub_ability.as_deref();
+    }
+    if !found_instead {
         return false;
     }
     let mut resolved = build_resolved_from_def(ability_def, object_id, player);
     resolved.context.additional_cost_paid = true;
+    resolved.set_context_recursive(resolved.context.clone());
     // CR 601.2c: a queue-synthesized "instead" cost only broadens castability when the
     // override re-selects a REAL (non-context-ref) target — mirror the cast-time gate
     // (requires_additional_cost_declaration_before_targets). A context-ref override
@@ -839,11 +854,20 @@ pub fn spell_modal_unavailable_modes(
 pub fn modal_spell_mode_abilities(
     obj: &crate::game::game_object::GameObject,
 ) -> Vec<AbilityDefinition> {
+    modal_spell_mode_ability_refs(obj).cloned().collect()
+}
+
+/// Borrowing view of [`modal_spell_mode_abilities`] — the same predicate
+/// without the per-call clone, for read-only consumers that only inspect the
+/// modes (AI classification, coverage reporting). Both share this one
+/// definition of "which abilities on this object are its printed modes" so the
+/// owned and borrowed forms can never disagree.
+pub fn modal_spell_mode_ability_refs(
+    obj: &crate::game::game_object::GameObject,
+) -> impl Iterator<Item = &AbilityDefinition> {
     obj.abilities
         .iter()
         .filter(|a| a.kind == AbilityKind::Spell)
-        .cloned()
-        .collect()
 }
 
 /// CR 700.2a-b + CR 700.2f: Extends `unavailable_modes` with mode indices
@@ -3148,7 +3172,7 @@ fn attach_host_filter_needs_target_slot(filter: &TargetFilter) -> bool {
     !filter.is_context_ref()
         && !matches!(
             filter,
-            TargetFilter::LastCreated | TargetFilter::LastRevealed
+            TargetFilter::LastCreated | TargetFilter::LastRevealed | TargetFilter::LastZoneChanged
         )
 }
 
@@ -4834,10 +4858,12 @@ fn concretize_granting_object_in_effect(effect: &mut Effect, granter: ObjectId) 
         | Effect::Pump { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
+        // CR 710.4: same single-target-slot shape as `Transform`.
+        | Effect::FlipPermanent { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
+        | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }
@@ -8369,6 +8395,198 @@ mod tests {
             .and_then(|shuffle| shuffle.sub_ability.as_deref())
             .expect("counter continuation must exist");
         assert_eq!(counter_step.targets, vec![TargetRef::Object(artifact)]);
+    }
+
+    #[test]
+    fn deferred_effect_target_traversal_crosses_transparent_links_regardless_of_sub_link() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scrying Source".to_string(),
+            Zone::Stack,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let chain = |tail_link| {
+            let mut put_counter = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            put_counter.sub_link = tail_link;
+
+            let shuffle = ResolvedAbility::new(
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(put_counter);
+            let change_zone = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(shuffle);
+
+            ResolvedAbility::new(
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(change_zone)
+        };
+
+        for link in [
+            SubAbilityLink::ContinuationStep,
+            SubAbilityLink::SequentialSibling,
+        ] {
+            let ability = chain(link);
+            let slots = build_target_slots(&state, &ability)
+                .expect("transparent deferred-effect links should surface the target");
+            assert_eq!(slots.len(), 1);
+            assert!(slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(creature)));
+            assert_eq!(target_slot_specs(&state, &ability).len(), 1);
+            assert!(chain_has_target_sink(&ability));
+            assert_eq!(minimum_targets_in_chain(&state, &ability), 1);
+            validate_selected_targets_for_ability(
+                &state,
+                &ability,
+                &slots,
+                &[TargetRef::Object(creature)],
+                &[],
+            )
+            .expect("the deferred-effect tail creature target should validate");
+
+            let mut compact_assigned = ability.clone();
+            assign_targets_in_chain(
+                &state,
+                &mut compact_assigned,
+                &[TargetRef::Object(creature)],
+            )
+            .expect("compact assignment must reach the deferred-effect tail");
+            assert_eq!(
+                compact_assigned
+                    .sub_ability
+                    .as_deref()
+                    .and_then(|change_zone| change_zone.sub_ability.as_deref())
+                    .and_then(|shuffle| shuffle.sub_ability.as_deref())
+                    .unwrap()
+                    .targets,
+                vec![TargetRef::Object(creature)]
+            );
+
+            let mut selected_assigned = ability;
+            assign_selected_slots_in_chain(
+                &state,
+                &mut selected_assigned,
+                &[Some(TargetRef::Object(creature))],
+            )
+            .expect("selected-slot assignment must reach the deferred-effect tail");
+            assert_eq!(
+                selected_assigned
+                    .sub_ability
+                    .as_deref()
+                    .and_then(|change_zone| change_zone.sub_ability.as_deref())
+                    .and_then(|shuffle| shuffle.sub_ability.as_deref())
+                    .unwrap()
+                    .targets,
+                vec![TargetRef::Object(creature)]
+            );
+        }
+
+        let mut when_you_do = chain(SubAbilityLink::ContinuationStep);
+        when_you_do
+            .sub_ability
+            .as_deref_mut()
+            .and_then(|change_zone| change_zone.sub_ability.as_deref_mut())
+            .and_then(|shuffle| shuffle.sub_ability.as_deref_mut())
+            .unwrap()
+            .condition = Some(AbilityCondition::WhenYouDo);
+        let mut resolution_timing = chain(SubAbilityLink::SequentialSibling);
+        resolution_timing
+            .sub_ability
+            .as_deref_mut()
+            .and_then(|change_zone| change_zone.sub_ability.as_deref_mut())
+            .and_then(|shuffle| shuffle.sub_ability.as_deref_mut())
+            .unwrap()
+            .target_choice_timing = TargetChoiceTiming::Resolution;
+
+        for ability in [when_you_do, resolution_timing] {
+            assert!(build_target_slots(&state, &ability)
+                .expect("deferred conditional target traversal should build")
+                .is_empty());
+            assert!(target_slot_specs(&state, &ability).is_empty());
+            assert!(!chain_has_target_sink(&ability));
+            assert_eq!(minimum_targets_in_chain(&state, &ability), 0);
+
+            let mut compact_assigned = ability.clone();
+            assign_targets_in_chain(&state, &mut compact_assigned, &[])
+                .expect("empty compact assignment should leave deferred targets unchosen");
+            assert!(compact_assigned
+                .sub_ability
+                .as_deref()
+                .and_then(|change_zone| change_zone.sub_ability.as_deref())
+                .and_then(|shuffle| shuffle.sub_ability.as_deref())
+                .unwrap()
+                .targets
+                .is_empty());
+
+            let mut selected_assigned = ability;
+            assign_selected_slots_in_chain(&state, &mut selected_assigned, &[])
+                .expect("empty selected-slot assignment should leave deferred targets unchosen");
+            assert!(selected_assigned
+                .sub_ability
+                .as_deref()
+                .and_then(|change_zone| change_zone.sub_ability.as_deref())
+                .and_then(|shuffle| shuffle.sub_ability.as_deref())
+                .unwrap()
+                .targets
+                .is_empty());
+        }
     }
 
     /// CR 608.2c + CR 115.1: Arcum Dagsson / #4678 — "Target artifact creature's

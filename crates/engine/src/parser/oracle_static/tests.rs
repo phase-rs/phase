@@ -28669,25 +28669,30 @@ fn protection_chosen_color_drops_trailing_sba_exemption_benevolent_blessing() {
 /// yield `Protection(ChosenColor)`. (fail-if-reverted)
 #[test]
 fn protection_chosen_color_drops_trailing_this_aura_exemption() {
+    use crate::types::ability::ProtectionDoesNotRemove;
     use crate::types::keywords::{Keyword, ProtectionTarget};
 
-    let mods = parse_continuous_modifications(
-        "Enchanted creature has protection from the chosen color. This effect doesn't remove this Aura.",
-    );
+    let text =
+        "Enchanted creature has protection from the chosen color. This effect doesn't remove this Aura.";
+    let mods = parse_continuous_modifications(text);
     assert!(
         mods.contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
         }),
         "expected Protection(ChosenColor), got {mods:?}"
     );
-    assert!(
-        !mods.iter().any(|m| matches!(
-            m,
-            ContinuousModification::AddKeyword {
-                keyword: Keyword::Protection(ProtectionTarget::CardType(_)),
-            }
-        )),
-        "trailing prose must not be swallowed into Protection(CardType(_)), got {mods:?}"
+    assert_eq!(
+        parse_protection_does_not_remove(text),
+        Some(ProtectionDoesNotRemove::Source),
+        "CR 702.16n rider must parse as Source exemption"
+    );
+    // `parse_oracle_text` rewrites "this Aura" → `~` before static dispatch.
+    assert_eq!(
+        parse_protection_does_not_remove(
+            "Enchanted creature has protection from the chosen color. This effect doesn't remove ~."
+        ),
+        Some(ProtectionDoesNotRemove::Source),
+        "normalized self-ref `~` must still stamp Source"
     );
 }
 
@@ -31928,5 +31933,296 @@ fn parse_static_condition_requires_full_consumption() {
     assert_eq!(
         parse_static_condition("~ is your Ring-bearer"),
         Some(StaticCondition::IsRingBearer)
+    );
+}
+
+// CR 205.4a + CR 105.1 + issue #6332: the Legends (1994) banding-land cycle —
+// "<Color> legendary creatures you control have \"bands with other legendary
+// creatures.\"" (Unholy Citadel [Black], Seafarer's Quay [Blue], Adventurers'
+// Guildhouse [Green], Cathedral of Serra [White], Mountain Stronghold [Red]) —
+// compounds a color adjective with the legendary supertype. Before the fix,
+// every bespoke descriptor recognizer in `parse_typed_you_control` declined:
+// `parse_named_color` requires a BARE color word (`descriptor.rest.is_empty()`
+// guard), `descriptor_is_supertype` requires a BARE supertype word
+// (`all_consuming`), and `is_capitalized_words` requires every word
+// Title-Cased (mid-sentence Oracle text lowercases "legendary"). The whole
+// static line failed to parse and the card did nothing.
+#[test]
+fn parse_unholy_citadel_black_legendary_bands_with_other() {
+    use crate::types::mana::ManaColor;
+
+    let def = parse_static_line(
+        "Black legendary creatures you control have \"bands with other legendary creatures.\" (Any legendary creatures can attack in a band as long as at least one has \"bands with other legendary creatures.\" Bands are blocked as a group. If at least two legendary creatures you control, one of which has \"bands with other legendary creatures,\" are blocking or being blocked by the same creature, you divide that creature's combat damage, not its controller, among any of the creatures it's being blocked by or is blocking.)",
+    )
+    .expect("the color+legendary compound subject must parse (was Unimplemented)");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let Some(TargetFilter::Typed(ref tf)) = def.affected else {
+        panic!("expected a Typed filter, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "subject must still be scoped to creatures: {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::HasColor {
+                color: ManaColor::Black
+            }
+        )),
+        "the color adjective must survive: {:?}",
+        tf.properties
+    );
+    assert!(
+        tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::HasSupertype {
+                value: Supertype::Legendary
+            }
+        )),
+        "the legendary supertype must survive alongside the color: {:?}",
+        tf.properties
+    );
+    // The quoted grant itself and its "Legend" quality normalization are
+    // pre-existing, already-tested machinery (`parse_granted_keyword_fragment`,
+    // `normalize_bands_with_other_quality`) — this only pins that the subject
+    // fix lets the grant actually reach them.
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::BandsWithOther("Legend".to_string())
+        }]
+    );
+}
+
+// Build-for-the-class regression: the fix is a general compound-descriptor
+// fallback, not a one-off for Black — it must generalize across every color in
+// the cycle. Seafarer's Quay is the Blue member.
+#[test]
+fn parse_seafarers_quay_blue_legendary_bands_with_other() {
+    use crate::types::mana::ManaColor;
+
+    let def = parse_static_line(
+        "Blue legendary creatures you control have \"bands with other legendary creatures.\"",
+    )
+    .expect("the color+legendary compound subject must parse for every color in the cycle");
+    let Some(TargetFilter::Typed(ref tf)) = def.affected else {
+        panic!("expected a Typed filter, got {:?}", def.affected);
+    };
+    assert!(tf.properties.iter().any(|p| matches!(
+        p,
+        FilterProp::HasColor {
+            color: ManaColor::Blue
+        }
+    )));
+    assert!(tf.properties.iter().any(|p| matches!(
+        p,
+        FilterProp::HasSupertype {
+            value: Supertype::Legendary
+        }
+    )));
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::BandsWithOther("Legend".to_string())
+        }]
+    );
+}
+
+#[test]
+fn parse_legendary_black_creatures_you_control() {
+    use crate::types::mana::ManaColor;
+
+    let def = parse_static_line(
+        "Legendary black creatures you control have \"bands with other legendary creatures.\"",
+    )
+    .expect("supertype-before-color compound subject must parse");
+    let Some(TargetFilter::Typed(ref tf)) = def.affected else {
+        panic!("expected a Typed filter, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(tf.properties.iter().any(|p| matches!(
+        p,
+        FilterProp::HasColor {
+            color: ManaColor::Black
+        }
+    )));
+    assert!(tf.properties.iter().any(|p| matches!(
+        p,
+        FilterProp::HasSupertype {
+            value: Supertype::Legendary
+        }
+    )));
+}
+
+// Decline guard: the new fallback delegates to `parse_type_phrase` and
+// requires FULL consumption of the subject as a single `Typed` filter. An
+// unrecognized leading word before "legendary" must not be silently accepted
+// as a fabricated filter — it must still fall through to `Unimplemented`
+// rather than mis-parsing into a filter that matches nothing (or everything).
+#[test]
+fn parse_unrecognized_word_legendary_creatures_you_control_declines() {
+    assert_eq!(
+        parse_static_line("Zzyzx legendary creatures you control have flying."),
+        None
+    );
+}
+
+// Review finding: the compound-descriptor fallback must decline for a
+// descriptor `parse_type_phrase` fully consumes but that carries NEITHER a
+// color NOR a supertype — a full-consumption check alone is not a narrow
+// enough acceptance gate. Saryth, the Viper's Fang and Augusta, Dean of Order
+// both read "Other tapped creatures you control have/get <predicate>." and
+// "Other untapped creatures you control have/get <predicate>." — "tapped"/
+// "untapped" are combat-status words, not colors or supertypes. Before the
+// property gate, `parse_typed_you_control`'s unconditional final `else`
+// wrongly claimed BOTH of these (each fully consumes through
+// `parse_type_phrase` as a bare `Typed(Creature)` filter with a `Tapped`/
+// `Untapped` property, satisfying the old remainder-only check), preventing
+// dispatch from ever reaching whichever OTHER handler correctly resolves
+// these two real, unrelated cards and silently changing their parsed
+// signatures. These tests call `parse_typed_you_control` directly (with
+// "Other " already stripped and `is_other: true`, exactly mirroring how
+// `dispatch.rs` invokes it) so they pin the function's own behavior without
+// depending on assumptions about that other downstream handler.
+#[test]
+fn parse_other_tapped_creatures_you_control_keeps_pre_existing_path() {
+    let text = "tapped creatures you control have deathtouch.";
+    let def = parse_typed_you_control(text, text, true).expect(
+        "the pre-existing literal 'tapped creatures you control' pattern \
+         (parse_modified_creature_subject_filter) must still match",
+    );
+    let Some(TargetFilter::Typed(ref tf)) = def.affected else {
+        panic!("expected a Typed filter, got {:?}", def.affected);
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::Tapped),
+        "the pre-existing 'tapped' status must survive unchanged: {:?}",
+        tf.properties
+    );
+    assert!(
+        !tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::HasSupertype { .. } | FilterProp::HasColor { .. }
+        )),
+        "no color or supertype should be fabricated for an unrelated descriptor: {:?}",
+        tf.properties
+    );
+}
+
+#[test]
+fn parse_other_untapped_creatures_you_control_declines_new_fallback() {
+    let text = "untapped creatures you control have hexproof.";
+    assert_eq!(
+        parse_typed_you_control(text, text, true),
+        None,
+        "'untapped' carries neither a color nor a supertype, so the new \
+         compound-descriptor fallback must decline and leave this subject to \
+         whichever OTHER dispatch handler already resolves it correctly"
+    );
+}
+
+// ===========================================================================
+// Issue #6566 — classify_quoted_inner routes a `~`-normalized leave-battlefield
+// exile rider to ContinuousModification::GrantReplacement (Layer 6).
+// ===========================================================================
+
+/// #6566 (3): the reanimation rider — reaching `classify_quoted_inner` after
+/// `normalize_card_name_refs` rewrote "this creature/permanent/land" to `~` —
+/// must classify as a single `GrantReplacement` carrying the SelfRef Moved→Exile
+/// replacement. Reverting either the `~` parser arm or the classify routing flips
+/// this (RED: falls through to a `GrantAbility` unimplemented body instead).
+#[test]
+fn classify_quoted_inner_grants_leave_battlefield_exile_6566() {
+    let mods = classify_quoted_inner(
+        "If ~ would leave the battlefield, exile it instead of putting it anywhere else",
+    );
+    assert_eq!(mods.len(), 1, "expected one GrantReplacement, got {mods:?}");
+    let ContinuousModification::GrantReplacement { replacement } = &mods[0] else {
+        panic!("expected GrantReplacement, got {:?}", mods[0]);
+    };
+    assert_eq!(
+        replacement.event,
+        crate::types::replacements::ReplacementEvent::Moved
+    );
+    assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
+    let exec = replacement.execute.as_ref().expect("execute present");
+    let Effect::ChangeZone { destination, .. } = &*exec.effect else {
+        panic!("expected ChangeZone execute, got {:?}", exec.effect);
+    };
+    assert_eq!(*destination, crate::types::zones::Zone::Exile);
+}
+
+/// #6566 (3-neg): a non-rider quoted body must NOT yield `GrantReplacement`. The
+/// positive reach-guard (it DOES parse to `AddKeyword`) proves the body cleared
+/// `classify_quoted_inner`'s dispatch, so the negative is not vacuous.
+#[test]
+fn classify_quoted_inner_non_rider_is_not_grant_replacement_6566() {
+    let mods = classify_quoted_inner("flying");
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::AddKeyword { .. })),
+        "reach guard: 'flying' must parse to AddKeyword: {mods:?}"
+    );
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantReplacement { .. })),
+        "non-rider body must not yield GrantReplacement: {mods:?}"
+    );
+}
+
+/// #6566 (4): CR 613.1f + CR 614.6 — a granted object-hosted replacement is an
+/// ability-adding effect, so it must layer at `Layer::Ability` (Layer 6).
+#[test]
+fn grant_replacement_layers_at_ability_6566() {
+    let m = ContinuousModification::GrantReplacement {
+        replacement: Box::new(crate::parser::oracle_effect::leave_battlefield_exile_replacement()),
+    };
+    assert_eq!(m.layer(), crate::types::layers::Layer::Ability);
+}
+
+/// #6566 × #6538 reconciliation: CR 611.2a + CR 613.1f — the GRANTED replacement
+/// must carry NO expiry. #6538 stamps `RestrictionExpiry::UntilHostLeavesPlay` on
+/// the *standalone* rider, and `is_runtime_host_lifetime_replacement` keys
+/// base-install + non-copiable + host-exit-prune off exactly that stamp. A
+/// base-installed granted rider would survive the granting continuous effect
+/// lapsing, so Elemental Expressionist's "until end of turn" grant would become
+/// permanent. This pins the reconciliation: if `classify_quoted_inner` ever goes
+/// back to reusing the stamped `AddTargetReplacement` payload from
+/// `try_parse_leave_battlefield_exile_replacement`, this assertion flips RED.
+#[test]
+fn granted_replacement_is_not_host_lifetime_stamped() {
+    let mods = classify_quoted_inner(
+        "If ~ would leave the battlefield, exile it instead of putting it anywhere else",
+    );
+    let ContinuousModification::GrantReplacement { replacement } = &mods[0] else {
+        panic!("reach guard: expected GrantReplacement, got {:?}", mods[0]);
+    };
+    assert_eq!(
+        replacement.expiry, None,
+        "a granted replacement's lifetime is governed by the grant's duration \
+         (CR 611.2a), not a host-lifetime stamp — a stamped def would be \
+         base-installed by #6538's machinery and outlive the grant"
+    );
+
+    // Positive contrast: the STANDALONE front door on the same text DOES stamp
+    // (#6538), proving the two paths are genuinely reconciled rather than the
+    // stamp having been deleted wholesale.
+    let Some(Effect::AddTargetReplacement {
+        replacement: standalone,
+        ..
+    }) = crate::parser::oracle_effect::try_parse_leave_battlefield_exile_replacement(
+        "if ~ would leave the battlefield, exile it instead of putting it anywhere else",
+    )
+    else {
+        panic!("reach guard: standalone front door must parse the same text");
+    };
+    assert_eq!(
+        standalone.expiry,
+        Some(crate::types::ability::RestrictionExpiry::UntilHostLeavesPlay),
+        "#6538's standalone host-lifetime stamp must be preserved (CR 400.7)"
     );
 }

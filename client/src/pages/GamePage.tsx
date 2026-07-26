@@ -19,6 +19,11 @@ import type {
   ObjectId,
   SerializedAbilityCost,
 } from "../adapter/types";
+import type {
+  InteractionManaRestriction,
+  InteractionPresentationSurface,
+  ViewerInteraction,
+} from "../adapter/generated/interaction";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -99,8 +104,10 @@ import { useModalPeek } from "../components/modal/useModalPeek.ts";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { AssistChoosePlayerModal } from "../components/modal/AssistChoosePlayerModal.tsx";
 import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
+import { ZoneOpponentChooserModal } from "../components/modal/ZoneOpponentChooserModal.tsx";
 import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
 import { AnnouncingOpponentModal } from "../components/modal/AnnouncingOpponentModal.tsx";
+import { GiftRecipientModal } from "../components/modal/GiftRecipientModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
@@ -410,6 +417,7 @@ export function GamePage() {
         if (hasConcededRef.current) break;
         // Server-initiated game end (concede, disconnect timeout, etc.)
         // Map the server's authoritative winner into the store so GameOverScreen renders.
+        clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
@@ -617,6 +625,7 @@ export function GamePage() {
         useMultiplayerStore.setState({ playerSlots: event.slots });
         break;
       case "gameOver":
+        clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
@@ -841,13 +850,22 @@ function GamePageContent({
   // identity-ref latch makes the consume idempotent under React StrictMode's
   // double-invoke and after the clear (the re-run sees `null`).
   const startingContest = useGameStore((s) => s.startingContest);
+  const openingTurnOrder = useGameStore((s) => s.gameState?.derived?.turn_order);
+  const openingViewerTurnNumber = useGameStore(
+    (s) => s.gameState?.derived?.viewer_turn_number,
+  );
   const consumedContestRef = useRef<typeof startingContest>(null);
   useEffect(() => {
     if (!startingContest || consumedContestRef.current === startingContest) return;
     consumedContestRef.current = startingContest;
-    flashStartingPlayerContest(startingContest.events, startingContest.startingPlayer);
+    flashStartingPlayerContest(
+      startingContest.events,
+      startingContest.startingPlayer,
+      openingTurnOrder,
+      openingViewerTurnNumber,
+    );
     useGameStore.getState().clearStartingContest();
-  }, [startingContest]);
+  }, [openingTurnOrder, openingViewerTurnNumber, startingContest]);
   // CR 103.1 before CR 103.5: the starting-player contest must finish before the
   // mulligan UI appears (the roll determines who's on the play, which precedes
   // drawing opening hands). True from `initGame` setting the carrier through the
@@ -1328,20 +1346,23 @@ function GamePageContent({
           gridTemplateColumns: "1fr",
         }}
       >
-        {/* Row 1: Opponent hand + zone piles (flow layout — piles take real space) */}
+        {/* Row 1: Opponent hand + zone piles. Equal flexible side tracks keep
+            the focused hand centered on the viewport while the piles remain
+            right-aligned; split layouts render their hands inside seat panes. */}
         <div
-          className={`relative z-20 min-w-0 flex w-full ${splitBoardActive ? "overflow-hidden" : "overflow-visible"}`}
+          className={`relative z-20 min-w-0 w-full ${renderFocusedOpponentTopRow ? "grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]" : "flex"} ${splitBoardActive ? "overflow-hidden" : "overflow-visible"}`}
           data-flex-zone="opp-row"
         >
           {renderFocusedOpponentTopRow && (
             <>
-              <div className="min-w-0 flex-1">
+              <div aria-hidden />
+              <div className="min-w-0">
                 <OpponentHand showCards={showAiHand} />
               </div>
               <DraggableWidget
                 target={{ kind: "widget", key: "opponentPiles" }}
                 flexZone="opponentPiles"
-                className="flex shrink-0 items-start gap-1.5 px-1 py-1"
+                className="flex items-start justify-self-end gap-1.5 px-1 py-1"
                 style={playerZoneRailStyle}
               >
                 {activeOpponentId != null ? (
@@ -1526,13 +1547,15 @@ function GamePageContent({
       <HelpSheet />
       <CardReportDialog />
 
-      {/* Connection failure toast */}
-      {isOnlineMode && (
-        <ConnectionToast
-          onRetry={() => window.location.reload()}
-          onSettings={() => setPreferencesOpen({})}
-        />
-      )}
+      {/* The page's toast surface, not an online-only one: solo games raise
+          toasts too (the native-engine fallback notice). Only online games get
+          a Retry — reloading re-dials the server, but a solo game has nothing
+          to re-dial and would just restart itself. */}
+      <ConnectionToast
+        onRetry={isOnlineMode ? () => window.location.reload() : undefined}
+        onSettings={() => setPreferencesOpen({})}
+      />
+
 
 
       {/*
@@ -1732,8 +1755,10 @@ function GamePageContent({
         <MeldChoiceModal />
         <AssistChoosePlayerModal />
         <ClashOpponentModal />
+        <ZoneOpponentChooserModal />
         <PileOpponentModal />
         <AnnouncingOpponentModal />
+        <GiftRecipientModal />
         <TributeModal />
         <CombatTaxModal />
         <AlternativeCostModal />
@@ -2827,6 +2852,129 @@ function GameOverScreen({
 
 // ── Ability Choice Modal ──────────────────────────────────────────────────
 
+export function manaRestrictionLabel(
+  t: TFunction<"game">,
+  restriction: InteractionManaRestriction,
+): string {
+  switch (restriction.type) {
+    case "onlyForTypeSpellsOrAbilities":
+      return t(
+        restriction.data.ability === "ofSpellType"
+          ? "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesOfSpellType"
+          : "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesAny",
+        { spellType: restriction.data.spellType },
+      );
+    case "onlyForSpell":
+      return t("gamePage.manaRestrictions.onlyForSpell");
+    case "onlyForActivation":
+      return t("gamePage.manaRestrictions.onlyForActivation");
+    case "onlyForSpellType":
+      return t("gamePage.manaRestrictions.onlyForSpellType", restriction.data);
+    case "onlyForCreatureType":
+      return t("gamePage.manaRestrictions.onlyForCreatureType", restriction.data);
+    case "onlyForTaggedActivation":
+      return t("gamePage.manaRestrictions.onlyForTaggedActivation", restriction.data);
+    case "onlyForXCosts":
+      return t("gamePage.manaRestrictions.onlyForXCosts");
+    case "onlyForSpellWithKeywordKind":
+      return t("gamePage.manaRestrictions.onlyForSpellWithKeywordKind", restriction.data);
+    case "onlyForSpellWithKeywordKindFromZone":
+      return t("gamePage.manaRestrictions.onlyForSpellWithKeywordKindFromZone", restriction.data);
+    case "onlyForSpellWithManaValue":
+      return t("gamePage.manaRestrictions.onlyForSpellWithManaValue", restriction.data);
+    case "onlyForSpellMatchingCostCriteria":
+      return t("gamePage.manaRestrictions.onlyForSpellMatchingCostCriteria", {
+        spellType: restriction.data.spellType ?? t("gamePage.manaRestrictions.anySpell"),
+        criteria: restriction.data.criteria.map((criterion) => {
+          switch (criterion.type) {
+            case "manaValue":
+              return t("gamePage.manaRestrictions.manaValueCriterion", criterion.data);
+            case "hasXInCost":
+              return t("gamePage.manaRestrictions.hasXInCostCriterion");
+          }
+        }).join(", "),
+      });
+    case "onlyForSpellWithColorCount":
+      return t("gamePage.manaRestrictions.onlyForSpellWithColorCount", restriction.data);
+    case "onlyForSpellFromZone":
+      return t("gamePage.manaRestrictions.onlyForSpellFromZone", restriction.data);
+    case "onlyForFaceDownSpell":
+      return t("gamePage.manaRestrictions.onlyForFaceDownSpell");
+    case "onlyForAny":
+      return t("gamePage.manaRestrictions.onlyForAny", {
+        restrictions: restriction.data.restrictions
+          .map((nested) => manaRestrictionLabel(t, nested))
+          .join(" "),
+      });
+    case "onlyForSpecialAction":
+      return t("gamePage.manaRestrictions.onlyForSpecialAction", restriction.data);
+    case "convokePayment":
+      return t("gamePage.manaRestrictions.convokePayment");
+  }
+}
+
+function projectedManaChoiceLabel(t: TFunction<"game">, surfaces: InteractionPresentationSurface[]): {
+  label: string;
+  description?: string;
+} {
+  const units = surfaces.filter(
+    (surface): surface is Extract<InteractionPresentationSurface, { type: "mana" }> =>
+      surface.type === "mana" && surface.data.role === "producedMana",
+  );
+  if (units.length === 0) return { label: t("gamePage.manaRestrictions.tapForMana") };
+
+  const grouped = new Map<string, { symbols: string[]; restrictions: InteractionManaRestriction[]; count: number }>();
+  for (const unit of units) {
+    const key = JSON.stringify([unit.data.symbols, unit.data.restrictions]);
+    const group = grouped.get(key);
+    if (group) {
+      group.count += 1;
+    } else {
+      grouped.set(key, {
+        symbols: unit.data.symbols,
+        restrictions: unit.data.restrictions,
+        count: 1,
+      });
+    }
+  }
+  const label = [...grouped.values()]
+    .map(({ symbols, count }) => {
+      const mana = symbols.map((symbol) => `{${symbol}}`).join("");
+      return count === 1 ? mana : `${mana} × ${count}`;
+    })
+    .join(" + ");
+  const restrictions = [...grouped.values()]
+    .flatMap((group) => group.restrictions.map((restriction) => manaRestrictionLabel(t, restriction)));
+  return {
+    label: t("gamePage.manaRestrictions.tapFor", { mana: label }),
+    description: restrictions.length > 0 ? [...new Set(restrictions)].join(" ") : undefined,
+  };
+}
+
+function projectedManaChoices(
+  interaction: ViewerInteraction | null,
+  objectId: ObjectId,
+): Map<string, InteractionPresentationSurface[]> {
+  const choices = new Map<string, InteractionPresentationSurface[]>();
+  if (!interaction) return choices;
+  for (const opportunity of interaction.opportunities) {
+    if (opportunity.response.type !== "exactChoices") continue;
+    for (const choice of opportunity.response.data.choices) {
+      const action = choice.surfaces.find(
+        (surface): surface is Extract<InteractionPresentationSurface, { type: "action" }> =>
+          surface.type === "action" && surface.data.code === "tapLandForMana",
+      );
+      const isSource = choice.surfaces.some(
+        (surface) => surface.type === "object"
+          && surface.data.role === "source"
+          && surface.data.reference === String(objectId),
+      );
+      if (action?.data.actionId && isSource) choices.set(action.data.actionId, choice.surfaces);
+    }
+  }
+  return choices;
+}
+
 function AbilityChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
@@ -2839,6 +2987,7 @@ function AbilityChoiceModal() {
   const webSlingingCosts = useGameStore(
     (s) => s.gameState?.derived?.web_slinging_costs,
   );
+  const viewerInteraction = useGameStore((s) => s.viewerInteraction);
 
   if (!pending || !obj) return null;
 
@@ -2870,6 +3019,7 @@ function AbilityChoiceModal() {
         : allPlayOrCast
           ? t("gamePage.abilityChoice.subtitlePlay")
           : t("gamePage.abilityChoice.subtitleChoose");
+  const manaChoices = projectedManaChoices(viewerInteraction, pending.objectId);
 
   return (
     <ChoiceModal
@@ -2878,12 +3028,18 @@ function AbilityChoiceModal() {
       previewCardName={obj.name}
       previewCardTypes={obj.card_types}
       options={pending.actions.map((action, i) => {
-        const { label, description } = abilityChoiceLabel(
+        let { label, description } = abilityChoiceLabel(
           action,
           obj,
           objects,
           webSlingingCosts,
         );
+        if (action.type === "TapLandForMana") {
+          const surfaces = action.interactionActionId
+            ? manaChoices.get(action.interactionActionId)
+            : undefined;
+          if (surfaces) ({ label, description } = projectedManaChoiceLabel(t, surfaces));
+        }
         // CR 606.1: prefix a loyalty badge for planeswalker ability costs,
         // reading the structured Loyalty cost (never parsing the label string).
         const ability =

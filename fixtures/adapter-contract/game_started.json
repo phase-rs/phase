@@ -1,6 +1,7 @@
 {
   "type": "GameStarted",
   "data": {
+    "state_revision": 1,
     "state": {
       "turn_number": 1,
       "active_player": 0,
@@ -145,6 +146,22 @@
       { "type": "PassPriority" }
     ],
     "auto_pass_recommended": false,
-    "spell_costs": {}
+    "mana_payment_shortcut_actions": [],
+    "spell_costs": {},
+    "viewer_interaction": {
+      "waitingForKind": {
+        "simultaneous": null,
+        "terminal": false,
+        "code": "choose"
+      },
+      "authorizedSubmitters": [0],
+      "canSubmit": true,
+      "autoPassRecommended": false,
+      "opportunities": [],
+      "availability": {
+        "type": "unsupported",
+        "data": { "reason": "authorityUnbound" }
+      }
+    }
   }
 }

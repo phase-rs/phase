@@ -171,6 +171,12 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             cmp_val(a0, b0)
         }
+        GameAction::ChooseZoneOpponentChooser { opponent: a0 } => {
+            let GameAction::ChooseZoneOpponentChooser { opponent: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
         GameAction::ChoosePileOpponent { opponent: a0 } => {
             let GameAction::ChoosePileOpponent { opponent: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
@@ -179,6 +185,12 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
         }
         GameAction::ChooseAnnouncingOpponent { opponent: a0 } => {
             let GameAction::ChooseAnnouncingOpponent { opponent: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
+        GameAction::ChooseGiftRecipient { opponent: a0 } => {
+            let GameAction::ChooseGiftRecipient { opponent: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
             cmp_val(a0, b0)
@@ -209,11 +221,11 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
                 cmp_val(a0, b0)
             }
         }
-        GameAction::TapLandForMana { object_id: a0 } => {
-            let GameAction::TapLandForMana { object_id: b0 } = b else {
+        GameAction::TapLandForMana { selection: a0 } => {
+            let GameAction::TapLandForMana { selection: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            cmp_val(a0, b0)
+            a0.cmp_stable(b0)
         }
         GameAction::UntapLandForMana { object_id: a0 } => {
             let GameAction::UntapLandForMana { object_id: b0 } = b else {
@@ -1647,6 +1659,14 @@ mod tests {
                 opponent: PlayerId(0),
             },
             GameAction::ChooseAnnouncingOpponent {
+                opponent: PlayerId(1),
+            },
+        );
+        assert_distinct_order(
+            GameAction::ChooseGiftRecipient {
+                opponent: PlayerId(0),
+            },
+            GameAction::ChooseGiftRecipient {
                 opponent: PlayerId(1),
             },
         );

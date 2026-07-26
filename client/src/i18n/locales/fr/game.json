@@ -248,6 +248,7 @@
     "target": "Cible",
     "copy": "Copie",
     "copyTooltip": "Jeton-copie d'une vraie carte",
+    "cantBeBlocked": "Ne peut pas être bloquée",
     "ringBearer": "Anneau",
     "ringBearerTooltip": "Porteur de l'Anneau",
     "hiddenAttachments": "+{{count}} more attached",
@@ -499,13 +500,22 @@
     "clickToFocus": "cliquez pour cibler"
   },
   "manaPool": {
+    "onlyForSpell": "À dépenser uniquement pour lancer des sorts",
     "onlyForSpellType": "À dépenser uniquement pour lancer des sorts d'un type spécifique",
     "onlyForCreatureType": "À dépenser uniquement pour lancer un sort de créature du type choisi",
     "onlyForTypeSpellsOrAbilities": "À dépenser uniquement pour des sorts ou capacités d'un type spécifique",
+    "onlyForTaggedActivation": "À dépenser uniquement pour activer des capacités d'un type spécifique",
     "onlyForSpellWithKeywordKind": "À dépenser uniquement pour lancer des sorts avec un mot-clé spécifique",
     "onlyForSpellWithKeywordKindFromZone": "À dépenser uniquement pour lancer des sorts à mot-clé depuis un cimetière",
+    "onlyForSpellWithManaValue": "À dépenser uniquement pour lancer des sorts répondant à une condition de valeur de mana",
+    "onlyForSpellMatchingCostCriteria": "À dépenser uniquement pour lancer des sorts répondant à une condition de coût",
+    "onlyForSpellWithColorCount": "À dépenser uniquement pour lancer des sorts répondant à une condition de nombre de couleurs",
+    "onlyForSpellFromZone": "À dépenser uniquement pour lancer des sorts depuis une zone autorisée",
+    "onlyForFaceDownSpell": "À dépenser uniquement pour lancer des sorts face cachée",
     "onlyForActivation": "À dépenser uniquement pour activer des capacités",
     "onlyForXCosts": "À dépenser uniquement pour des coûts incluant {X}",
+    "onlyForAny": "À dépenser uniquement pour l'une des utilisations indiquées",
+    "onlyForSpecialAction": "À dépenser uniquement pour une action spéciale spécifique",
     "convokePayment": "Paiement de la convocation",
     "grantsProperty": "Accorde une propriété au sort",
     "grantCantBeCountered": "À dépenser pour ce sort afin qu'il ne puisse pas être contrecarré"
@@ -653,6 +663,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Doit bloquer {{attacker}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -999,6 +1010,31 @@
       "subtitleActivate": "Activer cette capacité ?",
       "subtitlePlay": "Choisissez comment jouer cette carte",
       "subtitleChoose": "Choisissez une capacité à activer"
+    },
+    "manaRestrictions": {
+      "tapForMana": "Engager pour du mana",
+      "tapFor": "Engager pour {{mana}}",
+      "onlyForSpell": "Uniquement pour les sorts.",
+      "onlyForSpellType": "Uniquement pour les sorts de type {{spellType}}.",
+      "onlyForCreatureType": "Uniquement pour les sorts de {{creatureType}}.",
+      "onlyForTypeSpellsOrAbilitiesOfSpellType": "Uniquement pour les sorts de type {{spellType}} ou les capacités de {{spellType}}s.",
+      "onlyForTypeSpellsOrAbilitiesAny": "Uniquement pour les sorts ou capacités de type {{spellType}}.",
+      "onlyForActivation": "Uniquement pour activer des capacités.",
+      "onlyForTaggedActivation": "Uniquement pour activer des capacités {{tag}}.",
+      "onlyForXCosts": "Uniquement pour les coûts contenant X.",
+      "onlyForSpellWithKeywordKind": "Uniquement pour les sorts avec {{keyword}}.",
+      "onlyForSpellWithKeywordKindFromZone": "Uniquement pour les sorts avec {{keyword}} lancés depuis {{zone}}.",
+      "onlyForSpellWithManaValue": "Uniquement pour les sorts de valeur de mana {{comparator}} {{value}}.",
+      "onlyForSpellMatchingCostCriteria": "Uniquement pour les sorts de type {{spellType}} correspondant à {{criteria}}.",
+      "manaValueCriterion": "valeur de mana {{comparator}} {{value}}",
+      "hasXInCostCriterion": "un X dans leur coût",
+      "onlyForSpellWithColorCount": "Uniquement pour les sorts avec {{comparator}} {{count}} couleurs.",
+      "onlyForSpellFromZone": "Uniquement pour les sorts {{polarity}} {{zone}}.",
+      "onlyForFaceDownSpell": "Uniquement pour les sorts face cachée.",
+      "onlyForAny": "Uniquement pour l'un de ces usages : {{restrictions}}",
+      "onlyForSpecialAction": "Uniquement pour l'action spéciale {{action}}.",
+      "convokePayment": "Uniquement pour ce paiement de convocation.",
+      "anySpell": "n'importe quel"
     },
     "defiler": {
       "title": "Réduction de coût du Profanateur",
@@ -1701,9 +1737,30 @@
     "targetCreature": "la cible de créature",
     "targetChoice": "ce choix de cible"
   },
+  "giftRecipient": {
+    "title": "Choisir le destinataire du cadeau",
+    "subtitle": "Choisissez quel adversaire reçoit le cadeau promis."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Promettre un cadeau ?",
+      "pay": "Promettre {{gift}}",
+      "decline": "Lancer sans promettre",
+      "kind": {
+        "card": "une carte",
+        "treasure": "un Trésor",
+        "food": "un Aliment",
+        "tappedFish": "un Poisson engagé"
+      }
+    }
+  },
   "clashOpponent": {
     "title": "Choisir l'adversaire pour la confrontation",
     "subtitle": "Choisissez quel adversaire fera la confrontation avec vous."
+  },
+  "zoneOpponentChooser": {
+    "title": "Choisir un adversaire",
+    "subtitle": "Choisissez quel adversaire fait le choix."
   },
   "pileOpponent": {
     "title": "Choose Opponent",

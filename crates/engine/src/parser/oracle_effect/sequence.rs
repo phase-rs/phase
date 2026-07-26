@@ -9,7 +9,7 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
-use super::super::oracle_target::parse_target;
+use super::super::oracle_target::{parse_target, parse_target_with_ctx};
 use super::super::oracle_util::{contains_possessive, parse_count_expr, TextPair};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
@@ -1456,6 +1456,23 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
         return true;
     }
 
+    // CR 611.2a + CR 111.3 (issue class: Circle of Power): a token/permanent
+    // granted-ability quote that ends a sentence can also be followed by a fresh
+    // sibling sentence whose subject is a TYPED GROUP rather than a bare
+    // imperative verb — "Wizards you control get +1/+0 and gain lifelink until
+    // end of turn.", "Creatures you control get +1/+1 …". This one-shot mass
+    // continuous effect (CR 611.2a) is a sibling of the token creation, not an
+    // anaphor on the created object, so it must split off; otherwise the whole
+    // remainder is swallowed into the token-creation clause and the mass
+    // pump/grant is dropped entirely (the created token then also mis-reads a
+    // trailing "for each …" as its own count). Unlike
+    // `starts_imperative_action_continuation` (a bare verb head), the subject
+    // here is a NOUN, recognized by its type/subtype head plus a following
+    // continuous predicate verb.
+    if starts_typed_group_continuous_continuation(trimmed_lower.as_str()) {
+        return true;
+    }
+
     // CR 608.2c: read the whole text and apply the rules of English — a
     // granted-ability quote that ends a sentence can be followed by a fresh
     // causative "may have …" sentence directed at the affected object's
@@ -1482,6 +1499,27 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
 /// genuine sibling effect here.
 fn starts_imperative_action_continuation(remainder_lower: &str) -> bool {
     !starts_anaphoric_subject(remainder_lower) && starts_clause_text_lower(remainder_lower)
+}
+
+/// CR 611.2a + CR 111.3: true iff `remainder_lower` begins a fresh sibling
+/// sentence whose subject is a TYPED GROUP applying a continuous predicate —
+/// "creatures you control get +1/+1 …", "wizards you control gain lifelink until
+/// end of turn". After a token/permanent granted-ability quote that ends a
+/// sentence, such a one-shot mass continuous effect (CR 611.2a) is a sibling
+/// instruction, never an anaphor on the created object (anaphors begin with a
+/// pronoun/determiner and are handled by `starts_anaphoric_subject`).
+///
+/// Distinguished from a bare-verb imperative (`starts_imperative_action_
+/// continuation`) by its NOUN head: recognized via the shared
+/// `starts_with_type_word` combinator (the same type-word detector used by
+/// `continues_mass_exile_union` in this module) plus a following continuous
+/// predicate verb located by `find_predicate_start` — the exact pair
+/// `try_parse_subject_continuous_clause` uses to split a subject from its
+/// continuous predicate, so a `true` here means the continuation parses as a
+/// group-continuous clause rather than being swallowed.
+fn starts_typed_group_continuous_continuation(remainder_lower: &str) -> bool {
+    crate::parser::oracle_target::starts_with_type_word(remainder_lower)
+        && super::subject::find_predicate_start(remainder_lower).is_some()
 }
 
 /// True iff `remainder_lower` begins with a demonstrative/pronoun word that, after
@@ -3975,6 +4013,42 @@ pub(super) fn apply_clause_continuation(
             destination,
             reorder_all,
         } => {
+            // CR 608.2c + CR 701.20b (Portent of Calamity): After a per-category
+            // exile from among revealed cards, "put the rest into <zone>" moves
+            // the revealed cards still in the library — `LastRevealed` ∩ origin
+            // Library — NOT Dig.rest_destination (a keep_count-0 reveal Dig
+            // returns before applying rest) and NOT the chain tracked set of
+            // cards just exiled (which would dump the player's picks into the
+            // graveyard). Prefer this over Dig patching when both antecedents
+            // exist in the clause list. The exiled-card tail ("put the rest of
+            // the exiled cards …") is a distinct remainder set and must stay on
+            // the imperative `ExiledBySource` path.
+            let for_each_bound = defs.iter().rposition(|def| {
+                matches!(
+                    &*def.effect,
+                    Effect::ForEachCategory {
+                        action: ForEachCategoryAction::ExileFromPool { .. },
+                        ..
+                    }
+                )
+            });
+            if for_each_bound.is_some() && destination != Zone::Hand {
+                defs.push(AbilityDefinition::new(
+                    kind,
+                    Effect::ChangeZoneAll {
+                        origin: Some(Zone::Library),
+                        destination,
+                        target: TargetFilter::LastRevealed,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                        library_position: None,
+                        random_order: false,
+                    },
+                ));
+                return;
+            }
             // Absorbed into preceding Dig or RevealUntil — sets rest_destination
             // for unchosen/non-matching cards. CR 608.2c: When the preceding def is
             // a conditional "instead" alternative (new def with `else_ability =
@@ -3995,10 +4069,37 @@ pub(super) fn apply_clause_continuation(
                 None,
                 super::assembly::OnMiss::Ignore,
             );
-            let Some(bound_index) = bound else {
-                return;
-            };
-            patch_rest_destination_recursively(&mut defs[bound_index], destination, reorder_all);
+            if let Some(bound_index) = bound {
+                // CR 701.20a + CR 608.2c: Dynamic-count reveal-only Digs
+                // (`keep_count: 0`) return before `Dig.rest_destination` is
+                // applied at runtime. Emit an explicit `LastRevealed` sibling
+                // for the revealed-library remainder instead of patching an
+                // unused field (Sunbird's Invocation / Enshrined Memories class).
+                if !reorder_all && dig_needs_last_revealed_rest_sibling(&defs[bound_index].effect) {
+                    let library_position =
+                        (destination == Zone::Library).then_some(LibraryPosition::Bottom);
+                    defs.push(AbilityDefinition::new(
+                        kind,
+                        Effect::ChangeZoneAll {
+                            origin: Some(Zone::Library),
+                            destination,
+                            target: TargetFilter::LastRevealed,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enter_with_counters: vec![],
+                            face_down_profile: None,
+                            library_position,
+                            random_order: false,
+                        },
+                    ));
+                    return;
+                }
+                patch_rest_destination_recursively(
+                    &mut defs[bound_index],
+                    destination,
+                    reorder_all,
+                );
+            }
         }
         ContinuationAst::DigFromAmong {
             quantity,
@@ -4925,6 +5026,38 @@ fn apply_search_destination_to_ability_chain(
     }
 }
 
+/// CR 608.2c + CR 701.20b: True for "put the rest …" clauses that move the
+/// revealed-library remainder after a per-category exile. False for the distinct
+/// exiled-card tail ("put the rest of the exiled cards …"), which must bind to
+/// `ExiledBySource` instead of `LastRevealed` / chain `TrackedSet`.
+fn put_rest_targets_revealed_remainder(lower: &str) -> bool {
+    nom_primitives::scan_contains(lower, "put the rest")
+        && !nom_primitives::scan_contains(lower, "of the exiled cards")
+        && !nom_primitives::scan_contains(lower, "of those exiled cards")
+}
+
+/// CR 701.20a + CR 608.2c: True when a trailing PutRest must become an explicit
+/// `LastRevealed` sibling rather than patching `Dig.rest_destination`. Matches
+/// reveal-only Digs already at `keep_count: 0` and dynamic-count reveal Digs
+/// that assembly demotes to `keep_count: 0` after continuations are applied.
+fn dig_needs_last_revealed_rest_sibling(effect: &Effect) -> bool {
+    match effect {
+        Effect::Dig {
+            keep_count: Some(0),
+            reveal: true,
+            ..
+        } => true,
+        Effect::Dig {
+            keep_count: None,
+            reveal: true,
+            filter: TargetFilter::Any,
+            count,
+            ..
+        } => !matches!(count, QuantityExpr::Fixed { .. }),
+        _ => false,
+    }
+}
+
 /// Recursively patch `rest_destination` on Dig/RevealUntil effects reachable from
 /// `def` via `else_ability`. CR 608.2c: When a preceding def is a conditional
 /// "instead" wrapper (new_def with `else_ability = base_def`), a trailing
@@ -5128,6 +5261,22 @@ pub(super) fn parse_intrinsic_continuation_ast(
     }
 }
 
+/// CR 608.2c + CR 608.2k: Parse a Dig continuation's reveal/put filter with
+/// the enclosing context, so anaphoric references bind to a triggering subject
+/// when one exists.
+fn parse_dig_from_among_filter(filter_text: &str, ctx: &mut ParseContext) -> TargetFilter {
+    if filter_text.is_empty()
+        || filter_text == "card"
+        || filter_text == "cards"
+        || filter_text == "of them"
+    {
+        TargetFilter::Any
+    } else {
+        let (filter, _) = parse_target_with_ctx(filter_text, ctx);
+        filter
+    }
+}
+
 /// CR 701.20e + CR 608.2c: Parse "put/return up to N [filter] from among
 /// them/those cards onto the battlefield / into your hand / to your hand" into
 /// a DigFromAmong continuation that patches the preceding Dig effect. The
@@ -5152,7 +5301,11 @@ pub(super) fn parse_intrinsic_continuation_ast(
 /// - "you may reveal a creature card from among them and put it into your hand"
 /// - "put two of them into your hand and the rest on the bottom of your library in any order"
 /// - "put two of those cards into your hand"
-pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<ContinuationAst> {
+pub(super) fn parse_dig_from_among(
+    lower: &str,
+    original: &str,
+    ctx: &mut ParseContext,
+) -> Option<ContinuationAst> {
     // CR 202.3 + CR 107.3i: Strip a trailing "where X is <expression>" defining
     // clause before destination/count/filter parsing. `where_x_expression`
     // (when present) is applied to the parsed filter at the end.
@@ -5268,16 +5421,7 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             )
         };
 
-        let filter = if filter_text.is_empty()
-            || filter_text == "card"
-            || filter_text == "cards"
-            || filter_text == "of them"
-        {
-            TargetFilter::Any
-        } else {
-            let (parsed_filter, _) = parse_target(filter_text);
-            parsed_filter
-        };
+        let filter = parse_dig_from_among_filter(filter_text, ctx);
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
         let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref())?;
 
@@ -5367,17 +5511,8 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             (PutCount::up(1), after_put)
         };
 
-        // Parse the filter from the remaining text (e.g., "creature cards with mana value 3 or less")
-        let filter = if filter_text.is_empty()
-            || filter_text == "card"
-            || filter_text == "cards"
-            || filter_text == "of them"
-        {
-            TargetFilter::Any
-        } else {
-            let (parsed_filter, _) = parse_target(filter_text);
-            parsed_filter
-        };
+        // Parse the filter from the remaining text (e.g., "creature cards with mana value 3 or less").
+        let filter = parse_dig_from_among_filter(filter_text, ctx);
         // CR 202.3 + CR 107.3i: Bind the literal `X` in the filter's `Cmc` bound
         // with the stripped "where X is <expression>" defining clause.
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
@@ -5878,6 +6013,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // `Dig`, and the sacrificed creature feeds the continuation's filter
         // via `ObjectScope::CostPaidObject`.
         Effect::Sacrifice { .. } | Effect::PayCost { .. } => true,
+        // CR 406.3 + CR 608.2c + CR 701.24a: Exiling a face-down pile and
+        // shuffling it for its "If you do" rider is an intervening instruction;
+        // a later continuation may still refer to an earlier Dig.
+        Effect::ExileFaceDownPile { .. } => true,
         // CR 406.3: turning the exiled card face up is its own resolving effect,
         // not a Dig-lookback-transparent clause.
         Effect::TurnFaceUp { .. } => false,
@@ -5952,6 +6091,9 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c (Metamorphic Alteration): the as-enters copy choice is its
+        // own resolving effect, not a Dig-lookback-transparent clause.
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
@@ -5968,6 +6110,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealHand { .. }
@@ -6613,6 +6756,32 @@ pub(super) fn parse_followup_continuation_ast(
                 reorder_all: false,
             })
         }
+        // CR 608.2c + CR 701.20b (Portent of Calamity / Sanar class): "Put the
+        // rest into your graveyard" after a per-category exile from among the
+        // revealed cards. The rest are the revealed cards still in the library
+        // (not the cards just exiled into the chain tracked set).
+        Effect::ForEachCategory {
+            action: ForEachCategoryAction::ExileFromPool { .. },
+            ..
+        } if put_rest_targets_revealed_remainder(&lower) =>
+        {
+            let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
+                || nom_primitives::scan_contains(&lower, "into their graveyard")
+            {
+                Zone::Graveyard
+            } else if nom_primitives::scan_contains(&lower, "into your hand")
+                || nom_primitives::scan_contains(&lower, "into their hand")
+            {
+                Zone::Hand
+            } else {
+                // "on the bottom", "on top of", and other library rest piles.
+                Zone::Library
+            };
+            Some(ContinuationAst::PutRest {
+                destination,
+                reorder_all: false,
+            })
+        }
         // CR 701.20a + CR 608.2c: A reveal-until rest-pile clause may be
         // separated from the RevealUntil by a transparent intervening effect
         // ("~ deals damage equal to that card's mana value. Put that card into
@@ -6997,7 +7166,7 @@ pub(super) fn parse_followup_continuation_ast(
                     || nom_primitives::scan_contains(&lower, "to your hand")
                     || nom_primitives::scan_contains(&lower, "to their hand")) =>
         {
-            parse_dig_from_among(&lower, text)
+            parse_dig_from_among(&lower, text, ctx)
         }
         // CR 701.33: "[You may] reveal [up to] N <filter> cards from among
         // them" after Dig — the reveal-only form where the kept cards are NOT
@@ -7018,7 +7187,7 @@ pub(super) fn parse_followup_continuation_ast(
                 && !nom_primitives::scan_contains(&lower, "into your hand")
                 && !nom_primitives::scan_contains(&lower, "into their hand") =>
         {
-            parse_dig_from_among(&lower, text)
+            parse_dig_from_among(&lower, text, ctx)
         }
         // CR 508.4 / CR 614.1: "It/The token enters tapped and attacking" (singular)
         // or "They/Those tokens enter tapped and attacking" (plural)
@@ -7788,6 +7957,17 @@ mod tests {
     use super::*;
     use crate::types::ability::QuantityExpr;
 
+    #[test]
+    fn face_down_pile_is_dig_lookback_transparent() {
+        let effect = Effect::ExileFaceDownPile {
+            object: TargetFilter::TriggeringSource,
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 6 },
+        };
+
+        assert!(clause_is_dig_lookback_transparent(&effect));
+    }
+
     // CR 608.2c + CR 601.2c: "target opponent does the same / does so" replicates
     // the preceding sibling effect for a targeted opponent. The recognizer must
     // accept the "does the same", "does so", and leading-"then" phrasings.
@@ -7805,6 +7985,88 @@ mod tests {
                 "should recognize {phrasing:?}"
             );
         }
+    }
+
+    // CR 611.2a + CR 111.3: a typed-group continuous sibling ("<type> you control
+    // get/gain …") following a token's granted-ability quote is a fresh clause,
+    // not an anaphor on the created object. The recognizer keys off a type/subtype
+    // NOUN head plus a continuous predicate verb, so it fires for the group-pump /
+    // group-grant class while leaving pronoun anaphors ("it …", "that creature …")
+    // and bare imperatives ("draw …") to the other continuation gates.
+    #[test]
+    fn typed_group_continuous_continuation_recognizes_mass_pump_grant() {
+        for remainder in [
+            "creatures you control get +1/+1 and gain vigilance until end of turn.",
+            "wizards you control get +1/+0 and gain lifelink until end of turn.",
+            "zombies you control get +2/+1 until end of turn.",
+            "artifacts you control gain hexproof until end of turn.",
+        ] {
+            assert!(
+                starts_typed_group_continuous_continuation(remainder),
+                "should recognize typed-group continuous sibling: {remainder:?}"
+            );
+        }
+        // Anaphors on the created object stay attached (pronoun/determiner head).
+        for remainder in [
+            "it gains haste until end of turn.",
+            "that creature gets +1/+1 until end of turn.",
+            "those tokens gain flying.",
+        ] {
+            assert!(
+                !starts_typed_group_continuous_continuation(remainder),
+                "anaphoric continuation must NOT be treated as a typed-group sibling: {remainder:?}"
+            );
+        }
+        // Non-typed / bare-imperative continuations are handled by the other gates.
+        assert!(!starts_typed_group_continuous_continuation("draw a card."));
+        assert!(!starts_typed_group_continuous_continuation(
+            "you gain 2 life."
+        ));
+    }
+
+    // CR 111.3 + CR 611.2a (Circle of Power class): a token created "with \"…\""
+    // whose granted-ability quote ends a sentence must not swallow a following
+    // typed-group continuous sibling. The sentence-ending close quote splits the
+    // clause so the mass pump/grant reaches its own chunk instead of being folded
+    // into the token-creation clause (which would drop it silently).
+    #[test]
+    fn quoted_token_ability_does_not_swallow_typed_group_sibling() {
+        let text = "Create a 1/1 red Elf creature token with \"When this token dies, \
+                    draw a card.\" Creatures you control get +1/+1 and gain vigilance \
+                    until end of turn.";
+        let chunks = split_clause_sequence(text);
+        assert!(
+            chunks.len() >= 2,
+            "the quoted-ability token clause and the mass-pump sibling must be \
+             separate chunks, got {chunks:?}"
+        );
+        let sibling_split = chunks.iter().any(|c| {
+            // allow-noncombinator: test assertion on split_clause_sequence output, not parser dispatch
+            c.text.starts_with("Creatures you control get")
+        });
+        assert!(
+            sibling_split,
+            "the mass-pump sibling must survive as its own chunk, got {chunks:?}"
+        );
+
+        // End-to-end: the pumped-group continuous effect must survive chain
+        // assembly rather than being dropped when it follows the quoted token.
+        let def = super::super::parse_effect_chain(text, AbilityKind::Spell);
+        let mut node = Some(&def);
+        let mut saw_group_continuous = false;
+        while let Some(cur) = node {
+            if matches!(
+                &*cur.effect,
+                Effect::GenericEffect { .. } | Effect::PumpAll { .. }
+            ) {
+                saw_group_continuous = true;
+            }
+            node = cur.sub_ability.as_deref();
+        }
+        assert!(
+            saw_group_continuous,
+            "the mass pump/grant sibling must survive chain assembly, got {def:?}"
+        );
     }
 
     // CR 508.6 + CR 102.2 + CR 608.2c: the player-scoped "does the same"

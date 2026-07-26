@@ -7,6 +7,7 @@ import type {
   GameState,
   LegalActionsResult,
   ManaCost,
+  ObjectAction,
   ObjectId,
   PlayerId,
   SubmitResult,
@@ -603,8 +604,10 @@ export class ServerDraftAdapter implements EngineAdapter {
           your_player: PlayerId;
           legal_actions?: GameAction[];
           auto_pass_recommended?: boolean;
+          mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
-          legal_actions_by_object?: Record<string, GameAction[]>;
+          legal_actions_by_object?: Record<string, ObjectAction[]>;
+          viewer_interaction?: LegalActionsResult["viewerInteraction"];
           derived?: GameState["derived"];
         };
         const startedSnapshot = this.cacheSnapshot(
@@ -612,8 +615,10 @@ export class ServerDraftAdapter implements EngineAdapter {
           {
             actions: data.legal_actions ?? [],
             autoPassRecommended: data.auto_pass_recommended ?? false,
+            manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            viewerInteraction: data.viewer_interaction,
           },
         );
         this._playerId = data.your_player;
@@ -632,8 +637,10 @@ export class ServerDraftAdapter implements EngineAdapter {
           events: GameEvent[];
           legal_actions?: GameAction[];
           auto_pass_recommended?: boolean;
+          mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
-          legal_actions_by_object?: Record<string, GameAction[]>;
+          legal_actions_by_object?: Record<string, ObjectAction[]>;
+          viewer_interaction?: LegalActionsResult["viewerInteraction"];
           log_entries?: GameLogEntry[];
           derived?: GameState["derived"];
         };
@@ -642,8 +649,10 @@ export class ServerDraftAdapter implements EngineAdapter {
           {
             actions: data.legal_actions ?? [],
             autoPassRecommended: data.auto_pass_recommended ?? false,
+            manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            viewerInteraction: data.viewer_interaction,
           },
         );
         if (this.pendingResolve) {

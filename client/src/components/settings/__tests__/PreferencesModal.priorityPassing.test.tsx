@@ -34,4 +34,11 @@ describe("PreferencesModal priority passing", () => {
     fireEvent.click(checkbox);
     expect(usePreferencesStore.getState().priorityPassingMode).toBe("Standard");
   });
+
+  it("renders the command-zone layout label from the settings catalog", () => {
+    render(<PreferencesModal onClose={vi.fn()} initialTab="gameplay" />);
+
+    expect(screen.getByText("Command Zone")).toBeInTheDocument();
+    expect(screen.queryByText("GAMEPLAY.COMMANDZONE")).not.toBeInTheDocument();
+  });
 });

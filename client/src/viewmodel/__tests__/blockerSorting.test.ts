@@ -10,9 +10,9 @@ describe("sortCreaturesForBlockers", () => {
   it("orders blockers by their assigned attacker's opponent column", () => {
     const players = [g(1), g(2)];
     const opponents = [g(102), g(101)]; // atk 102 -> col 0, atk 101 -> col 1
-    const assignments = new Map<ObjectId, ObjectId>([
-      [1, 101], // col 1
-      [2, 102], // col 0
+    const assignments = new Map<ObjectId, Set<ObjectId>>([
+      [1, new Set([101])], // col 1
+      [2, new Set([102])], // col 0
     ]);
     const sorted = sortCreaturesForBlockers(players, opponents, assignments);
     expect(sorted.map((p) => p.ids[0])).toEqual([2, 1]);
@@ -25,10 +25,10 @@ describe("sortCreaturesForBlockers", () => {
     // defined. The result must preserve the input order deterministically.
     const players = [g(1), g(2), g(3)];
     const opponents: GroupedPermanent[] = []; // no attacker columns at all
-    const assignments = new Map<ObjectId, ObjectId>([
-      [1, 901],
-      [2, 902],
-      [3, 903],
+    const assignments = new Map<ObjectId, Set<ObjectId>>([
+      [1, new Set([901])],
+      [2, new Set([902])],
+      [3, new Set([903])],
     ]);
     const sorted = sortCreaturesForBlockers(players, opponents, assignments);
     expect(sorted.map((p) => p.ids[0])).toEqual([1, 2, 3]);
@@ -37,11 +37,24 @@ describe("sortCreaturesForBlockers", () => {
   it("sorts off-row (no-column) blockers after those with a real column", () => {
     const players = [g(10), g(11)];
     const opponents = [g(500)]; // col 0
-    const assignments = new Map<ObjectId, ObjectId>([
-      [10, 999], // Infinity (not on the opponent row)
-      [11, 500], // col 0
+    const assignments = new Map<ObjectId, Set<ObjectId>>([
+      [10, new Set([999])], // Infinity (not on the opponent row)
+      [11, new Set([500])], // col 0
     ]);
     const sorted = sortCreaturesForBlockers(players, opponents, assignments);
     expect(sorted.map((p) => p.ids[0])).toEqual([11, 10]);
+  });
+
+  it("uses the earliest attacker column when one blocker blocks multiple attackers", () => {
+    const players = [g(10), g(11)];
+    const opponents = [g(500), g(501)];
+    const assignments = new Map<ObjectId, Set<ObjectId>>([
+      [10, new Set([501, 500])],
+      [11, new Set([501])],
+    ]);
+
+    const sorted = sortCreaturesForBlockers(players, opponents, assignments);
+
+    expect(sorted.map((p) => p.ids[0])).toEqual([10, 11]);
   });
 });

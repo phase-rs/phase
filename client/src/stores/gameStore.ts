@@ -11,12 +11,14 @@ import type {
   LegalActionsResult,
   ManaCost,
   MatchConfig,
+  ObjectAction,
   ObjectId,
   PlayerId,
   PersistedGameState,
   StuckDecisionDiagnostic,
   WaitingFor,
 } from "../adapter/types";
+import type { ViewerInteraction } from "../adapter/generated/interaction";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { applySpellPaymentPreference } from "../game/castPaymentMode";
 import { getPlayerId } from "../hooks/usePlayerId";
@@ -24,13 +26,15 @@ import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersiste
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
-export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic"> {
+export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic" | "viewerInteraction"> {
   return {
     legalActions: result.actions,
     autoPassRecommended: result.autoPassRecommended,
+    manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     spellCosts: result.spellCosts ?? {},
     legalActionsByObject: result.legalActionsByObject ?? {},
     stuckDiagnostic: result.stuckDiagnostic ?? null,
+    viewerInteraction: result.viewerInteraction ?? null,
   };
 }
 
@@ -95,6 +99,8 @@ interface GameStoreState {
   waitingFor: WaitingFor | null;
   legalActions: GameAction[];
   autoPassRecommended: boolean;
+  /** Exact engine-authored actions dispatched by the tap-all-mana shortcut. */
+  manaPaymentShortcutActions: GameAction[];
   /** Effective mana costs for castable spells, keyed by object_id string. */
   spellCosts: Record<string, ManaCost>;
   /**
@@ -103,7 +109,7 @@ interface GameStoreState {
    * `legalActions`; frontend "what can I do with this card?" lookups go
    * through this map instead of inferring action availability from objects.
    */
-  legalActionsByObject: Record<string, GameAction[]>;
+  legalActionsByObject: Record<string, ObjectAction[]>;
   /**
    * Engine-owned non-fatal progress-wedge diagnostic (an engine anomaly, not a
    * rules outcome) — present only when the current decision is wedged (no legal
@@ -111,6 +117,8 @@ interface GameStoreState {
    * (drives `StuckDecisionToast`).
    */
   stuckDiagnostic: StuckDecisionDiagnostic | null;
+  /** Viewer-scoped interaction projection from the same engine snapshot. */
+  viewerInteraction: ViewerInteraction | null;
   stateHistory: GameState[];
   turnCheckpoints: GameState[];
   /**
@@ -181,6 +189,7 @@ type CommitExtraState = Partial<Omit<GameStoreState,
   | "waitingFor"
   | "legalActions"
   | "autoPassRecommended"
+  | "manaPaymentShortcutActions"
   | "spellCosts"
   | "legalActionsByObject"
   | "stuckDiagnostic"
@@ -207,6 +216,13 @@ interface GameStoreActions {
    * "Undo not supported in P2P games" guard.
    */
   resumeP2PHost: (gameId: string, adapter: EngineAdapter) => Promise<void>;
+  /**
+   * Resume a native-engine solo (AI) game. Like `resumeP2PHost` the game is
+   * server-authoritative — the local phase-server holds the state and the
+   * reconnecting adapter's `initialize()` yields it — so there is no local
+   * snapshot to `restoreState` and no undo history to rebuild.
+   */
+  resumeNativeSolo: (gameId: string, adapter: EngineAdapter) => Promise<void>;
   dispatch: (action: GameAction) => Promise<GameEvent[]>;
   undo: () => Promise<void>;
   reset: () => void;
@@ -277,6 +293,40 @@ export function nextGameSessionGeneration(): number {
 
 export type GameStore = GameStoreState & GameStoreActions;
 
+/**
+ * Seed the store from a server-authoritative adapter whose `initialize()` has
+ * already produced the current game state (resumed P2P host, or a reconnected
+ * native solo game). These games have no client-side undo history and no local
+ * checkpoints — the server owns the state — so `stateHistory`/`turnCheckpoints`
+ * stay empty. Shared by `resumeP2PHost` and `resumeNativeSolo`.
+ */
+async function seedResumedServerGame(
+  get: () => GameStore,
+  gameId: string,
+  adapter: EngineAdapter,
+): Promise<void> {
+  // Reset stack-pacing throughput — resuming may load a different game than the
+  // one just played; stale churn must not carry across.
+  resetStackThroughput();
+  await adapter.initialize();
+  // Fetched after `initialize()` restored/attached the engine state, so the
+  // snapshot is newest-by-construction and always passes the commit gate.
+  const snapshot = await adapter.getSnapshot();
+  get().commitEngineSnapshot(snapshot, {
+    extraState: {
+      gameId,
+      adapter,
+      gameSessionGeneration: nextGameSessionGeneration(),
+      events: [],
+      eventHistory: [],
+      logHistory: [],
+      nextLogSeq: 0,
+      stateHistory: [],
+      turnCheckpoints: [],
+    },
+  });
+}
+
 const initialState: GameStoreState = {
   gameId: null,
   gameMode: null,
@@ -292,9 +342,11 @@ const initialState: GameStoreState = {
   waitingFor: null,
   legalActions: [],
   autoPassRecommended: false,
+  manaPaymentShortcutActions: [],
   spellCosts: {},
   legalActionsByObject: {},
   stuckDiagnostic: null,
+  viewerInteraction: null,
   stateHistory: [],
   turnCheckpoints: [],
   lobbyProgress: null,
@@ -365,7 +417,26 @@ export const useGameStore = create<GameStore>()(
       // pacing (rematch started within the throughput window).
       resetStackThroughput();
       await adapter.initialize();
-      const initResult = await adapter.initializeGame(deckData, formatConfig, playerCount, matchConfig, firstPlayer);
+      // Network-backed adapters can publish the initial authoritative snapshot
+      // from inside `initializeGame`. Bind the transport before that happens so
+      // the shared remote-update path never commits a visible game state whose
+      // action dispatcher has no adapter yet.
+      set({ adapter });
+      let initResult;
+      try {
+        initResult = await adapter.initializeGame(
+          deckData,
+          formatConfig,
+          playerCount,
+          matchConfig,
+          firstPlayer,
+        );
+      } catch (error) {
+        // A failed initialization must not leave a transport that never
+        // produced a playable game attached to the store.
+        if (get().adapter === adapter) set({ adapter: null });
+        throw error;
+      }
       // Fetched AFTER the engine is initialized, so this snapshot is
       // newest-by-construction under the global counter — it always passes the
       // gate, and it drops any leftover in-flight commit from a prior match.
@@ -433,30 +504,19 @@ export const useGameStore = create<GameStore>()(
     },
 
     resumeP2PHost: async (gameId, adapter) => {
-      // Reset stack-pacing throughput on entry to this game context.
-      resetStackThroughput();
-      // `adapter.initialize()` on a resumed P2PHostAdapter already
-      // called `wasm.resumeMultiplayerHostState(savedState)` — the
-      // engine is populated and in multiplayer mode. All we need here
-      // is to pull the state out and seed the store. No stateHistory
-      // (multiplayer = no undo); no checkpoints (P2P never saved them).
-      await adapter.initialize();
-      // Fetched after that `initialize()` (which is what restored the engine, per
-      // the note above), so the snapshot is newest-by-construction.
-      const snapshot = await adapter.getSnapshot();
-      get().commitEngineSnapshot(snapshot, {
-        extraState: {
-          gameId,
-          adapter,
-          gameSessionGeneration: nextGameSessionGeneration(),
-          events: [],
-          eventHistory: [],
-          logHistory: [],
-          nextLogSeq: 0,
-          stateHistory: [],
-          turnCheckpoints: [],
-        },
-      });
+      // `adapter.initialize()` on a resumed P2PHostAdapter already called
+      // `wasm.resumeMultiplayerHostState(savedState)` — the engine is populated
+      // and in multiplayer mode — so the shared helper just pulls the state out
+      // and seeds the store. No stateHistory (multiplayer = no undo); no
+      // checkpoints (P2P never saved them).
+      await seedResumedServerGame(get, gameId, adapter);
+    },
+
+    resumeNativeSolo: async (gameId, adapter) => {
+      // The reconnecting native adapter's `initialize()` sends a reconnect frame
+      // and resolves once the phase-server replays the current GameStarted
+      // state; the shared helper then seeds the store from that authority.
+      await seedResumedServerGame(get, gameId, adapter);
     },
 
     dispatch: async (action) => {

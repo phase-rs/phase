@@ -454,6 +454,24 @@ pub struct PolicyPenalties {
     /// the current deck plan. Consumed by `CyclingDisciplinePolicy`.
     #[serde(default = "default_cycling_needed_land_penalty")]
     pub cycling_needed_land_penalty: f64,
+    /// Penalty for a `PayCost` discard selection that spends every land in hand
+    /// while a land drop remains available. Consumed by `PaymentSelectionPolicy`.
+    #[serde(default = "default_payment_selection_needed_land_penalty")]
+    pub payment_selection_needed_land_penalty: f64,
+    /// Strong finite penalty for crewing outside an immediate attack or block
+    /// window. Consumed by `CrewTimingPolicy`.
+    #[serde(default = "default_crew_no_immediate_use_penalty")]
+    pub crew_no_immediate_use_penalty: f64,
+    /// Strong finite penalty for activating a combat-withdrawal ability when no
+    /// exact legal target rescues one of the controller's creatures from combat.
+    /// Consumed by `CombatWithdrawalPolicy`.
+    #[serde(default = "default_combat_withdrawal_futile_penalty")]
+    pub combat_withdrawal_futile_penalty: f64,
+    /// Penalty when an exact self-counter replenishment ability has its
+    /// replacement-aware counter addition prevented. Consumed by
+    /// `SelfCostValuePolicy`.
+    #[serde(default = "default_self_cost_counter_replacement_prevented_penalty")]
+    pub self_cost_counter_replacement_prevented_penalty: f64,
     /// CR 732.2a / CR 104.2a: bonus for proposing an `UntilLethal` loop shortcut whose latched
     /// `predicted_winner` IS the proposer — the crown ends the game in their favor, and the only
     /// other outcome (`until_lethal_fallback`) restores the board a decline would have produced.
@@ -463,6 +481,16 @@ pub struct PolicyPenalties {
     /// scalar.)
     #[serde(default = "default_loop_shortcut_winning_declare_bonus")]
     pub loop_shortcut_winning_declare_bonus: f64,
+    /// CR 104.3d: card-equivalent weight for advancing the poison clock.
+    /// Critical band when the action reaches ten poison (a win), scaled by
+    /// clock progress below that.
+    #[serde(default = "default_poison_clock_pressure")]
+    pub poison_clock_pressure: f64,
+    /// CR 205.2a: card-equivalent weight for advancing graveyard card-type
+    /// diversity toward a delirium/descend threshold. Strong band when the
+    /// action supplies the last missing type.
+    #[serde(default = "default_graveyard_types_progress")]
+    pub graveyard_types_progress: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -526,13 +554,33 @@ impl Default for PolicyPenalties {
             self_cost_exile_graveyard_per_card: default_self_cost_exile_graveyard_per_card(),
             cycling_patience_penalty: default_cycling_patience_penalty(),
             cycling_needed_land_penalty: default_cycling_needed_land_penalty(),
+            payment_selection_needed_land_penalty: default_payment_selection_needed_land_penalty(),
+            crew_no_immediate_use_penalty: default_crew_no_immediate_use_penalty(),
+            combat_withdrawal_futile_penalty: default_combat_withdrawal_futile_penalty(),
+            self_cost_counter_replacement_prevented_penalty:
+                default_self_cost_counter_replacement_prevented_penalty(),
             loop_shortcut_winning_declare_bonus: default_loop_shortcut_winning_declare_bonus(),
+            poison_clock_pressure: default_poison_clock_pressure(),
+            graveyard_types_progress: default_graveyard_types_progress(),
         }
     }
 }
 
+/// CR 205.2a. Shared by `Default` and `#[serde(default)]` so a tuning artifact
+/// written before this field existed still deserializes (`ai_tune` reads the
+/// `policy_penalties` section directly into this struct).
+fn default_graveyard_types_progress() -> f64 {
+    2.5
+}
+
 fn default_wasted_cast_penalty() -> f64 {
     -8.0
+}
+/// CR 104.3d. Shared by `Default` and `#[serde(default)]` so a tuning artifact
+/// written before this field existed still deserializes (`ai_tune` reads the
+/// `policy_penalties` section directly into this struct).
+fn default_poison_clock_pressure() -> f64 {
+    6.0
 }
 fn default_untap_own_tapped_bonus() -> f64 {
     8.0
@@ -561,6 +609,18 @@ fn default_cycling_patience_penalty() -> f64 {
 }
 fn default_cycling_needed_land_penalty() -> f64 {
     -2.0
+}
+fn default_payment_selection_needed_land_penalty() -> f64 {
+    -2.0
+}
+fn default_crew_no_immediate_use_penalty() -> f64 {
+    5.0
+}
+fn default_combat_withdrawal_futile_penalty() -> f64 {
+    5.0
+}
+fn default_self_cost_counter_replacement_prevented_penalty() -> f64 {
+    3.0
 }
 
 /// 8.0 = mid-`critical` band. Sized for the HEURISTIC branch, which adds the tactical score RAW:
@@ -725,6 +785,17 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 /// vector yet.
 pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
+        "poison_clock_pressure",
+        "CR 104.3d win-detector weight — a critical-band term whose magnitude is \
+         load-bearing for correctness, not taste. Promote to ACTIVE only with a \
+         paired-seed ai-gate calibration.",
+    ),
+    (
+        "graveyard_types_progress",
+        "CR 205.2a delirium-threshold progress weight — awaiting a paired-seed \
+         ai-gate calibration before promotion to ACTIVE.",
+    ),
+    (
         "artifact_cost_payoff_bonus",
         "new ArtifactSynergyPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
     ),
@@ -811,6 +882,22 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "cycling_needed_land_penalty",
         "CyclingDisciplinePolicy sole-needed-land value occupies the finite strong band; explicitly untuned pending broader paired-seed calibration",
+    ),
+    (
+        "payment_selection_needed_land_penalty",
+        "PaymentSelectionPolicy retains the final playable hand land at the authoritative PayCost selection boundary; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "crew_no_immediate_use_penalty",
+        "CrewTimingPolicy timing guard; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "combat_withdrawal_futile_penalty",
+        "CombatWithdrawalPolicy exact-combat rescue guard; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "self_cost_counter_replacement_prevented_penalty",
+        "SelfCostValuePolicy replacement-aware counter-replenishment guard; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
     ),
     (
         "loop_shortcut_winning_declare_bonus",
@@ -1492,6 +1579,68 @@ mod tests {
         let p = PolicyPenalties::default();
         assert_eq!(p.cycling_patience_penalty, -1.0);
         assert_eq!(p.cycling_needed_land_penalty, -2.0);
+    }
+
+    /// Artifact compatibility: `ai_tune` deserializes a persisted
+    /// `policy_penalties` section straight into `PolicyPenalties`
+    /// (`bin/ai_tune.rs`, `TuneGroup::Penalties`), so an artifact written
+    /// before `poison_clock_pressure` existed must still load — with its own
+    /// tuned values intact and the new field filled from the shared default.
+    #[test]
+    fn policy_penalties_load_pre_poison_clock_artifact() {
+        let mut artifact = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let object = artifact.as_object_mut().expect("serializes as object");
+        object
+            .remove("poison_clock_pressure")
+            .expect("field must be present before removal");
+        // A value CMA-ES could plausibly have tuned, to prove the round-trip
+        // reads the artifact rather than silently falling back to Default.
+        object.insert("wasted_cast_penalty".into(), serde_json::json!(-3.5));
+
+        let loaded: PolicyPenalties = serde_json::from_value(artifact)
+            .expect("a pre-poison_clock_pressure artifact must still deserialize");
+        assert_eq!(loaded.wasted_cast_penalty, -3.5, "tuned value preserved");
+        assert_eq!(
+            loaded.poison_clock_pressure,
+            default_poison_clock_pressure(),
+            "absent field must fall back to the shared default"
+        );
+        assert_eq!(
+            PolicyPenalties::default().poison_clock_pressure,
+            default_poison_clock_pressure(),
+            "Default and serde must share one source of truth"
+        );
+    }
+
+    /// Artifact compatibility: `ai_tune` deserializes a persisted
+    /// `policy_penalties` section straight into `PolicyPenalties`
+    /// (`bin/ai_tune.rs`, `TuneGroup::Penalties`), so an artifact written
+    /// before `graveyard_types_progress` existed must still load — with its own
+    /// tuned values intact and the new field filled from the shared default.
+    #[test]
+    fn policy_penalties_load_pre_graveyard_types_artifact() {
+        let mut artifact = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let object = artifact.as_object_mut().expect("serializes as object");
+        object
+            .remove("graveyard_types_progress")
+            .expect("field must be present before removal");
+        // A value CMA-ES could plausibly have tuned, to prove the round-trip
+        // reads the artifact rather than silently falling back to Default.
+        object.insert("wasted_cast_penalty".into(), serde_json::json!(-3.5));
+
+        let loaded: PolicyPenalties = serde_json::from_value(artifact)
+            .expect("a pre-graveyard_types_progress artifact must still deserialize");
+        assert_eq!(loaded.wasted_cast_penalty, -3.5, "tuned value preserved");
+        assert_eq!(
+            loaded.graveyard_types_progress,
+            default_graveyard_types_progress(),
+            "absent field must fall back to the shared default"
+        );
+        assert_eq!(
+            PolicyPenalties::default().graveyard_types_progress,
+            default_graveyard_types_progress(),
+            "Default and serde must share one source of truth"
+        );
     }
 
     #[test]

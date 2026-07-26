@@ -500,6 +500,7 @@ impl EventObjectSnapshot {
             | TargetFilter::SpecificObject { .. }
             | TargetFilter::LastCreated
             | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
             | TargetFilter::CostPaidObject
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
@@ -1178,6 +1179,15 @@ pub enum GameEvent {
         event_type: String,
     },
     Transformed {
+        object_id: ObjectId,
+    },
+    /// CR 710.4: A Kamigawa flip permanent was flipped to its alternative face.
+    /// Distinct from `Transformed` — CR 701.27a restricts transforming to
+    /// double-faced permanents, and CR 710.1c keeps a flipped permanent's color
+    /// and mana cost unchanged where transforming swaps them. Drives the game
+    /// log and the public-state/frontend re-render. No printed card triggers on
+    /// a permanent flipping, so this event dispatches no trigger key.
+    Flipped {
         object_id: ObjectId,
     },
     /// Digital-only Specialize: a permanent became a color-specific specialized face.

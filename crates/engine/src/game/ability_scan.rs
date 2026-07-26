@@ -231,6 +231,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         source_incarnation: _,     // self-transform epoch latch, no dynamic read
         trigger_source: _,         // exact triggered-source authority, no dynamic read
         trigger_definition_ref: _, // exact trigger occurrence, no dynamic read
+        force_block_attacker: _,   // exact force-block referent, no dynamic read
         controller: _,             // player id
         original_controller: _,    // player id
         scoped_player: _,          // player id (iteration binding)
@@ -258,6 +259,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         chosen_players: _,         // concrete chosen player ids
         replacement_applied: _,    // replacement provenance set, no dynamic read
         sub_link: _,               // SubAbilityLink kind tag
+        sibling_condition: _,      // SiblingCondition replication marker, no dynamic read
         parent_target_missing_reason: _, // seam flag
     } = a;
 
@@ -890,6 +892,13 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc
         }
         Effect::BecomeCopy { .. } => Axes::CONSERVATIVE,
+        // CR 707.2c: the chosen creature's copiable values are latched onto the
+        // Aura's host at the answer — a copy-family continuous effect, same
+        // conservative classification as `BecomeCopy`. `filter` scans no
+        // per-source projected resource (it just bounds the choice pool).
+        Effect::ChoosePermanent { filter } => {
+            scan_target_filter(filter, target_ctx, mode).or(Axes::CONSERVATIVE)
+        }
         Effect::GainActivatedAbilitiesOfTarget {
             target,
             recipient,
@@ -1040,6 +1049,13 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
+        // CR 710.4: identical scan shape to `Transform` — the only read is the
+        // effect's own target filter.
+        Effect::FlipPermanent { target } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc
+        }
         Effect::SearchLibrary { .. } => Axes::CONSERVATIVE,
         Effect::SearchOutsideGame {
             filter,
@@ -1090,6 +1106,13 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(count, mode));
             acc
         }
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => scan_target_filter(object, target_ctx, mode)
+            .or(scan_target_filter(player, target_ctx, mode))
+            .or(scan_quantity_expr(count, mode)),
         Effect::TargetOnly { target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
@@ -1127,9 +1150,14 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::ForceBlock { target } => {
+        Effect::ForceBlock {
+            target,
+            attacker: _,
+            duration,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc = acc.or(scan_duration(duration, mode));
             acc
         }
         Effect::ForceAttack {
@@ -2883,7 +2911,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         TargetFilter::ScopedPlayer => Axes::NONE,
         TargetFilter::AttachedTo => Axes::NONE,
         TargetFilter::LastCreated => Axes::NONE,
-        TargetFilter::LastRevealed => Axes::NONE,
+        TargetFilter::LastRevealed | TargetFilter::LastZoneChanged => Axes::NONE,
         TargetFilter::CostPaidObject => Axes {
             event: true,
             sibling: false,
@@ -3071,11 +3099,13 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             acc = acc.or(scan_player_filter(player, mode));
             acc
         }
-        TriggerCondition::SourceEnteredThisTurn => Axes {
-            event: false,
-            sibling: false,
-            projected: true,
-        },
+        TriggerCondition::SourceEnteredThisTurn | TriggerCondition::SourceAttackedThisCombat => {
+            Axes {
+                event: false,
+                sibling: false,
+                projected: true,
+            }
+        }
         TriggerCondition::EchoDue => Axes::NONE,
         TriggerCondition::MinCoAttackers { filter, minimum: _ } => {
             let mut acc = Axes::NONE;
@@ -4243,6 +4273,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         target_selection_mode: _,
         sub_link: _,
         iteration_kind_binding: _,
+        sibling_condition: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);
@@ -4567,7 +4598,7 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Outlast(_)
         | Keyword::Dash(_)
         | Keyword::Warp(_)
-        | Keyword::Devour(_)
+        | Keyword::Devour { .. }
         | Keyword::Offspring(_)
         | Keyword::Splice { .. }
         | Keyword::Sunburst
@@ -4874,7 +4905,7 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::Bloodthirst(_)
         | Keyword::Amplify(_)
         | Keyword::Graft(_)
-        | Keyword::Devour(_)
+        | Keyword::Devour { .. }
         | Keyword::Toxic(_)
         | Keyword::Saddle(_)
         | Keyword::Teamwork(_)
@@ -5019,7 +5050,15 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         // documented fail-safe (over-veto = missed offer). A full `TriggerDefinition`
         // walker is a follow-up.
         ContinuousModification::CopyValues { .. }
+        // CR 707.2c (Metamorphic Alteration): the copy-marker stands in for a
+        // copy that grants the donor's whole ability set — fail-closed alongside
+        // its `CopyValues` sibling (the real grant is the installed TCE).
+        | ContinuousModification::CopyChosen
         | ContinuousModification::GrantTrigger { .. }
+        // A granted object-hosted replacement's `ReplacementDefinition` execute
+        // is outside the scanner's traversal closure — fail-closed CONSERVATIVE,
+        // same class as GrantTrigger / GrantStaticAbility.
+        | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::AddStaticMode { .. }
@@ -5191,6 +5230,10 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         //     recipient set ("Shards you control", CR 707.2).
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::BecomeCopy { .. }
+        //   CR 707.2c (Metamorphic Alteration): the copy target is chosen from a
+        //     battlefield-reading filter pool; defense-in-depth parity with
+        //     BecomeCopy (fail-closed census — over-vetoes the single-host shortcut).
+        | Effect::ChoosePermanent { .. }
         //   CR 708.2 / CR 708.2a (face-down permanents): `resolved_battlefield_object_
         //     ids` (effects/mod.rs) falls through to a battlefield mass scan for a
         //     non-targeted "turn each matching creature face up/down" (Illithid
@@ -5303,6 +5346,8 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: same single-target read context as `Transform`.
+        | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealHand { .. }
@@ -5310,6 +5355,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::ChooseDamageSource { .. }
@@ -5502,7 +5548,7 @@ enum CensusRole {
 #[cfg(test)]
 fn effect_census_role(e: &Effect) -> CensusRole {
     match e {
-        // -- CENSUS (28): verbatim mirror of `effect_target_ctx`'s LiveBoardCensus
+        // -- CENSUS (29): verbatim mirror of `effect_target_ctx`'s LiveBoardCensus
         // arm - mass battlefield population reads that scale with growth.
         Effect::EachSourceDealsDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
@@ -5544,6 +5590,9 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::PhaseIn { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c (Metamorphic Alteration): parity with the `effect_target_ctx`
+        // LiveBoardCensus member added above.
+        | Effect::ChoosePermanent { .. }
         | Effect::TurnFaceUp { .. }
         | Effect::TurnFaceDown { .. }
         | Effect::MultiplyCounter { .. }
@@ -5593,6 +5642,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Scry { .. }
         | Effect::Surveil { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::ExileFromTopUntil { .. }
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::Discover { .. }
@@ -5684,6 +5734,9 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: a flip reads only its own self-referential target — not a
+        // board census, mirroring `Transform`.
+        | Effect::FlipPermanent { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::ChooseDamageSource { .. }
@@ -5937,6 +5990,10 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c: raises `WaitingFor::CopyTargetChoice` — prompts, fail-closed
+        // MayPrompt (never resolved through the normal chain, but classified here
+        // to keep the match exhaustive).
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
@@ -5954,6 +6011,9 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: `flip_permanent` offers no resolution-time choice (it is a
+        // status change or a silent no-op), exactly like `Transform`.
+        | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealHand { .. }
@@ -5961,6 +6021,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::ChooseDamageSource { .. }
@@ -6204,6 +6265,8 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c: choosing a permanent draws on no game randomness.
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
@@ -6220,12 +6283,15 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::Mana { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: flipping is deterministic — no RNG draw, mirroring `Transform`.
+        | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealFromHand { .. }
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
@@ -6401,6 +6467,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         source_incarnation: _, // self-transform epoch latch, no resolution-time choice
         trigger_source: _, // exact triggered-source authority, no choice
         trigger_definition_ref: _, // exact trigger occurrence, no choice
+        force_block_attacker: _, // exact force-block referent, no choice
         controller: _, // player id
         original_controller: _, // player id
         scoped_player: _, // player id (iteration binding)
@@ -6423,6 +6490,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _,  // SubAbilityLink kind tag
+        sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
     } = a;
 
@@ -6891,7 +6959,7 @@ mod tests {
     }
 
     /// guard#3 (mitigation #3): the `LiveBoardCensus` tag set of `effect_target_ctx`
-    /// == EXACTLY the enumeration-derived MASS-POPULATION set (28). Source-scanned, not
+    /// == EXACTLY the enumeration-derived MASS-POPULATION set (29). Source-scanned, not
     /// hand-counted (the hand-count is what produced the earlier "relax=4" miss). Under
     /// B's SnapshotOrEvent default this is the primary false-certificate gate: only a
     /// census tag vetoes a mass read that ESCALATES over inert token growth (which
@@ -6927,6 +6995,7 @@ mod tests {
             "ChangeZoneAll",
             "ChooseAndSacrificeRest",
             "ChooseObjectsIntoTrackedSet",
+            "ChoosePermanent",
             "CounterAll",
             "DamageAll",
             "DamageEachPlayer",
@@ -6966,7 +7035,7 @@ mod tests {
             got, want,
             "census tag set drifted from the enumeration-derived mass-population set"
         );
-        assert_eq!(got.len(), 28, "exactly 28 mass-population census tags");
+        assert_eq!(got.len(), 29, "exactly 29 mass-population census tags");
     }
 
     /// A7' (mitigation #4, replaces the void census-default A7): with SnapshotOrEvent the
@@ -7077,7 +7146,7 @@ mod tests {
     /// with `effect_target_ctx` on the Census/Relax boundary, closing the F1 gap where a
     /// census-ROLE slot silently in the generic relax `|`-chain (exactly R1's Suspect{All})
     /// is invisible to the census-arm-only guards. Structural: both functions' `Census`
-    /// name-sets are source-scanned and asserted IDENTICAL (== the 28). Behavioral: the
+    /// name-sets are source-scanned and asserted IDENTICAL (== the 29). Behavioral: the
     /// two oracles agree on every discriminator, incl. BOTH Suspect/Unsuspect scopes.
     ///
     /// REVERT-PROBE (discrimination proof): moving `Suspect{All}` out of the census arm of
@@ -7092,7 +7161,7 @@ mod tests {
         use crate::types::ability::{EffectScope, TapStateChange};
         use ScanMode::LoopFirewall;
 
-        // -- Structural: the two census name-sets are byte-identical (and == 28).
+        // -- Structural: the two census name-sets are byte-identical (and == 29).
         fn census_names(fnsrc: &str, terminator: &str) -> Vec<String> {
             let end = fnsrc.find(terminator).expect("census terminator");
             let block = &fnsrc[..end];
@@ -7121,7 +7190,7 @@ mod tests {
             etc_census, ecr_census,
             "effect_census_role Census set diverged from effect_target_ctx"
         );
-        assert_eq!(ecr_census.len(), 28, "exactly 28 census members");
+        assert_eq!(ecr_census.len(), 29, "exactly 29 census members");
 
         // -- Behavioral: the two oracles agree on the Census/Relax boundary for every
         // discriminator. `census(e, true)` requires BOTH `effect_census_role == Census`
