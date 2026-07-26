@@ -27,13 +27,28 @@ class MockWebSocket extends EventTarget {
     super();
     MockWebSocket.last = this;
   }
-  // `openPhaseSocket` calls `addEventListener("close", ...)` / ("message", ...)
-  // in addition to the legacy `onXxx` assignments. Route both channels:
-  // legacy `onXxx` fires first, EventTarget listeners fire after.
+  // Deliver a frame the way production does — which is asymmetric between
+  // the two event types, so this routes them differently.
+  //
+  // `"message"`: `onmessage` ONLY. Both `openPhaseSocket`
+  // (`openPhaseSocket.ts:190`) and the adapter (`ws-adapter.ts:528`) assign
+  // the `onmessage` IDL attribute, and neither registers an
+  // `addEventListener("message", ...)` — `PhaseSocketTransport` types
+  // `addEventListener` for `"close"` alone (`openPhaseSocket.ts:20-25`), so
+  // a message listener is not even expressible through the interface. This
+  // previously also called `dispatchEvent(new MessageEvent(...))` under a
+  // comment claiming `openPhaseSocket` registered a message listener; it
+  // does not, and happy-dom routes `dispatchEvent` back through the
+  // `onmessage` attribute, so every frame in this file was handled TWICE.
+  // Harmless for idempotent handlers, but it silently defeats any negative
+  // that depends on state the first delivery consumes.
+  //
+  // `"close"`: both channels, because production genuinely uses both —
+  // `openPhaseSocket.ts:366` registers `addEventListener("close", ...)`
+  // alongside the `onclose` assignment.
   dispatchSynthetic(type: "message" | "close", data?: string) {
     if (type === "message" && data !== undefined) {
       this.onmessage?.({ data });
-      this.dispatchEvent(new MessageEvent("message", { data }));
     } else if (type === "close") {
       this.onclose?.();
       this.dispatchEvent(new Event("close"));
@@ -786,26 +801,24 @@ describe("WebSocketAdapter", () => {
 
     // Guards the new `else` against swallowing the normal path.
     //
-    // Delivered through `onmessage` directly rather than `dispatchSynthetic`,
-    // and that distinction is load-bearing here. `dispatchSynthetic` calls
-    // `onmessage` AND `dispatchEvent`, and happy-dom routes `dispatchEvent`
-    // back through the `onmessage` IDL attribute — so it hands the adapter
-    // each frame TWICE. On the second delivery `pendingReject` has already
-    // been cleared by the first, so the `else` fires and this negative could
-    // never pass. A real browser WebSocket delivers a frame once, and the
-    // adapter registers no `addEventListener("message")` listener, so a single
-    // `onmessage` call is the faithful reproduction of production.
+    // This test is why the double delivery in `dispatchSynthetic` had to be
+    // fixed rather than worked around: a second delivery of the same frame
+    // finds `pendingReject` already cleared by the first, takes the `else`,
+    // and makes the negative below unpassable no matter what the adapter
+    // does. It now goes through `dispatchSynthetic` like every other frame
+    // in this file.
     it("does not emit requestRejected when an action IS in flight", async () => {
       const listener = vi.fn();
       adapter.onEvent(listener);
 
       const pending = adapter.submitAction({ type: "PassPriority" }, 0);
-      ws.onmessage?.({
-        data: JSON.stringify({
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
           type: "ActionRejected",
           data: { reason: "Engine error: Something genuinely wrong" },
         }),
-      });
+      );
 
       // Reach-guard: the frame really was delivered and handled — without this
       // the negative below would pass for a message that never arrived.
