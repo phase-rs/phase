@@ -4211,6 +4211,16 @@ pub(crate) fn static_condition_to_trigger_condition(
         // CR 603.4 + CR 608.2c: Source-bound intervening-if predicates bridge
         // directly; the trigger evaluator checks the ability source at
         // detection and resolution.
+        // CR 603.4 + CR 120.1: the triggering damage event's source bridges
+        // 1:1 — both sides carry the same `TargetFilter` over the event's
+        // damage source (Firkraag, Cunning Instigator's "if that creature had
+        // to attack this combat", parsed by
+        // `parse_event_damage_source_had_to_attack` in oracle_nom/condition.rs).
+        StaticCondition::EventDamageSourceMatchesFilter { filter } => {
+            Some(TriggerCondition::EventDamageSourceMatchesFilter {
+                filter: filter.clone(),
+            })
+        }
         StaticCondition::SourceMatchesFilter { filter } => {
             Some(TriggerCondition::SourceMatchesFilter {
                 filter: filter.clone(),
@@ -5172,24 +5182,12 @@ fn extract_if_condition_with_card_name(
             // CR 508.1 / CR 603.4: attacking state.
             ("if it's attacking", TriggerCondition::SourceIsAttacking),
             ("if it is attacking", TriggerCondition::SourceIsAttacking),
-            // CR 508.1a + CR 508.1d + CR 603.4 + CR 701.15b: "if that creature
-            // had to attack this combat" — a combat-damage intervening-if whose
-            // subject is the DAMAGE SOURCE (the creature that dealt the
-            // triggering combat damage, not this ability's own permanent), so
-            // it reuses `EventDamageSourceMatchesFilter` (the same "match the
-            // event's damage source" mechanism as Mindblade Render's "if any of
-            // that damage was dealt by a Warrior") over a
-            // `FilterProp::RequiredToAttack` filter, rather than the
-            // source-scoped `SourceMatchesFilter` used by the "if ~ attacked
-            // this turn" arm below. Firkraag, Cunning Instigator.
-            (
-                "if that creature had to attack this combat",
-                TriggerCondition::EventDamageSourceMatchesFilter {
-                    filter: TargetFilter::Typed(
-                        TypedFilter::creature().properties(vec![FilterProp::RequiredToAttack]),
-                    ),
-                },
-            ),
+            // NOTE: "if that creature had to attack this combat" (Firkraag,
+            // Cunning Instigator) is NOT a table entry — it parses through the
+            // shared nom grammar (`parse_event_damage_source_had_to_attack` in
+            // oracle_nom/condition.rs) and bridges to
+            // `TriggerCondition::EventDamageSourceMatchesFilter` via
+            // `static_condition_to_trigger_condition`.
             // CR 113.6b: source-scoped "if it's on the battlefield" — the ETB
             // trigger's own source (a reanimator Aura: Animate Dead / Dance of
             // the Dead) resolves only while it is still on the battlefield.

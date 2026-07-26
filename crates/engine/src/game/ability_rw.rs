@@ -1951,6 +1951,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::EventDamageSourceMatchesFilter { .. }
         | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::SourceAttackingAlone
@@ -6148,6 +6149,11 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
             reads_player_of(StateKind::JournalCast)
         }
         StaticCondition::SourceMatchesFilter { filter: _ } => reads_src_of(StateKind::ObjectPt),
+        // CR 603.4 + CR 120.1: reads the triggering damage event's source
+        // snapshot — the static-side carrier of the trigger condition it
+        // bridges to, so it mirrors `rw_trigger_condition`'s
+        // `TriggerCondition::EventDamageSourceMatchesFilter` classification.
+        StaticCondition::EventDamageSourceMatchesFilter { filter: _ } => reads_event_live(),
         // CR 401/402: reads the controller's library top card (contents + order).
         // A draw/scry/surveil/mill/shuffle writes `HandLibrary`, so marking this
         // gate as reading `HandLibrary` invalidates it whenever the library top

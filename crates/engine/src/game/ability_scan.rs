@@ -3553,6 +3553,22 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
             ));
             acc
         }
+        // CR 603.4 + CR 120.1: static-side carrier of the trigger condition it
+        // bridges to — same event-read axes as
+        // `TriggerCondition::EventDamageSourceMatchesFilter` above.
+        StaticCondition::EventDamageSourceMatchesFilter { filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            };
+            acc = acc.or(scan_target_filter(
+                filter,
+                FilterReadContext::SnapshotOrEvent,
+                mode,
+            ));
+            acc
+        }
         StaticCondition::TopOfLibraryMatches { filter } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(

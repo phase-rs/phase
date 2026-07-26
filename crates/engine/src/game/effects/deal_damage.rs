@@ -746,6 +746,21 @@ pub(crate) fn apply_damage_after_replacement(
             // tail (Default::default()) covers the source-already-gone case.
             source_controller_snapshot: ctx.controller,
             source_owner: ctx.controller,
+            // CR 508.1a + CR 508.1d + CR 701.15b + CR 608.2i: snapshot the
+            // declaration-time must-attack fact from the source's live
+            // `AttackerInfo` — at damage time a combat-damage source is still
+            // in `state.combat.attackers`, so this is the last reliable moment
+            // to read it. The trigger's CR 603.4 resolution-time re-check may
+            // run AFTER the source has left the battlefield, when
+            // `remove_from_combat` has already erased the `AttackerInfo`; the
+            // damage-record matcher therefore consumes this snapshot instead
+            // of live combat state (Firkraag, Cunning Instigator's "if that
+            // creature had to attack this combat").
+            source_required_to_attack: state.combat.as_ref().is_some_and(|combat| {
+                combat.attackers.iter().any(|attacker| {
+                    attacker.object_id == ctx.source_id && attacker.required_to_attack
+                })
+            }),
             ..Default::default()
         };
         if let Some(obj) = src {

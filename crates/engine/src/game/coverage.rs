@@ -4144,6 +4144,11 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceIsHarnessed => "source is harnessed".into(),
         SC::SourceAttachedToCreature => "source is attached to a creature".into(),
         SC::SourceMatchesFilter { filter } => format!("source is {}", fmt_target(filter)),
+        // CR 603.4 + CR 120.1: same wording as the trigger-side
+        // `TC::EventDamageSourceMatchesFilter` it bridges to.
+        SC::EventDamageSourceMatchesFilter { filter } => {
+            format!("damage source is {}", fmt_target(filter))
+        }
         SC::TopOfLibraryMatches { filter } => {
             format!("top card of library is {}", fmt_target(filter))
         }
@@ -7708,6 +7713,15 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
         // SourceMatchesFilter resolved by layers::evaluate_condition (layers.rs:1104)
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
+        // CR 603.4 + CR 120.1: static-side carrier for the nom condition
+        // grammar; it names a triggering damage event, so it has no
+        // static/continuous evaluation context. It is consumed ONLY through
+        // `static_condition_to_trigger_condition` (bridging 1:1 to the handled
+        // `TriggerCondition::EventDamageSourceMatchesFilter`); a static ability
+        // that somehow retained it would be unevaluable — classify Unhandled.
+        StaticCondition::EventDamageSourceMatchesFilter { .. } => {
+            ("EventDamageSourceMatchesFilter", Unhandled)
+        }
         // CR 401.1 + CR 401.5: top-of-library gate, resolved by
         // layers::evaluate_condition_with_context against the controller's library top.
         StaticCondition::TopOfLibraryMatches { .. } => ("TopOfLibraryMatches", Handled),

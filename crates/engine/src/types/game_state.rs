@@ -1768,6 +1768,18 @@ pub struct DamageRecord {
     /// (the common combat-damage case) for legacy records and test fixtures.
     #[serde(default = "default_source_zone")]
     pub source_zone: Zone,
+    /// CR 508.1a + CR 508.1d + CR 701.15b + CR 608.2i: whether the source was
+    /// under a must-attack requirement when attackers were declared the combat
+    /// in which it dealt this damage — the `AttackerInfo::required_to_attack`
+    /// declaration-time snapshot, captured at damage time while the source was
+    /// still an attacker. Look-back consumers (`FilterProp::RequiredToAttack`
+    /// through `matches_target_filter_on_damage_record_source`) must read THIS
+    /// bit rather than live combat state: the source may leave the battlefield
+    /// before a CR 603.4 resolution-time re-check, and `remove_from_combat`
+    /// erases its `AttackerInfo` on the way out. `false` for noncombat damage,
+    /// non-attacker sources, and legacy records.
+    #[serde(default)]
+    pub source_required_to_attack: bool,
     /// CR 120.10: Excess damage beyond lethal for creatures/planeswalkers/battles.
     /// Zero for players and for damage that does not overkill. Used by the
     /// "was dealt excess damage this turn" intervening-if condition class.
@@ -1809,6 +1821,7 @@ impl Default for DamageRecord {
             source_controller_snapshot: PlayerId(0),
             source_owner: PlayerId(0),
             source_zone: Zone::Battlefield,
+            source_required_to_attack: false,
             excess: 0,
         }
     }

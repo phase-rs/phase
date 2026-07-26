@@ -4669,6 +4669,12 @@ pub(crate) fn static_condition_to_ability_condition(
         // predicate (Layer 6 / duration `ForAsLongAs`); no effect-resolution
         // (`AbilityCondition`) equivalent — lowering returns `None`.
         | StaticCondition::TopOfLibraryMatches { .. }
+        // CR 603.4 + CR 120.1: names a TRIGGERING damage event, so it only
+        // lowers through `static_condition_to_trigger_condition` (to
+        // `TriggerCondition::EventDamageSourceMatchesFilter`); an
+        // effect-resolution `AbilityCondition` has no triggering damage event
+        // to consult — lowering returns `None`.
+        | StaticCondition::EventDamageSourceMatchesFilter { .. }
         | StaticCondition::None => None,
     }
 }

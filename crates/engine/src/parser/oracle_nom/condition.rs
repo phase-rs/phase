@@ -298,6 +298,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
 fn parse_event_history_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_damage_dealt_this_turn_conditions,
+        parse_event_damage_source_had_to_attack,
         parse_source_damage_threshold_this_turn,
         parse_source_didnt_this_turn,
         parse_was_cast_condition,
@@ -380,6 +381,48 @@ fn parse_damage_dealt_this_turn_conditions(input: &str) -> OracleResult<'_, Stat
         parse_source_was_dealt_damage_this_turn,
     ))
     .parse(input)
+}
+
+/// CR 603.4 + CR 120.1 + CR 508.1a + CR 508.1d + CR 701.15b: "that creature
+/// had to attack this combat" — Firkraag, Cunning Instigator's combat-damage
+/// intervening-if, composed on three axes:
+///
+///   - subject: the demonstrative "that creature", bound to the TRIGGERING
+///     damage event's SOURCE (CR 120.1: the object that deals damage is the
+///     source of that damage). This is the source-axis sibling of the
+///     `TargetFilter::EventTarget` binding used by
+///     `parse_subject_was_dealt_excess_damage_this_turn` for the damaged
+///     object ("that creature was dealt excess damage this turn"). Only the
+///     creature form exists: "had to attack" is a creature-only predicate
+///     (CR 508.1a — attackers are creatures), so no "that permanent" arm.
+///   - predicate: "had to attack" — the declaration-time must-attack fact
+///     (`FilterProp::RequiredToAttack`, backed by the `AttackerInfo` /
+///     `DamageRecord::source_required_to_attack` snapshots; a live re-check
+///     would spuriously fail for tapped or departed attackers).
+///   - scope: "this combat" — the snapshot is taken when attackers are
+///     declared and read for the combat in which the triggering damage was
+///     dealt; a turn-scoped "this turn" form is a DIFFERENT (unsupported)
+///     condition and must not be claimed here.
+///
+/// Lowers to `StaticCondition::EventDamageSourceMatchesFilter`, which the
+/// trigger bridge maps 1:1 onto the existing typed
+/// `TriggerCondition::EventDamageSourceMatchesFilter` representation (the
+/// same event-damage-source mechanism as Mindblade Render's "if any of that
+/// damage was dealt by a Warrior").
+fn parse_event_damage_source_had_to_attack(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Subject axis: demonstrative anaphor for the triggering damage source.
+    let (rest, subject) = value(TypedFilter::creature(), tag("that creature")).parse(input)?;
+    // Predicate axis: the declaration-time must-attack fact.
+    let (rest, predicate) =
+        value(FilterProp::RequiredToAttack, tag(" had to attack")).parse(rest)?;
+    // Scope axis: per-combat (the declaration-time snapshot's granularity).
+    let (rest, _) = tag(" this combat").parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::EventDamageSourceMatchesFilter {
+            filter: TargetFilter::Typed(subject.properties(vec![predicate])),
+        },
+    ))
 }
 
 /// Wrapper around `parse_type_phrase` that fails (nom error) when the result is
@@ -18557,5 +18600,58 @@ mod tests {
             !matches!(target.as_ref(), TargetFilter::Any),
             "target filter must be non-Any, got: {target:?}"
         );
+    }
+
+    /// CR 603.4 + CR 120.1 + CR 508.1a: Firkraag, Cunning Instigator's "that
+    /// creature had to attack this combat" parses through the shared nom
+    /// grammar (subject / predicate / scope axes) to the event-damage-source
+    /// carrier over a creature `RequiredToAttack` filter, with the clause
+    /// boundary left unconsumed.
+    #[test]
+    fn parse_event_damage_source_had_to_attack_firkraag_phrasing() {
+        let expected = StaticCondition::EventDamageSourceMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::RequiredToAttack]),
+            ),
+        };
+        let (rest, cond) = parse_inner_condition("that creature had to attack this combat")
+            .expect("Firkraag's condition phrase must parse");
+        assert_eq!(rest, "", "the phrase must be fully consumed");
+        assert_eq!(cond, expected);
+        // The trigger-context form stops exactly at the clause boundary.
+        let (rest, cond) =
+            parse_inner_condition("that creature had to attack this combat, you draw a card")
+                .expect("the clause-boundary form must parse");
+        assert_eq!(rest, ", you draw a card", "the effect tail is not consumed");
+        assert_eq!(cond, expected);
+    }
+
+    /// Negative controls: the grammar must not over-accept. A turn-scoped
+    /// variant ("this turn"), a different predicate ("attacked"), and a
+    /// non-demonstrative subject ("a creature") are all DIFFERENT conditions
+    /// and must not be claimed by the had-to-attack combinator.
+    #[test]
+    fn parse_event_damage_source_had_to_attack_rejects_non_matching_phrasings() {
+        for input in [
+            // Wrong scope: the declaration-time snapshot is per-combat.
+            "that creature had to attack this turn",
+            // Wrong predicate: "attacked" is a fact of declaration, not of
+            // requirement.
+            "that creature attacked this combat",
+            // Wrong subject: an indefinite subject is not the event's damage
+            // source.
+            "a creature had to attack this combat",
+            // Wrong subject noun: "had to attack" is creature-only.
+            "that permanent had to attack this combat",
+        ] {
+            let claimed = matches!(
+                parse_inner_condition(input),
+                Ok((_, StaticCondition::EventDamageSourceMatchesFilter { .. }))
+            );
+            assert!(
+                !claimed,
+                "{input:?} must not parse as EventDamageSourceMatchesFilter"
+            );
+        }
     }
 }

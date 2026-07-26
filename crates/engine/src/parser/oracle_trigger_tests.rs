@@ -13811,6 +13811,58 @@ fn event_damage_source_intervening_if_handles_disjunction_and_combat_word() {
 }
 
 #[test]
+fn firkraag_had_to_attack_intervening_if_parses_via_nom_grammar() {
+    // CR 603.4 + CR 120.1 + CR 508.1a: Firkraag, Cunning Instigator's "if that
+    // creature had to attack this combat" is hoisted to the trigger condition
+    // through the shared nom grammar (`parse_event_damage_source_had_to_attack`
+    // + the `static_condition_to_trigger_condition` bridge — NOT a verbatim
+    // table entry), lowering to the same typed representation as Mindblade
+    // Render's event-damage-source class, over a creature
+    // `FilterProp::RequiredToAttack` filter.
+    let def = parse_trigger_line(
+        "Whenever a creature deals combat damage to one of your opponents, if that creature \
+         had to attack this combat, you put a +1/+1 counter on Firkraag and you draw a card.",
+        "Firkraag, Cunning Instigator",
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::EventDamageSourceMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::RequiredToAttack]),
+            ),
+        }),
+    );
+}
+
+#[test]
+fn had_to_attack_grammar_rejects_non_matching_phrasings() {
+    // Negative controls: the nom grammar must not over-accept — a turn-scoped
+    // variant and a different predicate are DIFFERENT conditions and must not
+    // lower to the event-damage-source `RequiredToAttack` condition (they have
+    // no supported lowering at all, so no condition is hoisted).
+    for phrasing in [
+        "if that creature had to attack this turn",
+        "if that creature attacked this combat",
+    ] {
+        let def = parse_trigger_line(
+            &format!(
+                "Whenever a creature deals combat damage to one of your opponents, {phrasing}, \
+                 you draw a card."
+            ),
+            "Test Card",
+        );
+        assert!(
+            !matches!(
+                def.condition,
+                Some(TriggerCondition::EventDamageSourceMatchesFilter { .. })
+            ),
+            "{phrasing:?} must not lower to EventDamageSourceMatchesFilter, got {:?}",
+            def.condition
+        );
+    }
+}
+
+#[test]
 fn trigger_opponents_creatures_dealt_excess_noncombat_damage() {
     let def = parse_trigger_line(
             "Whenever one or more creatures your opponents control are dealt excess noncombat damage, create a Treasure token.",

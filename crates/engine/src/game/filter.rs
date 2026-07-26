@@ -1573,6 +1573,22 @@ pub fn matches_target_filter_on_damage_record_source(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
+    // CR 508.1a + CR 508.1d + CR 701.15b + CR 608.2i: `RequiredToAttack` is a
+    // declaration-time fact, snapshotted into the record at damage time.
+    // Resolve it HERE, from the record — never from live combat state: the
+    // source may leave the battlefield (zones.rs `apply_zone_exit_cleanup` →
+    // `remove_from_combat`) between dealing the damage and a CR 603.4
+    // resolution-time re-check, which erases its `AttackerInfo` and would make
+    // the live `matches_filter_prop` arm read false for a creature that DID
+    // have to attack when attackers were declared. Mirrors
+    // `normalize_contextual_filter`'s resolve-then-delegate shape.
+    let resolved;
+    let filter = if filter_references_required_to_attack(filter) {
+        resolved = resolve_required_to_attack_filter(filter, record.source_required_to_attack);
+        &resolved
+    } else {
+        filter
+    };
     // CR 608.2i + CR 608.2h: reconstruct the synthetic source with its
     // damage-time zone (Stack for a spell, Battlefield for a permanent) so a
     // zone-discriminating look-back source filter evaluates correctly instead
@@ -1607,6 +1623,129 @@ pub fn matches_target_filter_on_damage_record_source(
         ctx.scoped_iteration_player,
         ControllerLookup::LiveOrLki,
     )
+}
+
+/// Whether `filter` mentions `FilterProp::RequiredToAttack` anywhere in its
+/// composite structure. Cheap non-allocating pre-check so the damage-record
+/// matcher only pays the resolve-rewrite for the (rare) filters that carry the
+/// prop.
+fn filter_references_required_to_attack(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => {
+            properties.iter().any(prop_references_required_to_attack)
+        }
+        TargetFilter::Not { filter: inner } => filter_references_required_to_attack(inner),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_references_required_to_attack)
+        }
+        _ => false,
+    }
+}
+
+/// `FilterProp` companion of [`filter_references_required_to_attack`], walking
+/// the prop-level combinators (`Not` / `AnyOf`).
+fn prop_references_required_to_attack(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::RequiredToAttack => true,
+        FilterProp::Not { prop: inner } => prop_references_required_to_attack(inner),
+        FilterProp::AnyOf { props } => props.iter().any(prop_references_required_to_attack),
+        _ => false,
+    }
+}
+
+/// Outcome of resolving one `FilterProp` against a snapshot value: either a
+/// constant (the prop — possibly through `Not`/`AnyOf` nesting — depended only
+/// on the snapshot), or a residual prop for the ordinary evaluator.
+enum SnapshotPropResolution {
+    Const(bool),
+    Dynamic(FilterProp),
+}
+
+/// CR 508.1a + CR 508.1d + CR 701.15b + CR 608.2i: Substitute the damage
+/// record's declaration-time `required_to_attack` snapshot for every
+/// `FilterProp::RequiredToAttack` occurrence in `filter`, so the delegated
+/// live-state evaluation never consults `state.combat` for this prop. Mirrors
+/// `normalize_contextual_filter`: resolve the context-dependent piece to a
+/// concrete form, then delegate the rest unchanged. Only called when
+/// [`filter_references_required_to_attack`] is true.
+fn resolve_required_to_attack_filter(filter: &TargetFilter, required: bool) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            let mut properties = Vec::with_capacity(typed.properties.len());
+            for prop in &typed.properties {
+                match resolve_required_to_attack_prop(prop, required) {
+                    // Satisfied by the snapshot — no residual constraint in
+                    // the AND-combined property list.
+                    SnapshotPropResolution::Const(true) => {}
+                    // Refuted by the snapshot — the whole typed filter can
+                    // never match this record's source.
+                    SnapshotPropResolution::Const(false) => return TargetFilter::None,
+                    SnapshotPropResolution::Dynamic(residual) => properties.push(residual),
+                }
+            }
+            TargetFilter::Typed(TypedFilter {
+                type_filters: typed.type_filters.clone(),
+                controller: typed.controller.clone(),
+                properties,
+            })
+        }
+        TargetFilter::Not { filter: inner } => TargetFilter::Not {
+            filter: Box::new(resolve_required_to_attack_filter(inner, required)),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .iter()
+                .map(|inner| resolve_required_to_attack_filter(inner, required))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .iter()
+                .map(|inner| resolve_required_to_attack_filter(inner, required))
+                .collect(),
+        },
+        _ => filter.clone(),
+    }
+}
+
+/// `FilterProp` companion of [`resolve_required_to_attack_filter`]: resolves
+/// `RequiredToAttack` to the snapshot constant, folding it through the
+/// prop-level `Not` / `AnyOf` combinators so a nested occurrence still reads
+/// the snapshot rather than live combat state.
+fn resolve_required_to_attack_prop(prop: &FilterProp, required: bool) -> SnapshotPropResolution {
+    match prop {
+        FilterProp::RequiredToAttack => SnapshotPropResolution::Const(required),
+        FilterProp::Not { prop: inner } => match resolve_required_to_attack_prop(inner, required) {
+            SnapshotPropResolution::Const(value) => SnapshotPropResolution::Const(!value),
+            SnapshotPropResolution::Dynamic(residual) => {
+                SnapshotPropResolution::Dynamic(FilterProp::Not {
+                    prop: Box::new(residual),
+                })
+            }
+        },
+        FilterProp::AnyOf { props } => {
+            let mut residuals = Vec::with_capacity(props.len());
+            for inner in props {
+                match resolve_required_to_attack_prop(inner, required) {
+                    // One satisfied disjunct satisfies the whole AnyOf.
+                    SnapshotPropResolution::Const(true) => {
+                        return SnapshotPropResolution::Const(true)
+                    }
+                    // A refuted disjunct drops out of the disjunction.
+                    SnapshotPropResolution::Const(false) => {}
+                    SnapshotPropResolution::Dynamic(residual) => residuals.push(residual),
+                }
+            }
+            if residuals.is_empty() {
+                // Every disjunct was refuted by the snapshot (matches the
+                // ordinary evaluator: an empty `AnyOf` never matches).
+                SnapshotPropResolution::Const(false)
+            } else {
+                SnapshotPropResolution::Dynamic(FilterProp::AnyOf { props: residuals })
+            }
+        }
+        other => SnapshotPropResolution::Dynamic(other.clone()),
+    }
 }
 
 /// CR 400.7 + CR 608.2h: Evaluate a target filter against last-known information.
@@ -4187,7 +4326,11 @@ fn matches_filter_prop(
         // read the declaration-time snapshot taken when attackers were
         // declared this combat, not a live `creature_must_attack` recheck
         // (the attacker is typically tapped by the time this is consulted,
-        // which would make a live recheck spuriously false).
+        // which would make a live recheck spuriously false). Damage-record
+        // look-backs never reach this arm: `matches_target_filter_on_damage_
+        // record_source` pre-resolves the prop from the record's own
+        // `source_required_to_attack` snapshot, which stays answerable after
+        // the source leaves combat and its `AttackerInfo` is erased.
         FilterProp::RequiredToAttack => state.combat.as_ref().is_some_and(|combat| {
             combat
                 .attackers

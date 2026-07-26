@@ -921,6 +921,10 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
+        // CR 603.4 + CR 120.1: reads a triggering damage event's SNAPSHOT
+        // (only meaningful after bridging to the trigger side), never live
+        // battlefield population.
+        | StaticCondition::EventDamageSourceMatchesFilter { .. }
         // CR 401.1: reads the controller's LIBRARY top card, never battlefield
         // population — a battlefield entry cannot change the library top.
         | StaticCondition::TopOfLibraryMatches { .. }
@@ -1057,6 +1061,10 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
+        // CR 603.4 + CR 120.1: reads a triggering damage event's SNAPSHOT
+        // (only meaningful after bridging to the trigger side), never live
+        // battlefield population.
+        | StaticCondition::EventDamageSourceMatchesFilter { .. }
         // CR 401.1: reads the controller's LIBRARY top card, never battlefield
         // population — a battlefield entry cannot change the library top.
         | StaticCondition::TopOfLibraryMatches { .. }
@@ -1399,6 +1407,13 @@ fn evaluate_condition_with_context(
             filter,
             &FilterContext::from_source(state, source_id),
         ),
+        // CR 603.4 + CR 120.1: names the TRIGGERING damage event's source — a
+        // static/continuous evaluation has no triggering event to consult, so
+        // this carrier is unanswerable here and fails closed. It is only
+        // meaningful after `static_condition_to_trigger_condition` bridges it
+        // to `TriggerCondition::EventDamageSourceMatchesFilter`, whose
+        // evaluator (game/triggers.rs) reads the event's damage record.
+        StaticCondition::EventDamageSourceMatchesFilter { .. } => false,
         // CR 401.1 + CR 401.5: True when the top card of the source controller's
         // library (`library[0]`) matches `filter`. Resolves the specific top-card
         // object and matches its printed characteristics — the filter is a plain
@@ -3032,6 +3047,9 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         // type-enforced, so all are routed).
         StaticCondition::DefendingPlayerControls { filter }
         | StaticCondition::SourceMatchesFilter { filter }
+        // CR 603.4 + CR 120.1: event-snapshot subject, but the nested filter is
+        // still a condition surface — route it like the other filter carriers.
+        | StaticCondition::EventDamageSourceMatchesFilter { filter }
         | StaticCondition::TopOfLibraryMatches { filter }
         | StaticCondition::RecipientMatchesFilter { filter } => {
             target_filter_reads_life_total(filter)

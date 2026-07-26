@@ -836,6 +836,9 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
+        // CR 603.4 + CR 120.1: event-snapshot subject; carries no
+        // QuantityExpr, so it can never read unspent mana.
+        | StaticCondition::EventDamageSourceMatchesFilter { .. }
         | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
         | StaticCondition::RecipientAttackingOwnerTarget { .. }

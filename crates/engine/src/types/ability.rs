@@ -7318,6 +7318,19 @@ pub enum StaticCondition {
     SourceMatchesFilter {
         filter: TargetFilter,
     },
+    /// CR 603.4 + CR 120.1: The TRIGGERING damage event's source matches
+    /// `filter` — "that creature" is the creature that dealt the triggering
+    /// combat damage (CR 120.1: the object that deals damage is the source of
+    /// that damage), not this ability's own permanent. Static-side carrier for
+    /// the shared nom condition grammar (`parse_inner_condition`); it names a
+    /// triggering event, so it has no static/continuous evaluation context and
+    /// only becomes meaningful once `static_condition_to_trigger_condition`
+    /// lowers it 1:1 to `TriggerCondition::EventDamageSourceMatchesFilter`.
+    /// Firkraag, Cunning Instigator: "if that creature had to attack this
+    /// combat" (a `FilterProp::RequiredToAttack` filter over the source).
+    EventDamageSourceMatchesFilter {
+        filter: TargetFilter,
+    },
     /// CR 401.1 + CR 401.5: True when the top card of the source controller's
     /// library matches `filter`. A library is a single face-down ordered pile
     /// (CR 401.1/401.2); its top card is `library[0]` in the engine convention.

@@ -410,6 +410,10 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::SourceIsMonstrous
         | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceMatchesFilter { .. }
+        // CR 603.4 + CR 120.1: names a TRIGGERING damage event — a cast/activation
+        // restriction has no triggering event to consult, so there is no
+        // `ParsedCondition` counterpart. Rejected rather than approximated.
+        | StaticCondition::EventDamageSourceMatchesFilter { .. }
         // CR 401.1 (#5692): "as long as the top card of your library is a <filter>"
         // (Vampire Nocturnus, Conspicuous Snoop). Another filter-carrying condition with
         // no `ParsedCondition` counterpart — same vocabulary asymmetry as
