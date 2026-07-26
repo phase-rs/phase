@@ -643,6 +643,66 @@ describe("WebSocketAdapter", () => {
       });
     });
 
+    // A refused takeback answers a fire-and-forget request, so no promise owns
+    // the rejection. Before this branch the whole `if (this.pendingReject)`
+    // body was skipped and the refusal was dropped on the floor — which is why
+    // the server had been reaching for `ServerMessage::error` instead, the
+    // event `handleNativeEvent` treats as terminal.
+    it("emits requestRejected when an ActionRejected has no in-flight action", () => {
+      const listener = vi.fn();
+      adapter.onEvent(listener);
+
+      adapter.sendRequestTakeback();
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ActionRejected",
+          data: { reason: "There is no previous action of yours to take back" },
+        }),
+      );
+
+      expect(listener).toHaveBeenCalledWith({
+        type: "requestRejected",
+        reason: "There is no previous action of yours to take back",
+      });
+      // The survivability property: no terminal `error` event, which is what
+      // tears down a native session.
+      expect(listener).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "error" }),
+      );
+    });
+
+    // Guards the new `else` against swallowing the normal path.
+    //
+    // Delivered through `onmessage` directly rather than `dispatchSynthetic`,
+    // and that distinction is load-bearing here. `dispatchSynthetic` calls
+    // `onmessage` AND `dispatchEvent`, and happy-dom routes `dispatchEvent`
+    // back through the `onmessage` IDL attribute — so it hands the adapter
+    // each frame TWICE. On the second delivery `pendingReject` has already
+    // been cleared by the first, so the `else` fires and this negative could
+    // never pass. A real browser WebSocket delivers a frame once, and the
+    // adapter registers no `addEventListener("message")` listener, so a single
+    // `onmessage` call is the faithful reproduction of production.
+    it("does not emit requestRejected when an action IS in flight", async () => {
+      const listener = vi.fn();
+      adapter.onEvent(listener);
+
+      const pending = adapter.submitAction({ type: "PassPriority" }, 0);
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: "ActionRejected",
+          data: { reason: "Engine error: Something genuinely wrong" },
+        }),
+      });
+
+      // Reach-guard: the frame really was delivered and handled — without this
+      // the negative below would pass for a message that never arrived.
+      await expect(pending).rejects.toMatchObject({ code: "ACTION_REJECTED" });
+      expect(listener).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "requestRejected" }),
+      );
+    });
+
     it("sends the action frame and keeps the promise pending on a healthy socket", () => {
       ws.send.mockClear();
       void adapter.submitAction({ type: "PassPriority" }, 0);

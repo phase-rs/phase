@@ -174,7 +174,11 @@ export type WsAdapterEvent =
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number }
   | { type: "takebackRequested"; requester: PlayerId; requesterName: string }
-  | { type: "takebackResolved"; approved: boolean; resolvedBy: PlayerId | null };
+  | { type: "takebackResolved"; approved: boolean; resolvedBy: PlayerId | null }
+  /** The server refused a fire-and-forget request (e.g. `RequestTakeback`).
+   *  Distinct from `error`, which the native session treats as terminal:
+   *  this one is survivable and carries a server-authored reason to show. */
+  | { type: "requestRejected"; reason: string };
 
 type WsAdapterEventListener = (event: WsAdapterEvent) => void;
 
@@ -1195,6 +1199,19 @@ export class WebSocketAdapter implements EngineAdapter {
           );
           this.pendingResolve = null;
           this.pendingReject = null;
+        } else {
+          // No in-flight action owns this rejection, so it answers a
+          // fire-and-forget request — `sendRequestTakeback` is the only one
+          // today. Surface it instead of dropping it on the floor.
+          //
+          // These two branches cannot race: `handle_client_message` is
+          // awaited to completion before the socket reads the next frame, so
+          // a takeback refusal is not even parsed until any preceding action
+          // has been fully answered. That is what rules out the sharper
+          // hazard here — rejecting an in-flight ACTION's promise with a
+          // TAKEBACK's reason string, which would be a misattribution rather
+          // than merely a stale spinner.
+          this.emit({ type: "requestRejected", reason: data.reason });
         }
         break;
       }

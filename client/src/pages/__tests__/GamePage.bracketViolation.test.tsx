@@ -441,3 +441,112 @@ describe("GamePage — toast surface", () => {
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 });
+
+/**
+ * A refused takeback must not destroy a desktop-solo session.
+ *
+ * Desktop solo-vs-AI is served by the `phase-server` sidecar over a
+ * WebSocket and arrives here as `mode=ai`, so `isOnlineMode` is false and
+ * `case "error"` sets a TERMINAL `reconnectState`. The server used to answer
+ * every refused takeback with `ServerMessage::error`, so a second takeback
+ * click — reachable because an approved takeback clears the history — tore
+ * down the adapter and stranded the game behind a "Connection lost" banner.
+ * The refusal now travels `ServerMessage::ActionRejected`, which the adapter
+ * surfaces as `requestRejected`.
+ */
+describe("GamePage — a refused request is survivable", () => {
+  it("toasts a refused takeback without entering the terminal reconnect state", () => {
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "requestRejected",
+        reason: "There is no previous action of yours to take back",
+      });
+    });
+
+    // Delivery witness. Without this the two negatives below would be
+    // satisfied by an event that was never delivered at all.
+    expect(mockMultiplayerState.showToast).toHaveBeenCalledWith(
+      "There is no previous action of yours to take back",
+    );
+    // The session is intact: no terminal banner, no Return-to-Menu escape
+    // hatch. These are the assertions that fail if the server reverts to
+    // `ServerMessage::error`, or if GameProvider forwards this event into
+    // the teardown branch instead of its own.
+    expect(screen.queryByText("Connection lost")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Return to Menu" })).toBeNull();
+  });
+
+  it("still tears down on a genuine transport error from the same fixture", () => {
+    // Reach guard for the negatives above: the SAME fixture and the SAME
+    // event channel can and does produce the terminal state, so their
+    // absence in the test above is the classification change and not an
+    // inert harness.
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "error", message: "WebSocket connection failed" });
+    });
+
+    expect(screen.getByText("Connection lost")).toBeInTheDocument();
+  });
+
+  it("survives a second refusal, the click that used to be reachable", () => {
+    // An approved takeback clears `takeback_history`, so takeback-twice
+    // lands on "there is no previous action of yours to take back". This is
+    // the exact reachability that made the destructive path a routine
+    // second click rather than an edge case.
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "requestRejected", reason: "first refusal" });
+      capturedOnWsEvent?.({
+        type: "requestRejected",
+        reason: "There is no previous action of yours to take back",
+      });
+    });
+
+    expect(mockMultiplayerState.showToast).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("Connection lost")).toBeNull();
+  });
+
+  it("routes an adjacent refusal reason down the same non-terminal path", () => {
+    // The fix is per-CHANNEL, not per-message: "only human players may
+    // request a takeback" and "a takeback request is already pending" travel
+    // the same wire message and must behave identically.
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "requestRejected",
+        reason: "Only human players may request a takeback",
+      });
+    });
+
+    expect(mockMultiplayerState.showToast).toHaveBeenCalledWith(
+      "Only human players may request a takeback",
+    );
+    expect(screen.queryByText("Connection lost")).toBeNull();
+  });
+
+  it("does not set the terminal state for an online refusal either", () => {
+    // Behaviour-preserving for `online`: it toasted before (via `case
+    // "error"`, where `isOnlineMode` suppressed the terminal branch) and
+    // toasts now via `case "requestRejected"`.
+    //
+    // `?mode=host` — the URL spelling. `?mode=online` is NOT an inhabitant of
+    // the raw-mode set and falls through to `local`, for which GamePage passes
+    // no `onWsEvent` at all, so the whole test would go silently inert.
+    renderGamePage("/game/test-game-123?mode=host");
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "requestRejected", reason: "refused" });
+    });
+
+    // Reach guard: `capturedOnWsEvent` must actually exist for this mode.
+    expect(capturedOnWsEvent).toBeDefined();
+    expect(mockMultiplayerState.showToast).toHaveBeenCalledWith("refused");
+    expect(screen.queryByText("Connection lost")).toBeNull();
+  });
+});

@@ -506,6 +506,15 @@ export function GamePage() {
           setReconnectState({ status: "failed" });
         }
         break;
+      case "requestRejected":
+        // The server refused a request; the session is intact. Deliberately
+        // does NOT touch `reconnectState` — that is the whole point of this
+        // case existing beside `error` rather than being folded into it.
+        // `event.reason` is server-authored and so passes through raw, per
+        // `client/src/i18n/README.md` ("a string gets `t()` if and only if the
+        // frontend authored it").
+        useMultiplayerStore.getState().showToast(event.reason);
+        break;
       case "deckRejected":
         navigate("/multiplayer", {
           state: {
