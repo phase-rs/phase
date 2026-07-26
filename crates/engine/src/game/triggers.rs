@@ -230,6 +230,13 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
                 }
             }
         }
+        WardCost::GetPlayerCounters {
+            counter_kind,
+            count,
+        } => AbilityCost::GetPlayerCounters {
+            counter_kind: *counter_kind,
+            count: *count,
+        },
     }
 }
 
@@ -19843,6 +19850,20 @@ pub mod tests {
         let waterbend = WardCost::Waterbend(ManaCost::generic(4));
         let result = ward_cost_to_ability_cost(&waterbend);
         assert!(matches!(result, AbilityCost::Mana { cost } if cost == ManaCost::generic(4)));
+
+        // Get player counters (The Serpent Society: "Ward—Get five poison counters.")
+        let poison = WardCost::GetPlayerCounters {
+            counter_kind: crate::types::player::PlayerCounterKind::Poison,
+            count: 5,
+        };
+        let result = ward_cost_to_ability_cost(&poison);
+        assert!(matches!(
+            result,
+            AbilityCost::GetPlayerCounters {
+                counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                count: 5,
+            }
+        ));
     }
 
     #[test]

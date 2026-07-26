@@ -1121,6 +1121,8 @@
       "returnToHand_one": "return a permanent to hand",
       "returnToHand_other": "return {{count}} permanents to hand",
       "energy": "{{amount}} energy",
+      "playerCounters_one": "get {{count}} {{kind}} counter",
+      "playerCounters_other": "get {{count}} {{kind}} counters",
       "generic": "a cost",
       "pay": "Pay {{cost}}"
     },

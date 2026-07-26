@@ -8634,6 +8634,16 @@ pub enum AbilityCost {
     KeywordCostOfCastSpell {
         keyword: crate::types::keywords::KeywordKind,
     },
+    /// CR 702.21a + CR 122.1 + CR 104.3d: Give the paying player counters of
+    /// a kind, as a Ward unless-cost (The Serpent Society's "Ward—Get five
+    /// poison counters."). Unlike `PayLife`/`PayEnergy`, there is no
+    /// affordability gate — a player may always choose to accept more
+    /// counters; poison's ten-or-more loss condition is a separate,
+    /// already-implemented SBA, not a payment-time limit.
+    GetPlayerCounters {
+        counter_kind: PlayerCounterKind,
+        count: u32,
+    },
     Unimplemented {
         description: String,
     },
@@ -8731,6 +8741,7 @@ impl AbilityCost {
             | AbilityCost::Waterbend { .. }
             | AbilityCost::NinjutsuFamily { .. }
             | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::GetPlayerCounters { .. }
             | AbilityCost::Unimplemented { .. } => {}
         }
     }
@@ -8787,6 +8798,7 @@ impl AbilityCost {
             | AbilityCost::EffectCost { .. }
             | AbilityCost::PerCounter { .. }
             | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::GetPlayerCounters { .. }
             | AbilityCost::Unimplemented { .. } => false,
         }
     }
@@ -8864,6 +8876,9 @@ impl AbilityCost {
             AbilityCost::Mill { .. } => vec![CostCategory::Mills],
             AbilityCost::Exert => vec![CostCategory::Exerts],
             AbilityCost::Blight { .. } => vec![CostCategory::PutsCounters],
+            // CR 702.21a + CR 122.1: Ward's player-counter cost puts counters
+            // on the payer, same category as Blight's self-counter cost.
+            AbilityCost::GetPlayerCounters { .. } => vec![CostCategory::PutsCounters],
             AbilityCost::Reveal { .. } => vec![CostCategory::Reveals],
             AbilityCost::Behold { action, .. } => {
                 if *action == BeholdCostAction::ExileChosen {
@@ -8976,6 +8991,8 @@ impl AbilityCost {
             | AbilityCost::EffectCost { .. }
             // CR 118.9: borrowed mana cost — pays mana, never destroys the source.
             | AbilityCost::KeywordCostOfCastSpell { .. }
+            // CR 702.21a: gives the payer counters — never destroys the source.
+            | AbilityCost::GetPlayerCounters { .. }
             | AbilityCost::Unimplemented { .. } => false,
         }
     }

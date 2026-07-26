@@ -1382,6 +1382,27 @@ fn pay_ability_cost_inner(
                 delta: -(amount as i32),
             });
         }
+        // CR 702.21a + CR 122.1 + CR 104.3d: Ward cost paid by giving the
+        // paying player counters of a kind (The Serpent Society). No
+        // affordability check (see `can_pay_resolution`) — a player may
+        // always choose to accept more counters. Routes through
+        // `add_player_counter_with_replacement` — not a raw
+        // `resolve_and_apply_player_edit` call — so "players can't get
+        // counters" replacement effects still apply, mirroring the
+        // `EffectCost`/`PutCounter` arm's use of the sibling
+        // `effects::counters::add_counter_with_replacement` above.
+        AbilityCost::GetPlayerCounters {
+            counter_kind,
+            count,
+        } => {
+            if !super::effects::player_counter::add_player_counter_with_replacement(
+                state, player, player, *counter_kind, *count, events,
+            ) {
+                return Ok(PaymentOutcome::Paused {
+                    remaining_cost: None,
+                });
+            }
+        }
         AbilityCost::PaySpeed { amount } => {
             let amount = resolve_cost_quantity(state, amount, player, source_id, scope);
             let amount = u8::try_from(amount.max(0)).unwrap_or(u8::MAX);
@@ -1772,6 +1793,9 @@ pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::Composite { .. }
+        // CR 702.21a + CR 122.1: Ward's unless-pay always resolves at
+        // resolution time (never activation), so this must be true here.
+        | AbilityCost::GetPlayerCounters { .. }
         | AbilityCost::OneOf { .. } => true,
         // Only the chosen-from-hand discard has a resolution arm (the
         // `WaitingFor::DiscardChoice` / forced-choice fast path). The source-card
@@ -1943,6 +1967,10 @@ fn can_pay_resolution(
         AbilityCost::OneOf { costs } => costs
             .iter()
             .any(|cost| can_pay_resolution(state, payer, cost, ability)),
+        // CR 702.21a + CR 122.1: Always payable — no resource/eligibility
+        // limit on giving yourself more counters (poison's ten-or-more loss
+        // condition is a separate SBA, not a payment-time affordability gate).
+        AbilityCost::GetPlayerCounters { .. } => true,
         // Variants below have no resolution-time payment arm
         // (`supported_at_resolution` is the shared membership authority).
         // Refusing here is the conservative affordability answer (treat as

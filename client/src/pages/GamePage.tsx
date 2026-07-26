@@ -3439,7 +3439,13 @@ function formatManaCost(cost: { type: string; shards?: string[]; generic?: numbe
 }
 
 function formatUnlessCost(
-  cost: { type: string; cost?: { type: string; shards?: string[]; generic?: number }; amount?: number; count?: number },
+  cost: {
+    type: string;
+    cost?: { type: string; shards?: string[]; generic?: number };
+    amount?: number;
+    count?: number;
+    counter_kind?: string;
+  },
   t: TFunction<"game">,
 ): string {
   switch (cost.type) {
@@ -3471,6 +3477,13 @@ function formatUnlessCost(
     }
     case "PayEnergy":
       return t("gamePage.cost.energy", { amount: cost.amount ?? 0 });
+    // CR 702.21a + CR 122.1 + CR 104.3d: Ward's player-counter cost
+    // (The Serpent Society: "Ward—Get five poison counters.").
+    case "GetPlayerCounters": {
+      const count = cost.count ?? 1;
+      const kind = (cost.counter_kind ?? "").toLowerCase();
+      return t("gamePage.cost.playerCounters", { count, kind });
+    }
     default:
       return t("gamePage.cost.generic");
   }

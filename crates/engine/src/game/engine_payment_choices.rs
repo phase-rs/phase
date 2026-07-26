@@ -730,6 +730,30 @@ pub(super) fn handle_unless_payment(
                     }
                 }
             }
+            // CR 702.21a + CR 122.1 + CR 104.3d: Unless-cost of giving
+            // yourself N counters (Ward's player-counter form). No
+            // affordability gate exists — route through the single payment
+            // authority exactly like PayLife/PayEnergy above. Unlike those
+            // two, a real `Paused` path exists here (a "can't get counters"
+            // replacement effect may need a live choice), so it is preserved
+            // rather than lumped with `Failed`.
+            AbilityCost::GetPlayerCounters { .. } => {
+                match costs::pay_ability_cost_for_resolution(
+                    state,
+                    player,
+                    &cost,
+                    pending_effect.as_ref(),
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Failed { .. } => {
+                        payment_failed = true;
+                    }
+                    PaymentOutcome::Paused { .. } => {
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
+                }
+            }
             // CR 118.12a + CR 701.9 + CR 702.24a: Unless-discard. Resolve the
             // per-counter-scaled count, gate on eligible hand size, and seed the
             // `remaining` re-prompt loop (one card per round-trip). Defers to the

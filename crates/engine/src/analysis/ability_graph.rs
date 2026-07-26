@@ -1455,7 +1455,7 @@ fn sink_mana_cost(acc: &mut NodeAcc, cost: &ManaCost) {
 }
 
 /// CR 118 cost fold: the fourth compile-time drift gate — an exhaustive
-/// **no-wildcard** match over all 29 [`AbilityCost`] variants. Polarity/sign
+/// **no-wildcard** match over all 30 [`AbilityCost`] variants. Polarity/sign
 /// aware: a cost consumes a resource (negative `net`, ⇒ `requires`) or, in cost
 /// position, *produces* one (positive `net`, ⇒ `produces`). Field-less axes
 /// (`Tap`, `AnyCounter`) are injected directly.
@@ -1569,6 +1569,11 @@ fn fold_cost(acc: &mut NodeAcc, cost: &AbilityCost) {
         // cast (the spell being cast), never an activation cost of this ability,
         // so it carries no modeled axis for the loop detector.
         | AbilityCost::KeywordCostOfCastSpell { .. }
+        // CR 702.21a: a Ward player-counter cost, like the effect-side
+        // `Effect::GivePlayerCounter` above, carries no modeled axis here —
+        // poison accumulation is a loss condition, not a combo resource this
+        // loop detector tracks.
+        | AbilityCost::GetPlayerCounters { .. }
         | AbilityCost::Unimplemented { .. } => {}
     }
 }

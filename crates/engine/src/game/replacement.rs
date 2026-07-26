@@ -1170,6 +1170,18 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         // multiplier itself doesn't change the *kind* of cost the prompt
         // describes; the resolved scaled amount is decided in Task 6.
         AbilityCost::PerCounter { base, .. } => replacement_cost_description(base),
+        // CR 702.21a + CR 122.1 + CR 104.3d: Ward's player-counter cost.
+        AbilityCost::GetPlayerCounters {
+            counter_kind,
+            count,
+        } => {
+            let kind = format!("{counter_kind:?}").to_lowercase();
+            if *count == 1 {
+                format!("Get a {kind} counter")
+            } else {
+                format!("Get {count} {kind} counters")
+            }
+        }
         AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap

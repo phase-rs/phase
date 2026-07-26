@@ -543,6 +543,15 @@ pub enum WardCost {
     /// CR 702.21a: Compound ward cost — multiple costs that must all be paid.
     /// Used for "Ward—{2}, Pay 2 life" where comma-separated sub-costs are conjoined.
     Compound(Vec<WardCost>),
+    /// CR 702.21a + CR 122.1 + CR 104.3d: Ward cost paid by giving the paying
+    /// player counters of a kind (The Serpent Society: "Ward—Get five poison
+    /// counters."). Parameterized over `PlayerCounterKind` rather than a
+    /// poison-only variant so a future Ward cost of a different
+    /// player-counter kind reuses this shape instead of adding a sibling.
+    GetPlayerCounters {
+        counter_kind: crate::types::player::PlayerCounterKind,
+        count: u32,
+    },
 }
 
 /// CR 702.54a + CR 702.54b: Bloodthirst has fixed-N and X-count forms.

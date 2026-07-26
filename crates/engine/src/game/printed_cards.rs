@@ -1004,6 +1004,7 @@ fn walk_cost(cost: &AbilityCost, out: &mut Vec<String>) {
         | AbilityCost::NinjutsuFamily { .. }
         // CR 118.9: a borrowed keyword cost carries no nested effect/cost carrier.
         | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
         | AbilityCost::Unimplemented { .. } => {}
     }
 }

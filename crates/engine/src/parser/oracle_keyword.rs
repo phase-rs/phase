@@ -750,6 +750,37 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
         return Some(WardCost::Waterbend(cost));
     }
 
+    // CR 702.21a + CR 122.1 + CR 104.3d: "get N <kind> counter(s)" — a
+    // player-counter ward cost (The Serpent Society: "Ward—Get five poison
+    // counters."). MUST run before the mana-cost fallback below, which
+    // otherwise silently parses unrecognized cost text with no mana
+    // symbols/braces as a free, always-paid Ward (phase-rs/phase#6640).
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("get ").parse(lower) {
+        if let Some(before_counter) = rest
+            .strip_suffix(" counters")
+            .or_else(|| rest.strip_suffix(" counter"))
+        {
+            let parsed = nom_primitives::parse_number
+                .parse(before_counter)
+                .map(|(kind_word, n)| (n, kind_word.trim()))
+                .or_else(|_: nom::Err<OracleError<'_>>| {
+                    nom_primitives::parse_article
+                        .parse(before_counter)
+                        .map(|(kind_word, ())| (1, kind_word.trim()))
+                });
+            if let Ok((count, kind_word)) = parsed {
+                if let Ok((_, counter_kind)) =
+                    all_consuming(nom_primitives::parse_player_counter_kind).parse(kind_word)
+                {
+                    return Some(WardCost::GetPlayerCounters {
+                        counter_kind,
+                        count,
+                    });
+                }
+            }
+        }
+    }
+
     // Fall back to mana cost parsing
     let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(lower.trim());
     Some(WardCost::Mana(cost))
@@ -2829,6 +2860,46 @@ mod tests {
     use super::*;
     use crate::types::ability::{AbilityCost, SacrificeCost};
     use crate::types::mana::ManaCost;
+    use crate::types::player::PlayerCounterKind;
+
+    #[test]
+    fn ward_get_poison_counters_parses_as_player_counter_cost() {
+        // Issue #6640 (The Serpent Society): "Ward—Get five poison counters."
+        // must not silently fall through to the mana-cost fallback.
+        let result = parse_ward_cost("Get five poison counters.");
+        assert_eq!(
+            result,
+            Some(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: PlayerCounterKind::Poison,
+                count: 5,
+            }))
+        );
+    }
+
+    #[test]
+    fn ward_get_player_counters_accepts_digit_count_and_other_kinds() {
+        // Class-level coverage: digit form, and a non-poison counter kind.
+        let result = parse_ward_cost("Get 3 experience counters.");
+        assert_eq!(
+            result,
+            Some(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: PlayerCounterKind::Experience,
+                count: 3,
+            }))
+        );
+    }
+
+    #[test]
+    fn ward_get_a_poison_counter_singular_defaults_to_count_one() {
+        let result = parse_ward_cost("Get a poison counter.");
+        assert_eq!(
+            result,
+            Some(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: PlayerCounterKind::Poison,
+                count: 1,
+            }))
+        );
+    }
 
     #[test]
     fn parse_granted_keyword_fragment_cascade() {
