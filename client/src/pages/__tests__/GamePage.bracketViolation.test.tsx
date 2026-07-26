@@ -576,9 +576,12 @@ describe("GamePage — a refused request is survivable", () => {
  */
 describe("GamePage — takeback is a transport capability", () => {
   class FakeWebSocketAdapter extends WebSocketAdapter {
-    // Bypass the real constructor: this fixture only needs `instanceof` to
-    // hold, which is the exact predicate GamePage and `handleRequestTakeback`
-    // both use.
+    // Real superclass construction, not a stub — `super(...)` runs. It is safe
+    // to call here because the constructor only assigns fields and
+    // `maxReconnectAttempts`; it opens no socket. The subclass exists solely
+    // to supply throwaway arguments, since all this fixture needs is
+    // `instanceof` to hold — the exact predicate GamePage and
+    // `handleRequestTakeback` both use.
     constructor() {
       super("ws://test/ws", "host", { main_deck: [], sideboard: [] });
     }

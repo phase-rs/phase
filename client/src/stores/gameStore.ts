@@ -125,6 +125,10 @@ export function isAuthorityRemote(mode: GameMode | null): boolean {
  * the next gate needing "are other humans watching?" has an answer to call
  * instead of an `||` to append — and so the classification is observable, which
  * is what lets a test prove the two axes actually disagree for `native-ai`.
+ * Without it a test could still tabulate `isAuthorityRemote` across all eight
+ * modes and go red on any classification change; that test would not be
+ * vacuous, it would just be a no-op restatement of the behaviour before the
+ * split, unable to say anything about the axis this change exists to name.
  * No lint flags unused exports here (`client/eslint.config.js` configures only
  * `@typescript-eslint/no-unused-vars`, and there is no knip), so this comment,
  * not a suppression, is the honest handling.

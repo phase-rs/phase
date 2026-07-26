@@ -286,11 +286,25 @@ export class WebSocketAdapter implements EngineAdapter {
     // never stale-purged; a transient drop against a live sidecar is exactly
     // the recoverable case, and 8 attempts is the same budget `online` gets.
     //
-    // Not purely additive: a genuinely DEAD sidecar now spends ~27s of
-    // `reconnecting` UI (capped exponential backoff, 1+2+4+5+5+5+5+5) before
-    // `reconnectFailed`, where today it fails instantly. That is the right
-    // trade — the common case goes from fatal to recovered — but it is a
-    // user-visible latency regression on the most likely desktop failure.
+    // Not purely additive: a genuinely DEAD sidecar now spends **32s** of
+    // `reconnecting` UI before `reconnectFailed`, where today it fails
+    // instantly. `attemptReconnect`'s
+    // `Math.min(Math.pow(2, attempt - 1) * 1000, 5000)` over attempts 1-8 is
+    // 1+2+4+5+5+5+5+5 = 32, not the 27 first claimed here — the series was
+    // right and the sum was wrong.
+    //
+    // That is a floor, not a ceiling. It assumes each connect is *refused*
+    // immediately. If they hang instead, `attachSocket` calls
+    // `openPhaseSocket` without a `timeoutMs`, taking its 5000ms default, so
+    // the worst case is 32 + 8x5 = 72s.
+    //
+    // Still the right trade — the common case goes from fatal to recovered —
+    // but it is a user-visible latency regression on the most likely desktop
+    // failure, and for a LOOPBACK socket that failure is a crash or a
+    // sleep/resume rather than a spurious drop. 8 attempts buys little over
+    // 3-4 there, and nothing respawns the sidecar: `ensureNativeEngine` is
+    // never called from a close or error handler. Worth revisiting; the
+    // budget is deliberately left matching `online` rather than tuned here.
     //
     // `nativePregame` keeps 0, and that is out of scope rather than endorsed:
     // a pregame drop is recoverable by re-entering the lobby (no game has
