@@ -37,7 +37,7 @@ pub(super) fn finalize_trigger_target_selection(
     let mut trigger = trigger;
     let controller = trigger.controller;
     let distribute = trigger.distribute.clone();
-    trigger.ability = ability;
+    trigger.ability = Box::new(ability);
 
     // CR 601.2d + CR 603.3d: When a triggered ability divides damage or
     // counters among its targets, the controller announces that division while
@@ -183,7 +183,7 @@ pub(super) fn handle_trigger_target_selection_select_targets(
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
 
     Ok(finalize_trigger_target_selection(
-        state, trigger, ability, events,
+        state, trigger, *ability, events,
     ))
 }
 
@@ -340,7 +340,7 @@ pub(super) fn handle_trigger_target_selection_choose_target(
                 .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
 
             Ok(finalize_trigger_target_selection(
-                state, trigger, ability, events,
+                state, trigger, *ability, events,
             ))
         }
     }

@@ -269,7 +269,7 @@ fn maybe_pause_for_cast_distribution(
         return Ok(None);
     }
     let mut pending_dist = pending.clone();
-    pending_dist.ability = ability.clone();
+    pending_dist.ability = Box::new(ability.clone());
     state.pending_cast = Some(Box::new(pending_dist));
     Ok(Some(WaitingFor::DistributeAmong {
         player,
@@ -335,7 +335,7 @@ pub(crate) fn handle_select_targets(
             state,
             player,
             &pending,
-            pending.ability.clone(),
+            (*pending.ability).clone(),
         )? {
             return Ok(waiting_for);
         }
@@ -346,7 +346,7 @@ pub(crate) fn handle_select_targets(
     }
 
     let cost = pending.cost.clone();
-    finish_pending_cast_cost_or_pay(state, player, pending, ability, cost, events)
+    finish_pending_cast_cost_or_pay(state, player, pending, *ability, cost, events)
 }
 
 pub(crate) fn handle_choose_target(
@@ -431,7 +431,7 @@ pub(crate) fn handle_choose_target(
                     state,
                     controller,
                     &pending,
-                    pending.ability.clone(),
+                    (*pending.ability).clone(),
                 )? {
                     return Ok(waiting_for);
                 }
@@ -448,7 +448,7 @@ pub(crate) fn handle_choose_target(
             }
 
             let cost = pending.cost.clone();
-            finish_pending_cast_cost_or_pay(state, controller, pending, ability, cost, events)
+            finish_pending_cast_cost_or_pay(state, controller, pending, *ability, cost, events)
         }
     }
 }
@@ -476,7 +476,7 @@ fn pay_activation_costs_after_target_selection(
                 ));
             }
             let mut pending = pending.clone();
-            pending.ability = assigned_ability;
+            pending.ability = Box::new(assigned_ability);
             return Ok(Some(WaitingFor::PayCost {
                 player,
                 kind: PayCostKind::ExileFromZone { zone: narrow_zone },
@@ -512,7 +512,7 @@ fn pay_activation_costs_after_target_selection(
                 ));
             }
             let mut pending = pending.clone();
-            pending.ability = assigned_ability;
+            pending.ability = Box::new(assigned_ability);
             // CR 601.2h: unattach-from is a required cost — no decline, exactly
             // `count` selections.
             return Ok(Some(WaitingFor::PayCost {
@@ -552,7 +552,7 @@ pub(crate) fn finish_activation_after_automatic_mana_payment(
         pending.activation_target_selection,
         ActivationTargetSelection::Settled
     ) {
-        let ability = pending.ability.clone();
+        let ability = (*pending.ability).clone();
         if let Some(waiting) =
             pay_activation_costs_after_target_selection(state, player, &pending, ability)?
         {

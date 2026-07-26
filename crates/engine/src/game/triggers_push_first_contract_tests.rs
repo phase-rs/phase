@@ -405,11 +405,11 @@ fn push_first_no_legal_modes_modal_trigger_dropped_silently() {
         source_id,
         controller: PlayerId(0),
         condition: None,
-        ability: super::super::ability_utils::build_resolved_from_def(
+        ability: Box::new(super::super::ability_utils::build_resolved_from_def(
             &modal_ability,
             source_id,
             PlayerId(0),
-        ),
+        )),
         timestamp: state.turn_number,
         target_constraints: Vec::new(),
         distribute: None,
@@ -515,11 +515,11 @@ fn random_modal_trigger_resolves_without_prompting() {
         source_id,
         controller: PlayerId(0),
         condition: None,
-        ability: super::super::ability_utils::build_resolved_from_def(
+        ability: Box::new(super::super::ability_utils::build_resolved_from_def(
             &modal_ability,
             source_id,
             PlayerId(0),
-        ),
+        )),
         timestamp: state.turn_number,
         target_constraints: Vec::new(),
         distribute: None,

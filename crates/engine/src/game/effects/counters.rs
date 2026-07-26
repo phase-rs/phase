@@ -571,7 +571,7 @@ fn apply_pending_counter_post_action(
                     condition: DelayedTriggerCondition::AtNextPhase {
                         phase: crate::types::phase::Phase::EndCombat,
                     },
-                    ability: ResolvedAbility::new(
+                    ability: Box::new(ResolvedAbility::new(
                         Effect::Sacrifice {
                             target: TargetFilter::Any,
                             count: QuantityExpr::Fixed { value: 1 },
@@ -580,7 +580,7 @@ fn apply_pending_counter_post_action(
                         vec![TargetRef::Object(object_id)],
                         source_id,
                         controller,
-                    ),
+                    )),
                     controller,
                     source_id,
                     one_shot: true,
@@ -2711,7 +2711,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: source,
-                ability: root,
+                ability: Box::new(root),
             },
         });
 

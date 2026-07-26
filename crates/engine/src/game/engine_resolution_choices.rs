@@ -5629,7 +5629,7 @@ pub(super) fn handle_resolution_choice(
                     let ability = pending.ability.clone();
                     let cost = pending.cost.clone();
                     state.waiting_for = match casting_costs::finish_pending_cast_cost_or_pay(
-                        state, player, *pending, ability, cost, events,
+                        state, player, *pending, *ability, cost, events,
                     ) {
                         Ok(waiting_for) => waiting_for,
                         Err(err) => {

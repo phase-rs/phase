@@ -240,7 +240,10 @@ mod tests {
                 id: ObjectId(100),
                 source_id,
                 controller: PlayerId(0),
-                kind: StackEntryKind::ActivatedAbility { source_id, ability },
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id,
+                    ability: Box::new(ability),
+                },
             },
             &mut events,
         );

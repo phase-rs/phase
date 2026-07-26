@@ -74,7 +74,7 @@ pub fn resolve(
             condition: DelayedTriggerCondition::AtNextPhase {
                 phase: Phase::EndCombat,
             },
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Exile,
@@ -97,7 +97,7 @@ pub fn resolve(
                     .collect(),
                 ability.source_id,
                 ability.controller,
-            ),
+            )),
             controller: ability.controller,
             source_id: ability.source_id,
             one_shot: true,

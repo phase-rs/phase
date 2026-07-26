@@ -7268,7 +7268,7 @@ fn apply_action(
                 source_id: source,
                 controller: p,
                 condition: None,
-                ability,
+                ability: Box::new(ability),
                 timestamp: 0,
                 target_constraints: vec![],
                 distribute: None,
@@ -8215,7 +8215,7 @@ fn apply_action(
                         state,
                         p,
                         *pending,
-                        ability,
+                        *ability,
                         cost,
                         &mut events,
                     ) {

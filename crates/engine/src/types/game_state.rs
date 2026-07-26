@@ -5258,7 +5258,7 @@ pub struct DelayedTrigger {
     /// When this trigger fires.
     pub condition: DelayedTriggerCondition,
     /// The ability to execute when it fires.
-    pub ability: ResolvedAbility,
+    pub ability: Box<ResolvedAbility>,
     /// CR 603.7d: Controller (the player who created it).
     pub controller: PlayerId,
     /// Source permanent that created this delayed trigger.
@@ -5370,7 +5370,7 @@ pub struct CastingPermissionIndex(pub usize);
 pub struct PendingCast {
     pub object_id: ObjectId,
     pub card_id: CardId,
-    pub ability: ResolvedAbility,
+    pub ability: Box<ResolvedAbility>,
     pub cost: ManaCost,
     /// CR 601.2f: The tax-inclusive base mana cost captured at announcement,
     /// BEFORE any cost reductions/increases or {X} concretization. Lets the
@@ -5822,7 +5822,7 @@ impl PendingCast {
         Self {
             object_id,
             card_id,
-            ability,
+            ability: Box::new(ability),
             cost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -6506,7 +6506,7 @@ fn default_one_u32() -> u32 {
 /// CR 103.6: A beginning-of-game ability waiting to resolve after mulligans.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingBeginGameAbility {
-    pub ability: ResolvedAbility,
+    pub ability: Box<ResolvedAbility>,
 }
 
 /// CR 103.5b: Which declare-point action a pending `BottomCards` obligation
@@ -10092,7 +10092,7 @@ impl StackEntry {
     /// `ResolvedAbility`.
     pub fn ability(&self) -> Option<&ResolvedAbility> {
         match &self.kind {
-            StackEntryKind::Spell { ability, .. } => ability.as_ref(),
+            StackEntryKind::Spell { ability, .. } => ability.as_deref(),
             StackEntryKind::ActivatedAbility { ability, .. } => Some(ability),
             StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
             StackEntryKind::KeywordAction { .. } => None,
@@ -10105,7 +10105,7 @@ impl StackEntry {
     /// `ResolvedAbility`.
     pub fn ability_mut(&mut self) -> Option<&mut ResolvedAbility> {
         match &mut self.kind {
-            StackEntryKind::Spell { ability, .. } => ability.as_mut(),
+            StackEntryKind::Spell { ability, .. } => ability.as_deref_mut(),
             StackEntryKind::ActivatedAbility { ability, .. } => Some(ability),
             StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
             StackEntryKind::KeywordAction { .. } => None,
@@ -10578,7 +10578,7 @@ pub enum StackEntryKind {
         /// spell-level effect (creatures, artifacts, etc.) — they simply enter the
         /// battlefield on resolution.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        ability: Option<ResolvedAbility>,
+        ability: Option<Box<ResolvedAbility>>,
         /// How this spell was cast — determines resolution behavior (zone routing,
         /// exile permissions, delayed triggers).
         #[serde(default)]
@@ -10588,7 +10588,7 @@ pub enum StackEntryKind {
     },
     ActivatedAbility {
         source_id: ObjectId,
-        ability: ResolvedAbility,
+        ability: Box<ResolvedAbility>,
     },
     TriggeredAbility {
         source_id: ObjectId,
@@ -19134,7 +19134,7 @@ mod tests {
         let mut a = GameState::new_two_player(7);
         a.delayed_triggers.push(DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            ability: draw_ability(1),
+            ability: Box::new(draw_ability(1)),
             controller: PlayerId(0),
             source_id: ObjectId(5),
             one_shot: true,
@@ -19145,7 +19145,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(5),
-                ability: draw_ability(1),
+                ability: Box::new(draw_ability(1)),
             },
         });
 
@@ -20693,7 +20693,7 @@ mod tests {
             Box::new(PendingCast {
                 object_id: ObjectId(1),
                 card_id: CardId(1),
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Unimplemented {
                         name: "Dummy".to_string(),
                         description: None,
@@ -20701,7 +20701,7 @@ mod tests {
                     vec![],
                     ObjectId(1),
                     PlayerId(0),
-                ),
+                )),
                 cost: ManaCost::NoCost,
                 base_cost: None,
                 declared_mana_additions: Vec::new(),
@@ -21099,7 +21099,7 @@ mod tests {
         let pending = Box::new(PendingCast {
             object_id: ObjectId(1),
             card_id: CardId(1),
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 crate::types::ability::Effect::Unimplemented {
                     name: "Dummy".to_string(),
                     description: None,
@@ -21107,7 +21107,7 @@ mod tests {
                 vec![],
                 ObjectId(1),
                 PlayerId(0),
-            ),
+            )),
             cost: ManaCost::NoCost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -21987,7 +21987,7 @@ mod tests {
             source_id: ObjectId(5),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -21995,7 +21995,7 @@ mod tests {
                 vec![],
                 ObjectId(5),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 42,
             target_constraints: Vec::new(),
             distribute: None,
@@ -22053,7 +22053,7 @@ mod tests {
             source_id: ObjectId(5),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -22061,7 +22061,7 @@ mod tests {
                 vec![],
                 ObjectId(5),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -22658,7 +22658,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(5),
-                ability: act_ability,
+                ability: Box::new(act_ability),
             },
         };
         assert!(!state.is_priority_yielded(PlayerId(0), &spell));

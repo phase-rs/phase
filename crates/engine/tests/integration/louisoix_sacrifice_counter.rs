@@ -134,7 +134,7 @@ fn stack_with_four_entries() -> (GameState, ObjectId, ObjectId, ObjectId, Object
         controller: PlayerId(1),
         kind: StackEntryKind::ActivatedAbility {
             source_id: perm,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "Act".to_string(),
                     description: None,
@@ -142,7 +142,7 @@ fn stack_with_four_entries() -> (GameState, ObjectId, ObjectId, ObjectId, Object
                 vec![],
                 perm,
                 PlayerId(1),
-            ),
+            )),
         },
     });
     state.stack.push_back(StackEntry {

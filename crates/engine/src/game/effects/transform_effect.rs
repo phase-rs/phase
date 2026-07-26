@@ -303,7 +303,7 @@ mod tests {
                     controller: PlayerId(0),
                     kind: StackEntryKind::ActivatedAbility {
                         source_id,
-                        ability: transform(),
+                        ability: Box::new(transform()),
                     },
                 },
                 &mut events,
@@ -367,7 +367,10 @@ mod tests {
                     die_result: None,
                 }
             } else {
-                StackEntryKind::ActivatedAbility { source_id, ability }
+                StackEntryKind::ActivatedAbility {
+                    source_id,
+                    ability: Box::new(ability),
+                }
             };
             let mut events = Vec::new();
             push_to_stack(
@@ -450,7 +453,7 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::TriggeredAbility {
                     source_id,
-                    ability: Box::new(delayed.ability),
+                    ability: delayed.ability,
                     condition: None,
                     trigger_event: None,
                     description: None,
@@ -522,7 +525,7 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::TriggeredAbility {
                     source_id,
-                    ability: Box::new(delayed.ability),
+                    ability: delayed.ability,
                     condition: None,
                     trigger_event: None,
                     description: None,

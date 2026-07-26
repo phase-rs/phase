@@ -239,7 +239,7 @@ fn queue_room_trigger(
         source_id,
         controller: player,
         condition: None,
-        ability: room_ability,
+        ability: Box::new(room_ability),
         timestamp: 0,
         target_constraints,
         distribute: None,

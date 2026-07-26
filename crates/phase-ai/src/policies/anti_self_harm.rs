@@ -3286,7 +3286,7 @@ mod tests {
             source_id: ObjectId(200),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: None,
                     destination: Zone::Exile,
@@ -3305,7 +3305,7 @@ mod tests {
                 Vec::new(),
                 ObjectId(200),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -3397,7 +3397,7 @@ mod tests {
             source_id: ObjectId(200),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: None,
                     destination: Zone::Exile,
@@ -3416,7 +3416,7 @@ mod tests {
                 Vec::new(),
                 ObjectId(200),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,

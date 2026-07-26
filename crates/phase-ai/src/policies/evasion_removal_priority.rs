@@ -499,7 +499,7 @@ mod tests {
             source_id: trigger_source,
             controller: P0,
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Destroy {
                     target: TargetFilter::Any,
                     cant_regenerate: false,
@@ -507,7 +507,7 @@ mod tests {
                 Vec::new(),
                 trigger_source,
                 P0,
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,

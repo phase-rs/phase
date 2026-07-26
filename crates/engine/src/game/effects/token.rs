@@ -1007,7 +1007,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
                 condition: DelayedTriggerCondition::AtNextPhase {
                     phase: Phase::EndCombat,
                 },
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::Any,
                         count: QuantityExpr::Fixed { value: 1 },
@@ -1016,7 +1016,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
                     vec![TargetRef::Object(obj_id)],
                     spec.source_id,
                     spec.controller,
-                ),
+                )),
                 controller: spec.controller,
                 source_id: spec.source_id,
                 one_shot: true,
@@ -1686,7 +1686,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
             condition: DelayedTriggerCondition::AtNextPhase {
                 phase: Phase::EndCombat,
             },
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
                     count: QuantityExpr::Fixed { value: 1 },
@@ -1695,7 +1695,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
                 vec![TargetRef::Object(object_id)],
                 source_id,
                 controller,
-            ),
+            )),
             controller,
             source_id,
             one_shot: true,
