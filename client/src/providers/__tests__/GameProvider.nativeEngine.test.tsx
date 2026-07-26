@@ -5,7 +5,11 @@ import { useMultiplayerStore } from "../../stores/multiplayerStore";
 
 type NativeAdapterEvent =
   | { type: "reconnectFailed" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  // Non-terminal: the server refused a fire-and-forget request. Listed here
+  // alongside the two terminal events precisely because `handleNativeEvent`
+  // must treat it differently from both.
+  | { type: "requestRejected"; reason: string };
 
 const {
   NativeEngineVersionMismatchError,
