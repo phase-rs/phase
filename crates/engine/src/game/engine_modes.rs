@@ -187,10 +187,11 @@ fn handle_activated_mode_choice(
         // interactive sacrifice prompt before targets or direct cost payment.
         // Non-modal activations take this path in `handle_activate_ability`;
         // without it, `pay_ability_cost` no-ops non-self `Sacrifice` sub-costs.
-        if let Some((count, sac_filter)) = casting::find_non_self_sacrifice_cost(cost) {
+        if let Some((requirement, sac_filter)) = casting::find_non_self_sacrifice_cost(cost) {
             let eligible =
                 casting::find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
-            let (min_count, max_count) = casting::sacrifice_cost_bounds(count, eligible.len());
+            let (min_count, max_count) =
+                casting::sacrifice_cost_bounds(requirement, eligible.len());
             if eligible.len() < min_count {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough eligible permanents to sacrifice".into(),

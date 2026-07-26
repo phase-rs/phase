@@ -23,8 +23,9 @@ use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, AggregateFunction, BeholdCostAction, ChoiceType, Comparator, ControllerRef,
     CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerScope, QuantityExpr,
-    QuantityRef, SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
-    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
+    QuantityRef, SacrificeCost, SacrificeRequirement, TapCreaturesRequirement, TargetFilter,
+    TypedFilter, EXILE_COST_X, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER,
+    REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
 use crate::types::zones::Zone;
@@ -657,31 +658,34 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // [filter]" / "sacrifice at least one [filter]" — player chooses a
         // ranged count of eligible permanents (Rottenmouth Viper, Scapeshift
         // class; "one or more" — Plumb the Forbidden class, issue #1108).
-        // `u32::MAX` is the shared ranged-count sentinel: paired with the
-        // `AdditionalCost::Optional` wrapper these costs already carry, "you
-        // may sacrifice one or more" and "you may sacrifice any number of" are
-        // observably identical — declining the optional cost is the only path
-        // to zero, so the ranged floor doesn't need its own representation.
-        // Mirrors the same quantifier vocabulary as
+        // The quantifier decides the typed floor: "any number of" keeps the
+        // zero-floor `Count { count: u32::MAX }` ranged sentinel, while
+        // "one or more" / "at least one" lower to the typed
+        // `SacrificeRequirement::AtLeast { min: 1 }` — accepting such a cost
+        // commits to at least one sacrifice, so the floor threads through
+        // `sacrifice_cost_bounds` and the `ChooseXValue` announcement range
+        // (game/casting.rs, game/casting_costs.rs) rather than defaulting to
+        // zero. Mirrors the same quantifier vocabulary as
         // `parse_you_sacrifice_this_way_clause` (oracle_nom/condition.rs) so
         // the cost parser and its reflexive-trigger condition sibling agree on
         // what counts as "a ranged sacrifice quantifier".
-        if let Some(((), rest_after_qty)) = nom_on_lower(rest, &rest_lower, |i| {
-            value(
-                (),
-                alt((
-                    tag::<_, _, E<'_>>("any number of "),
-                    tag("one or more "),
-                    tag("at least one "),
-                )),
-            )
+        if let Some((ranged_floor, rest_after_qty)) = nom_on_lower(rest, &rest_lower, |i| {
+            alt((
+                value(None, tag::<_, _, E<'_>>("any number of ")),
+                value(Some(1u32), tag("one or more ")),
+                value(Some(1u32), tag("at least one ")),
+            ))
             .parse(i)
         }) {
             let filter_text = rest_after_qty.trim().trim_end_matches('.');
             let target_phrase = format!("target {filter_text}");
             let (filter, remainder) = parse_target(&target_phrase);
             if remainder.trim().is_empty() {
-                return AbilityCost::Sacrifice(SacrificeCost::count(filter, u32::MAX));
+                let requirement = match ranged_floor {
+                    None => SacrificeRequirement::count(u32::MAX),
+                    Some(min) => SacrificeRequirement::at_least(min),
+                };
+                return AbilityCost::Sacrifice(SacrificeCost::new(filter, requirement));
             }
         }
         // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"

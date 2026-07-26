@@ -281,7 +281,12 @@ impl AbilityCost {
             // CR 601.2b: Sacrifice requires a choice of permanent; self-sacrifice
             // is always payable so long as the source exists on the battlefield.
             AbilityCost::Sacrifice(cost) => match &cost.requirement {
-                crate::types::ability::SacrificeRequirement::Count { count } => {
+                // CR 701.21 + CR 107.2: counted requirements — fixed counts,
+                // the ranged sentinel, and the typed "at least" floor
+                // (issue #1108) — are payable when the eligible pool covers
+                // the requirement's minimum selection.
+                crate::types::ability::SacrificeRequirement::Count { .. }
+                | crate::types::ability::SacrificeRequirement::AtLeast { .. } => {
                     if matches!(cost.target, TargetFilter::SelfRef) {
                         return state
                             .objects
@@ -298,7 +303,7 @@ impl AbilityCost {
                         &cost.target,
                     );
                     let (min_count, _) =
-                        super::casting::sacrifice_cost_bounds(*count, eligible.len());
+                        super::casting::sacrifice_cost_bounds(&cost.requirement, eligible.len());
                     eligible.len() >= min_count
                 }
                 crate::types::ability::SacrificeRequirement::Aggregate {

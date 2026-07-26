@@ -717,6 +717,13 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
                     format!("Sacrifice {count} permanents")
                 }
             }
+            crate::types::ability::SacrificeRequirement::AtLeast { min } => {
+                if *min == 1 {
+                    "Sacrifice one or more permanents".to_string()
+                } else {
+                    format!("Sacrifice at least {min} permanents")
+                }
+            }
             crate::types::ability::SacrificeRequirement::Aggregate {
                 stat: crate::types::ability::SacrificeAggregateStat::TotalPower,
                 comparator,

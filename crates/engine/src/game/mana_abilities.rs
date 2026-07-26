@@ -3579,7 +3579,11 @@ fn sacrifice_cost_choice(
     source_id: ObjectId,
     cost: &Option<AbilityCost>,
 ) -> Option<(usize, Vec<ObjectId>)> {
-    let (count, filter) = super::casting::find_non_self_sacrifice_cost(cost.as_ref()?)?;
+    let (requirement, filter) = super::casting::find_non_self_sacrifice_cost(cost.as_ref()?)?;
+    // Mana-ability sacrifice costs carry fixed counts only; a typed ranged
+    // floor ("sacrifice one or more", issue #1108) has no mana-ability
+    // announcement channel, so decline rather than treat the floor as exact.
+    let count = requirement.fixed_count()?;
     let permanents =
         super::casting::find_eligible_sacrifice_targets(state, player, source_id, filter);
     Some((count as usize, permanents))

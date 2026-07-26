@@ -921,7 +921,7 @@ mod tests {
     use crate::types::ability::{
         AdditionalCostRepeatability, AggregateFunction, BeholdCostAction, CardSelectionMode,
         Comparator, ControllerRef, CountScope, FilterProp, ParsedCondition, PlayerScope,
-        QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+        QuantityExpr, QuantityRef, SacrificeRequirement, TargetFilter, TypeFilter,
     };
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost};
@@ -1670,9 +1670,9 @@ Trample";
     }
 
     /// Issue #1108: Plumb the Forbidden — "sacrifice one or more creatures"
-    /// must ranged-parse the same way "sacrifice any number of X" already
-    /// does (a real `Creature` filter, not an empty one; a ranged count, not
-    /// a fixed 1).
+    /// must ranged-parse with a real `Creature` filter (not an empty one) and
+    /// the typed `AtLeast { min: 1 }` floor — NOT the zero-floor "any number
+    /// of" sentinel: accepting the cost commits to at least one sacrifice.
     #[test]
     fn parse_additional_cost_optional_sacrifice_one_or_more_creatures() {
         let lower =
@@ -1684,7 +1684,7 @@ Trample";
             Some(AdditionalCost::Optional {
                 cost: AbilityCost::Sacrifice(ref sac),
                 repeatability: AdditionalCostRepeatability::Once,
-            }) if sac.requirement.fixed_count() == Some(u32::MAX) => match &sac.target {
+            }) if sac.requirement == SacrificeRequirement::at_least(1) => match &sac.target {
                 TargetFilter::Typed(t) => {
                     assert!(
                         t.type_filters.contains(&TypeFilter::Creature),
@@ -1712,7 +1712,7 @@ Trample";
             Some(AdditionalCost::Optional {
                 cost: AbilityCost::Sacrifice(ref sac),
                 repeatability: AdditionalCostRepeatability::Once,
-            }) if sac.requirement.fixed_count() == Some(u32::MAX) => {}
+            }) if sac.requirement == SacrificeRequirement::at_least(1) => {}
             other => panic!("Expected Optional(Sacrifice ranged), got {:?}", other),
         }
     }

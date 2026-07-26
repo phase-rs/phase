@@ -793,6 +793,31 @@ pub(super) fn handle_unless_payment(
                         return Ok(action_result(events, state.waiting_for.clone()));
                     }
                 }
+                SacrificeRequirement::AtLeast { min } => {
+                    // CR 118.12 + CR 107.2: a ranged unless-sacrifice floor —
+                    // paying exactly the minimum satisfies the cost; nothing
+                    // ever forces sacrificing more than the floor, so surface
+                    // the floor as the required count (issue #1108).
+                    let filter = &cost.target;
+                    let eligible = eligible_unless_sacrifice_permanents(
+                        state,
+                        player,
+                        pending_effect.source_id,
+                        filter,
+                    );
+                    if eligible.len() < *min as usize {
+                        payment_failed = true;
+                    } else {
+                        state.waiting_for = WaitingFor::WardSacrificeChoice {
+                            player,
+                            permanents: eligible,
+                            pending_effect: pending_effect.clone(),
+                            remaining: *min,
+                            min_total_power: None,
+                        };
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
+                }
                 SacrificeRequirement::Aggregate {
                     stat,
                     comparator,

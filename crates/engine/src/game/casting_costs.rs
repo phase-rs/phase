@@ -2641,8 +2641,16 @@ pub(crate) fn handle_sacrifice_for_cost(
     }
 
     // CR 107.3a: The selected payment count defines X for this activation or
-    // additional cost while its ability is on the stack.
-    if min_count == 0 {
+    // additional cost while its ability is on the stack. A ranged requirement
+    // is detected either by its zero floor (`min_count == 0`, the historical
+    // any-number proxy) or by the paid cost's typed ranged floor — a
+    // "sacrifice one or more" cost has `min_count == 1` yet its selection
+    // count is still the chosen X (issue #1108).
+    let ranged_selection = min_count == 0
+        || paid_cost
+            .and_then(|payment| super::casting::find_non_self_sacrifice_cost(payment.cost))
+            .is_some_and(|(requirement, _)| requirement.chosen_range_min().is_some());
+    if ranged_selection {
         pending
             .ability
             .set_chosen_x_recursive(chosen.len().try_into().unwrap_or(u32::MAX));
@@ -4067,14 +4075,17 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         }));
     }
 
-    if let Some((count, sacrifice_filter)) = super::casting::find_non_self_sacrifice_cost(cost) {
+    if let Some((requirement, sacrifice_filter)) =
+        super::casting::find_non_self_sacrifice_cost(cost)
+    {
         let eligible = super::casting::find_eligible_sacrifice_targets(
             state,
             player,
             source_id,
             sacrifice_filter,
         );
-        let (min_count, max_count) = super::casting::sacrifice_cost_bounds(count, eligible.len());
+        let (min_count, max_count) =
+            super::casting::sacrifice_cost_bounds(requirement, eligible.len());
         if eligible.len() < min_count {
             return Err(EngineError::ActionNotAllowed(
                 "Not enough eligible permanents to sacrifice".into(),
@@ -5960,7 +5971,15 @@ fn pay_additional_cost_with_source(
 ) -> Result<WaitingFor, EngineError> {
     if pending.ability.chosen_x.is_none() {
         if let Some(max) = additional_cost_x_max(state, player, pending.object_id, &cost) {
-            let min = pending.ability.min_x_value;
+            // CR 601.2b + CR 107.2: the announced X range's floor is the
+            // larger of the spell's own minimum-X annotation and the typed
+            // ranged floor carried by the additional cost itself ("sacrifice
+            // one or more" / "at least one" — issue #1108); accepting such a
+            // cost can never announce X=0.
+            let min = pending
+                .ability
+                .min_x_value
+                .max(additional_cost_x_min(&cost));
             if min > max {
                 super::casting::handle_cancel_cast(state, &pending, events);
                 return Err(EngineError::ActionNotAllowed(format!(
@@ -6191,10 +6210,18 @@ fn pay_additional_cost_with_source(
         }
         AbilityCost::Sacrifice(cost) => {
             let target = &cost.target;
-            let SacrificeRequirement::Count { count } = cost.requirement else {
-                return Err(EngineError::ActionNotAllowed(
-                    "Unsupported sacrifice cost requirement for spell payment".into(),
-                ));
+            // CR 701.21: counted requirements only — fixed counts, the ranged
+            // sentinel, and the typed `AtLeast` floor (issue #1108). Aggregate
+            // power-sum requirements have no spell-payment path here.
+            let requirement = match cost.requirement {
+                SacrificeRequirement::Count { .. } | SacrificeRequirement::AtLeast { .. } => {
+                    cost.requirement.clone()
+                }
+                SacrificeRequirement::Aggregate { .. } => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Unsupported sacrifice cost requirement for spell payment".into(),
+                    ));
+                }
             };
             if matches!(target, crate::types::ability::TargetFilter::SelfRef) {
                 if super::static_abilities::player_cant_sacrifice_as_cost(
@@ -6241,7 +6268,7 @@ fn pay_additional_cost_with_source(
                     target,
                 );
                 let (min_count, max_count) = super::casting::sacrifice_cost_bounds_with_chosen_x(
-                    count,
+                    &requirement,
                     eligible.len(),
                     pending.ability.chosen_x,
                 );
@@ -6258,9 +6285,9 @@ fn pay_additional_cost_with_source(
                     min_count,
                     resume: CostResume::SpellCost {
                         spell: Box::new(pending),
-                        cost: Box::new(AbilityCost::Sacrifice(SacrificeCost::count(
+                        cost: Box::new(AbilityCost::Sacrifice(SacrificeCost::new(
                             target.clone(),
-                            count,
+                            requirement,
                         ))),
                         source: cost_source,
                     },
@@ -6803,9 +6830,10 @@ fn additional_cost_x_max(
         AbilityCost::PayEnergy { amount } if amount.contains_x() => {
             Some(state.players[player.0 as usize].energy)
         }
-        AbilityCost::Sacrifice(cost)
-            if cost.requirement == SacrificeRequirement::Count { count: u32::MAX } =>
-        {
+        // CR 601.2b + CR 107.2: both ranged forms — the zero-floor "any
+        // number of" sentinel and the typed "one or more"/"at least one"
+        // `AtLeast` floor (issue #1108) — announce X before later choices.
+        AbilityCost::Sacrifice(cost) if cost.requirement.chosen_range_min().is_some() => {
             // CR 601.2b: X in an additional sacrifice cost is announced before later target choices.
             Some(
                 super::casting::find_eligible_sacrifice_targets(
@@ -6882,6 +6910,22 @@ fn additional_cost_x_max(
             additional_cost_x_max(state, player, source_id, base)
         }
         _ => None,
+    }
+}
+
+/// CR 601.2b + CR 107.2: lower bound for an announced X on an additional or
+/// activation cost. Nonzero only for the typed ranged sacrifice floor
+/// ("sacrifice one or more" / "at least one" — Plumb the Forbidden class,
+/// issue #1108); the "any number of" sentinel and every other X-bearing cost
+/// keep their zero floor.
+fn additional_cost_x_min(cost: &AbilityCost) -> u32 {
+    match cost {
+        AbilityCost::Sacrifice(cost) => cost.requirement.chosen_range_min().unwrap_or(0),
+        AbilityCost::Composite { costs } => {
+            costs.iter().map(additional_cost_x_min).max().unwrap_or(0)
+        }
+        AbilityCost::PerCounter { base, .. } => additional_cost_x_min(base),
+        _ => 0,
     }
 }
 
@@ -10638,7 +10682,15 @@ pub fn enter_payment_step(
                 pending.activation_ability_index.is_some() || pending.base_cost.is_some(),
                 "spell-cast PendingCast reached X announcement without a captured base_cost",
             );
-            let min = pending.ability.min_x_value;
+            // CR 601.2b + CR 107.2: an activation cost carrying a typed
+            // ranged sacrifice floor raises the announced X minimum the same
+            // way the additional-cost path does (issue #1108).
+            let min = pending.ability.min_x_value.max(
+                pending
+                    .activation_cost
+                    .as_ref()
+                    .map_or(0, additional_cost_x_min),
+            );
             let excluded_sources = pending
                 .activation_cost
                 .as_ref()

@@ -7915,6 +7915,13 @@ pub enum SacrificeRequirement {
         #[serde(default = "default_one")]
         count: u32,
     },
+    /// CR 107.2: a player-chosen ranged count with a typed lower bound —
+    /// "sacrifice one or more [filter]" / "sacrifice at least one [filter]"
+    /// (Plumb the Forbidden class, issue #1108). Distinct from the
+    /// `Count { count: u32::MAX }` any-number sentinel, whose floor is zero:
+    /// accepting a cost carrying this requirement commits the chooser to
+    /// sacrificing at least `min` permanents.
+    AtLeast { min: u32 },
     Aggregate {
         stat: SacrificeAggregateStat,
         comparator: Comparator,
@@ -7933,15 +7940,46 @@ impl SacrificeRequirement {
         Self::Count { count: n }
     }
 
+    /// CR 107.2: typed ranged requirement — "one or more" / "at least one".
+    pub fn at_least(min: u32) -> Self {
+        Self::AtLeast { min }
+    }
+
     pub fn fixed_count(&self) -> Option<u32> {
         match self {
             Self::Count { count } => Some(*count),
-            Self::Aggregate { .. } => None,
+            Self::AtLeast { .. } | Self::Aggregate { .. } => None,
         }
     }
 
     pub fn is_aggregate(&self) -> bool {
         matches!(self, Self::Aggregate { .. })
+    }
+
+    /// CR 107.2 + CR 601.2b: `Some(floor)` when the sacrifice count is chosen
+    /// by the paying player at payment time (a ranged requirement): `Some(0)`
+    /// for the `Count { count: u32::MAX }` any-number sentinel, `Some(min)`
+    /// for the typed `AtLeast` form. `None` for fixed counts and aggregates —
+    /// those have no player-chosen count to announce.
+    pub fn chosen_range_min(&self) -> Option<u32> {
+        match self {
+            Self::Count { count: u32::MAX } => Some(0),
+            Self::Count { .. } => None,
+            Self::AtLeast { min } => Some(*min),
+            Self::Aggregate { .. } => None,
+        }
+    }
+
+    /// CR 701.21: the fewest permanents a legal payment of this requirement
+    /// can sacrifice — the fixed count, or the ranged floor. `None` for
+    /// aggregates, whose constraint is a power sum rather than a count.
+    pub fn min_selection_count(&self) -> Option<u32> {
+        match self {
+            Self::Count { count: u32::MAX } => Some(0),
+            Self::Count { count } => Some(*count),
+            Self::AtLeast { min } => Some(*min),
+            Self::Aggregate { .. } => None,
+        }
     }
 }
 
@@ -8067,7 +8105,7 @@ impl serde::Serialize for SacrificeCost {
         st.serialize_field("target", &self.target)?;
         match &self.requirement {
             SacrificeRequirement::Count { count } => st.serialize_field("count", count)?,
-            SacrificeRequirement::Aggregate { .. } => {
+            SacrificeRequirement::AtLeast { .. } | SacrificeRequirement::Aggregate { .. } => {
                 st.serialize_field("requirement", &self.requirement)?;
             }
         }

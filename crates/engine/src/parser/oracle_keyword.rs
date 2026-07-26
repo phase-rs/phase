@@ -2544,6 +2544,13 @@ fn format_cumulative_upkeep_cost(cost: &AbilityCost) -> String {
                         format!("Sacrifice {count} {subject}s")
                     }
                 }
+                SacrificeRequirement::AtLeast { min } => {
+                    if *min == 1 {
+                        format!("Sacrifice one or more {subject}s")
+                    } else {
+                        format!("Sacrifice at least {min} {subject}s")
+                    }
+                }
                 SacrificeRequirement::Aggregate { value, .. } => {
                     format!("Sacrifice {subject} with total power {value} or greater")
                 }

@@ -5,8 +5,8 @@ use crate::types::ability::{
     CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, FilterProp, GameRestriction,
     ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity,
     QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
-    StaticCondition, StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter,
-    TargetRef,
+    SacrificeRequirement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapCreaturesRequirement, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -351,27 +351,45 @@ pub(crate) fn begin_variable_speed_payment(
 
 /// CR 107.3a + CR 118.3: X in an activation/additional cost is chosen as part
 /// of activating or casting, bounded by the resources available to pay fully.
-pub(crate) fn sacrifice_cost_bounds(count: u32, eligible_len: usize) -> (usize, usize) {
-    if count == u32::MAX {
-        (0, eligible_len)
-    } else {
-        let exact = count as usize;
-        (exact, exact)
+/// CR 107.2: ranged requirements select between their typed floor and the
+/// eligible pool — zero for the "any number of" sentinel, `min` for the
+/// "one or more" / "at least one" `AtLeast` form (issue #1108).
+pub(crate) fn sacrifice_cost_bounds(
+    requirement: &SacrificeRequirement,
+    eligible_len: usize,
+) -> (usize, usize) {
+    match requirement {
+        SacrificeRequirement::Count { count: u32::MAX } => (0, eligible_len),
+        SacrificeRequirement::Count { count } => {
+            let exact = *count as usize;
+            (exact, exact)
+        }
+        SacrificeRequirement::AtLeast { min } => (*min as usize, eligible_len),
+        // CR 701.21: an aggregate requirement constrains the chosen set's power
+        // sum, not its size — any subset of the eligible pool may be offered
+        // and `sacrifice_pool_meets_aggregate_constraint` validates the sum.
+        // No cost-payment caller reaches here (their walkers pre-filter to
+        // counted requirements); the full range is the honest fallback.
+        SacrificeRequirement::Aggregate { .. } => (0, eligible_len),
     }
 }
 
 pub(crate) fn sacrifice_cost_bounds_with_chosen_x(
-    count: u32,
+    requirement: &SacrificeRequirement,
     eligible_len: usize,
     chosen_x: Option<u32>,
 ) -> (usize, usize) {
-    if count == u32::MAX {
+    if let Some(floor) = requirement.chosen_range_min() {
         if let Some(value) = chosen_x {
-            let exact = value as usize;
+            // CR 601.2b + CR 107.2: an announced X below the typed floor is
+            // rejected at announcement (`ChooseXValue { min, .. }`); clamp
+            // defensively so a stale/foreign chosen X can never drop the
+            // selection below the requirement's floor.
+            let exact = value.max(floor) as usize;
             return (exact, exact);
         }
     }
-    sacrifice_cost_bounds(count, eligible_len)
+    sacrifice_cost_bounds(requirement, eligible_len)
 }
 
 /// Emit `BecomesTarget` and `CrimeCommitted` events for each target.
@@ -15121,12 +15139,19 @@ fn find_waterbend_cost(cost: &AbilityCost) -> Option<&ManaCost> {
 /// Walk a cost tree and return the first non-SelfRef sacrifice `(count, filter)`
 /// found, if any. The `count` is honored so multi-permanent sacrifice costs
 /// ("Sacrifice two creatures:") are modeled correctly.
-pub(super) fn find_non_self_sacrifice_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+pub(super) fn find_non_self_sacrifice_cost(
+    cost: &AbilityCost,
+) -> Option<(&SacrificeRequirement, &TargetFilter)> {
     match cost {
-        AbilityCost::Sacrifice(cost) if !matches!(cost.target, TargetFilter::SelfRef) => cost
-            .requirement
-            .fixed_count()
-            .map(|count| (count, &cost.target)),
+        // CR 701.21: counted requirements only (fixed, ranged sentinel, typed
+        // `AtLeast` floor); aggregate power-sum requirements stay invisible to
+        // this walker, matching its pre-`AtLeast` `fixed_count()` behavior.
+        AbilityCost::Sacrifice(cost)
+            if !matches!(cost.target, TargetFilter::SelfRef)
+                && cost.requirement.min_selection_count().is_some() =>
+        {
+            Some((&cost.requirement, &cost.target))
+        }
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_sacrifice_cost),
         _ => None,
     }
@@ -15152,7 +15177,11 @@ pub(super) enum RemovalKind {
 pub(super) fn find_non_self_battlefield_removal_cost(
     cost: &AbilityCost,
 ) -> Option<(u32, &TargetFilter, RemovalKind)> {
-    if let Some((n, f)) = find_non_self_sacrifice_cost(cost) {
+    if let Some((requirement, f)) = find_non_self_sacrifice_cost(cost) {
+        // Callers use this walker as a presence check; the requirement's
+        // minimum selection count is the honest scalar for the tuple slot
+        // (the walker only yields counted requirements, so this is Some).
+        let n = requirement.min_selection_count().unwrap_or(0);
         return Some((n, f, RemovalKind::Sacrifice));
     }
     if let Some((n, f)) = find_battlefield_exile_cost(cost) {
@@ -16299,8 +16328,9 @@ pub fn can_activate_ability_now_with_restriction_gates(
             ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
                 && ability_def.cost.as_ref().is_some_and(|cost| {
                     casting_costs::extract_x_mana_cost(cost).is_some()
-                        || find_non_self_sacrifice_cost(cost)
-                            .is_some_and(|(count, _)| count == u32::MAX)
+                        || find_non_self_sacrifice_cost(cost).is_some_and(|(requirement, _)| {
+                            requirement.chosen_range_min().is_some()
+                        })
                         || casting_costs::activation_cost_needs_x_choice(&resolved, cost)
                 })
         }
@@ -16904,9 +16934,9 @@ pub fn handle_activate_ability(
             }
         }
 
-        if let Some((count, sac_filter)) = find_non_self_sacrifice_cost(cost) {
+        if let Some((requirement, sac_filter)) = find_non_self_sacrifice_cost(cost) {
             let eligible = find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
-            let (min_count, max_count) = sacrifice_cost_bounds(count, eligible.len());
+            let (min_count, max_count) = sacrifice_cost_bounds(requirement, eligible.len());
             if eligible.len() < min_count {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough eligible permanents to sacrifice".into(),
