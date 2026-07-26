@@ -11,19 +11,41 @@
 //! `pending_trigger` is `None`, so every retyped field is degenerate there and
 //! the test would pass for any layout. These fixtures are populated instead.
 //!
-//! The discriminator is `StackEntryKind::TriggeredAbility.ability`, which was
-//! **already** `Box<ResolvedAbility>` before this change. Asserting that the
-//! two newly-boxed spellings serialize to the *same JSON shape* as the
-//! long-boxed one is what makes these assertions non-vacuous: if `Box<T>` were
-//! not serde-transparent, the already-boxed control would move in lockstep with
-//! the newly-boxed fields and the shape comparison would still hold — so the
-//! test additionally pins the concrete key path, which only holds if `Box`
-//! introduces no wrapper level at all.
+//! **What actually discriminates here, and what does not.**
+//!
+//! `boxing_introduces_no_wrapper_level_in_the_wire_shape` makes two different
+//! kinds of assertion, and only one of them can fail on its own:
+//!
+//! * **The discriminator: the key-path assertions.**
+//!   `stack[i]["kind"]["data"]["ability"].get("effect").is_some()` — and the
+//!   same for `pending_trigger.ability` — is what proves `Box` adds no wrapper
+//!   level. If `Box<T>` serialized as anything other than `T` (a `{"Box": …}`
+//!   tag, a one-element sequence, an extra nesting level), `"effect"` would not
+//!   be a direct child at that path and these assertions go red. They are
+//!   absolute, not relative: nothing in the fixture can make them pass
+//!   vacuously.
+//!
+//! * **Necessary but insufficient: the control comparison.**
+//!   `StackEntryKind::TriggeredAbility.ability` was **already**
+//!   `Box<ResolvedAbility>` before this change, so `assert_eq!(ability,
+//!   control)` pins the newly-boxed fields against a spelling whose wire format
+//!   is known-good. That catches an *asymmetry* — one field picking up a rename,
+//!   a `flatten`, or a different container attribute than its long-boxed
+//!   sibling. It cannot catch a *uniform* regression: if `Box<T>` stopped being
+//!   transparent, the control would grow the same wrapper as the fields under
+//!   test and the comparison would still hold. So the control comparison alone
+//!   would be vacuous; it earns its place only alongside the key-path
+//!   assertions, which is why both are present.
+//!
+//! Do not delete the key-path assertions on the grounds that the `assert_eq!`
+//! against the control "already covers it". It does not.
 
 use engine::game::scenario::{P0, P1};
 use engine::game::triggers::PendingTrigger;
 use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
-use engine::types::game_state::{GameState, StackEntry, StackEntryKind};
+use engine::types::game_state::{
+    GameState, PersistedGameState, StackEntry, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::{CardId, ObjectId};
 
 const SOURCE: ObjectId = ObjectId(700);
@@ -171,5 +193,98 @@ fn boxing_introduces_no_wrapper_level_in_the_wire_shape() {
     assert!(
         value.get("pending_discard_for_cost").is_none(),
         "pending_discard_for_cost is #[serde(skip)] and must stay off the wire"
+    );
+}
+
+/// `GameState::resolving_stack_entry: Option<StackEntry>` shrank 5,336 -> 344 B
+/// through this change, because `StackEntryKind::Spell.ability` was boxed
+/// underneath it. It is the field the *persisted* path depends on: CR 707.10 —
+/// the Chain cycle ("you may copy this spell") defers its copy past an
+/// `OptionalEffectChoice`, so a server game saved with that prompt pending and
+/// later reloaded must still find the popped entry, or the accepted copy is
+/// silently dropped.
+///
+/// The two tests above are not sufficient for that. They round-trip `GameState`
+/// through `serde_json` directly, whereas persistence goes through
+/// `PersistedGameState`, whose `Serialize`/`Deserialize` are **hand-written**:
+/// both branches funnel through `ResolutionStateWire::to_value`, which runs
+/// `canonicalize_legacy_resolution_state` + `frames.validate(&waiting_for)`
+/// before emitting, and `PersistedGameState::deserialize` dispatches on a
+/// top-level `"state"` key. None of that is exercised by a bare `GameState`
+/// round trip, so this test covers the persisted seam on its own terms.
+fn state_with_resolving_stack_entry() -> GameState {
+    let mut state = GameState::new_two_player(42);
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.resolving_stack_entry = Some(StackEntry {
+        id: ObjectId(704),
+        source_id: SOURCE,
+        controller: P0,
+        kind: StackEntryKind::Spell {
+            card_id: CardId(1),
+            ability: Some(Box::new(damage_ability())),
+            casting_variant: Default::default(),
+            actual_mana_spent: 2,
+        },
+    });
+    state
+}
+
+#[test]
+fn persisted_round_trip_preserves_the_boxed_resolving_stack_entry() {
+    let state = state_with_resolving_stack_entry();
+
+    // Reach-guard: the fixture reaches the branch under test. Without a
+    // populated `resolving_stack_entry` this whole test is a no-op that passes
+    // for any layout, because the field is `skip_serializing_if =
+    // "Option::is_none"` and would never appear on the wire at all.
+    let entry = state
+        .resolving_stack_entry
+        .as_ref()
+        .expect("reach-guard: resolving_stack_entry is populated");
+    assert!(
+        matches!(
+            &entry.kind,
+            StackEntryKind::Spell {
+                ability: Some(_),
+                ..
+            }
+        ),
+        "reach-guard: the resolving entry carries a populated boxed Spell ability, got {:?}",
+        entry.kind
+    );
+
+    let json = serde_json::to_string(&PersistedGameState::capture(state.clone()))
+        .expect("a trusted persisted snapshot serializes");
+
+    // The discriminator that makes this more than a `GameState` round trip: the
+    // boxed field must survive the hand-written `PersistedGameState` codec, not
+    // just the derived `GameState` one.
+    let restored = serde_json::from_str::<PersistedGameState>(&json)
+        .expect("and deserializes back through the persisted codec")
+        .into_game_state();
+
+    let restored_entry = restored
+        .resolving_stack_entry
+        .as_ref()
+        .expect("resolving_stack_entry must survive the persisted round trip");
+    assert_eq!(
+        restored_entry.ability().map(|ability| &ability.effect),
+        state
+            .resolving_stack_entry
+            .as_ref()
+            .and_then(StackEntry::ability)
+            .map(|ability| &ability.effect),
+        "the boxed ability inside resolving_stack_entry must survive persistence \
+         with its effect intact"
+    );
+
+    // And it must be flat on the persisted wire: no `Box` wrapper level at the
+    // key path a persisted save is actually read back from.
+    let value: serde_json::Value = serde_json::from_str(&json).expect("persisted JSON parses");
+    let persisted_ability = &value["state"]["resolving_stack_entry"]["kind"]["data"]["ability"];
+    assert!(
+        persisted_ability.get("effect").is_some(),
+        "resolving_stack_entry's boxed ability must serialize as a bare \
+         ResolvedAbility object on the persisted wire, got {persisted_ability}"
     );
 }

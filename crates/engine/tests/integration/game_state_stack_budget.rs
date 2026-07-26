@@ -37,16 +37,59 @@
 //! strongest available non-vacuity signal.
 //!
 //! **Read the ratio honestly.** `size_of::<GameState>()` fell by 2.42x, but
-//! this fixture's stack high-water fell only ~1.36x. The remainder of the
-//! budget is recursion and call-frame overhead that does *not* scale with
-//! `GameState`. The high-water is therefore **not** proportional to the struct
-//! size, and no claim in this file depends on it being so.
+//! this fixture's stack high-water fell only ~1.36x. The high-water is
+//! therefore **not** proportional to the struct size, and no claim in this file
+//! depends on it being so.
+//!
+//! **The residual is not attributed.** Nobody has instrumented it, so treat the
+//! following as ranked hypotheses, not findings:
+//!
+//!   1. **By-value `ResolvedAbility` parameters — still size-scaling.** This
+//!      change boxed `ResolvedAbility` at every *storage* site but left the
+//!      ~33 by-value *parameter* sites alone (13 of them in
+//!      `game/casting_costs.rs`), and it unboxes into them at the call sites.
+//!      They nest on the path this very fixture drives: casting Murder reaches
+//!      `casting_costs::check_additional_cost_or_pay` (`ability:
+//!      ResolvedAbility`), which calls
+//!      `check_additional_cost_or_pay_with_distribute` (also by value) — two
+//!      live 5,264 B frames from one cast. `finish_pending_cast_cost_or_pay`
+//!      takes one by value only to `Box::new` it immediately. So part of the
+//!      remainder almost certainly *does* scale with `ResolvedAbility`; the
+//!      earlier claim that it does not was wrong.
+//!   2. Recursion depth and per-frame overhead that genuinely does not scale
+//!      with any one type.
+//!
+//! Hypothesis 1 is a real follow-up with a measurable prize, not a dead end.
+//! Instrument before acting on either.
 //!
 //! Because the window is a ~30% band rather than an order of magnitude, the
 //! bound is deliberately taken near the top of it: that maximises post-fix
-//! headroom while still going red pre-fix. Debug frame sizes are
-//! platform-dependent, so if this ever fails on a *non*-aarch64 host, re-run
-//! the bisection above before changing the number.
+//! headroom while still going red pre-fix.
+//!
+//! # Why this test is gated to aarch64
+//!
+//! The discriminating window is `[2,560 KiB, 3,328 KiB]` — only ~30% wide — and
+//! it was measured on **one** target. There is no safer number available: going
+//! above 3,328 KiB makes the *pre-fix* layout pass too, at which point the test
+//! stops discriminating and becomes decoration. So the bound cannot be widened
+//! to absorb an unmeasured platform delta.
+//!
+//! Debug frame sizes are target-dependent (ABI, register pressure, spill
+//! decisions), and `[profile.test]` inherits `dev`, so nothing is optimized
+//! away. CI runs `ubuntu-latest` — x86_64-unknown-linux-gnu, never measured
+//! here. Running an uncalibrated bound there does not fail politely: a stack
+//! overflow `abort()`s, so the symptom is a **SIGABRT with no assertion
+//! message** on whatever unrelated PR happens to be in the queue, and the
+//! documented remedy ("re-run the bisection") is hours of work for someone with
+//! no context for it.
+//!
+//! Gating to the target it was calibrated on keeps it a precise instrument
+//! where the number means something, instead of a coin flip where it does not.
+//! To un-gate: run the same bisection on the new target, add its row to the
+//! calibration table above, and set `BOUNDED_STACK_BYTES` from the
+//! *intersection* of all measured windows. Cross-compiling is not enough — the
+//! bisection has to execute.
+#![cfg(target_arch = "aarch64")]
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::format::FormatConfig;
