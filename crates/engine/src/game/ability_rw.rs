@@ -4124,10 +4124,10 @@ fn rw_effect(
             (p, None)
         }
         // CR 122 + CR 603.10a (PR-6.75 c5): inspects the distinct counter kinds on
-        // `target` (an ObjectCounters board read) and persists the pick as
-        // ChosenAttribute::Counter on the SOURCE — a per-source binding a later
-        // PutChosenCounter consumes (member-bound; mirrors Effect::Choose{persist}).
-        // No board WRITE: the placement is the separate PutChosenCounter.
+        // `target` (an ObjectCounters board read) and retains the pick as a
+        // resolution-local, per-iteration binding consumed by a later
+        // PutChosenCounter. No board WRITE: placement is the separate
+        // PutChosenCounter.
         Effect::ChooseCounterKind { target } => {
             let mut p = if target.is_context_ref() {
                 reads_board_of(StateKind::ObjectCounters)
@@ -4139,9 +4139,9 @@ fn rw_effect(
             (p, None)
         }
         // CR 122.1 + CR 122.6 + CR 603.10a (PR-6.75 c5): adds `count` counters of the
-        // source's persisted ChosenAttribute::Counter kind to `target`. An
-        // ObjectCounters write (like PutCounter) that CONSUMES the per-source
-        // chosen-kind binding ⇒ member-bound read.
+        // resolution-local counter kind to `target`. An ObjectCounters write
+        // (like PutCounter) that CONSUMES the per-iteration chosen-kind binding
+        // implies a member-bound read.
         Effect::PutChosenCounter {
             target,
             count,

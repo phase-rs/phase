@@ -624,8 +624,8 @@ pub enum ChoiceType {
     /// Androzani II/III). The concrete `options` list is enumerated at
     /// resolution from the target object's counters (mirroring the runtime-baked
     /// `Keyword { options }` template idiom), so the same interactive
-    /// `WaitingFor::NamedChoice` seam renders it. The chosen kind persists as
-    /// `ChosenAttribute::Counter` on the source for a downstream
+    /// `WaitingFor::NamedChoice` seam renders it. The chosen kind is retained
+    /// only in resolution-local state for a downstream
     /// `Effect::PutChosenCounter` ("put an additional counter of that kind").
     CounterKind {
         options: Vec<CounterType>,
@@ -1482,8 +1482,8 @@ pub enum ChoiceValue {
     /// `RemoveChosenKeyword` resolution.
     Keyword(Keyword),
     /// CR 608.2d + CR 122.1: typed counter-kind choice from a
-    /// `ChoiceType::CounterKind` option list (The Caves of Androzani). Persisted
-    /// as `ChosenAttribute::Counter` for later `PutChosenCounter` resolution.
+    /// `ChoiceType::CounterKind` option list (The Caves of Androzani). Retained
+    /// only for the current resolution for later `PutChosenCounter` resolution.
     Counter(CounterType),
 }
 
@@ -11125,20 +11125,19 @@ pub enum Effect {
     /// of the distinct counter kinds currently on `target`. Zero kinds → no-op
     /// (CR 608.2d "can't choose an impossible option"); one kind → auto-select
     /// (no prompt); two or more → an interactive `WaitingFor::NamedChoice`
-    /// (`ChoiceType::CounterKind`). The chosen kind persists as
-    /// `ChosenAttribute::Counter` on the source for a following
-    /// `Effect::PutChosenCounter`. Building block for The Caves of Androzani
-    /// II/III (member-driven `repeat_for` over each non-Saga permanent).
+    /// (`ChoiceType::CounterKind`). The chosen kind is retained only in
+    /// resolution-local state for a following `Effect::PutChosenCounter`.
+    /// Building block for The Caves of Androzani II/III (member-driven
+    /// `repeat_for` over each non-Saga permanent).
     ChooseCounterKind {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
     /// CR 122.1 + CR 122.6: "put an additional counter of that kind on that
-    /// permanent" — read the source's `ChosenAttribute::Counter` and add `count`
-    /// counters of that kind to `target`. No-op when no counter kind was chosen
-    /// (the preceding `ChooseCounterKind` was skipped because the object had no
-    /// counters). Mirrors the `ChosenAttribute::Keyword` → `RemoveChosenKeyword`
-    /// consume precedent.
+    /// permanent" — read the resolution-local counter-kind choice and add
+    /// `count` counters of that kind to `target`. No-op when no counter kind was
+    /// chosen (the preceding `ChooseCounterKind` was skipped because the object
+    /// had no counters).
     PutChosenCounter {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,

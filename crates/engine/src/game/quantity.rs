@@ -4416,7 +4416,7 @@ fn object_id_for_scope(
     }
 }
 
-/// CR 122.1: Distinct counter kinds present on permanents matching `filter`
+/// CR 122.1: Distinct counter kinds present on objects matching `filter`
 /// (controller-relative, CR 109.4). Mirrors `DistinctColorsAmongPermanents`'s
 /// resolver (zone from `filter.extract_in_zone()`, `zone_object_ids`,
 /// `matches_target_filter`), enumerating only positive-count counter kinds the
@@ -4433,34 +4433,31 @@ pub(crate) fn distinct_counter_kinds_among(
     filter_ctx: &FilterContext<'_>,
 ) -> Vec<CounterType> {
     let mut seen: HashSet<CounterType> = HashSet::new();
-    // CR 608.2c + CR 122.1: a `ParentTarget` iteration source ("for each kind of
-    // counter on target permanent" — Dramatist's Puppet, Quarry Hauler) resolves
-    // to the chosen target(s) carried on the resolving ability, not via
-    // battlefield object matching (`matches_target_filter` returns false for
-    // `ParentTarget` by design — it is resolution-time context, not a predicate).
-    if matches!(filter, TargetFilter::ParentTarget) {
-        if let Some(ability) = filter_ctx.ability {
-            for target in &ability.targets {
-                if let TargetRef::Object(id) = target {
-                    if let Some(obj) = state.objects.get(id) {
-                        for counter_type in positive_counter_types(&obj.counters) {
-                            seen.insert(counter_type);
-                        }
-                    }
-                }
-            }
-        }
-        let mut kinds: Vec<CounterType> = seen.into_iter().collect();
-        kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-        return kinds;
-    }
-    let zone = filter
-        .extract_in_zone()
-        .unwrap_or(crate::types::zones::Zone::Battlefield);
-    for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
-        if !matches_target_filter(state, id, filter, filter_ctx) {
-            continue;
-        }
+    // CR 608.2c + CR 122.1: parent-target domains ("it", "that permanent",
+    // or an indexed parent slot) resolve through the same ability-bound
+    // authority as other resolution effects. Predicate domains instead scan
+    // the exact zone declared by `InZone`, defaulting to the battlefield.
+    let object_ids: Vec<ObjectId> = if matches!(
+        filter,
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+    ) {
+        filter_ctx
+            .ability
+            .map(|ability| {
+                crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter)
+            })
+            .unwrap_or_default()
+    } else {
+        let zone = filter
+            .extract_in_zone()
+            .unwrap_or(crate::types::zones::Zone::Battlefield);
+        crate::game::targeting::zone_object_ids(state, zone)
+            .iter()
+            .copied()
+            .filter(|id| matches_target_filter(state, *id, filter, filter_ctx))
+            .collect()
+    };
+    for id in object_ids {
         if let Some(obj) = state.objects.get(&id) {
             for counter_type in positive_counter_types(&obj.counters) {
                 seen.insert(counter_type);

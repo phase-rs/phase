@@ -181,6 +181,16 @@ fn attack_trigger_chooses_kind_at_resolution_and_adds_when_absent() {
         1,
         "PutChosenCounter delegates one Stun placement through the normal pipeline"
     );
+    assert!(
+        runner.state().objects[&aven]
+            .chosen_attributes
+            .iter()
+            .all(|attribute| !matches!(
+                attribute,
+                engine::types::ability::ChosenAttribute::Counter(_)
+            )),
+        "the resolution-only counter choice must not persist on Aven Courier"
+    );
 }
 
 /// CR 608.2c + CR 122.1: the chosen-kind predicate is false when the target
