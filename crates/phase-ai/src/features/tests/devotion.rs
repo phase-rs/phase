@@ -432,3 +432,39 @@ fn dual_color_god_xenagos_red_green() {
         }]
     );
 }
+
+/// [MED] CR 700.5: a hybrid `{W/B}` symbol contributes exactly ONCE to a W+B
+/// candidate set, not once to white and once to black. `pip_count` for the
+/// combined primary set must be computed set-wise, not as a sum of per-color
+/// buckets (which would double-count every hybrid shard).
+#[test]
+fn hybrid_pips_count_once_for_a_combined_set() {
+    const WB: ManaCostShard = ManaCostShard::WhiteBlack;
+    let deck = vec![
+        // Athreos makes W+B the demanded (and only) candidate set. Its own cost
+        // is two unambiguous pips (one white, one black) → 2 toward {W,B}.
+        entry(
+            dual_god(
+                "Athreos",
+                ManaColor::White,
+                ManaColor::Black,
+                5,
+                &[ManaCostShard::White, ManaCostShard::Black],
+            ),
+            1,
+        ),
+        // Four pure-hybrid `{W/B}{W/B}` bodies: 2 shards each, each counting once
+        // for {W,B} → 2 per copy, 8 total. A per-color-bucket sum would see each
+        // shard in BOTH buckets and report 16.
+        entry(pip_body("WB Hybrid Body", &[WB, WB]), 4),
+    ];
+    let f = detect(&deck);
+    assert_eq!(f.primary_colors, vec![ManaColor::White, ManaColor::Black]);
+    // 2 (god) + 4 × 2 (hybrid bodies, each shard once) = 10. Double-counting
+    // hybrids would yield 2 + 4 × 4 = 18.
+    assert_eq!(
+        f.pip_count, 10,
+        "each hybrid shard must count once for the W+B set, got {}",
+        f.pip_count
+    );
+}

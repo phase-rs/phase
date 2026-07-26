@@ -116,8 +116,10 @@ pub fn detect(deck: &[DeckEntry]) -> DevotionFeature {
     let mut payoff_count = 0u32;
     let mut total_nonland = 0u32;
     let mut payoff_names: Vec<String> = Vec::new();
-    // Per-color deck pip totals across permanent faces (index by ManaColor).
-    let mut pip_totals = ColorTotals::default();
+    // Permanent-face mana costs (with copy counts) so candidate-set totals are
+    // computed SET-WISE below — a hybrid `{W/B}` shard counts once for a W+B set
+    // (CR 700.5), never once per color as a sum of per-color buckets would.
+    let mut permanent_costs: Vec<(&engine::types::mana::ManaCost, u32)> = Vec::new();
     // Every color SET a payoff demands, kept whole (a two-color god demands the
     // pair, not each color), plus whether a `ChosenColor` payoff makes every
     // color eligible (Nykthos).
@@ -138,17 +140,15 @@ pub fn detect(deck: &[DeckEntry]) -> DevotionFeature {
             total_nonland = total_nonland.saturating_add(entry.count);
         }
 
-        // CR 700.5 + CR 110.4: only permanents contribute devotion pips.
+        // CR 700.5 + CR 110.4: only permanents contribute devotion pips. Keep the
+        // whole cost so each candidate set is scored set-wise (hybrids once).
         if face
             .card_type
             .core_types
             .iter()
             .any(|t| t.is_permanent_type())
         {
-            for color in ManaColor::ALL {
-                let pips = face.mana_cost.count_colored_pips(Some(color)).max(0) as u32;
-                pip_totals.add(color, pips.saturating_mul(entry.count));
-            }
+            permanent_costs.push((&face.mana_cost, entry.count));
         }
 
         let gate = highest_devotion_gate(face);
@@ -179,8 +179,7 @@ pub fn detect(deck: &[DeckEntry]) -> DevotionFeature {
 
     // Candidate primary sets: every demanded set, plus each single color when a
     // `ChosenColor` payoff (Nykthos) makes any color eligible. The primary is the
-    // set the deck is most devoted to, approximated by summed per-color pips —
-    // exact combined devotion is computed at runtime per gate.
+    // set the deck is most devoted to.
     let mut candidates = demanded_sets.clone();
     if any_chosen {
         for color in ManaColor::ALL {
@@ -190,11 +189,22 @@ pub fn detect(deck: &[DeckEntry]) -> DevotionFeature {
             }
         }
     }
+    // CR 700.5 set-wise: a candidate set's deck devotion is the pips each
+    // permanent face contributes to the SET as a whole (a hybrid symbol once),
+    // summed over copies. This is the same counting `count_devotion` performs at
+    // runtime — never a sum of independent per-color buckets, which would count a
+    // `{W/B}` shard twice toward a W+B set and inflate commitment.
+    let set_total = |set: &[ManaColor]| -> u32 {
+        permanent_costs
+            .iter()
+            .map(|&(cost, count)| cost_devotion_pips(cost, set).saturating_mul(count))
+            .sum()
+    };
     let primary_colors = candidates
         .into_iter()
-        .max_by_key(|set| set.iter().map(|c| pip_totals.get(*c)).sum::<u32>())
+        .max_by_key(|set| set_total(set))
         .unwrap_or_default();
-    let pip_count = primary_colors.iter().map(|c| pip_totals.get(*c)).sum();
+    let pip_count = set_total(&primary_colors);
 
     let commitment = compute_commitment(payoff_count, pip_count, total_nonland);
 
@@ -439,40 +449,5 @@ fn continuous_modification_quantity(
         | CM::AddSupertype { .. }
         | CM::RemoveSupertype { .. }
         | CM::RemoveManaCost => None,
-    }
-}
-
-/// Fixed-size per-color accumulator — avoids a `HashMap` in a hot deck scan.
-#[derive(Default)]
-struct ColorTotals {
-    white: u32,
-    blue: u32,
-    black: u32,
-    red: u32,
-    green: u32,
-}
-
-impl ColorTotals {
-    fn add(&mut self, color: ManaColor, n: u32) {
-        let slot = self.slot(color);
-        *slot = slot.saturating_add(n);
-    }
-    fn get(&self, color: ManaColor) -> u32 {
-        match color {
-            ManaColor::White => self.white,
-            ManaColor::Blue => self.blue,
-            ManaColor::Black => self.black,
-            ManaColor::Red => self.red,
-            ManaColor::Green => self.green,
-        }
-    }
-    fn slot(&mut self, color: ManaColor) -> &mut u32 {
-        match color {
-            ManaColor::White => &mut self.white,
-            ManaColor::Blue => &mut self.blue,
-            ManaColor::Black => &mut self.black,
-            ManaColor::Red => &mut self.red,
-            ManaColor::Green => &mut self.green,
-        }
     }
 }
