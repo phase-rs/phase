@@ -3602,6 +3602,156 @@ mod tests {
     }
 
     #[test]
+    fn noncreature_ward_target_scores_lower_than_unwarded_equivalent() {
+        let mut state = make_state();
+
+        // Two identical artifacts (non-creature): one bare, one with a small, payable,
+        // nonlethal poison-counter Ward. Both owned by the opponent (PlayerId(1)) so removal
+        // targeting them is non-beneficial from the AI's (PlayerId(0)) perspective.
+        let bare_card_id = CardId(state.next_object_id);
+        let bare_artifact = create_object(
+            &mut state,
+            bare_card_id,
+            PlayerId(1),
+            "Prophetic Prism".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bare_artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Artifact);
+
+        let warded_card_id = CardId(state.next_object_id);
+        let warded_artifact = create_object(
+            &mut state,
+            warded_card_id,
+            PlayerId(1),
+            "Warded Relic".to_string(),
+            Zone::Battlefield,
+        );
+        let warded_obj = state.objects.get_mut(&warded_artifact).unwrap();
+        warded_obj
+            .card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Artifact);
+        warded_obj
+            .keywords
+            .push(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                count: 2,
+            }));
+
+        // Set up pending trigger with a removal (exile) effect, matching
+        // `trigger_target_prefers_creature_over_token` above.
+        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+            source_id: ObjectId(200),
+            controller: PlayerId(0),
+            condition: None,
+            ability: ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                Vec::new(),
+                ObjectId(200),
+                PlayerId(0),
+            ),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        });
+
+        let config = AiConfig::default();
+        let legal_targets = vec![
+            TargetRef::Object(bare_artifact),
+            TargetRef::Object(warded_artifact),
+        ];
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TriggerTargetSelection {
+                player: PlayerId(0),
+                trigger_controller: None,
+                trigger_event: None,
+                trigger_events: Vec::new(),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: legal_targets.clone(),
+                    optional: false,
+                    chooser: None,
+                }],
+                mode_labels: Vec::new(),
+                target_constraints: Vec::new(),
+                selection: Default::default(),
+                source_id: Some(ObjectId(200)),
+                description: None,
+            },
+            candidates: Vec::new(),
+        };
+
+        // Score targeting the bare artifact
+        let bare_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bare_artifact)),
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let bare_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &bare_candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let bare_score = AntiSelfHarmPolicy.score(&bare_ctx);
+
+        // Score targeting the warded artifact
+        let warded_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(warded_artifact)),
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let warded_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &warded_candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let warded_score = AntiSelfHarmPolicy.score(&warded_ctx);
+
+        assert!(
+            bare_score > warded_score,
+            "Should prefer targeting the unwarded artifact ({bare_score}) over the poison-Ward artifact ({warded_score})"
+        );
+    }
+
+    #[test]
     fn trigger_target_effects_are_extracted() {
         let mut state = make_state();
         state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
