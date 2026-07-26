@@ -44,9 +44,11 @@ use engine::game::scenario::{P0, P1};
 use engine::game::triggers::PendingTrigger;
 use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::game_state::{
-    GameState, PersistedGameState, StackEntry, StackEntryKind, WaitingFor,
+    GameState, PendingCast, PendingDiscardForCostResume, PersistedGameState, StackEntry,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::mana::ManaCost;
 
 const SOURCE: ObjectId = ObjectId(700);
 
@@ -119,6 +121,28 @@ fn populated_state() -> GameState {
         subject_match_count: None,
         die_result: None,
     }));
+    // Populated so the `#[serde(skip)]` assertion in
+    // `boxing_introduces_no_wrapper_level_in_the_wire_shape` discriminates. With
+    // this field left `None`, that assertion could only distinguish `skip` from
+    // serialize-as-`null`, and would pass unchanged if the attribute were
+    // swapped to `skip_serializing_if = "Option::is_none"` — under which a
+    // *populated* field would cross the wire. Populated, the assertion fails for
+    // any attribute that does not actually suppress the field.
+    //
+    // Safe for `boxed_abilities_round_trip_through_serde`: `GameState`'s manual
+    // `PartialEq` deliberately excludes this field, so an intentionally-dropped
+    // skipped field cannot make the round-trip equality assertion red.
+    state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume {
+        player: P0,
+        pending: PendingCast::new(
+            ObjectId(704),
+            CardId(1),
+            damage_ability(),
+            ManaCost::default(),
+        ),
+        chosen: vec![ObjectId(705)],
+        paused_at_index: 0,
+    }));
     state
 }
 
@@ -151,7 +175,19 @@ fn boxed_abilities_round_trip_through_serde() {
 
 #[test]
 fn boxing_introduces_no_wrapper_level_in_the_wire_shape() {
-    let value = serde_json::to_value(populated_state()).expect("state serializes");
+    let state = populated_state();
+
+    // Reach-guard for the `pending_discard_for_cost` assertion at the end of
+    // this test, asserted on the *same* instance that is serialized below (not
+    // on a second `populated_state()`), so it is evidence about this value
+    // rather than about the fixture function in general.
+    assert!(
+        state.pending_discard_for_cost.is_some(),
+        "reach-guard: the fixture must populate pending_discard_for_cost, or the \
+         #[serde(skip)] assertion at the end of this test passes vacuously"
+    );
+
+    let value = serde_json::to_value(state).expect("state serializes");
     let stack = value["stack"].as_array().expect("stack is an array");
 
     // The already-boxed `TriggeredAbility` is the control: its wire shape did
@@ -189,10 +225,18 @@ fn boxing_introduces_no_wrapper_level_in_the_wire_shape() {
     );
 
     // `pending_discard_for_cost` is `#[serde(skip)]`; boxing must not have
-    // promoted it onto the wire.
+    // promoted it onto the wire. The reach-guard at the top of this test is what
+    // makes this discriminating: the serialized value really did carry a
+    // populated field, so its absence here is evidence the attribute suppressed
+    // it, not evidence that there was nothing to suppress. Note the sibling
+    // field `pending_cost_move_resume` uses `skip_serializing_if =
+    // "Option::is_none"` instead — under that attribute a populated field *does*
+    // cross the wire, so the distinction this assertion draws is a live one in
+    // this very struct, not a hypothetical.
     assert!(
         value.get("pending_discard_for_cost").is_none(),
-        "pending_discard_for_cost is #[serde(skip)] and must stay off the wire"
+        "pending_discard_for_cost is #[serde(skip)] and must stay off the wire, \
+         but the fixture populates it and it appeared in {value}"
     );
 }
 

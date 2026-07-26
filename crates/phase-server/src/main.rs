@@ -113,18 +113,27 @@ const SPECTATOR_PLAYER_ID: PlayerId = PlayerId(u8::MAX);
 ///   * the measured high-water does **not** fall in proportion to the struct.
 ///     On the equivalent bisected fixture the struct shrank 2.42x while the
 ///     stack high-water fell only ~1.36x. The residual is **unattributed** — it
-///     was not instrumented. The leading candidate is that boxing covered every
-///     `ResolvedAbility` *storage* site but none of the ~33 by-value *parameter*
-///     sites (13 in `engine/src/game/casting_costs.rs`), which nest two deep on
-///     the ordinary cast path, so part of the residual likely still scales with
-///     `ResolvedAbility`. Either way, no static size fix is proven to bound it;
-///     see `engine/tests/integration/game_state_stack_budget.rs`;
+///     was not instrumented, so treat what follows as the leading candidate,
+///     not a finding. Boxing covered every `ResolvedAbility` *storage* site but
+///     none of the by-value *parameter* sites (48 in `crates/`, of which 13 are
+///     in `engine/src/game/casting_costs.rs`; population and counting method
+///     are stated in `engine/tests/integration/game_state_stack_budget.rs`, and
+///     48 is a lower bound because grep undercounts this shape). Those nest two
+///     deep on the ordinary cast path, so part of the residual plausibly still
+///     scales with `ResolvedAbility`. Either way, no static size fix is proven
+///     to bound it;
 ///   * AI search depth is data-driven, so no static size fix bounds
 ///     `depth x chain_depth x sizeof`;
 ///   * `[profile.server-release]` (`opt-level = 2`, `lto = "thin"`,
 ///     `codegen-units = 16`) uses measurably more stack than `ai_commander`'s
 ///     profile;
-///   * the cost is reserved *address space*, not committed memory.
+///   * the cost is reserved *address space*, not committed memory. Note the
+///     multiplier: `thread_stack_size` also sizes Tokio's **blocking** pool,
+///     whose default cap is 512 threads, so the worst-case reservation for that
+///     pool goes from ~1 GiB to ~16 GiB. Blocking threads are spawned on demand
+///     and 512 is a cap rather than a steady state, and on 64-bit this is
+///     address space only — but if this server ever runs somewhere with strict
+///     VA-commit accounting, `max_blocking_threads` is the knob to reach for.
 ///
 /// 32 MiB matches what `ai_commander` and `duel_suite` already use for this
 /// same engine recursion.

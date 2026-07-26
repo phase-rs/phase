@@ -469,9 +469,21 @@ fn handle_triggered_mode_choice(
             // here — the resulting stack entry carries `trigger_event` for the
             // resolution-time re-establishment in `stack::resolve_top`.
             triggers::restore_trigger_event_context(state, mode_context_snapshot);
-            // `Box::clone` clones straight into a fresh allocation, so this
-            // never materializes the 5,264 B `ResolvedAbility` on this frame —
-            // `(*trigger.ability).clone()` would.
+            // `Box::clone` allocates first and clones into the allocation
+            // (`Box::new_uninit_in` + `CloneToUninit`), which *lets* the
+            // optimizer build the 5,264 B `ResolvedAbility` in place. It does
+            // not guarantee it: std's generic path is
+            // `ptr::write(dst, src.clone())`, and std's own comment there
+            // (`library/core/src/clone/uninit.rs`, `CopySpec::clone_one`) calls
+            // in-place construction something it *hopes* the optimizer figures
+            // out. At `opt-level = 0` — the regime every stack measurement
+            // behind this change was taken in — it does not, and a temporary is
+            // materialized here. `(*trigger.ability).clone()` gives the
+            // optimizer no such opening: it builds the temporary
+            // unconditionally and then moves it into a fresh box. So
+            // `Box::clone` is never worse and is strictly better once
+            // optimized, which is why the mechanical `(*b).clone()` rewrite was
+            // reverted at this call site.
             let mut resolved = trigger.ability.clone();
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             // CR 113.2c + CR 603.2 + CR 603.3b: `finalize_trigger_target_selection`

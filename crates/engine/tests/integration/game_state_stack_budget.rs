@@ -44,18 +44,49 @@
 //! **The residual is not attributed.** Nobody has instrumented it, so treat the
 //! following as ranked hypotheses, not findings:
 //!
-//!   1. **By-value `ResolvedAbility` parameters — still size-scaling.** This
-//!      change boxed `ResolvedAbility` at every *storage* site but left the
-//!      ~33 by-value *parameter* sites alone (13 of them in
-//!      `game/casting_costs.rs`), and it unboxes into them at the call sites.
-//!      They nest on the path this very fixture drives: casting Murder reaches
+//!   1. **By-value `ResolvedAbility` parameters — a candidate that likely
+//!      still size-scales.** This change boxed `ResolvedAbility` at every
+//!      *storage* site but left the by-value *parameter* sites alone, and it
+//!      unboxes into them at the call sites.
+//!
+//!      **Population and method, so the number can be re-derived rather than
+//!      trusted:** `48` sites in `crates/`, counted as occurrences of
+//!      `<ident>: ResolvedAbility` followed by `,` or `)` — i.e. the by-value
+//!      spelling only, excluding `&`, `&mut`, `Box<>`, `Option<>` and `Vec<>`.
+//!      That is 47 fn parameters plus 1 closure parameter
+//!      (`game/effects/scoped_library_search.rs`), of which **13** are in
+//!      `game/casting_costs.rs` and 6 are in test-only files. Zero are struct
+//!      fields — this change boxed all of those, so this population is now
+//!      purely parameters. Narrower scopes, for cross-checking: 46 under
+//!      `crates/engine/src`.
+//!
+//!      Treat 48 as a **lower bound**: ripgrep undercounts this shape (macro
+//!      sites, multi-line signatures), and rustc, not grep, is the
+//!      authoritative census — the same argument this change makes for the
+//!      retyping itself.
+//!
+//!      **Two other figures are in circulation; both reconcile, so do not
+//!      "correct" this one to either.** PLAN-r4 §1.5 measured **49**
+//!      crate-wide (48 fn + 1 closure) and listed `engine_stack.rs` among the
+//!      sites — that is `finalize_trigger_target_selection`, whose parameter
+//!      commit `5d0a2ab599` subsequently boxed. 49 - 1 = 48. PLAN-r4 also
+//!      reports `casting_costs.rs` **x11**, against **13** here: its cluster
+//!      counts only parameters *named* `ability`, and its eleven line numbers
+//!      match those exactly; the extra two are `mut resolved: ResolvedAbility`
+//!      at `:4352` and `:4664`. Same sites, different naming filter. The
+//!      superseded "~33" that this comment used to carry matches neither and
+//!      stated no population at all.
+//!
+//!      These nest on the path this very fixture drives: casting Murder reaches
 //!      `casting_costs::check_additional_cost_or_pay` (`ability:
 //!      ResolvedAbility`), which calls
 //!      `check_additional_cost_or_pay_with_distribute` (also by value) — two
 //!      live 5,264 B frames from one cast. `finish_pending_cast_cost_or_pay`
 //!      takes one by value only to `Box::new` it immediately. So part of the
-//!      remainder almost certainly *does* scale with `ResolvedAbility`; the
-//!      earlier claim that it does not was wrong.
+//!      remainder plausibly still scales with `ResolvedAbility`. This is the
+//!      leading candidate, not a measured cause; an earlier claim that these
+//!      sites cannot contribute was wrong, but "they dominate" is equally
+//!      uninstrumented.
 //!   2. Recursion depth and per-frame overhead that genuinely does not scale
 //!      with any one type.
 //!
@@ -66,30 +97,51 @@
 //! bound is deliberately taken near the top of it: that maximises post-fix
 //! headroom while still going red pre-fix.
 //!
-//! # Why this test is gated to aarch64
+//! # Why this test is gated to aarch64 macOS
 //!
 //! The discriminating window is `[2,560 KiB, 3,328 KiB]` — only ~30% wide — and
-//! it was measured on **one** target. There is no safer number available: going
-//! above 3,328 KiB makes the *pre-fix* layout pass too, at which point the test
-//! stops discriminating and becomes decoration. So the bound cannot be widened
-//! to absorb an unmeasured platform delta.
+//! it was measured on **one** target: `aarch64-apple-darwin`. There is no safer
+//! number available: going above 3,328 KiB makes the *pre-fix* layout pass too,
+//! at which point the test stops discriminating and becomes decoration. So the
+//! bound cannot be widened to absorb an unmeasured platform delta.
 //!
 //! Debug frame sizes are target-dependent (ABI, register pressure, spill
 //! decisions), and `[profile.test]` inherits `dev`, so nothing is optimized
-//! away. CI runs `ubuntu-latest` — x86_64-unknown-linux-gnu, never measured
-//! here. Running an uncalibrated bound there does not fail politely: a stack
-//! overflow `abort()`s, so the symptom is a **SIGABRT with no assertion
-//! message** on whatever unrelated PR happens to be in the queue, and the
-//! documented remedy ("re-run the bisection") is hours of work for someone with
-//! no context for it.
+//! away. Running an uncalibrated bound does not fail politely: a stack overflow
+//! `abort()`s, so the symptom is a **SIGABRT with no assertion message** on
+//! whatever unrelated PR happens to be in the queue, and the documented remedy
+//! ("re-run the bisection") is hours of work for someone with no context for
+//! it.
 //!
-//! Gating to the target it was calibrated on keeps it a precise instrument
-//! where the number means something, instead of a coin flip where it does not.
+//! The `cfg` therefore matches the calibration on **both** axes. `target_arch =
+//! "aarch64"` alone would be one axis too loose: it also admits
+//! `aarch64-unknown-linux-gnu` and `aarch64-pc-windows-msvc`, neither of which
+//! was bisected. CI is `ubuntu-latest` (x86_64) today, so `target_arch` alone
+//! happens to be inert there — but GitHub ships `ubuntu-*-arm` runners, and
+//! moving CI onto one would silently start executing this uncalibrated. Pinning
+//! `target_os = "macos"` as well means the gate can only ever run where the
+//! number means something.
+//!
 //! To un-gate: run the same bisection on the new target, add its row to the
-//! calibration table above, and set `BOUNDED_STACK_BYTES` from the
-//! *intersection* of all measured windows. Cross-compiling is not enough — the
-//! bisection has to execute.
-#![cfg(target_arch = "aarch64")]
+//! calibration table above, widen the `cfg` to admit it, and set
+//! `BOUNDED_STACK_BYTES` from the *intersection* of all measured windows.
+//! Cross-compiling is not enough — the bisection has to execute.
+//!
+//! # A better instrument exists — this gate is not the only option
+//!
+//! Recorded as a follow-up, deliberately not built here: **stack-painting
+//! high-water measurement**. Spawn a thread with a known large stack, fill it
+//! with a sentinel pattern, run the fixture, then scan for the deepest
+//! disturbed byte. That yields a *number* rather than the survive/abort bit
+//! this test produces, which means it (a) fails politely with "high-water
+//! 2,410 KiB exceeds budget 3,072 KiB" instead of a bare SIGABRT, (b) runs on
+//! every target, because the assertion is on the measured value rather than on
+//! a target-calibrated bound, and (c) makes the 1.36x-vs-2.42x ratio above
+//! *trackable over time* instead of something that has to be re-bisected by
+//! hand. It is materially more work and needs care around what the OS actually
+//! commits versus reserves. Do not read the `cfg` below as a claim that
+//! target-gating was the only available design.
+#![cfg(all(target_arch = "aarch64", target_os = "macos"))]
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::format::FormatConfig;
@@ -163,9 +215,18 @@ fn four_player_commander_action_fits_a_bounded_stack() {
             runner
         })
         .expect("spawn bounded-stack action thread");
+    // NOTE ON THIS MESSAGE: it does *not* report the overflow. A stack overflow
+    // is a guard-page `abort()`, which kills the process, so `join()` never
+    // returns and nothing below ever prints — the symptom of the failure this
+    // test exists to catch is a bare SIGABRT with no output, attributed to this
+    // test by nextest's process-per-test isolation. This `expect` fires only for
+    // an ordinary panic inside the closure (a rules error, a failed assertion in
+    // the engine). Both cases point at the same place, hence one message.
     let runner = handle.join().expect(
-        "a four-player Commander cast + resolve must NOT overflow a 3 MiB stack \
-         (see the calibration table in this file's module docs)",
+        "the bounded-stack action panicked. If instead you are looking at a bare \
+         SIGABRT with no message, that IS the overflow this test guards: a \
+         four-player Commander cast + resolve no longer fits a 3 MiB stack. \
+         Either way, see the calibration table in this file's module docs.",
     );
 
     // Positive outcome assertions: the measured action really did resolve.
