@@ -16,7 +16,8 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
     ResolvedStackEntryFinalizeCommand, ResolvedStackEntryFinalizeReplayInvariantError,
-    ResolvedStackPushCommand, ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError,
+    ResolvedStackPopCommand, ResolvedStackPopReplayInvariantError, ResolvedStackPushCommand,
+    ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError,
     ResolvedUncommittedTriggerRemovalCommand,
     ResolvedUncommittedTriggerRemovalReplayInvariantError,
 };
@@ -304,11 +305,59 @@ pub(crate) fn pop_top_stack_entry(state: &mut GameState) -> Option<PoppedStackEn
     let entry = state.stack.pop_back()?;
     let paid_facts = state.stack_paid_facts.remove(&entry.id);
     let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
+
+    // CR 733: journal once ALL THREE removals have settled, so the record
+    // describes a stack the entry has already left. An empty stack is the one
+    // case that journals nothing — `?` returns above, because no mutation
+    // happened at all.
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_stack_pop(ResolvedStackPopCommand {
+            entry: Box::new(entry.clone()),
+            resulting_depth: state.stack.len(),
+            cause,
+        })
+        .expect("resolved stack pop must have a live journal cause");
+
     Some(PoppedStackEntry {
         entry,
         paid_facts,
         trigger_event_batch,
     })
+}
+
+/// Replays one already-resolved CR 405.2 stack pop.
+///
+/// Installs the recorded removal with nothing re-derived: the entry to remove is
+/// verified against the record rather than located by a fresh scan. Both
+/// preconditions are checked BEFORE any mutation, so a rejected replay leaves
+/// the stack and both side tables untouched.
+pub fn apply_resolved_stack_pop(
+    state: &mut GameState,
+    command: &ResolvedStackPopCommand,
+) -> Result<(), ResolvedStackPopReplayInvariantError> {
+    // CR 405.2: the predecessor must be exactly one deeper than the record.
+    let expected_depth = command.resulting_depth + 1;
+    if state.stack.len() != expected_depth {
+        return Err(ResolvedStackPopReplayInvariantError::DepthMismatch {
+            expected: expected_depth,
+            found: state.stack.len(),
+        });
+    }
+    // Compared WHOLE rather than by id: an applier that matched on `id` alone
+    // would discard a divergent object that merely reused the identifier.
+    if state.stack.back() != Some(command.entry.as_ref()) {
+        return Err(ResolvedStackPopReplayInvariantError::PoppedEntryMismatch);
+    }
+
+    let entry = state
+        .stack
+        .pop_back()
+        .expect("the entry was just verified at the top of the stack");
+    state.stack_paid_facts.remove(&entry.id);
+    state.stack_trigger_event_batches.remove(&entry.id);
+    Ok(())
 }
 
 /// CR 603.3d: removes an uncommitted triggered ability from the stack.

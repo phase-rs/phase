@@ -1151,6 +1151,47 @@ pub enum ResolvedUncommittedTriggerRemovalReplayInvariantError {
     UnexpectedRemovableEntry(ObjectId),
 }
 
+/// One exact CR 405.2 removal of the topmost object from the stack.
+///
+/// Recorded by `stack::pop_top_stack_entry`, the single authority behind the
+/// CR 405.5 resolution pop and the drain loops (batched resolution, inert no-op
+/// batches, CR 724.1b stack exile). A drain of N entries records N of these
+/// rather than one bulk removal, so a replay reproduces the removal ORDER and
+/// not merely the final depth.
+///
+/// NOT unified with [`ResolvedUncommittedTriggerRemovalCommand`], despite both
+/// removing a stack entry. The axis would have to span CR 603.3d
+/// trigger-construction and CR 405.5 resolution — different rule sections the
+/// engine resolves separately — and the operand sets genuinely differ: the
+/// CR 603.3d removal consumes a cursor and may legitimately pop NOTHING, an
+/// outcome that has no analogue here. Unifying them would buy one enum variant
+/// at the cost of an applier that checks preconditions belonging to whichever
+/// family it was not handed.
+///
+/// The removed side-table VALUES are deliberately not recorded, for the same
+/// reason the CR 603.3d removal omits them: this command installs nothing. It
+/// drops rows keyed on the recorded entry's own id, so no recorded value would
+/// pin an invariant, and carrying `Vec<GameEvent>` batches would widen every
+/// journal entry on the hottest path in the engine for nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedStackPopCommand {
+    /// The removed entry, recorded verbatim so replay verifies the whole object
+    /// rather than trusting the id.
+    pub entry: Box<StackEntry>,
+    /// Stack depth AFTER the removal (CR 405.2).
+    pub resulting_depth: usize,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved CR 405.2 stack pop.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedStackPopReplayInvariantError {
+    #[error("stack pop expected depth {expected} before removal, found {found}")]
+    DepthMismatch { expected: usize, found: usize },
+    #[error("stack pop expected a different entry on top of the stack")]
+    PoppedEntryMismatch,
+}
+
 /// Semantic command payload currently carried by a resolved-rules journal entry.
 ///
 /// Additional command families are intentionally added by their owning P2
@@ -1181,6 +1222,7 @@ pub enum ResolvedRulesCommand {
     StackPush(Box<ResolvedStackPushCommand>),
     StackEntryFinalize(Box<ResolvedStackEntryFinalizeCommand>),
     UncommittedTriggerRemoval(Box<ResolvedUncommittedTriggerRemovalCommand>),
+    StackPop(Box<ResolvedStackPopCommand>),
 }
 
 /// An append-only trigger collection command has no replay-time precondition.
@@ -2258,6 +2300,17 @@ impl ResolvedRulesJournal {
         )
     }
 
+    /// Records one exact CR 405.2 top-of-stack removal under its cause.
+    pub fn record_stack_pop(
+        &mut self,
+        command: ResolvedStackPopCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::StackPop(Box::new(command)),
+        )
+    }
+
     fn begin_settlement(
         &mut self,
         identity_for: impl FnOnce(SettlementNodeOrdinal) -> RulesExecutionNodeRef,
@@ -2474,7 +2527,8 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::TriggerCollection(_)
                 | ResolvedRulesCommand::StackPush(_)
                 | ResolvedRulesCommand::StackEntryFinalize(_)
-                | ResolvedRulesCommand::UncommittedTriggerRemoval(_) => {}
+                | ResolvedRulesCommand::UncommittedTriggerRemoval(_)
+                | ResolvedRulesCommand::StackPop(_) => {}
             }
         }
         for node in &self.nodes {
@@ -2936,6 +2990,19 @@ impl ResolvedRulesJournal {
                                 .to_string(),
                         ));
                     }
+                }
+            }
+            ResolvedRulesCommand::StackPop(command) => {
+                // Cause-only. A pop draws no id and no timestamp, so there is no
+                // allocator receipt to cross-check. Both of its preconditions
+                // (the CR 405.2 depth and the exact entry on top) are
+                // state-dependent and are enforced by
+                // `stack::apply_resolved_stack_pop`, where the state exists to
+                // check them against.
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "stack pop command has an unrelated cause".to_string(),
+                    ));
                 }
             }
         }

@@ -109,6 +109,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
             )
             .unwrap();
         }
+        ResolvedRulesCommand::StackPop(command) => {
+            engine::game::stack::apply_resolved_stack_pop(state, command.as_ref()).unwrap();
+        }
     }
 }
 

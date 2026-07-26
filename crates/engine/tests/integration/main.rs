@@ -105,6 +105,7 @@ mod cr733_resolved_modifier_install;
 mod cr733_resolved_object_cease;
 mod cr733_resolved_player_leave;
 mod cr733_resolved_stack_entry_finalize;
+mod cr733_resolved_stack_pop;
 mod cr733_resolved_stack_push;
 mod cr733_resolved_token_creation;
 mod cr733_resolved_transform;
