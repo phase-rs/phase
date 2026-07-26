@@ -1,5 +1,6 @@
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, GameRestriction, ResolvedAbility, RestrictionExpiry,
+    Effect, EffectError, EffectKind, GameRestriction, ProhibitedActivity, ResolvedAbility,
+    RestrictionExpiry,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -93,6 +94,10 @@ fn fill_runtime_fields(
     restriction: &mut GameRestriction,
     ability: &ResolvedAbility,
 ) {
+    // CR 109.5: "you" in a triggered ability remains the controller when it
+    // triggered, even if the source later changes controller or leaves play.
+    let original_controller = ability.original_controller.unwrap_or(ability.controller);
+
     match restriction {
         GameRestriction::DamagePreventionDisabled { source, .. }
         | GameRestriction::ProhibitActivity { source, .. }
@@ -167,6 +172,18 @@ fn fill_runtime_fields(
         | GameRestriction::CantEnterBattlefieldFrom { .. } => {}
     }
 
+    if let GameRestriction::ProhibitActivity {
+        activity: ProhibitedActivity::Attack {
+            protected_player, ..
+        },
+        ..
+    } = restriction
+    {
+        // CR 109.5: snapshot the resolving ability's controller for the
+        // controller-relative "you" in the attack restriction.
+        *protected_player = Some(original_controller);
+    }
+
     match restriction {
         GameRestriction::ProhibitActivity {
             expiry,
@@ -191,7 +208,7 @@ fn fill_runtime_fields(
                     player: PlayerScope::Controller,
                 }) => {
                     *expiry = RestrictionExpiry::UntilPlayerNextTurn {
-                        player: ability.controller,
+                        player: original_controller,
                     };
                 }
                 // CR 514.2 + CR 500.7: "during [the controller's] next turn …"
@@ -208,7 +225,7 @@ fn fill_runtime_fields(
                         // ("during their next turn") anchors on the restricted
                         // player; fall back to the controller for grants with no
                         // resolved specific player (Kang's self-controller form).
-                        player: restricted_player.unwrap_or(ability.controller),
+                        player: restricted_player.unwrap_or(original_controller),
                     };
                 }
                 _ => {}
@@ -492,6 +509,7 @@ mod tests {
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::PlayerOrPermanents,
+                        protected_player: None,
                     },
                 },
             },
@@ -520,6 +538,7 @@ mod tests {
                 },
                 activity: ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::PlayerOrPermanents,
+                    protected_player: Some(PlayerId(0)),
                 },
             }
         ));
@@ -541,6 +560,7 @@ mod tests {
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::Player,
+                        protected_player: None,
                     },
                 },
             },
@@ -557,6 +577,55 @@ mod tests {
             GameRestriction::ProhibitActivity {
                 affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
                 ..
+            }
+        ));
+    }
+
+    /// CR 109.5: an Advokist-style per-player restriction preserves
+    /// the trigger controller for both "you" and "your next turn", while its
+    /// affected player remains the accepting scoped player.
+    #[test]
+    fn attack_restriction_snapshots_original_controller_without_rebinding_scoped_player() {
+        use crate::types::triggers::AttackTargetFilter;
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let mut ability = ResolvedAbility::new(
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::ScopedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::PlayerOrPlaneswalker,
+                        protected_player: None,
+                    },
+                },
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(1), // rebound current player for this each-player iteration
+        )
+        .duration(Duration::UntilNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        });
+        ability.original_controller = Some(PlayerId(0));
+        ability.scoped_player = Some(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("restriction resolves");
+
+        assert!(matches!(
+            &state.restrictions[0],
+            GameRestriction::ProhibitActivity {
+                source: ObjectId(7),
+                affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(1)),
+                expiry: RestrictionExpiry::UntilPlayerNextTurn {
+                    player: PlayerId(0)
+                },
+                activity: ProhibitedActivity::Attack {
+                    defended: AttackTargetFilter::PlayerOrPlaneswalker,
+                    protected_player: Some(PlayerId(0)),
+                },
             }
         ));
     }
