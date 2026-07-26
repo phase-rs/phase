@@ -8,7 +8,8 @@ use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
     ResolvedControllerOverrideCommand, ResolvedControllerOverrideReplayInvariantError,
     ResolvedEntryProvenanceCommand, ResolvedEntryProvenanceReplayInvariantError,
-    ResolvedZoneChangeCommand, ResolvedZoneChangeReplayInvariantError,
+    ResolvedObjectCeaseCommand, ResolvedObjectCeaseReplayInvariantError, ResolvedZoneChangeCommand,
+    ResolvedZoneChangeReplayInvariantError,
 };
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -1737,8 +1738,63 @@ pub(crate) fn cease_object(
     zone: Zone,
     owner: PlayerId,
 ) {
-    remove_from_zone(state, object_id, zone, owner);
+    // CR 733: capture the occurrence BEFORE the removal — after it there is no
+    // object left to reference. A caller that passes an already-absent object
+    // keeps the prior silent behavior and journals nothing.
+    let Some(object) = state.objects.get(&object_id) else {
+        remove_from_zone(state, object_id, zone, owner);
+        return;
+    };
+    let command = ResolvedObjectCeaseCommand {
+        object: ObjectIncarnationRef::from_object(object),
+        expected_zone: zone,
+        owner,
+        cause: state.current_or_begin_rules_execution_node(),
+    };
+    apply_resolved_object_cease(state, &command)
+        .expect("the freshly read object must satisfy its own cease precondition");
+    state
+        .resolved_rules_journal
+        .record_object_cease(command)
+        .expect("resolved cease-to-exist must have a live journal cause");
+}
+
+/// Installs one already-resolved CR 704.5d cease-to-exist removal verbatim.
+///
+/// Deliberately re-runs none of the CR 704.5d/e eligibility scan: whether this
+/// object was a token outside the battlefield was settled by the SBA sweep that
+/// recorded the command.
+pub fn apply_resolved_object_cease(
+    state: &mut GameState,
+    command: &ResolvedObjectCeaseCommand,
+) -> Result<(), ResolvedObjectCeaseReplayInvariantError> {
+    let object_id = command.object.object_id;
+    let object = state.objects.get(&object_id).ok_or(
+        ResolvedObjectCeaseReplayInvariantError::UnknownObject(object_id),
+    )?;
+    let found = ObjectIncarnationRef::from_object(object);
+    if found != command.object {
+        return Err(ResolvedObjectCeaseReplayInvariantError::StaleObject {
+            expected: command.object,
+            found,
+        });
+    }
+    if object.zone != command.expected_zone {
+        return Err(ResolvedObjectCeaseReplayInvariantError::ZoneMismatch {
+            expected: command.expected_zone,
+            found: object.zone,
+        });
+    }
+    if object.owner != command.owner {
+        return Err(ResolvedObjectCeaseReplayInvariantError::OwnerMismatch {
+            expected: command.owner,
+            found: object.owner,
+        });
+    }
+
+    remove_from_zone(state, object_id, command.expected_zone, command.owner);
     state.objects.remove(&object_id);
+    Ok(())
 }
 
 /// Add an ObjectId to the appropriate zone collection.

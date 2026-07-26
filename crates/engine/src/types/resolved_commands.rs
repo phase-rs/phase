@@ -314,6 +314,39 @@ pub enum ResolvedEntryProvenanceReplayInvariantError {
     },
 }
 
+/// One exact CR 704.5d / CR 704.5e cease-to-exist removal.
+///
+/// Ceasing to exist is NOT a zone change (CR 400.7) — no event is emitted and no
+/// "whenever exiled" trigger fires — so it cannot ride the zone-change family. It
+/// is the only production path that deletes an object outright, and a replay that
+/// omitted it would leave a token alive in a zone the rules already swept it from.
+///
+/// No characteristics are recorded: replay removes the object the retained prefix
+/// already reconstructed rather than rebuilding a deleted one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedObjectCeaseCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_zone: Zone,
+    pub owner: PlayerId,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved cease-to-exist removal.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedObjectCeaseReplayInvariantError {
+    #[error("cease command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("cease occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("cease zone mismatch: expected {expected:?}, found {found:?}")]
+    ZoneMismatch { expected: Zone, found: Zone },
+    #[error("cease owner mismatch: expected {expected:?}, found {found:?}")]
+    OwnerMismatch { expected: PlayerId, found: PlayerId },
+}
+
 /// The audience that received one exact revealed-card fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedInformationAudience {
@@ -562,6 +595,7 @@ pub enum ResolvedRulesCommand {
     Attachment(ResolvedAttachmentCommand),
     ControllerOverride(ResolvedControllerOverrideCommand),
     EntryProvenance(ResolvedEntryProvenanceCommand),
+    ObjectCease(ResolvedObjectCeaseCommand),
     Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
@@ -1494,6 +1528,14 @@ impl ResolvedRulesJournal {
         )
     }
 
+    /// Records one exact CR 704.5d cease-to-exist removal under its causal node.
+    pub fn record_object_cease(
+        &mut self,
+        command: ResolvedObjectCeaseCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::ObjectCease(command))
+    }
+
     /// Records one exact bounded resolution-frame transition under its causal node.
     pub fn record_frame_transition(
         &mut self,
@@ -1718,6 +1760,7 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::Attachment(_)
                 | ResolvedRulesCommand::ControllerOverride(_)
                 | ResolvedRulesCommand::EntryProvenance(_)
+                | ResolvedRulesCommand::ObjectCease(_)
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
                 | ResolvedRulesCommand::LibraryShuffle(_)
@@ -2019,6 +2062,19 @@ impl ResolvedRulesJournal {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "entry-provenance command re-stamps the same source, or has an unrelated \
                          cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::ObjectCease(command) => {
+                // CR 704.5d/e: only a token or a copy of a card ceases to exist,
+                // and never from the battlefield or the stack.
+                if entry.node != command.cause
+                    || matches!(command.expected_zone, Zone::Battlefield | Zone::Stack)
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "cease command names a zone objects never cease from, or has an \
+                         unrelated cause"
                             .to_string(),
                     ));
                 }
