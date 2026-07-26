@@ -211,3 +211,63 @@ fn serpent_society_ward_payment_that_reaches_ten_poison_loses_the_game() {
         "the game must end (P1 loses) before the destroy spell gets a chance to resolve, so Serpent Society must still be on the battlefield"
     );
 }
+
+/// CR 122.1 + CR 614.17 + CR 702.21a: Solemnity's "Players can't get
+/// counters" replacement must make Ward's poison-counter cost a FAILED
+/// payment, not a free bypass. Before this fix, `add_player_counter_with_
+/// replacement` reported `Prevented` as if it were a paid cost, so the
+/// targeting opponent's spell would incorrectly continue resolving even
+/// though no poison was actually given — nullifying Ward's entire deterrent
+/// for free. Solemnity's real Oracle text is "Players can't get counters.
+/// Prevent all damage that would be dealt to permanents by sources with
+/// counters on them." — only the first (relevant) sentence is used here.
+#[test]
+fn serpent_society_ward_payment_prevented_by_solemnity_counters_the_spell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Solemnity", 0, 0, "Players can't get counters.")
+        .as_enchantment();
+    let serpent_society = scenario
+        .add_creature_from_oracle(P0, "The Serpent Society", 3, 4, SERPENT_SOCIETY)
+        .id();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P1, "Destroy Spell", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+
+    runner
+        .cast(destroy)
+        .target_objects(&[serpent_society])
+        .commit();
+    runner.advance_until_stack_empty();
+
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("attempting to pay Ward's poison-counter cost must be a legal action even when Solemnity prevents the actual counter gain");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].poison_counters,
+        0,
+        "Solemnity must prevent the poison counters from actually being given"
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .get(&serpent_society)
+            .is_some_and(|obj| obj.zone == engine::types::zones::Zone::Battlefield),
+        "a prevented player-counter payment must be treated as a FAILED cost, countering the targeting spell exactly like a declined payment — Serpent Society must survive"
+    );
+    assert!(
+        !runner.state().stack.iter().any(|entry| entry.id == destroy),
+        "the countered spell must be removed from the stack"
+    );
+}

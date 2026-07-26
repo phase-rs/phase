@@ -568,14 +568,15 @@ pub(crate) fn apply_damage_after_replacement(
                 // counters. Route through the player-counter replacement pipeline
                 // so "players can't get poison counters" / poison-doublers apply;
                 // the actor is the source's controller.
-                if !player_counter::add_player_counter_with_replacement(
+                if player_counter::add_player_counter_with_replacement(
                     state,
                     ctx.controller,
                     *player_id,
                     PlayerCounterKind::Poison,
                     actual_amount,
                     events,
-                ) {
+                ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
+                {
                     return DamageResult::NeedsChoice;
                 }
             } else {
@@ -596,14 +597,15 @@ pub(crate) fn apply_damage_after_replacement(
                 // when a creature deals combat damage to a player. Route through
                 // the player-counter replacement pipeline (prevention/doublers);
                 // the actor is the source's controller.
-                if !player_counter::add_player_counter_with_replacement(
+                if player_counter::add_player_counter_with_replacement(
                     state,
                     ctx.controller,
                     *player_id,
                     PlayerCounterKind::Poison,
                     ctx.combat_damage_poison,
                     events,
-                ) {
+                ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
+                {
                     return DamageResult::NeedsChoice;
                 }
             }

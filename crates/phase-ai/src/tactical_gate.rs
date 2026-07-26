@@ -706,6 +706,9 @@ mod tests {
     use engine::game::combat::{AttackerInfo, CombatState};
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::types::ability::{BounceSelection, EffectKind, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{
+        QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
+    };
     use engine::types::game_state::{
         PendingCast, StackEntry, StackEntryKind, TargetEffectDetail, TargetSelectionProgress,
         TargetSelectionSlot, WaitingFor,
@@ -713,6 +716,7 @@ mod tests {
     use engine::types::identifiers::CardId;
     use engine::types::keywords::WardCost;
     use engine::types::mana::ManaCost;
+    use engine::types::replacements::ReplacementEvent;
 
     #[test]
     fn rejects_pump_after_combat_without_live_threat() {
@@ -1283,6 +1287,57 @@ mod tests {
         state.players[P0.0 as usize].poison_counters = 5;
         let decision = damage_target_decision(artifact, 3);
         let candidate = choose_target_candidate(artifact);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// CR 104.3d + CR 614.1a: a doubler on the poison counters the AI itself
+    /// would receive can make an individually-nonlethal PRINTED count
+    /// actually lethal once replacement-adjusted. The AI must project the
+    /// real, replacement-adjusted result (`preview_player_counter_addition`)
+    /// rather than trusting the printed count — the naive printed-count math
+    /// (4 existing + 3 printed = 7) would wrongly call this safe, but the
+    /// doubled result (4 + 6 = 10) is lethal.
+    #[test]
+    fn rejects_targeting_ward_with_lethal_poison_after_doubling_replacement() {
+        let mut scenario = GameScenario::new();
+        // A permanent the AI (P0) controls that doubles poison counters P0
+        // would receive. `valid_player: Some(You)` + the default recipient
+        // scope means this applies whenever P0 is the one gaining counters,
+        // mirroring how `player_counter.rs`'s own Solemnity test constructs a
+        // global player-counter replacement, parameterized to double instead
+        // of prevent.
+        let doubler_id = scenario.add_creature(P0, "Poison Doubler", 0, 0).id();
+        let mut doubler_def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::DOUBLE);
+        doubler_def.valid_player = Some(ReplacementPlayerScope::You);
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                count: 3,
+            }))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state
+            .objects
+            .get_mut(&doubler_id)
+            .unwrap()
+            .replacement_definitions = vec![doubler_def].into();
+        state.players[P0.0 as usize].poison_counters = 4;
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
         let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
         let ctx = PolicyContext {
             state,

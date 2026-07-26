@@ -733,21 +733,58 @@ pub(crate) fn available_mana_after_spell(ctx: &PolicyContext<'_>) -> u32 {
     sources.saturating_sub(spell_cost)
 }
 
-/// CR 104.3d: total poison counters `ward` would give the payer, summed
-/// across every `GetPlayerCounters { Poison, .. }` sub-cost in the whole
-/// tree — a `Compound` cost's sub-costs are all paid together (CR 702.21a:
-/// "every conjoined sub-cost must be payable"), not independently, so two
-/// individually-nonlethal poison sub-costs can be jointly lethal and must be
-/// checked against their COMBINED total, not each against the same
+/// CR 104.3d: total poison counters `ward` would ACTUALLY give the payer,
+/// summed across every `GetPlayerCounters { Poison, .. }` sub-cost in the
+/// whole tree — a `Compound` cost's sub-costs are all paid together (CR
+/// 702.21a: "every conjoined sub-cost must be payable"), not independently,
+/// so two individually-nonlethal poison sub-costs can be jointly lethal and
+/// must be checked against their COMBINED total, not each against the same
 /// unchanged starting count.
-fn total_poison_from_ward_cost(ward: &WardCost) -> u32 {
+///
+/// Projects each sub-cost through `preview_player_counter_addition` — the
+/// real replacement pipeline, side-effect-free — rather than trusting the
+/// printed count: a doubler or +N effect on the payer can make the printed
+/// count understate what actually happens, letting a lethal payment look
+/// safe. Returns `None` when any sub-cost's replacement outcome can't be
+/// cleanly projected (`ChoiceRequired`/`Unsupported`) — callers must treat
+/// `None` as "can't prove this is safe", never as zero poison.
+fn total_poison_from_ward_cost(ctx: &PolicyContext<'_>, ward: &WardCost) -> Option<u32> {
     match ward {
         WardCost::GetPlayerCounters {
-            counter_kind: engine::types::player::PlayerCounterKind::Poison,
+            counter_kind: kind @ engine::types::player::PlayerCounterKind::Poison,
             count,
-        } => *count,
-        WardCost::Compound(costs) => costs.iter().map(total_poison_from_ward_cost).sum(),
-        _ => 0,
+        } => {
+            match engine::game::effects::player_counter::preview_player_counter_addition(
+                ctx.state,
+                ctx.ai_player,
+                ctx.ai_player,
+                *kind,
+                *count,
+            ) {
+                engine::game::effects::player_counter::PlayerCounterAdditionPreview::Applied {
+                    count,
+                }
+                | engine::game::effects::player_counter::PlayerCounterAdditionPreview::Transformed {
+                    count,
+                } => Some(count),
+                // A "players can't get counters" replacement (Solemnity) means
+                // this sub-cost actually gives zero poison — genuinely safe,
+                // not merely unproven.
+                engine::game::effects::player_counter::PlayerCounterAdditionPreview::Prevented => {
+                    Some(0)
+                }
+                engine::game::effects::player_counter::PlayerCounterAdditionPreview::ChoiceRequired {
+                    ..
+                }
+                | engine::game::effects::player_counter::PlayerCounterAdditionPreview::Unsupported => {
+                    None
+                }
+            }
+        }
+        WardCost::Compound(costs) => costs.iter().try_fold(0u32, |total, cost| {
+            Some(total.saturating_add(total_poison_from_ward_cost(ctx, cost)?))
+        }),
+        _ => Some(0),
     }
 }
 
@@ -762,17 +799,23 @@ pub(crate) fn can_pay_ward_cost(
     warded: &GameObject,
 ) -> bool {
     // CR 104.3d: reject up front if the AGGREGATE poison this cost would
-    // give (direct or across every Compound sub-cost) reaches or crosses
-    // `LETHAL_POISON` — checked once, against the combined total, before any
-    // per-variant mechanical-affordability logic below. The AI must never
-    // treat ending its own game as an ordinary payable cost, for direct or
-    // compound Ward alike.
-    let total_poison = total_poison_from_ward_cost(ward);
-    if total_poison > 0 {
-        let current = ctx.state.players[ctx.ai_player.0 as usize].poison_counters;
-        if current.saturating_add(total_poison) >= crate::features::poison::LETHAL_POISON {
-            return false;
+    // ACTUALLY give (direct or across every Compound sub-cost, replacement-
+    // adjusted) reaches or crosses `LETHAL_POISON` — checked once, against
+    // the combined total, before any per-variant mechanical-affordability
+    // logic below. `None` means the replacement outcome couldn't be cleanly
+    // projected (a live choice or an unmodeled event rewrite) — conservatively
+    // decline rather than assume it's safe. The AI must never treat ending
+    // its own game as an ordinary payable cost, for direct or compound Ward
+    // alike.
+    match total_poison_from_ward_cost(ctx, ward) {
+        None => return false,
+        Some(total_poison) if total_poison > 0 => {
+            let current = ctx.state.players[ctx.ai_player.0 as usize].poison_counters;
+            if current.saturating_add(total_poison) >= crate::features::poison::LETHAL_POISON {
+                return false;
+            }
         }
+        Some(_) => {}
     }
     match ward {
         WardCost::Mana(cost) | WardCost::Waterbend(cost) => {

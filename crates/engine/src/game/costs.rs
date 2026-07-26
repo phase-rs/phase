@@ -1390,17 +1390,31 @@ fn pay_ability_cost_inner(
         // `resolve_and_apply_player_edit` call — so "players can't get
         // counters" replacement effects still apply, mirroring the
         // `EffectCost`/`PutCounter` arm's use of the sibling
-        // `effects::counters::add_counter_with_replacement` above.
+        // `effects::counters::add_counter_with_replacement` above. A
+        // replacement that PREVENTS the addition (Solemnity) is a genuinely
+        // FAILED payment here, not a paused one: unlike effect resolution
+        // (where "prevented" and "applied" both just mean the pending item is
+        // resolved), a cost that silently gives zero counters must not be
+        // mistaken for having actually been paid, or Ward's deterrent is
+        // bypassed for free.
         AbilityCost::GetPlayerCounters {
             counter_kind,
             count,
         } => {
-            if !super::effects::player_counter::add_player_counter_with_replacement(
+            match super::effects::player_counter::add_player_counter_with_replacement(
                 state, player, player, *counter_kind, *count, events,
             ) {
-                return Ok(PaymentOutcome::Paused {
-                    remaining_cost: None,
-                });
+                super::effects::player_counter::PlayerCounterAdditionOutcome::Applied => {}
+                super::effects::player_counter::PlayerCounterAdditionOutcome::Prevented => {
+                    return Ok(payment_failed(
+                        "Player-counter cost prevented by a replacement effect",
+                    ));
+                }
+                super::effects::player_counter::PlayerCounterAdditionOutcome::NeedsChoice => {
+                    return Ok(PaymentOutcome::Paused {
+                        remaining_cost: None,
+                    });
+                }
             }
         }
         AbilityCost::PaySpeed { amount } => {
