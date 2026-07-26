@@ -2479,9 +2479,11 @@ pub(crate) fn deliver_replaced_zone_change(
         // visible at ETB trigger fire-time (CR 603.4).
         if to == Zone::Battlefield {
             if let Some(src) = source_id {
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    obj.entered_via_ability_source = Some(src);
-                }
+                // CR 733: route the stamp through its single authority so the
+                // provenance is captured as a resolved command instead of written
+                // raw. The authority keeps the prior silent skip when the object
+                // is no longer present.
+                zones::stamp_battlefield_entry_provenance(state, object_id, src);
             }
         }
         // CR 110.2a: Apply controller override if the effect specifies

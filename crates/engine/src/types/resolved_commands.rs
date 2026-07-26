@@ -230,6 +230,90 @@ pub enum ResolvedAttachmentReplayInvariantError {
     UnknownHost(ObjectId),
 }
 
+/// One exact CR 110.2a + CR 603.6a "under your control" battlefield-entry
+/// controller override.
+///
+/// The override retags the live object AND the two turn-record snapshots the
+/// entry created, so a replay that installed only the object's controller would
+/// leave "entered under whose control" look-back queries answering with the
+/// pre-override controller.
+///
+/// The record positions are RECORDED rather than re-found at replay time,
+/// mirroring `ResolvedZoneChangeCommand::turn_zone_change_index`: the resolve-time
+/// authority knows exactly which snapshot it retagged, and re-running a
+/// last-match scan against a replayed board could land on a different entry when
+/// the same object entered twice in one turn. They are `Option` because the
+/// override also runs for entries whose snapshots are absent (CR 603.6a
+/// leaves-the-battlefield reconstruction, and the elimination path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedControllerOverrideCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_old_base_controller: Option<PlayerId>,
+    pub expected_old_controller: PlayerId,
+    pub resulting_controller: PlayerId,
+    pub zone_change_index: Option<usize>,
+    pub battlefield_entry_index: Option<usize>,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved controller override.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedControllerOverrideReplayInvariantError {
+    #[error("controller-override command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("controller-override occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("controller-override base-controller precondition mismatch: expected {expected:?}, found {found:?}")]
+    BaseControllerPreconditionMismatch {
+        expected: Option<PlayerId>,
+        found: Option<PlayerId>,
+    },
+    #[error("controller-override controller precondition mismatch: expected {expected:?}, found {found:?}")]
+    ControllerPreconditionMismatch { expected: PlayerId, found: PlayerId },
+    #[error("controller-override references a missing zone-change record at {0}")]
+    MissingZoneChangeRecord(usize),
+    #[error("controller-override references a missing battlefield-entry record at {0}")]
+    MissingBattlefieldEntryRecord(usize),
+}
+
+/// One exact CR 603.6a battlefield-entry provenance stamp.
+///
+/// The entering permanent records which ability put it there so anti-recursion
+/// intervening-ifs ("if it wasn't put onto the battlefield with this ability")
+/// can exclude the permanents that very ability placed. A replay that dropped the
+/// stamp would let those abilities re-trigger off their own output.
+///
+/// `resulting_source` is not an `Option`: the delivery tail stamps only
+/// ability-driven entries, and `reset_for_battlefield_entry` has already cleared
+/// the field, so a recorded stamp always installs a concrete source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedEntryProvenanceCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_old_source: Option<ObjectId>,
+    pub resulting_source: ObjectId,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved entry-provenance stamp.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedEntryProvenanceReplayInvariantError {
+    #[error("entry-provenance command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("entry-provenance occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("entry-provenance precondition mismatch: expected {expected:?}, found {found:?}")]
+    SourcePreconditionMismatch {
+        expected: Option<ObjectId>,
+        found: Option<ObjectId>,
+    },
+}
+
 /// The audience that received one exact revealed-card fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedInformationAudience {
@@ -476,6 +560,8 @@ pub enum ResolvedRulesCommand {
     ObjectCounter(ResolvedObjectCounterCommand),
     ObjectTransform(ResolvedObjectTransformCommand),
     Attachment(ResolvedAttachmentCommand),
+    ControllerOverride(ResolvedControllerOverrideCommand),
+    EntryProvenance(ResolvedEntryProvenanceCommand),
     Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
@@ -1386,6 +1472,28 @@ impl ResolvedRulesJournal {
         self.append_command(command.cause, ResolvedRulesCommand::Attachment(command))
     }
 
+    /// Records one exact CR 110.2a controller override under its causal node.
+    pub fn record_controller_override(
+        &mut self,
+        command: ResolvedControllerOverrideCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::ControllerOverride(command),
+        )
+    }
+
+    /// Records one exact CR 603.6a entry-provenance stamp under its causal node.
+    pub fn record_entry_provenance(
+        &mut self,
+        command: ResolvedEntryProvenanceCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::EntryProvenance(command),
+        )
+    }
+
     /// Records one exact bounded resolution-frame transition under its causal node.
     pub fn record_frame_transition(
         &mut self,
@@ -1608,6 +1716,8 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::ObjectCounter(_)
                 | ResolvedRulesCommand::ObjectTransform(_)
                 | ResolvedRulesCommand::Attachment(_)
+                | ResolvedRulesCommand::ControllerOverride(_)
+                | ResolvedRulesCommand::EntryProvenance(_)
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
                 | ResolvedRulesCommand::LibraryShuffle(_)
@@ -1881,6 +1991,34 @@ impl ResolvedRulesJournal {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "attachment command does not change the host, mismatches its timestamp \
                          draw, or has an unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::ControllerOverride(command) => {
+                // CR 110.2a: an override that leaves both the derived and the
+                // pinned controller exactly as they were retagged nothing, so it
+                // is not an override that ever happened.
+                if entry.node != command.cause
+                    || (command.expected_old_base_controller == Some(command.resulting_controller)
+                        && command.expected_old_controller == command.resulting_controller)
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "controller-override command changes no controller, or has an unrelated \
+                         cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::EntryProvenance(command) => {
+                // CR 603.6a: a stamp that names the source the object was already
+                // stamped with recorded nothing.
+                if entry.node != command.cause
+                    || command.expected_old_source == Some(command.resulting_source)
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "entry-provenance command re-stamps the same source, or has an unrelated \
+                         cause"
                             .to_string(),
                     ));
                 }
