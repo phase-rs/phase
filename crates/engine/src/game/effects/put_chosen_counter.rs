@@ -13,13 +13,46 @@
 
 use crate::types::ability::{
     ChosenCounterCountCondition, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
-/// CR 608.2c + CR 122.1: Evaluate an optional predicate against the resolved
-/// target's count of the counter kind chosen earlier in this resolution.
+/// CR 608.2c + CR 122.1: Return the resolved objects that independently satisfy
+/// the predicate against their count of the counter kind chosen earlier in
+/// this resolution.
+fn targets_satisfying_condition(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+    chosen_kind: &CounterType,
+    condition: &ChosenCounterCountCondition,
+) -> Vec<crate::types::identifiers::ObjectId> {
+    crate::game::targeting::resolved_object_ids_for_filter(state, ability, target)
+        .into_iter()
+        .filter(|target_id| {
+            let count = state
+                .objects
+                .get(target_id)
+                .and_then(|object| object.counters.get(chosen_kind))
+                .copied()
+                .map(crate::game::arithmetic::u32_to_i32_saturating)
+                .unwrap_or(0);
+            let mut per_target_ability = ability.clone();
+            per_target_ability.targets = vec![TargetRef::Object(*target_id)];
+            let rhs = crate::game::quantity::resolve_quantity_for_ability_condition(
+                state,
+                &condition.rhs,
+                &per_target_ability,
+            );
+            condition.comparator.evaluate(count, rhs)
+        })
+        .collect()
+}
+
+/// CR 608.2c + CR 122.1: Evaluate whether an optional chosen-counter
+/// instruction has at least one resolved object that satisfies its predicate.
 ///
 /// This is the single authority shared by normal resolution and the optional
 /// effect feasibility check, so an impossible optional placement is never
@@ -34,26 +67,7 @@ pub(crate) fn target_condition_is_satisfied(
     let Some(condition) = condition else {
         return true;
     };
-    let Some(target_id) =
-        crate::game::targeting::resolved_object_ids_for_filter(state, ability, target)
-            .into_iter()
-            .next()
-    else {
-        return false;
-    };
-    let count = state
-        .objects
-        .get(&target_id)
-        .and_then(|object| object.counters.get(chosen_kind))
-        .copied()
-        .map(crate::game::arithmetic::u32_to_i32_saturating)
-        .unwrap_or(0);
-    let rhs = crate::game::quantity::resolve_quantity_for_ability_condition(
-        state,
-        &condition.rhs,
-        ability,
-    );
-    condition.comparator.evaluate(count, rhs)
+    !targets_satisfying_condition(state, ability, target, chosen_kind, condition).is_empty()
 }
 
 /// CR 122.1 + CR 122.6: Resolve `Effect::PutChosenCounter`.
@@ -87,11 +101,17 @@ pub fn resolve(
         return Ok(());
     };
 
-    // CR 608.2c: Later text can condition this instruction on the target's
-    // current count of the kind chosen by the preceding instruction (Aven
-    // Courier). The condition is checked after the kind is known and before
-    // counter placement.
-    if !target_condition_is_satisfied(state, ability, &target, &counter_type, target_condition) {
+    // CR 608.2c: Later text can condition this instruction on each resolved
+    // object's current count of the kind chosen by the preceding instruction
+    // (Aven Courier). Evaluate after the kind is known and retain only the
+    // objects for which the condition is true.
+    let conditioned_targets = target_condition.map(|condition| {
+        targets_satisfying_condition(state, ability, &target, &counter_type, condition)
+    });
+    if conditioned_targets
+        .as_ref()
+        .is_some_and(|targets| targets.is_empty())
+    {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -101,14 +121,24 @@ pub fn resolve(
     }
 
     // CR 122.1 + CR 122.6: Delegate to the single counter-placement authority.
-    // The synthetic `PutCounter` inherits the resolving ability's targets so a
-    // `ParentTarget` resolves to the current `repeat_for` iteration object.
+    // Without a predicate, the synthetic `PutCounter` preserves the original
+    // filter and targets. With a predicate, replace its target set with the
+    // independently passing objects and use `Any` so special anaphor/slot
+    // resolution cannot re-expand that filtered set.
     let mut synthetic = ability.clone();
     synthetic.sub_ability = None;
+    if let Some(targets) = conditioned_targets {
+        synthetic.targets = targets.into_iter().map(TargetRef::Object).collect();
+        synthetic.distribution = None;
+    }
     synthetic.effect = Effect::PutCounter {
         counter_type,
         count,
-        target,
+        target: if target_condition.is_some() {
+            TargetFilter::Any
+        } else {
+            target
+        },
     };
     crate::game::effects::counters::resolve_add(state, &synthetic, events)
 }
@@ -259,6 +289,43 @@ mod tests {
             state.objects[&target].counters.get(&CounterType::Stun),
             Some(&1),
             "a false chosen-counter predicate makes the put a no-op"
+        );
+    }
+
+    /// CR 608.2c + CR 122.1: A multi-object resolved set evaluates the
+    /// chosen-counter predicate per object. Qualifying objects receive the
+    /// counter; nonqualifying siblings remain unchanged.
+    #[test]
+    fn target_condition_filters_each_resolved_object_independently() {
+        let (mut state, source, first) = setup();
+        let second = crate::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Second Target".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state.chosen_counter_kind_this_resolution = Some(CounterType::Stun);
+        state
+            .objects
+            .get_mut(&second)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let mut ability = absent_chosen_counter_ability(source, first);
+        ability.targets.push(TargetRef::Object(second));
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert_eq!(
+            state.objects[&first].counters.get(&CounterType::Stun),
+            Some(&1),
+            "the qualifying first object receives the chosen counter"
+        );
+        assert_eq!(
+            state.objects[&second].counters.get(&CounterType::Stun),
+            Some(&1),
+            "the nonqualifying sibling must not receive the chosen counter"
         );
     }
 

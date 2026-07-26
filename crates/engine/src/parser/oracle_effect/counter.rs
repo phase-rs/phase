@@ -391,10 +391,13 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
 /// CR 608.2c + CR 122.1 + CR 122.6: "[a[n]] [additional] counter of that kind
 /// on <recipient> [if it doesn't have a counter of that kind on it]" →
 /// `Effect::PutChosenCounter`. Anaphoric recipients bind to `ParentTarget` (The
-/// Caves of Androzani); typed recipients use the shared target parser (Aven
-/// Courier). The optional suffix becomes an explicit EQ-zero predicate over the
-/// resolved target's count of the chosen kind. Combinator-based and fully
-/// consuming; `input` has already had the leading "put " stripped.
+/// Caves of Androzani); declared typed recipients use the shared target parser
+/// (Aven Courier). A source-self recipient remains unsupported because its
+/// producer may be a random counter-kind choice that is not yet bound to
+/// resolution state (Crystalline Giant). The optional suffix becomes an
+/// explicit EQ-zero predicate over each resolved target's count of the chosen
+/// kind. Combinator-based and fully consuming; `input` has already had the
+/// leading "put " stripped.
 pub(super) fn try_parse_put_chosen_counter(input: &str) -> Option<Effect> {
     let (recipient_text, _) = (
         opt(alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))),
@@ -414,7 +417,7 @@ pub(super) fn try_parse_put_chosen_counter(input: &str) -> Option<Effect> {
         (TargetFilter::ParentTarget, remainder)
     } else {
         let (target, remainder) = parse_target(recipient_text);
-        if matches!(target, TargetFilter::Any) {
+        if matches!(target, TargetFilter::Any | TargetFilter::SelfRef) {
             return None;
         }
         (target, remainder)
@@ -1593,6 +1596,17 @@ mod tests {
                 target_condition: None,
             }
         ));
+    }
+
+    /// Crystalline Giant's random counter-kind producer is not represented by
+    /// `ChoiceType::CounterKind`, so its source-self consumer must stay outside
+    /// the supported `PutChosenCounter` grammar until that binding exists.
+    #[test]
+    fn put_chosen_counter_rejects_unbound_source_self_consumer() {
+        assert!(
+            try_parse_put_chosen_counter("a counter of that kind on ~.").is_none(),
+            "an unbound random counter kind must remain a strict parser gap"
+        );
     }
 
     /// CR 115.1d + CR 608.2c + CR 608.2d: Full-card reach guard for Aven

@@ -3738,9 +3738,9 @@ pub(super) fn parse_choose_ast(
 
         // CR 608.2d + CR 122.1: "choose a counter on it / that permanent" —
         // pick one of the distinct counter kinds on the anaphoric object
-        // (The Caves of Androzani II/III). Anaphoric form only; the declared-
-        // target form ("a counter on target permanent", Ichormoon Gauntlet)
-        // is handled by the target parser below.
+        // (The Caves of Androzani II/III), or on an untargeted typed domain
+        // (Aven Courier). Declared-target forms remain owned by the target
+        // parser below.
         if let Some(ast) = try_parse_choose_counter_kind(rest_lower) {
             return Some(ast);
         }
@@ -3855,10 +3855,7 @@ fn try_parse_choose_counter_kind(rest_lower: &str) -> Option<ChooseImperativeAst
     let (domain, _) = tag::<_, _, OracleError<'_>>("a counter on ")
         .parse(rest_lower.trim())
         .ok()?;
-    if tag::<_, _, OracleError<'_>>("target ")
-        .parse(domain)
-        .is_ok()
-    {
+    if nom_target::parse_declared_target_prefix(domain).is_ok() {
         return None;
     }
 
@@ -13452,16 +13449,49 @@ mod tests {
     /// stack-target designation path (Clockspinning / Ichormoon Gauntlet), not
     /// the untargeted chosen-counter population parser.
     #[test]
-    fn try_parse_choose_counter_kind_rejects_literal_target_siblings() {
-        assert!(
-            try_parse_choose_counter_kind("a counter on target permanent.").is_none(),
-            "Ichormoon-style literal target must not become a resolution population"
-        );
+    fn try_parse_choose_counter_kind_rejects_declared_target_prefixes() {
+        for input in [
+            "a counter on target permanent.",
+            "a counter on another target permanent.",
+            "a counter on other target permanent.",
+        ] {
+            let (domain, _) = tag::<_, _, OracleError<'_>>("a counter on ")
+                .parse(input)
+                .expect("test input has the chooser prefix");
+            let (target, remainder) = parse_target(domain);
+            assert!(
+                !matches!(target, TargetFilter::Any) && remainder == ".",
+                "positive reach guard: declared target syntax must remain parseable: {input}"
+            );
+            assert!(
+                try_parse_choose_counter_kind(input).is_none(),
+                "declared target must not become a resolution population: {input}"
+            );
+        }
+
         assert!(
             try_parse_choose_counter_kind("a counter on target permanent or suspended card.")
                 .is_none(),
             "Clockspinning literal target must stay in TargetOnly parsing"
         );
+    }
+
+    /// CR 608.2d + CR 122.1: Every supported definite anaphor binds the
+    /// counter-kind choice to the preceding instruction's object.
+    #[test]
+    fn try_parse_choose_counter_kind_preserves_anaphoric_family() {
+        for input in [
+            "a counter on it.",
+            "a counter on that permanent.",
+            "a counter on that creature.",
+        ] {
+            assert!(matches!(
+                try_parse_choose_counter_kind(input),
+                Some(ChooseImperativeAst::CounterKind {
+                    target: TargetFilter::ParentTarget,
+                })
+            ));
+        }
     }
 
     fn has_type(tf: &TypedFilter, ty: TypeFilter) -> bool {
