@@ -10569,6 +10569,26 @@ impl CastingVariant {
     }
 }
 
+// clippy::large_enum_variant: this fires *because* the stack-budget fix
+// succeeded. Every variant used to carry an inline `ResolvedAbility`, so all of
+// them were ~5,264 B and the spread between them was small; boxing that payload
+// took the enum from 5,312 B to 320 B and left `TriggeredAbility` (320 B) as the
+// outlier against `Spell` (60 B).
+//
+// The residual weight is NOT the ability — that is now 8 B in every variant. It
+// is `condition: Option<TriggerCondition>` at 184 B, plus `trigger_event:
+// Option<GameEvent>` at 56 B (measured with `-Zprint-type-sizes`). Boxing those
+// is a separate design decision on separate types: `TriggerCondition` is
+// inspected on every trigger-condition re-check, and the same field is spelled
+// inline on `PendingTrigger`, so the two would have to move together. That is
+// out of scope here and is recorded as follow-up rather than done by reflex.
+//
+// The size that actually reaches a stack frame is bounded and pinned:
+// `StackEntry` is the only path from this enum into `GameState`
+// (`resolving_stack_entry`), and `types/game_state_size.rs` holds it under
+// 512 B. Follows the documented allows on `Effect` / `CastingPermission` /
+// `OutsideGameChoiceSource`.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum StackEntryKind {
