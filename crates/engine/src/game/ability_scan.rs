@@ -7458,7 +7458,7 @@ mod tests {
     ///     helper-enumerator mass reads on existing relaxed variants; raw-iteration mass
     ///     reads rely on the oracle's no-wildcard forcing.
     ///   - BOUNDED raw-iter / O(1) reads are deliberately kept OUT of `CLASSIFIED` (so the
-    ///     set-equality stays over the 15 idiom-matched files — no allowlist pollution):
+    ///     set-equality stays over the 14 idiom-matched files — no allowlist pollution):
     ///     `vote.rs` (`votes_per_session_for` = 1 + count of `GrantsExtraVote` statics,
     ///     snapshotted at session start — bounded single outcome) and `switch_pt.rs`
     ///     (O(1) `state.battlefield.contains()` over the effect's own `ids` — bounded
@@ -7491,12 +7491,6 @@ mod tests {
                 true,
                 "ChangeZoneAll: mass battlefield zone move (census); single ChangeZone path \
                  also present in-file",
-            ),
-            (
-                "choose_counter_kind.rs",
-                true,
-                "ChooseCounterKind: typed resolution-time domain scans every matching \
-                 battlefield permanent and unions its counter kinds",
             ),
             (
                 "copy_token_blocking.rs",
@@ -7622,7 +7616,6 @@ mod tests {
             .collect();
         let census_reps: &[(&str, &str)] = &[
             ("change_zone.rs", "ChangeZoneAll"),
-            ("choose_counter_kind.rs", "ChooseCounterKind"),
             ("copy_token_blocking.rs", "CopyTokenBlockingAttacker"),
             ("counters.rs", "PutCounterAll"),
             ("goad.rs", "GoadAll"),
