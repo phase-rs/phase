@@ -15,3 +15,4 @@ pub mod mulligan_input_lint;
 pub mod poison;
 pub mod reanimator_payoff;
 pub mod score_contract_lint;
+pub mod self_bounce_target;

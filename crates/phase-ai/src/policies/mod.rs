@@ -50,6 +50,7 @@ mod redundancy_avoidance;
 pub mod registry;
 mod sacrifice_land_protection;
 mod sacrifice_value;
+mod self_bounce_target;
 mod self_cost;
 mod self_cost_value;
 mod self_protection_classify;
