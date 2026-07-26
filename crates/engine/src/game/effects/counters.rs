@@ -414,6 +414,7 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
                         player_id: action.player_id,
                         action: action.action,
                         look_count: None,
+                        scry_bottom_count: None,
                     });
                 }
             }
@@ -474,6 +475,7 @@ fn apply_pending_counter_post_action(
                 player_id,
                 action,
                 look_count: None,
+                scry_bottom_count: None,
             });
             true
         }

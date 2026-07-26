@@ -2411,7 +2411,10 @@ pub(super) fn match_player_action(
     state: &GameState,
 ) -> bool {
     let GameEvent::PlayerPerformedAction {
-        player_id, action, ..
+        player_id,
+        action,
+        scry_bottom_count,
+        ..
     } = event
     else {
         return false;
@@ -2422,7 +2425,19 @@ pub(super) fn match_player_action(
 
     match trigger.mode {
         TriggerMode::SearchedLibrary => *action == PlayerActionKind::SearchedLibrary,
-        TriggerMode::Scry => *action == PlayerActionKind::Scry,
+        TriggerMode::Scry => {
+            // CR 701.22a + CR 701.22d + CR 603.2: a completed scry emits its
+            // own action event with the number actually placed on bottom, and
+            // the trigger predicate compares that preserved event-local value.
+            *action == PlayerActionKind::Scry
+                && trigger
+                    .scry_bottom_count
+                    .is_none_or(|(comparator, threshold)| {
+                        scry_bottom_count.is_some_and(|count| {
+                            comparator.evaluate(count as i32, threshold as i32)
+                        })
+                    })
+        }
         TriggerMode::Surveil => *action == PlayerActionKind::Surveil,
         TriggerMode::CollectEvidence => *action == PlayerActionKind::CollectEvidence,
         TriggerMode::Investigated => *action == PlayerActionKind::Investigate,
@@ -7714,6 +7729,7 @@ mod tests {
             player_id: PlayerId(0),
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7741,6 +7757,7 @@ mod tests {
             player_id: PlayerId(0),
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
+            scry_bottom_count: None,
         };
         assert!(!match_player_action(
             &event,
@@ -7768,6 +7785,7 @@ mod tests {
             player_id: PlayerId(1),
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7795,6 +7813,7 @@ mod tests {
             player_id: PlayerId(1),
             action: PlayerActionKind::Surveil,
             look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7822,6 +7841,7 @@ mod tests {
             player_id: PlayerId(0),
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
+            scry_bottom_count: None,
         };
         assert!(!match_player_action(
             &event,
@@ -7849,6 +7869,7 @@ mod tests {
             player_id: PlayerId(0),
             action: PlayerActionKind::Proliferate,
             look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -10952,6 +10973,7 @@ mod tests {
             player_id: PlayerId(0),
             action: PlayerActionKind::ShuffledLibrary,
             look_count: None,
+            scry_bottom_count: None,
         };
         let trigger = make_trigger(TriggerMode::Shuffled);
         assert!(match_shuffled(
@@ -10983,6 +11005,7 @@ mod tests {
             player_id: PlayerId(1),
             action: PlayerActionKind::ShuffledLibrary,
             look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_shuffled(
             &opp_event,
@@ -10996,6 +11019,7 @@ mod tests {
             player_id: PlayerId(0),
             action: PlayerActionKind::ShuffledLibrary,
             look_count: None,
+            scry_bottom_count: None,
         };
         assert!(!match_shuffled(
             &self_event,

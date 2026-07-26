@@ -2838,6 +2838,7 @@ fn junk_ability() -> AbilityDefinition {
         Effect::ExileTop {
             player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 1 },
+            position: crate::types::ability::LibraryPosition::Top,
             face_down: false,
         },
     )

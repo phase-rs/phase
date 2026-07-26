@@ -1570,6 +1570,9 @@ pub(crate) enum ZoneCounterImperativeAst {
     ExileTop {
         player: TargetFilter,
         count: QuantityExpr,
+        /// CR 401.2 + CR 701.13a: the library's ordered top or bottom edge
+        /// selects the cards this exile instruction moves.
+        position: LibraryPosition,
         /// CR 406.3: Mirrors `Effect::ExileTop.face_down` — set when the
         /// Oracle text terminates with "face down" (Necropotence / Bomat
         /// Courier / Asmodeus class).

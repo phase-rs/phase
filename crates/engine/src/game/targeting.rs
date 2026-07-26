@@ -4290,6 +4290,7 @@ mod tests {
             player_id: PlayerId(1),
             action: crate::types::events::PlayerActionKind::Scry,
             look_count: None,
+            scry_bottom_count: None,
         };
         let result = extract_player_from_event(&event, &state);
         assert_eq!(result, Some(PlayerId(1)));

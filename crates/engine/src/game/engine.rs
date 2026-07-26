@@ -7778,6 +7778,7 @@ fn apply_action(
                 player_id: p,
                 action: PlayerActionKind::Proliferate,
                 look_count: None,
+                scry_bottom_count: None,
             });
             let pending = state
                 .take_active_proliferate_frame()

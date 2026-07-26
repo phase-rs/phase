@@ -70,6 +70,7 @@ fn occurrence(player: PlayerId) -> ConsumedTriggerEventOccurrence {
             player_id: player,
             action: PlayerActionKind::Scry,
             look_count: None,
+            scry_bottom_count: None,
         },
         occurrence: 0,
     }

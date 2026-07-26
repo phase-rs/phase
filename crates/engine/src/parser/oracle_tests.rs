@@ -15934,6 +15934,7 @@ fn ixhel_corrupted_end_step_trigger_parses_poison_scoped_exile() {
             player,
             count,
             face_down,
+            ..
         } => {
             assert!(matches!(player, TargetFilter::ScopedPlayer));
             assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
@@ -19632,6 +19633,7 @@ fn crumbling_sanctuary_parses_as_replacement_without_swallowed_clause() {
             count: QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount
             },
+            position: crate::types::ability::LibraryPosition::Top,
             face_down: false,
         }
     ));

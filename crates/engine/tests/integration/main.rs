@@ -1147,6 +1147,7 @@ mod taii_wakeen;
 mod tamiyo_inquisitive_student_flip;
 mod teamwork_keyword;
 mod teferis_puzzle_box_4241;
+mod temporal_anchor;
 mod temporary_cant_be_blocked_view;
 mod tergrid_mirrormade_copy_on_effect_entry;
 mod the_mind_stone_harness_infinity;

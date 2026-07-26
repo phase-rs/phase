@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 1191
 expression: "&ir"
 ---
 {
@@ -71,6 +72,9 @@ expression: "&ir"
               "count": {
                 "type": "Fixed",
                 "value": 1
+              },
+              "position": {
+                "type": "Top"
               },
               "face_down": true
             },
