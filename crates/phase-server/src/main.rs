@@ -128,6 +128,14 @@ const SPECTATOR_PLAYER_ID: PlayerId = PlayerId(u8::MAX);
 ///
 /// 32 MiB matches what `ai_commander` and `duel_suite` already use for this
 /// same engine recursion.
+///
+/// Side effect worth knowing: a **debug** `phase-server` used to abort on any
+/// WebSocket connect, because a debug frame chain did not fit Tokio's 2 MiB
+/// default worker stack. Sizing the owner and worker threads here fixed that, so
+/// the debug binary is now a usable smoke target — `cargo run -p phase-server`,
+/// connect a client, and the handshake plus lobby path complete without an
+/// abort. Verified once by hand after this constant landed; if you are looking
+/// for a cheap end-to-end check of a server change, that is now available.
 const RUNTIME_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
 type SharedDraftPools = Arc<draft_pools::DraftPools>;
 /// Spectator senders keyed by draft_code. Each spectator has a visibility + sender.
