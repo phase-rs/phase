@@ -443,3 +443,105 @@ fn a_recorded_pop_unblocks_a_later_push_replay() {
         "CR 405.2: the replay installs the recorded entry at the recorded index"
     );
 }
+
+/// CR 800.4a: a leaving player's spells are removed from the stack. This is the
+/// PLURAL case — one `retain` pass used to drop several entries at once — and it
+/// is journaled as one command per entry rather than one bulk record.
+///
+/// The load-bearing assertion is that BOTH removals record index 0. An
+/// implementation that captured each entry's ORIGINAL position would record
+/// (0, 1); recording (0, 0) is what proves each index is the LIVE index at the
+/// moment that entry was removed, which is the only form a sequential replay can
+/// reproduce.
+///
+/// The leaving player is the one casting, so no priority juggling is needed: a
+/// self-targeted burn spell takes its own controller to 0 and the CR 704.5a
+/// state-based action runs the sweep through the real pipeline.
+#[test]
+fn eliminating_a_player_journals_one_removal_per_controlled_stack_entry() {
+    // Three players so the elimination does not end the game outright.
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bolt = scenario.add_bolt_to_hand(P0);
+    let victim_lower = scenario
+        .add_spell_to_hand_from_oracle(P0, "Journal Victim Lower", true, ELVISH_TOKEN_SPELL)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let victim_upper = scenario
+        .add_spell_to_hand_from_oracle(P0, "Journal Victim Upper", true, ELVISH_TOKEN_SPELL)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+
+    runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|player| player.id == P0)
+        .expect("the caster is in the game")
+        .life = 3;
+
+    cast(&mut runner, victim_lower);
+    cast(&mut runner, victim_upper);
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        vec![victim_lower, victim_upper],
+        "reach guard: both of the leaving player's spells are on the stack"
+    );
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+
+    // CR 704.5a through the real pipeline: self-targeted burn takes the caster
+    // to 0 and the state-based action eliminates them, running the CR 800.4a
+    // sweep over the two spells still on the stack beneath it.
+    runner.cast(bolt).target_player(P0).resolve();
+
+    assert!(
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|player| player.id == P0)
+            .expect("the player record survives elimination")
+            .is_eliminated,
+        "CR 704.5a reach guard: the caster actually left the game"
+    );
+
+    let victim_removals: Vec<_> = stack_removals(runner.state(), journal_start)
+        .into_iter()
+        .filter(|removal| removal.entry.id == victim_lower || removal.entry.id == victim_upper)
+        .collect();
+    assert_eq!(
+        victim_removals.len(),
+        2,
+        "CR 800.4a: each removed entry is journaled separately, not as one bulk record"
+    );
+    assert_eq!(
+        (victim_removals[0].entry.id, victim_removals[1].entry.id),
+        (victim_lower, victim_upper),
+        "the sweep removes by ascending position, and the records carry that order"
+    );
+    assert_eq!(
+        (victim_removals[0].index, victim_removals[1].index),
+        (0, 0),
+        "each index is the LIVE index at its own removal: once the lower spell \
+         leaves index 0 the upper one slides down into it. Original-position \
+         capture would record (0, 1) and a replay would remove the wrong entry"
+    );
+    assert_eq!(
+        (
+            victim_removals[0].resulting_depth,
+            victim_removals[1].resulting_depth
+        ),
+        (1, 0),
+        "the depths descend one per removal"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "CR 800.4a: every spell the leaving player controlled is gone"
+    );
+}
