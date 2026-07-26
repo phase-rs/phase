@@ -157,39 +157,38 @@ fn elrond_scry_counters_are_capped_by_clamped_look_count_not_requested_amount() 
 
 /// Maintainer review on PR #5872 (multi-scry blocker): one resolution that
 /// scries TWICE with different amounts ("Scry 3.\nScry 1." — contiguous
-/// resolution lines chain into a single ability) must expose each queued
-/// trigger's OWN scry's look count as its target-slot limit — never the value
-/// of whichever scry happened LAST.
+/// resolution lines chain into a single ability) queues TWO independent
+/// "whenever you scry" triggers (CR 603.2: once per scry event), and each
+/// trigger exposes ITS OWN scry's look count as its target-slot limit — never
+/// the value of whichever scry happened LAST.
 ///
-/// Revert discriminator: with a global last-scry scalar instead of per-event
-/// provenance, the scalar is overwritten by the second scry (look count 1)
-/// BEFORE the first scry's queued trigger constructs its target slots after
-/// the spell finishes resolving — the prompt shows 1 slot instead of 3 and
-/// the assertion below fails.
+/// Two revert discriminators, matching the two halves of the fix:
 ///
-/// Observed engine limitation, deliberately NOT asserted around here: only
-/// the FIRST scry's trigger is queued at all — the second scry's
-/// `PlayerPerformedAction` event (emitted between the first and second
-/// interactive `ScryChoice` pauses of the same resolution) never produces a
-/// pending trigger (`deferred_triggers` stays at 1 and no `OrderTriggers`
-/// prompt appears). That second-trigger loss is a separate, pre-existing
-/// pause/resume event-collection defect, orthogonal to how the look count is
-/// carried; this test pins the per-event provenance for the trigger that DOES
-/// fire, and intentionally hard-asserts the current single-trigger behavior
-/// so a future fix for the loss surfaces here and can upgrade the test to the
-/// full two-trigger shape.
+/// 1. Per-event provenance: with a global last-scry scalar instead of the
+///    look count riding each scry's own event, both queued triggers would
+///    read the second scry's 1 — the first prompt would offer 1 slot, not 3.
+///
+/// 2. Pause/resume event collection: the second scry's
+///    `PlayerPerformedAction` event is emitted while the action resumes
+///    between the two interactive `ScryChoice` pauses of the same
+///    resolution. `run_post_action_pipeline` scans an action's events only
+///    when it settles to `Priority`, so before the repair in the
+///    `ScryChoice` resume seam (`engine_resolution_choices.rs`, which parks
+///    the resumed slice via `park_observer_triggers_if_paused`) that event
+///    was dropped and only ONE trigger ever fired — the second prompt below
+///    never appeared.
 #[test]
-fn elrond_multi_scry_trigger_reads_its_own_scry_look_count() {
+fn elrond_multi_scry_queues_one_trigger_per_scry_with_its_own_look_count() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
     scenario.add_creature_from_oracle(P0, "Elrond, Master of Healing", 3, 4, ELROND_ABILITY_1);
-    // More creatures than the larger scry's slot count (3), so the trigger's
-    // target selection is genuinely ambiguous and pauses interactively.
+    // More creatures than the larger scry's slot count (3), so both triggers'
+    // target selections are genuinely ambiguous and pause interactively.
     let c1 = scenario.add_creature(P0, "Ward A", 2, 2).id();
     let c2 = scenario.add_creature(P0, "Ward B", 2, 2).id();
-    scenario.add_creature(P0, "Ward C", 2, 2);
-    scenario.add_creature(P0, "Ward D", 2, 2);
+    let c3 = scenario.add_creature(P0, "Ward C", 2, 2).id();
+    let c4 = scenario.add_creature(P0, "Ward D", 2, 2).id();
 
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Double Scrying Rod", false, "Scry 3.\nScry 1.")
@@ -231,39 +230,65 @@ fn elrond_multi_scry_trigger_reads_its_own_scry_look_count() {
         "the resolution must scry 3 first, then 1"
     );
 
-    // See the doc comment: the engine currently queues ONLY the first scry's
-    // trigger. Hard-assert that so a future fix of the second-trigger loss
-    // shows up here and this test can be upgraded to the two-trigger shape.
+    // CR 603.2 + CR 603.3b: BOTH scry events must have queued a trigger. The
+    // two same-controller triggers surface an OrderTriggers prompt (identity
+    // order keeps queue order: the first scry's trigger is placed first),
+    // then each trigger's OWN target selection. Collect each prompt's slot
+    // limit and pick disjoint targets so the counter assertions below
+    // separate the two triggers.
+    advance_to_trigger_target_selection(&mut runner);
+    let mut slot_limits = Vec::new();
+
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } =
+        runner.state().waiting_for.clone()
+    else {
+        unreachable!("advance_to_trigger_target_selection guarantees this variant");
+    };
+    slot_limits.push(target_slots.len());
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(c1), TargetRef::Object(c2)],
+        })
+        .expect("selecting two of the first trigger's allowed targets must succeed");
+
     advance_to_trigger_target_selection(&mut runner);
     let WaitingFor::TriggerTargetSelection { target_slots, .. } =
         runner.state().waiting_for.clone()
     else {
         unreachable!("advance_to_trigger_target_selection guarantees this variant");
     };
-    assert_eq!(
-        target_slots.len(),
-        3,
-        "the FIRST scry's trigger must expose ITS OWN look count (3) as the \
-         slot limit — a global last-scry scalar would read the second scry's 1"
-    );
-
+    slot_limits.push(target_slots.len());
     runner
         .act(GameAction::SelectTargets {
-            targets: vec![TargetRef::Object(c1), TargetRef::Object(c2)],
+            targets: vec![TargetRef::Object(c3)],
         })
-        .expect("selecting two of the three allowed targets must succeed");
+        .expect("selecting the second trigger's single allowed target must succeed");
     runner.advance_until_stack_empty();
 
     assert_eq!(
-        runner.state().deferred_triggers.len(),
-        0,
-        "no further scry trigger is pending — the second scry's trigger loss \
-         documented above; if this changes, upgrade this test to assert both \
-         triggers' distinct slot limits (3 and 1)"
+        slot_limits,
+        vec![3, 1],
+        "each trigger must expose ITS OWN scry's look count as its slot limit: \
+         the scry-3 trigger offers 3 slots and the scry-1 trigger offers 1 — \
+         independently, in the same resolution"
+    );
+
+    // Disjoint targets: each targeted creature got exactly one counter from
+    // exactly one trigger; the creature targeted by neither got none.
+    assert_eq!(
+        p1p1_counters(&runner, c1),
+        1,
+        "scry-3 trigger, first target"
     );
     assert_eq!(
-        p1p1_counters(&runner, c1) + p1p1_counters(&runner, c2),
-        2,
-        "each chosen creature must receive exactly one +1/+1 counter"
+        p1p1_counters(&runner, c2),
+        1,
+        "scry-3 trigger, second target"
+    );
+    assert_eq!(p1p1_counters(&runner, c3), 1, "scry-1 trigger's target");
+    assert_eq!(
+        p1p1_counters(&runner, c4),
+        0,
+        "creature targeted by neither trigger must receive no counter"
     );
 }
