@@ -9792,15 +9792,18 @@ fn parse_damage_prevention_replacement(
     //   * for the continuous, non-depleting bare "prevent N of that damage" class
     //     (Heart-Shaped Herb — issue #5902, Sphere of Purity, Orbs of Warding,
     //     Urza's Armor, Guardian Seraph, Daunting Defender, ...), a
-    //     `DamageModification::Minus { value: N }` that saturating-subtracts N
-    //     from every qualifying damage event.
+    //     `DamageModification::PreventionMinus { value: N }` that
+    //     saturating-subtracts N from every qualifying damage event.
     //
-    // CR 702.64: the `Minus` representation deliberately reuses the same shared
-    // per-event damage-subtraction authority that Absorb already synthesizes
+    // CR 702.64: `PreventionMinus` deliberately reuses the same shared per-event
+    // damage-subtraction authority that Absorb already synthesizes
     // (`database::synthesis::build_absorb_replacement`) rather than a new
-    // prevention-amount variant, so parser and resolver keep a single semantic
-    // representation for continuous per-event prevention (it is non-consumed and
-    // re-fires for every event — exactly Absorb's CR 702.64b semantics).
+    // prevention-amount variant — it is the typed PREVENTION provenance of the
+    // shared `Minus` subtraction arm, so parser and resolver keep a single
+    // semantic representation for continuous per-event prevention (it is
+    // non-consumed and re-fires for every event — exactly Absorb's CR 702.64b
+    // semantics) while plain arithmetic `Minus` (Benevolent Unicorn) stays
+    // outside the prevention bookkeeping.
     enum PreventionRepr {
         Shield(PreventionAmount),
         Reduce(u32),
@@ -9821,21 +9824,22 @@ fn parse_damage_prevention_replacement(
         // "prevent that damage" in redirection context — redirect handled separately
         PreventionRepr::Shield(PreventionAmount::All)
     } else {
-        // CR 615.1a: bare "prevent N of that damage" — a literal numeric amount
-        // immediately following the "prevent " verb. Only a leading ASCII digit
-        // qualifies: `parse_number` also maps the bare pronoun "X" → 0 for the
-        // dynamic "prevent the next X" idiom, and matching that here would
-        // silently swallow the dynamic case into a static `Minus { value: 0 }`
-        // no-op instead of letting the chunk-level where-X machinery bind it.
-        // Anchored on the literal "of that damage" suffix trailing the number so
-        // an unrelated numeric phrase elsewhere in the clause cannot be misbound.
-        // Any miss (no leading digit, or no "of that damage" anchor) means this
-        // is not a recognized prevention pattern, so `?` bails the whole parse.
-        let n = after_prevent
-            .filter(|s| s.trim_start().starts_with(|c: char| c.is_ascii_digit()))
-            .and_then(parse_number)
-            .filter(|(_, rest)| nom_primitives::scan_contains(rest.trim_start(), "of that damage"))
-            .map(|(n, _)| n)?;
+        // CR 615.1a: bare "prevent N of that damage" — a numeric amount
+        // immediately following the "prevent " verb, anchored by the literal
+        // " of that damage" suffix DIRECTLY after the number (a composed nom
+        // sequence, not a scan), so a non-adjacent "of that damage" phrase
+        // elsewhere in the clause cannot be misbound as the anchor.
+        // `nom_primitives::parse_number` (unlike `parse_number_or_x`) never
+        // matches the bare pronoun "x", so the dynamic "prevent X ..." idiom is
+        // not swallowed into a static `PreventionMinus { value: 0 }` no-op and
+        // stays with the chunk-level where-X machinery. Any miss (no number, or
+        // no adjacent " of that damage" anchor) means this is not a recognized
+        // prevention pattern, so `?` bails the whole parse.
+        let n = after_prevent.and_then(|s| {
+            nom_parse_lower(s, |i| {
+                terminated(nom_primitives::parse_number, tag(" of that damage")).parse(i)
+            })
+        })?;
         PreventionRepr::Reduce(n)
     };
 
@@ -9958,11 +9962,14 @@ fn parse_damage_prevention_replacement(
         // redirection-context "prevent that damage").
         PreventionRepr::Shield(amount) => def.prevention_shield(amount),
         // CR 615.1a + CR 702.64: continuous "prevent N of that damage" reuses the
-        // shared `DamageModification::Minus` per-event subtraction authority
-        // (Branch 1 of `damage_done_applier`), never consumed, re-firing for
-        // every qualifying event — no separate prevention-amount variant.
+        // shared `Minus` per-event subtraction authority (Branch 1 of
+        // `damage_done_applier`) under its typed PREVENTION provenance,
+        // `DamageModification::PreventionMinus` — never consumed, re-firing for
+        // every qualifying event, and emitting `DamagePrevented` bookkeeping
+        // (which plain-arithmetic `Minus`, e.g. Benevolent Unicorn's "minus 1",
+        // must not).
         PreventionRepr::Reduce(n) => {
-            def.damage_modification(DamageModification::Minus { value: n })
+            def.damage_modification(DamageModification::PreventionMinus { value: n })
         }
     };
 
@@ -12928,9 +12935,10 @@ mod tests {
     /// `parse_damage_prevention_replacement` returned `None` and the whole
     /// static ability silently failed to install — matching the reported symptom
     /// ("isn't affecting it at all"). Per the maintainer's CR review the class is
-    /// re-emitted onto the shared `DamageModification::Minus` per-event
-    /// subtraction authority (the CR 702.64 Absorb representation), NOT a new
-    /// prevention-amount variant. This idiom is shared by many real cards
+    /// re-emitted onto the shared `Minus` per-event subtraction authority under
+    /// its typed prevention provenance, `DamageModification::PreventionMinus`
+    /// (the CR 702.64 Absorb representation), NOT a new prevention-amount
+    /// variant. This idiom is shared by many real cards
     /// (Sphere of Purity, Orbs of Warding, Urza's Armor, Guardian Seraph,
     /// Daunting Defender, ...), so the fix is generic.
     #[test]
@@ -12943,9 +12951,10 @@ mod tests {
 
         assert_eq!(
             def.damage_modification,
-            Some(DamageModification::Minus { value: 1 }),
-            "bare 'prevent 1 of that damage' must install a continuous Minus(1) \
-             modification, not fall through unparsed"
+            Some(DamageModification::PreventionMinus { value: 1 }),
+            "bare 'prevent 1 of that damage' must install a continuous \
+             PreventionMinus(1) modification (prevention provenance of the \
+             shared Minus subtraction), not fall through unparsed"
         );
         assert_eq!(
             def.shield_kind,
@@ -12989,12 +12998,30 @@ mod tests {
 
         assert_eq!(
             def.damage_modification,
-            Some(DamageModification::Minus { value: 2 })
+            Some(DamageModification::PreventionMinus { value: 2 })
         );
         assert_eq!(def.shield_kind, ShieldKind::None);
         assert!(
             def.damage_source_filter.is_none(),
             "unqualified 'a source' must not synthesize a source filter"
+        );
+    }
+
+    /// CR 615.1a: the "prevent N of that damage" grammar is an ANCHORED nom
+    /// sequence — the number must be immediately followed by " of that damage".
+    /// A non-adjacent "of that damage" later in the clause must NOT satisfy the
+    /// anchor (the pre-fix scan-based check accepted it), and the clause must
+    /// fall through unrecognized rather than misbind the amount.
+    #[test]
+    fn prevent_n_requires_adjacent_of_that_damage_anchor() {
+        let def = parse_replacement_line(
+            "If a source would deal damage to you, prevent 2 damage this turn of that damage.",
+            "Anchor Probe",
+        );
+        assert!(
+            def.is_none(),
+            "a non-adjacent 'of that damage' phrase must not satisfy the anchored \
+             'prevent N of that damage' grammar, got {def:?}"
         );
     }
 
