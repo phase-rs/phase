@@ -1002,10 +1002,12 @@ async fn main() {
 
     // A single-user instance has no other players whose seats a grace period
     // would free, so reconnects never expire — a game suspended for any length
-    // of time stays resumable. `with_grace_period` sets the reconnect window;
+    // of time stays resumable. `single_user` sets the reconnect window;
     // ten years is effectively unbounded without risking overflow in `now + grace`.
+    // It also stamps `HostingMode::SingleUser` on every session this manager
+    // owns, which is what grants the desktop sidecar its debug capability.
     let state: SharedState = Arc::new(Mutex::new(if cli.single_user {
-        SessionManager::with_grace_period(Duration::from_secs(10 * 365 * 24 * 60 * 60))
+        SessionManager::single_user(Duration::from_secs(10 * 365 * 24 * 60 * 60))
     } else {
         SessionManager::new()
     }));
