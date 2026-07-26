@@ -5,8 +5,8 @@ use crate::types::ability::{
     CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, FilterProp,
     GameRestriction, ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope,
     ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry,
-    RestrictionPlayerScope, SacrificeRequirement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TapCreaturesRequirement, TargetFilter, TargetRef,
+    RestrictionPlayerScope, SacrificeRequirement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TapCreaturesRequirement, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
