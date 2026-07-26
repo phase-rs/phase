@@ -15,8 +15,8 @@ use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, Tac
 use engine::game::game_object::GameObject;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    DamageSource, EachDamageRecipient, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
-    TargetRef,
+    DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, QuantityExpr,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
@@ -474,17 +474,80 @@ fn triggering_source_damage_stays_neutral() {
     );
 }
 
+/// A snapshot standing in for an already-replaced damage event (CR 120.3), with
+/// every source characteristic off — so if `ApplyPostReplacementDamage` were
+/// ever modelled instead of bailing, it would look like plain marked damage and
+/// the `Unresolved` assertion below would fail loudly.
+fn vanilla_damage_snapshot() -> DamageContextSnapshot {
+    DamageContextSnapshot {
+        source_id: ObjectId(1),
+        controller: AI,
+        source_is_creature: false,
+        has_deathtouch: false,
+        has_lifelink: false,
+        has_wither: false,
+        has_infect: false,
+        combat_damage_poison: 0,
+        excess_recipient: None,
+        lifelink_bonus: 0,
+    }
+}
+
 #[test]
-fn multi_source_damage_effects_stay_neutral() {
-    // CR 120.1: `EachSourceDealsDamage` is a per-source batch this layer does
-    // not model, so it must not be silently under-counted to zero damage.
-    let each_source = Effect::EachSourceDealsDamage {
-        sources: TargetFilter::Any,
-        amount: QuantityExpr::Fixed { value: 3 },
-        recipient: EachDamageRecipient::EachController,
-    };
-    assert_eq!(
-        pending_for(&[], Body::new(3), each_source),
-        PendingDamage::Unresolved
-    );
+fn batch_damage_effects_stay_neutral() {
+    // CR 120.1: every member of the batch-damage group puts damage on this object
+    // from sources this layer does not model per-source. Each must report
+    // `Unresolved` — a variant that silently under-counted to zero would look
+    // like "no damage reaches this target" and leave the ranking unguarded.
+    // Covered as a table so the assertion set can never drift behind the match
+    // arm it guards in `pending_damage_to_object`.
+    let batch = [
+        (
+            "EachSourceDealsDamage",
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::Any,
+                amount: QuantityExpr::Fixed { value: 3 },
+                recipient: EachDamageRecipient::EachController,
+            },
+        ),
+        (
+            "EachDealsDamageEqualToPower",
+            Effect::EachDealsDamageEqualToPower {
+                sources: TargetFilter::Any,
+                recipient: TargetFilter::Any,
+                extra_source: None,
+            },
+        ),
+        (
+            "DamageAll",
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                player_filter: None,
+                damage_source: None,
+            },
+        ),
+        (
+            "ApplyPostReplacementDamage",
+            Effect::ApplyPostReplacementDamage {
+                context: vanilla_damage_snapshot(),
+                target: TargetRef::Object(ObjectId(1)),
+                amount: 3,
+                is_combat: false,
+            },
+        ),
+    ];
+
+    for (name, effect) in batch {
+        assert_eq!(
+            pending_for(&[], Body::new(3), effect.clone()),
+            PendingDamage::Unresolved,
+            "{name} must report Unresolved rather than under-counting to zero"
+        );
+        assert_eq!(
+            bonus_for(&[], Body::new(3), effect),
+            0.0,
+            "{name} must leave the target ranking untouched"
+        );
+    }
 }
