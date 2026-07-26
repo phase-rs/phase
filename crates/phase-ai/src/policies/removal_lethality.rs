@@ -237,14 +237,12 @@ pub(crate) fn pending_damage_to_object(
 /// A creature already at 0 or less toughness is dying to its own CR 704.5f
 /// state-based action, not to this spell, so it does not count as killed here.
 pub(crate) fn outcome_is_lethal(target: &GameObject, outcome: &DamageOutcome) -> bool {
-    let toughness = target.toughness.unwrap_or(0);
-    if toughness <= 0 {
+    if target.toughness.unwrap_or(0) <= 0 {
         return false;
     }
-    let counters = i32::try_from(outcome.minus_counters).unwrap_or(i32::MAX);
-    let reduced_toughness = toughness.saturating_sub(counters);
+    let reduced = reduced_toughness(target, outcome);
     // CR 704.5f: 0 toughness kills through indestructible.
-    if reduced_toughness <= 0 {
+    if reduced <= 0 {
         return true;
     }
     // CR 702.12b: indestructible ignores the lethal-damage state-based actions.
@@ -257,18 +255,16 @@ pub(crate) fn outcome_is_lethal(target: &GameObject, outcome: &DamageOutcome) ->
         return true;
     }
     // CR 704.5g: lethal marked damage, measured against the reduced toughness.
-    u32::try_from(reduced_toughness).is_ok_and(|threshold| marked >= threshold)
+    u32::try_from(reduced).is_ok_and(|threshold| marked >= threshold)
 }
 
-/// Toughness the creature keeps after this spell's -1/-1 counters — the size of
-/// the body the removal failed to kill, used to scale the waste penalty.
-fn surviving_toughness(target: &GameObject, outcome: &DamageOutcome) -> i32 {
+/// CR 122.1a: `target`'s toughness once this spell's -1/-1 counters (CR 120.3d)
+/// are on it. The single authority for the counter-reduced toughness — it is
+/// both the CR 704.5g lethal-damage threshold and, clamped at 0, the size of the
+/// body a non-lethal spell failed to kill.
+fn reduced_toughness(target: &GameObject, outcome: &DamageOutcome) -> i32 {
     let counters = i32::try_from(outcome.minus_counters).unwrap_or(i32::MAX);
-    target
-        .toughness
-        .unwrap_or(0)
-        .saturating_sub(counters)
-        .max(0)
+    target.toughness.unwrap_or(0).saturating_sub(counters)
 }
 
 /// Lethality contribution for pointing a damage removal spell at `target`.
@@ -294,5 +290,6 @@ pub(crate) fn lethality_bonus(
     if outcome_is_lethal(target, &outcome) {
         return LETHAL_BONUS;
     }
-    -(f64::from(surviving_toughness(target, &outcome)) * WASTE_PENALTY_MULT).min(WASTE_PENALTY_MAX)
+    let survived = reduced_toughness(target, &outcome).max(0);
+    -(f64::from(survived) * WASTE_PENALTY_MULT).min(WASTE_PENALTY_MAX)
 }
