@@ -880,8 +880,15 @@ pub enum InteractionResponseSpec {
         max_len: u32,
         confirm: ConfirmSemantics,
     },
+    /// CR 100.2a / CR 100.4a / CR 100.5: a between-games main/sideboard split.
+    ///
+    /// The card pool is invariant, so `sideboard = pool - main` and both the
+    /// minimum deck size and the sideboard cap collapse into one closed
+    /// interval on the main-deck total. `min_main_total` is a *minimum* — there
+    /// is no maximum deck size, so a client must not require an exact match.
     DeckPartition {
-        main_total: u32,
+        min_main_total: u32,
+        max_main_total: u32,
         confirm: ConfirmSemantics,
     },
     Relations {

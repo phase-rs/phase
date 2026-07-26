@@ -8040,6 +8040,20 @@ pub enum WaitingFor {
         player: PlayerId,
         game_number: u8,
         score: MatchScore,
+        /// CR 100.2a / CR 100.5: fewest cards this player's main deck may hold
+        /// when they submit. `deck_size` is a *minimum* — there is no maximum
+        /// deck size — so sideboarding need not be a one-for-one swap.
+        ///
+        /// Published here (rather than left for the UI to derive) so the
+        /// submit gate is the engine's own acceptance predicate. Computed by
+        /// `match_flow::sideboard_submission_bounds`, the single authority
+        /// `handle_submit_sideboard` also validates against.
+        #[serde(default)]
+        min_main_deck_size: u32,
+        /// CR 100.4a: most cards the sideboard may hold, or `None` when the
+        /// format imposes no cap. `Forbidden`-sideboard formats report `0`.
+        #[serde(default)]
+        max_sideboard_size: Option<u32>,
     },
     BetweenGamesChoosePlayDraw {
         player: PlayerId,

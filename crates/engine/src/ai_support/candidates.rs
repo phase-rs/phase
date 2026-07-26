@@ -6272,6 +6272,8 @@ mod tests {
             player: PlayerId(0),
             game_number: 2,
             score: Default::default(),
+            min_main_deck_size: 0,
+            max_sideboard_size: None,
         };
 
         let actions = candidate_actions(&state);

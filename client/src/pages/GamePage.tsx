@@ -1968,6 +1968,8 @@ function GamePageContent({
               pool={pool}
               gameNumber={waitingFor.data.game_number}
               score={waitingFor.data.score}
+              minMainDeckSize={waitingFor.data.min_main_deck_size}
+              maxSideboardSize={waitingFor.data.max_sideboard_size}
               onSubmit={handleSubmitSideboard}
             />
           );

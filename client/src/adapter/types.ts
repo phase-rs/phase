@@ -1685,7 +1685,7 @@ export type WaitingFor =
   | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; trigger_controller?: PlayerId; trigger_event?: GameEvent; trigger_events?: GameEvent[]; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
-  | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
+  | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore; min_main_deck_size: number; max_sideboard_size: number | null } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" }; persist_player?: PlayerId } }
   | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source: { prompt: { identity: unknown; controller: PlayerId; display_name: string } }; proposition_truth?: boolean } }
