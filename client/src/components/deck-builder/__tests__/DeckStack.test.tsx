@@ -238,6 +238,35 @@ describe("DeckStack", () => {
     expect(screen.getByTitle("Add one Sol Ring")).toBeEnabled();
   });
 
+  it("disables the add button when the engine says the card is at its copy limit", () => {
+    // The counterpart to the three cases above: those prove the stack never
+    // derives a ceiling of its own, this proves it does honour the one the
+    // engine hands it. Without this case every test here supplies a predicate
+    // that returns true, so they would all still pass if DeckStack dropped the
+    // engine's answer on the floor.
+    const canAddCard = vi.fn(() => false);
+    render(
+      <DeckStack
+        deck={{ main: [{ name: "Sol Ring", count: 1 }], sideboard: [] }}
+        commanders={[]}
+        cardDataCache={new Map([["Sol Ring", makeCard("Sol Ring", "Artifact", 1)]])}
+        format="Commander"
+        onAddCard={vi.fn()}
+        canAddCard={canAddCard}
+        onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        groupMode="type"
+      />,
+    );
+
+    // At the limit the control stays on screen but goes inert, and its title
+    // explains why rather than still offering the add.
+    expect(screen.queryByTitle("Add one Sol Ring")).not.toBeInTheDocument();
+    expect(screen.getByTitle("Sol Ring is at the copy limit")).toBeDisabled();
+    expect(canAddCard).toHaveBeenCalledWith("Sol Ring");
+  });
+
   it("moves a second-section card back to the main deck via its move button", () => {
     // The recovery path for the Commander 'maybeboard trap': a card parked in
     // the second section must be returnable to the main deck from the stack.

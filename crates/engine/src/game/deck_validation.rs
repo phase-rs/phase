@@ -2731,16 +2731,35 @@ fn effective_copy_limit(
     deck_copy_limit_for(db, canonical_name).unwrap_or(format_default)
 }
 
-/// CR 100.2a / CR 903.5b: How many copies of `name` a `format` deck may legally
-/// contain, counting main deck, sideboard, and command zone together
-/// (CR 100.4a: "The four-card limit applies to the combined deck and
+/// CR 100.2a / CR 100.2b / CR 903.5b: How many copies of `name` a `format` deck
+/// may legally contain, counting main deck, sideboard, and command zone
+/// together (CR 100.4a: "The four-card limit applies to the combined deck and
 /// sideboard"). `Unlimited` means no ceiling.
 ///
 /// This is the query-shaped counterpart to `copy_limit_violations` and the
 /// single authority consumers outside the engine must use — the deck builder
 /// disables its increment control from this, and must never re-derive the
 /// limit from Oracle text, card type, or a hardcoded four.
+///
+/// Being query-shaped is why the restricted list is applied here rather than in
+/// [`effective_copy_limit`]: validation reports a restricted overrun as its own
+/// distinct violation (`restricted_copy_violations`), so the shared helper must
+/// keep the two failures separable. A caller asking "how many may I have?"
+/// wants the one ceiling that actually binds.
 pub fn max_deck_copies(db: &CardDatabase, name: &str, format: GameFormat) -> DeckCopyLimit {
+    // CR 100.2b: a card the format's legality table marks Restricted is legal
+    // at no more than one copy, whichever way the format default or the card's
+    // printed override would otherwise point. Vintage is the canonical user,
+    // but the lookup is format-general.
+    if format
+        .legality_format()
+        .and_then(|legality_format| {
+            db.legality_status(resolve_card_name(db, name), legality_format)
+        })
+        .is_some_and(|status| status == LegalityStatus::Restricted)
+    {
+        return DeckCopyLimit::UpTo(1);
+    }
     effective_copy_limit(
         db,
         &canonical_deck_count_key(db, name),
@@ -3972,6 +3991,48 @@ mod tests {
         assert_eq!(
             max_deck_copies(&db, "Nazgul", GameFormat::Modern),
             DeckCopyLimit::UpTo(9)
+        );
+    }
+
+    /// CR 100.2b: the restricted list is a copy ceiling, so the query the deck
+    /// builder gates its increment control on has to honour it — otherwise the
+    /// `+` stays live through four Black Lotuses and the deck only fails later,
+    /// at validation. The restriction is format-scoped: the same card is a
+    /// plain four-of wherever its legality table doesn't restrict it.
+    #[test]
+    fn max_deck_copies_honours_the_format_restricted_list() {
+        let db = CardDatabase::from_json_str(&vintage_test_db()).unwrap();
+
+        // Reach guard: the ceiling below is only meaningful if the fixture
+        // really does mark this card Restricted in Vintage.
+        assert_eq!(
+            db.legality_status(
+                "Black Lotus",
+                GameFormat::Vintage.legality_format().unwrap()
+            ),
+            Some(LegalityStatus::Restricted),
+            "fixture must present Black Lotus as Vintage-restricted"
+        );
+
+        assert_eq!(
+            max_deck_copies(&db, "Black Lotus", GameFormat::Vintage),
+            DeckCopyLimit::UpTo(1),
+            "a Vintage-restricted card is capped at one copy, not the four-of default"
+        );
+
+        // Format-scoped: Legacy's legality table says nothing about this card,
+        // so it falls through to the CR 100.2a default rather than inheriting
+        // Vintage's restriction.
+        assert_eq!(
+            max_deck_copies(&db, "Black Lotus", GameFormat::Legacy),
+            DeckCopyLimit::UpTo(4)
+        );
+
+        // CR 205.4c still wins for basics — a restricted lookup must not
+        // shadow the exemption for cards the list doesn't name.
+        assert_eq!(
+            max_deck_copies(&db, "Island", GameFormat::Vintage),
+            DeckCopyLimit::Unlimited
         );
     }
 
