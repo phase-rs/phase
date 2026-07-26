@@ -6030,7 +6030,12 @@ fn parse_each_of_target_distribution(
         )
         .parse(input)
     })?;
-    Some((spec, noun, remainder.trim_start()))
+    // Return the remainder UNTRIMMED. A leading space is the compound-boundary
+    // marker every consumer of `try_parse_damage_with_remainder` keys on —
+    // `try_split_damage_compound` matches `tag(" and ")` and explicitly does not
+    // trim. Only the typed arm needs a phrase starting at `target `, so it trims
+    // at its own call site.
+    Some((spec, noun, remainder))
 }
 
 /// CR 601.2c + CR 115.4: "⟨source⟩ deals N damage to each of ⟨count⟩ ⟨noun⟩".
@@ -6055,7 +6060,9 @@ fn parse_each_of_up_to_damage_target<'a>(
     Some(match noun {
         EachOfTargetNoun::AnyTargets => (TargetFilter::Any, remainder),
         EachOfTargetNoun::Typed => {
-            let (target, rest) = parse_target_with_ctx(remainder, ctx);
+            // Only this arm trims: `parse_target_with_ctx` must see a phrase
+            // starting at `target `/`other target `/`another target `.
+            let (target, rest) = parse_target_with_ctx(remainder.trim_start(), ctx);
             refine_damage_target_remainder(target, rest)
         }
     })

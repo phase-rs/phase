@@ -49379,10 +49379,12 @@ fn shower_of_coals_first_sentence_fixed_threshold_anaphor_still_dropped() {
     );
 }
 
-/// Batroc the Leaper — MANDATORY PIN, deliberately NOT counted as a fix. Its
-/// backlog bullet stays because the KickerCount-through-trigger runtime path
-/// carries no runtime test here. This pins the observed parser shape so the
-/// behaviour change can never be silent.
+/// Batroc the Leaper — MANDATORY PIN. The regenerated export confirms its
+/// root-cause-#15 defect (dropped announced count) is genuinely fixed, so its
+/// backlog bullet was retired along with the rest. What is NOT covered here is
+/// the runtime path — `KickerCount` resolved through *trigger* target selection
+/// — so this pins the observed parser shape instead, and the behaviour change
+/// can never be silent.
 #[test]
 fn batroc_the_leaper_each_of_up_to_x_targets_pinned_shape() {
     let parsed = parse_oracle_text(
