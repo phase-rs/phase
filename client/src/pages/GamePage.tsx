@@ -3478,10 +3478,18 @@ function formatUnlessCost(
     case "PayEnergy":
       return t("gamePage.cost.energy", { amount: cost.amount ?? 0 });
     // CR 702.21a + CR 122.1 + CR 104.3d: Ward's player-counter cost
-    // (The Serpent Society: "Ward—Get five poison counters.").
+    // (The Serpent Society: "Ward—Get five poison counters."). The counter
+    // kind is looked up through i18n (not interpolated as raw English) so
+    // non-English locales get a real translated noun, matching how the
+    // badges section already localizes poison/experience/rad counter names.
     case "GetPlayerCounters": {
       const count = cost.count ?? 1;
-      const kind = (cost.counter_kind ?? "").toLowerCase();
+      const kindKey = ["Poison", "Experience", "Rad", "Ticket"].includes(
+        cost.counter_kind ?? "",
+      )
+        ? (cost.counter_kind as string).toLowerCase()
+        : "poison";
+      const kind = t(`gamePage.cost.playerCounterKind.${kindKey}`);
       return t("gamePage.cost.playerCounters", { count, kind });
     }
     default:

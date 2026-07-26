@@ -1123,6 +1123,12 @@
       "energy": "{{amount}} energy",
       "playerCounters_one": "get {{count}} {{kind}} counter",
       "playerCounters_other": "get {{count}} {{kind}} counters",
+      "playerCounterKind": {
+        "poison": "poison",
+        "experience": "experience",
+        "rad": "rad",
+        "ticket": "ticket"
+      },
       "generic": "a cost",
       "pay": "Pay {{cost}}"
     },

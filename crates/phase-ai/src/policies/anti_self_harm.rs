@@ -790,6 +790,11 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                         WardCost::DiscardCard => 1.5,
                         WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                         WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                        // CR 702.21a + CR 122.1 + CR 104.3d: voluntarily taking
+                        // poison (or other player) counters is a severe cost —
+                        // uncapped, scaled by count, since poison specifically
+                        // progresses toward an unconditional loss at 10.
+                        WardCost::GetPlayerCounters { count, .. } => *count as f64 * 3.0,
                         // CR 702.21a: Compound costs sum severity of components.
                         WardCost::Compound(costs) => costs
                             .iter()
@@ -804,6 +809,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                                 WardCost::Waterbend(cost) => {
                                     (cost.mana_value() as f64 / 2.0).min(2.0)
                                 }
+                                WardCost::GetPlayerCounters { count, .. } => *count as f64 * 3.0,
                                 WardCost::Compound(_) => 2.0,
                             })
                             .sum::<f64>()

@@ -780,6 +780,10 @@ pub(crate) fn can_pay_ward_cost(
                 .count();
             matching as u32 >= *count
         }
+        // CR 702.21a + CR 122.1: no affordability limit — a player can always
+        // choose to accept more counters (mirrors the engine's own
+        // `can_pay_resolution` for this cost).
+        WardCost::GetPlayerCounters { .. } => true,
         // CR 702.21a: every conjoined sub-cost must be payable. Mana contention
         // between multiple mana sub-costs is approximated (each checked against
         // the full post-spell pool) — rare enough not to warrant exact tracking.

@@ -1083,6 +1083,14 @@
       "returnToHand_one": "eine bleibende Karte auf die Hand zurückgeben",
       "returnToHand_other": "{{count}} bleibende Karten auf die Hand zurückgeben",
       "energy": "{{amount}} Energie",
+      "playerCounters_one": "{{count}} {{kind}}marke erhalten",
+      "playerCounters_other": "{{count}} {{kind}}marken erhalten",
+      "playerCounterKind": {
+        "poison": "Gift",
+        "experience": "Erfahrung",
+        "rad": "Strahlung",
+        "ticket": "Ticket"
+      },
       "generic": "Kosten",
       "pay": "{{cost}} bezahlen"
     },
