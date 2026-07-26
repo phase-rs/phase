@@ -9,6 +9,9 @@ use std::sync::Arc;
 
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
@@ -17,6 +20,7 @@ use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::{CyclingCost, Keyword};
 use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use crate::config::AiConfig;
@@ -51,8 +55,10 @@ fn cycler(state: &mut GameState) -> ObjectId {
     id
 }
 
-/// A payoff engine permanent the AI controls, matched by name.
-fn engine_on_battlefield(state: &mut GameState) {
+/// A permanent the AI controls, named `ENGINE_NAME`, that carries `trigger`
+/// live `trigger_definitions` (or none when `trigger` is `None` — the name-only
+/// impostor case).
+fn permanent_with_trigger(state: &mut GameState, trigger: Option<TriggerDefinition>) {
     let card_id = CardId(state.next_object_id);
     let id = create_object(
         state,
@@ -61,22 +67,36 @@ fn engine_on_battlefield(state: &mut GameState) {
         ENGINE_NAME.to_string(),
         Zone::Battlefield,
     );
-    state
-        .objects
-        .get_mut(&id)
-        .unwrap()
-        .card_types
-        .core_types
-        .push(CoreType::Enchantment);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    if let Some(trigger) = trigger {
+        obj.trigger_definitions.push(trigger);
+    }
 }
 
-fn session(commitment: f32, payoff_names: Vec<String>) -> AiSession {
+/// Astral Drift shape: a live "whenever you cycle or discard a card" engine.
+fn engine_on_battlefield(state: &mut GameState) {
+    permanent_with_trigger(state, Some(cycle_trigger(TargetFilter::Any)));
+}
+
+/// A controller-scoped `CycledOrDiscarded` trigger whose effect targets
+/// `target` (use `TargetFilter::Controller` for a no-target payoff shape).
+fn cycle_trigger(target: TargetFilter) -> TriggerDefinition {
+    TriggerDefinition::new(TriggerMode::CycledOrDiscarded).execute(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target,
+        },
+    ))
+}
+
+fn session(commitment: f32) -> AiSession {
     let features = DeckFeatures {
         cycling: CyclingFeature {
             source_count: 18,
             payoff_count: 4,
             commitment,
-            payoff_names,
         },
         ..Default::default()
     };
@@ -157,7 +177,7 @@ fn rewards_cycling_with_an_active_engine() {
     let mut st = state();
     engine_on_battlefield(&mut st);
     let source = cycler(&mut st);
-    let context = context(&config, session(0.9, vec![ENGINE_NAME.to_string()]));
+    let context = context(&config, session(0.9));
     let candidate = activate(source);
     let decision = AiDecisionContext {
         waiting_for: WaitingFor::Priority { player: AI },
@@ -178,7 +198,7 @@ fn neutral_without_an_engine_on_board() {
     let mut st = state();
     // Engine known to the deck, but none is on the battlefield.
     let source = cycler(&mut st);
-    let context = context(&config, session(0.9, vec![ENGINE_NAME.to_string()]));
+    let context = context(&config, session(0.9));
     let candidate = activate(source);
     let decision = AiDecisionContext {
         waiting_for: WaitingFor::Priority { player: AI },
@@ -194,7 +214,7 @@ fn neutral_without_an_engine_on_board() {
 fn neutral_for_a_non_cycling_action() {
     let config = AiConfig::default();
     let st = state();
-    let context = context(&config, session(0.9, vec![ENGINE_NAME.to_string()]));
+    let context = context(&config, session(0.9));
     // A cast candidate is not an activated ability at all.
     let candidate = CandidateAction {
         action: GameAction::ActivateAbility {
@@ -213,6 +233,51 @@ fn neutral_for_a_non_cycling_action() {
     assert_eq!(delta, 0.0);
 }
 
+/// [MED review] A permanent that merely SHARES the engine's name but carries no
+/// live cycle trigger must not be rewarded — detection is structural over
+/// `trigger_definitions`, not name-based.
+#[test]
+fn name_only_impostor_without_a_live_trigger_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    permanent_with_trigger(&mut st, None); // named "Astral Drift", no trigger
+    let source = cycler(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) =
+        score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "cycling_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// A no-target payoff (Drannith Stinger shape — its on-cycle effect hits each
+/// opponent, choosing nothing) must still be rewarded; the policy checks the
+/// live trigger, not target legality.
+#[test]
+fn no_target_payoff_still_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    permanent_with_trigger(&mut st, Some(cycle_trigger(TargetFilter::Controller)));
+    let source = cycler(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) =
+        score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "cycling_payoff_engine_active");
+    assert!(
+        delta > 0.0,
+        "no-target payoff must still reward, got {delta}"
+    );
+}
+
 // ─── production seam (registry routing) ─────────────────────────────────────
 
 #[test]
@@ -229,7 +294,7 @@ fn registry_routes_cycling_activation_to_the_policy() {
     let mut st = state();
     engine_on_battlefield(&mut st);
     let source = cycler(&mut st);
-    let context = context(&config, session(0.9, vec![ENGINE_NAME.to_string()]));
+    let context = context(&config, session(0.9));
     let candidate = activate(source);
     let decision = AiDecisionContext {
         waiting_for: WaitingFor::Priority { player: AI },

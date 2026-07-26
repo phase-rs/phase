@@ -71,7 +71,6 @@ fn empty_deck_produces_defaults() {
     assert_eq!(f.source_count, 0);
     assert_eq!(f.payoff_count, 0);
     assert_eq!(f.commitment, 0.0);
-    assert!(f.payoff_names.is_empty());
 }
 
 #[test]
@@ -89,10 +88,9 @@ fn detects_cycler_source() {
 }
 
 #[test]
-fn detects_engine_payoff_and_names_it() {
+fn detects_engine_payoff() {
     let f = detect(&[entry(engine("Astral Drift"), 3)]);
     assert_eq!(f.payoff_count, 3);
-    assert_eq!(f.payoff_names, vec!["Astral Drift".to_string()]);
 }
 
 /// A pure "when you cycle THIS card" self-bonus is a cyclable card with upside,
@@ -120,13 +118,6 @@ fn opponent_scoped_trigger_ignored() {
         Some(TargetFilter::Opponent),
     )];
     assert_eq!(detect(&[entry(f, 2)]).payoff_count, 0);
-}
-
-/// Identity list carries one entry per UNIQUE face, never per playset copy.
-#[test]
-fn payoff_names_dedup_per_face() {
-    let f = detect(&[entry(engine("Astral Drift"), 4)]);
-    assert_eq!(f.payoff_names.len(), 1);
 }
 
 /// Calibration: a dedicated cycling shell (cyclers + engines) clears the floor.

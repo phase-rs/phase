@@ -18,14 +18,17 @@
 //! `verdict()` runs per candidate per search node. The card-local check — the
 //! candidate is a `Cycling`-tagged activation — runs FIRST and rejects every
 //! other activation. Only a confirmed cycling activation pays for the
-//! battlefield engine scan, and only in a deck whose `activation` floor is
-//! already cleared. No affordability sweep, no `find_legal_targets`.
+//! battlefield engine scan (a structural trigger match over each permanent's
+//! live `trigger_definitions`), and only in a deck whose `activation` floor is
+//! already cleared. Target legality is deliberately NOT checked — that would
+//! mean a per-candidate `find_legal_targets` sweep, and it would wrongly drop
+//! no-target payoffs like Drannith Stinger ("deals damage to each opponent").
 
 use engine::types::ability::AbilityTag;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
-use crate::features::cycling::CYCLING_PAYOFF_FLOOR;
+use crate::features::cycling::{is_cycle_payoff_parts, CYCLING_PAYOFF_FLOOR};
 use crate::features::DeckFeatures;
 
 use super::context::PolicyContext;
@@ -68,22 +71,10 @@ impl TacticalPolicy for CyclingPayoffPolicy {
             return PolicyVerdict::neutral(PolicyReason::new("cycling_payoff_na"));
         }
 
-        let Some(feature) = ctx
-            .context
-            .session
-            .features
-            .get(&ctx.ai_player)
-            .map(|f| &f.cycling)
-        else {
-            return PolicyVerdict::neutral(PolicyReason::new("cycling_payoff_na"));
-        };
-        if feature.payoff_names.is_empty() {
-            return PolicyVerdict::neutral(PolicyReason::new("cycling_payoff_no_engine"));
-        }
-
-        // Only now pay for the battlefield scan. Identity lookup (the sanctioned
-        // exempt pattern): re-find the structurally-classified engines the AI
-        // controls, since `GameObject` carries no `triggers` field.
+        // Only now pay for the battlefield scan. Re-classify each permanent the
+        // AI controls STRUCTURALLY against its live `trigger_definitions` (CR
+        // 702.29c/d) — a name match is not enough, the object must actually
+        // carry the "whenever you cycle" trigger to produce value.
         let engines = ctx
             .state
             .battlefield
@@ -91,7 +82,11 @@ impl TacticalPolicy for CyclingPayoffPolicy {
             .filter(|id| {
                 ctx.state.objects.get(id).is_some_and(|obj| {
                     obj.controller == ctx.ai_player
-                        && feature.payoff_names.iter().any(|name| name == &obj.name)
+                        && is_cycle_payoff_parts(
+                            obj.trigger_definitions
+                                .iter_unchecked()
+                                .map(|entry| &entry.definition),
+                        )
                 })
             })
             .count();

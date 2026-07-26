@@ -60,11 +60,6 @@ pub struct CyclingFeature {
     /// `0.0..=1.0` — how central cycling-as-a-payoff is to this deck. Consumed by
     /// `CyclingPayoffPolicy::activation` as the single scaling knob.
     pub commitment: f32,
-    /// Names of the detected payoff engines. NOT used for classification — that
-    /// already happened against the AST. Identity lookup only, so the policy can
-    /// re-find a payoff on the battlefield (`GameObject` carries no `triggers`
-    /// field). One entry per UNIQUE face, never per playset copy.
-    pub payoff_names: Vec<String>,
 }
 
 /// Structural detection over each `DeckEntry`'s `CardFace` AST.
@@ -76,7 +71,6 @@ pub fn detect(deck: &[DeckEntry]) -> CyclingFeature {
     let mut source_count = 0u32;
     let mut payoff_count = 0u32;
     let mut total_nonland = 0u32;
-    let mut payoff_names: Vec<String> = Vec::new();
 
     for entry in deck {
         let face = &entry.card;
@@ -89,10 +83,6 @@ pub fn detect(deck: &[DeckEntry]) -> CyclingFeature {
         }
         if is_cycle_payoff_parts(&face.triggers) {
             payoff_count = payoff_count.saturating_add(entry.count);
-            // Identity list: one push per UNIQUE face, not per copy.
-            if !payoff_names.contains(&face.name) {
-                payoff_names.push(face.name.clone());
-            }
         }
     }
 
@@ -102,7 +92,6 @@ pub fn detect(deck: &[DeckEntry]) -> CyclingFeature {
         source_count,
         payoff_count,
         commitment,
-        payoff_names,
     }
 }
 
@@ -113,8 +102,10 @@ pub(crate) fn is_cycle_source_parts(keywords: &[Keyword]) -> bool {
         .any(|k| matches!(k, Keyword::Cycling(_) | Keyword::Typecycling { .. }))
 }
 
-/// CR 702.29c/d: the face carries a "whenever you cycle a card" engine trigger —
-/// a repeatable payoff, not a one-shot self-cycle bonus.
+/// CR 702.29c/d: the triggers carry a "whenever you cycle a card" engine —
+/// a repeatable payoff, not a one-shot self-cycle bonus. Parts-based so it
+/// classifies both a deck-time `CardFace.triggers` slice and a live
+/// `GameObject.trigger_definitions` iterator (the runtime trigger authority).
 pub(crate) fn is_cycle_payoff_parts<'a>(
     triggers: impl IntoIterator<Item = &'a TriggerDefinition>,
 ) -> bool {
