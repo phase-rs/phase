@@ -606,7 +606,7 @@ fn do_eliminate(
     crate::game::planechase::preserve_phenomenon_stack_abilities_for_handoff(state, planar_handoff);
 
     // CR 800.4a: Remove spells they control from the stack, one at a time
-    // through the single CR 405.2 removal authority — the same shape as the
+    // through the shared stack-removal authority — the same shape as the
     // scheduled-control release below. A `retain` would drop several entries in
     // one unjournalable mutation; removing by position instead records each
     // entry with the index it occupied at the moment IT was removed, so a replay

@@ -28,7 +28,7 @@
 //! succeeding. Do not weaken it to a bare success assertion — the failing half
 //! is what proves the pop record is doing the work.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::stack::{apply_resolved_stack_push, apply_resolved_stack_removal};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, GameState};

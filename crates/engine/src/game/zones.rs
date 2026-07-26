@@ -1704,7 +1704,7 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
         Zone::Battlefield => state.battlefield.retain(|id| *id != object_id),
         Zone::Stack => {
             // A unique id, so at most ONE entry matches. Routed through the
-            // CR 405.2 removal authority, which journals it and drops BOTH
+            // shared stack-removal authority, which journals it and drops BOTH
             // per-entry side tables (this arm previously dropped only
             // `stack_paid_facts`). A miss is normal: the resolution pop already
             // removed the entry before the card is routed to its next zone.
