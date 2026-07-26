@@ -79,6 +79,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         ResolvedRulesCommand::ObjectTransform(command) => {
             engine::game::transform::apply_resolved_transform(state, command).unwrap();
         }
+        ResolvedRulesCommand::Attachment(command) => {
+            engine::game::effects::attach::apply_resolved_attachment(state, command).unwrap();
+        }
         ResolvedRulesCommand::LedgerEdit(command) => {
             engine::game::ledger::apply_resolved_ledger_edit(state, command).unwrap();
         }
@@ -186,6 +189,7 @@ fn exact_mana_spend_rejects_a_second_removal() {
             | ResolvedRulesCommand::ObjectStatus(_)
             | ResolvedRulesCommand::ObjectCounter(_)
             | ResolvedRulesCommand::ObjectTransform(_)
+            | ResolvedRulesCommand::Attachment(_)
             | ResolvedRulesCommand::LedgerEdit(_)
             | ResolvedRulesCommand::LibraryShuffle(_)
             | ResolvedRulesCommand::ZoneChange(_)

@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::game::game_object::AttachTarget;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
 use super::ability::TriggerDefinitionRef;
@@ -180,6 +181,53 @@ pub enum ResolvedObjectTransformReplayInvariantError {
     TransformedPreconditionMismatch { expected: bool, found: bool },
     #[error("transform command object {0:?} has no back face to swap")]
     MissingBackFace(ObjectId),
+}
+
+/// One exact CR 701.3 attachment-graph edit.
+///
+/// The three production authorities — `attach_to`, `attach_to_player`, and
+/// `unattach` — perform the same graph mutation parameterized by the resulting
+/// host, so they share one command instead of three sibling variants:
+/// `Some(Object)` (CR 301.5 / CR 303.4f), `Some(Player)` (CR 303.4), and `None`
+/// (CR 701.3d unattach) are leaf values of the `Option<AttachTarget>` the object
+/// already stores.
+///
+/// CR 613.7e + CR 701.3c: attaching to a DIFFERENT host draws a new timestamp,
+/// which orders the attachment against continuous effects in the layer system; a
+/// same-host re-attach (CR 701.3b) and an unattach draw none. `resulting_timestamp`
+/// is therefore `Some` exactly when the authority drew one, and replay installs
+/// that value — mirroring the transform and zone-change families — instead of
+/// re-drawing from `GameState::next_timestamp` and silently reordering layers.
+///
+/// The host-side `attachments` list is not recorded: removing the attachment from
+/// its old host and pushing it onto the new one is a structural consequence of the
+/// recorded host transition, not a re-selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedAttachmentCommand {
+    pub attachment: ObjectIncarnationRef,
+    pub expected_old_host: Option<AttachTarget>,
+    pub resulting_host: Option<AttachTarget>,
+    pub resulting_timestamp: Option<u64>,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved attachment edit.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedAttachmentReplayInvariantError {
+    #[error("attachment command references an unknown object {0:?}")]
+    UnknownAttachment(ObjectId),
+    #[error("attachment occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleAttachment {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("attachment host precondition mismatch: expected {expected:?}, found {found:?}")]
+    HostPreconditionMismatch {
+        expected: Option<AttachTarget>,
+        found: Option<AttachTarget>,
+    },
+    #[error("attachment command references an unknown host object {0:?}")]
+    UnknownHost(ObjectId),
 }
 
 /// The audience that received one exact revealed-card fact.
@@ -427,6 +475,7 @@ pub enum ResolvedRulesCommand {
     ObjectStatus(ResolvedObjectStatusCommand),
     ObjectCounter(ResolvedObjectCounterCommand),
     ObjectTransform(ResolvedObjectTransformCommand),
+    Attachment(ResolvedAttachmentCommand),
     Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
@@ -1329,6 +1378,14 @@ impl ResolvedRulesJournal {
         )
     }
 
+    /// Records one exact CR 701.3 attachment-graph edit under its causal node.
+    pub fn record_attachment(
+        &mut self,
+        command: ResolvedAttachmentCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::Attachment(command))
+    }
+
     /// Records one exact bounded resolution-frame transition under its causal node.
     pub fn record_frame_transition(
         &mut self,
@@ -1550,6 +1607,7 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::ObjectStatus(_)
                 | ResolvedRulesCommand::ObjectCounter(_)
                 | ResolvedRulesCommand::ObjectTransform(_)
+                | ResolvedRulesCommand::Attachment(_)
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
                 | ResolvedRulesCommand::LibraryShuffle(_)
@@ -1805,6 +1863,24 @@ impl ResolvedRulesJournal {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "transform command does not change the displayed face, or has an \
                          unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::Attachment(command) => {
+                // CR 701.3b: re-attaching to the host it is already attached to
+                // does nothing, so a recorded edit that leaves the host unchanged
+                // is not an edit that ever happened.
+                // CR 613.7e + CR 701.3c/d: a move to a new host draws a timestamp
+                // and an unattach does not, so the drawn value is present on
+                // exactly the commands that installed a host.
+                if entry.node != command.cause
+                    || command.expected_old_host == command.resulting_host
+                    || command.resulting_timestamp.is_some() != command.resulting_host.is_some()
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "attachment command does not change the host, mismatches its timestamp \
+                         draw, or has an unrelated cause"
                             .to_string(),
                     ));
                 }
