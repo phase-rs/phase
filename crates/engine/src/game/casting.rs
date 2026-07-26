@@ -17851,8 +17851,8 @@ pub fn handle_cancel_cast(
             .iter()
             .rposition(|entry| entry.id == pending.object_id)
         {
-            state.stack.remove(pos);
-            state.stack_paid_facts.remove(&pending.object_id);
+            super::stack::remove_stack_entry_at(state, pos)
+                .expect("rposition yielded a live stack index");
         }
     }
 

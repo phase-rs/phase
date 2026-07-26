@@ -1391,6 +1391,36 @@ fn parse_its_a_card_type_gate_body<'a>(
     ))
     .parse(rest)
     .ok()?;
+    // CR 205.2a + CR 205.2b: A printed card-type DISJUNCTION ("instant or
+    // sorcery card", Hidetsugu and Kairi / Oriq Loremage / The Biblioplex) names
+    // every type that satisfies the gate, and `RevealedHasCardType` matches its
+    // `card_types` with `any` — so the whole disjunction must be carried, not
+    // just one leg. The last-word fallback below cannot express this: it reduces
+    // "instant or sorcery" to "sorcery" and silently drops the instant leg,
+    // making the gate false for revealed instants.
+    //
+    // Full consumption is required so this arm claims only genuine disjunctions.
+    // A conjunctive type stack ("artifact creature card") leaves an unconsumed
+    // remainder and falls through to the single-type path below, preserving its
+    // existing reading.
+    if let Ok((_, card_types)) =
+        all_consuming(nom_primitives::parse_core_type_disjunction).parse(type_str)
+    {
+        if card_types.len() > 1 {
+            let (after_type, additional_filter) = parse_revealed_card_gate_suffix(after_type, ctx);
+            return Some((
+                maybe_negate(
+                    AbilityCondition::RevealedHasCardType {
+                        card_types,
+                        additional_filter,
+                        subtype_filter: None,
+                    },
+                    negated,
+                ),
+                after_type,
+            ));
+        }
+    }
     let type_word = type_str.rsplit(' ').next().unwrap_or(type_str);
     let capitalized = format!("{}{}", &type_word[..1].to_uppercase(), &type_word[1..]);
     // CR 608.2c: "permanent" is not a CoreType (it spans CR 110.1's permanent card
@@ -5718,6 +5748,25 @@ pub(super) fn try_nom_condition_as_ability_condition(
                         filter,
                         use_lki: false,
                         subject_slot: None,
+                    },
+                    negated,
+                ));
+            }
+        }
+        // CR 205.2a + CR 205.2b: Card-type disjunction ("it's an instant or
+        // sorcery") — carry every printed leg, since `RevealedHasCardType`
+        // matches `card_types` with `any`. Guarded on a multi-leg result and
+        // placed ahead of the single-type match so one-word gates keep taking
+        // the arms below unchanged (including the "nonland" negation).
+        if let Ok((_, card_types)) =
+            all_consuming(nom_primitives::parse_core_type_disjunction).parse(rest)
+        {
+            if card_types.len() > 1 {
+                return Some(maybe_negate(
+                    AbilityCondition::RevealedHasCardType {
+                        card_types,
+                        additional_filter: None,
+                        subtype_filter: None,
                     },
                     negated,
                 ));

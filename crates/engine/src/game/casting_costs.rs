@@ -9399,7 +9399,8 @@ fn handle_resolution_cast_rejection(
     // finishes entering the stack because we abort before the Hand→Stack
     // zone move in `finalize_cast_with_phyrexian_choices`.
     if let Some(pos) = state.stack.iter().rposition(|entry| entry.id == object_id) {
-        state.stack.remove(pos);
+        super::stack::remove_stack_entry_at(state, pos)
+            .expect("rposition yielded a live stack index");
     }
 
     let needs_choice = match reject_action {

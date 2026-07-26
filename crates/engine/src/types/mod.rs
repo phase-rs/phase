@@ -93,10 +93,12 @@ pub use resolved_commands::{
     ResolvedRngReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
     ResolvedRulesJournalError, ResolvedStackEntryFinalizeCommand,
     ResolvedStackEntryFinalizeReplayInvariantError, ResolvedStackPushCommand,
-    ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError, ResolvedTriggerCollection,
+    ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError, ResolvedStackRemovalCommand,
+    ResolvedStackRemovalReplayInvariantError, ResolvedTriggerCollection,
     ResolvedTriggerCollectionCommand, ResolvedTriggerCollectionReplayInvariantError,
-    ResolvedTriggerLedgerEdit, RulesExecutionNodeKind, RulesExecutionNodeRef, SettlementNode,
-    SettlementNodeOrdinal, SpentManaUnit,
+    ResolvedTriggerLedgerEdit, ResolvedUncommittedTriggerRemovalCommand,
+    ResolvedUncommittedTriggerRemovalReplayInvariantError, RulesExecutionNodeKind,
+    RulesExecutionNodeRef, SettlementNode, SettlementNodeOrdinal, SpentManaUnit,
 };
 pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};
