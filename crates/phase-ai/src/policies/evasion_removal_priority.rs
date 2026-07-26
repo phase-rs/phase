@@ -58,8 +58,12 @@ impl EvasionRemovalPriorityPolicy {
         let target_quality_bonus = removal_target_quality_score(target_value);
         let evasion_bonus = evasion_score(ctx, target, *target_id);
         let velocity_bonus = velocity_score(ctx, target, *target_id);
+        // #6582: threat value alone rewards the biggest body, so a damage spell
+        // gets pointed at a creature it can't kill. Fold in whether the pending
+        // damage is actually lethal (CR 704.5g) so a clean kill outranks a whiff.
+        let lethality_bonus = super::removal_lethality::lethality_bonus(ctx, *target_id, target);
 
-        target_quality_bonus + evasion_bonus + velocity_bonus
+        target_quality_bonus + evasion_bonus + velocity_bonus + lethality_bonus
     }
 }
 

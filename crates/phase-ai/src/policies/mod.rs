@@ -47,6 +47,7 @@ mod reactive_self_protection;
 mod recursion_awareness;
 mod redundancy_avoidance;
 pub mod registry;
+mod removal_lethality;
 mod sacrifice_land_protection;
 mod sacrifice_value;
 mod self_cost;
