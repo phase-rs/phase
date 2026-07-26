@@ -148,18 +148,22 @@ pub(crate) fn resolve(
     let mut copy_ability = (**spell).clone();
     set_resolved_source_recursive(&mut copy_ability, copy_id);
 
-    state.stack.push_back(StackEntry {
-        id: copy_id,
-        source_id: copy_id,
-        controller,
-        kind: StackEntryKind::Spell {
-            card_id,
-            ability: Some(copy_ability.clone()),
-            casting_variant: CastingVariant::default(),
-            actual_mana_spent: 0,
+    // CR 707.10 + CR 702.50a: the copy-onto-stack authority emits `StackPushed`.
+    crate::game::stack::push_copy_to_stack(
+        state,
+        StackEntry {
+            id: copy_id,
+            source_id: copy_id,
+            controller,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: Some(copy_ability.clone()),
+                casting_variant: CastingVariant::default(),
+                actual_mana_spent: 0,
+            },
         },
-    });
-    events.push(GameEvent::StackPushed { object_id: copy_id });
+        events,
+    );
 
     // CR 707.10: a copy is put on the stack but not cast — `SpellCopied` (not
     // `SpellCast`) so copy-sensitive triggers fire without cast-only triggers.

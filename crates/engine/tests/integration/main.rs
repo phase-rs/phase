@@ -79,6 +79,7 @@ mod comeuppance;
 mod companion_special_action;
 mod consuming_vapors_life_gain_5925;
 mod consuming_vapors_rebound;
+mod copied_ability_transform_generation;
 mod copy_gy_creature_mana_value_x;
 mod copy_retarget_past_rider;
 mod copy_token_except_keyword_and_quoted_ability;
