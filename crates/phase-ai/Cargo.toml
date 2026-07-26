@@ -8,6 +8,7 @@ license.workspace = true
 engine = { path = "../engine" }
 serde = { workspace = true }
 serde_json = "1"
+sha2 = "0.10"
 rand = "0.9"
 rand_chacha = "0.9"
 tracing = "0.1"
@@ -29,7 +30,6 @@ test = false
 [[bin]]
 name = "ai-tune"
 path = "src/bin/ai_tune.rs"
-test = false
 
 [[bin]]
 name = "ai-commander"

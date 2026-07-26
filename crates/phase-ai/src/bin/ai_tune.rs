@@ -3,6 +3,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use phase_ai::auto_play::run_ai_actions;
 use phase_ai::config::{
@@ -19,10 +20,17 @@ use engine::game::deck_loading::{resolve_deck_list, DeckList, DeckPayload, Playe
 use engine::game::engine::start_game_skip_mulligan;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
+use sha2::{Digest, Sha256};
 
 const CMA_TUNED_KIND: &str = "cma_tuned_weights";
 const FITNESS_MATCHUP_IDS: &[&str] = &["red-vs-green", "white-vs-red", "red-vs-blue"];
 const HOLDOUT_MATCHUP_IDS: &[&str] = &["black-vs-blue", "azorius-vs-prowess", "delver-vs-green"];
+const OPPONENT_DIFFICULTIES: &[AiDifficulty] =
+    &[AiDifficulty::Easy, AiDifficulty::Medium, AiDifficulty::Hard];
+const SEAT_ORDERS: usize = 2;
+const CMA_CONFIG_SCHEMA: &str = "phase-ai-cma-config-v2";
+const CMA_PROGRESS_SCHEMA: &str = "phase-ai-cma-progress-v2";
+const NO_WINNER_SCORE: f64 = 0.0;
 const EVAL_PARAMETER_NAMES: &[&str] = &[
     "late.life",
     "late.aggression",
@@ -266,11 +274,16 @@ fn config_from_late_weights_and_profile(late: EvalWeights, profile: AiProfile) -
     config
 }
 
+#[cfg(test)]
 fn load_cma_tuned_config(path: &std::path::Path) -> Result<AiConfig, String> {
-    let text = std::fs::read_to_string(path)
+    let artifact = std::fs::read(path)
         .map_err(|err| format!("failed to read tuned artifact {}: {err}", path.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|err| format!("failed to parse tuned artifact {}: {err}", path.display()))?;
+    load_cma_tuned_config_bytes(&artifact)
+}
+
+fn load_cma_tuned_config_bytes(artifact: &[u8]) -> Result<AiConfig, String> {
+    let value: serde_json::Value = serde_json::from_slice(artifact)
+        .map_err(|err| format!("failed to parse tuned artifact: {err}"))?;
     let kind = value
         .get("kind")
         .and_then(|v| v.as_str())
@@ -346,6 +359,167 @@ fn load_cma_tuned_config(path: &std::path::Path) -> Result<AiConfig, String> {
     };
 
     Ok(config_from_late_weights_and_profile(late, profile))
+}
+
+fn validate_tuning_manifest_for_holdout(tuned_path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let path = manifest_output_path(tuned_path);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read tuning manifest {}: {err}", path.display()))?;
+    let manifest: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|err| format!("failed to parse tuning manifest {}: {err}", path.display()))?;
+    let object = manifest
+        .as_object()
+        .ok_or_else(|| "tuning manifest must be a JSON object".to_string())?;
+    let require_string = |field: &str, expected: &str| -> Result<(), String> {
+        match object.get(field).and_then(serde_json::Value::as_str) {
+            Some(actual) if actual == expected => Ok(()),
+            actual => Err(format!(
+                "tuning manifest field {field} is {actual:?}, expected {expected:?}"
+            )),
+        }
+    };
+    require_string("kind", "cma_tuning_manifest")?;
+    require_string("artifact_kind", CMA_TUNED_KIND)?;
+    require_string("seed_schedule", "common_random_numbers_splitmix64_v1")?;
+    let expected_artifact_sha256 = object
+        .get("artifact_sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "tuning manifest is missing artifact_sha256".to_string())?;
+    let artifact = std::fs::read(tuned_path).map_err(|err| {
+        format!(
+            "failed to read tuned artifact {}: {err}",
+            tuned_path.display()
+        )
+    })?;
+    let actual_artifact_sha256 = sha256_hex(&artifact);
+    if expected_artifact_sha256 != actual_artifact_sha256 {
+        return Err(format!(
+            "tuned artifact SHA-256 mismatch: manifest={expected_artifact_sha256}, \
+             actual={actual_artifact_sha256}"
+        ));
+    }
+    if object
+        .get("draws_excluded_from_fitness")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false)
+    {
+        return Err(
+            "tuning manifest must score draws/no-winner attempts in the fitness denominator"
+                .to_string(),
+        );
+    }
+    if object
+        .get("no_winner_score")
+        .and_then(serde_json::Value::as_f64)
+        != Some(NO_WINNER_SCORE)
+    {
+        return Err(format!(
+            "tuning manifest no_winner_score must be {NO_WINNER_SCORE}"
+        ));
+    }
+    if object
+        .get("paired_mirrored_seeds")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return Err("tuning manifest must bind paired mirrored seeds".to_string());
+    }
+
+    let raw_fitness = object
+        .get("fitness_decks")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "tuning manifest is missing fitness_decks".to_string())?;
+    let fitness_ids: Vec<&str> = raw_fitness
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| "tuning manifest fitness_decks must contain strings".to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    let alias = object
+        .get("fitness_matchups")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "tuning manifest is missing fitness_matchups".to_string())?;
+    if alias != raw_fitness {
+        return Err(
+            "tuning manifest fitness_matchups alias disagrees with fitness_decks".to_string(),
+        );
+    }
+    validate_fitness_matchup_ids(&fitness_ids)?;
+    if fitness_ids
+        .iter()
+        .any(|id| HOLDOUT_MATCHUP_IDS.contains(id))
+    {
+        return Err("tuning manifest fitness decks overlap holdout decks".to_string());
+    }
+    let holdout_ids: Vec<&str> = object
+        .get("holdout_decks")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "tuning manifest is missing holdout_decks".to_string())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| "tuning manifest holdout_decks must contain strings".to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    if holdout_ids != HOLDOUT_MATCHUP_IDS {
+        return Err(
+            "tuning manifest holdout_decks do not match the validator holdouts".to_string(),
+        );
+    }
+    let opponent_pool: Vec<&str> = object
+        .get("opponent_pool")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "tuning manifest is missing opponent_pool".to_string())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| "tuning manifest opponent_pool must contain strings".to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    if opponent_pool != opponent_difficulty_labels() {
+        return Err("tuning manifest opponent_pool changed".to_string());
+    }
+
+    let positive_usize = |field: &str| -> Result<usize, String> {
+        let raw = object
+            .get(field)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| format!("tuning manifest is missing positive integer {field}"))?;
+        let value = usize::try_from(raw)
+            .map_err(|_| format!("tuning manifest field {field} exceeds usize"))?;
+        (value > 0)
+            .then_some(value)
+            .ok_or_else(|| format!("tuning manifest field {field} must be positive"))
+    };
+    let games = positive_usize("games_per_eval")?;
+    let population = positive_usize("population")?;
+    let generations = positive_usize("generations")?;
+    let attempts = validate_cma_request(
+        generations,
+        population,
+        games,
+        object
+            .get("seed")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "tuning manifest is missing seed".to_string())?,
+        fitness_ids.len(),
+    )?;
+    for (field, expected) in [
+        ("attempts_per_candidate", attempts.per_candidate),
+        ("attempts_per_generation", attempts.per_generation),
+        ("attempts_total", attempts.total),
+    ] {
+        if positive_usize(field)? != expected {
+            return Err(format!(
+                "tuning manifest field {field} disagrees with its evaluation dimensions"
+            ));
+        }
+    }
+    Ok(artifact)
 }
 
 /// Scale a base weight set by the ratio between a target phase and a reference phase.
@@ -707,6 +881,286 @@ fn build_tuning_matchups(
         .collect()
 }
 
+fn validate_fitness_matchup_ids(ids: &[&str]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Err("at least one fitness matchup is required".to_string());
+    }
+    let mut seen = HashSet::new();
+    for id in ids {
+        if !seen.insert(*id) {
+            return Err(format!("duplicate fitness matchup {id}"));
+        }
+        if HOLDOUT_MATCHUP_IDS.contains(id) {
+            return Err(format!(
+                "fitness matchup {id} is reserved for holdout validation"
+            ));
+        }
+        if !all_matchups().iter().any(|spec| spec.id == *id) {
+            return Err(format!("unknown tuning matchup {id}"));
+        }
+    }
+    Ok(())
+}
+
+fn parse_fitness_matchup_ids(value: &str) -> Result<Vec<String>, String> {
+    let components: Vec<&str> = value.split(',').map(str::trim).collect();
+    if components.iter().any(|id| id.is_empty()) {
+        return Err("fitness matchup list contains an empty component".to_string());
+    }
+    let ids: Vec<String> = components.into_iter().map(str::to_string).collect();
+    let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
+    validate_fitness_matchup_ids(&borrowed)?;
+    Ok(ids)
+}
+
+fn validate_holdout_games(games: usize) -> Result<(), String> {
+    if games == 0 {
+        return Err("holdout games must be at least 2".to_string());
+    }
+    if !games.is_multiple_of(SEAT_ORDERS) {
+        return Err(format!(
+            "holdout games must be even so each candidate gets equal play/draw seats; got {games}"
+        ));
+    }
+    Ok(())
+}
+
+/// SplitMix64 finalizer used to keep evaluation-coordinate domains independent.
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+/// Derive one common-random-number game seed for a generation evaluation cell.
+///
+/// Candidate index is intentionally absent: every candidate in one CMA-ES
+/// generation sees the same game schedule, reducing ranking variance. The two
+/// candidate seat orders also reuse this exact seed. Tagged mixing replaces the
+/// former additive offsets, where generation, candidate, opponent, and matchup
+/// coordinates could alias each other.
+fn evaluation_seed(
+    base_seed: u64,
+    generation: usize,
+    matchup: usize,
+    opponent: usize,
+    game: usize,
+) -> u64 {
+    let mut state = splitmix64(base_seed ^ 0x434d_415f_5345_4544);
+    for (tag, coordinate) in [
+        (0x4745_4e45_5241_544e, generation as u64),
+        (0x4d41_5443_4855_505f, matchup as u64),
+        (0x4f50_504f_4e45_4e54, opponent as u64),
+        (0x4741_4d45_5f49_4458, game as u64),
+    ] {
+        state = splitmix64(state ^ splitmix64(tag ^ coordinate));
+    }
+    state
+}
+
+/// Independent, collision-resistant schedule for paired holdout comparisons.
+fn holdout_evaluation_seed(base_seed: u64, matchup: usize, opponent: usize, game: usize) -> u64 {
+    let mut state = splitmix64(base_seed ^ 0x484f_4c44_4f55_545f);
+    for (tag, coordinate) in [
+        (0x4d41_5443_4855_505f, matchup as u64),
+        (0x4f50_504f_4e45_4e54, opponent as u64),
+        (0x4741_4d45_5f49_4458, game as u64),
+    ] {
+        state = splitmix64(state ^ splitmix64(tag ^ coordinate));
+    }
+    state
+}
+
+fn paired_evaluation_seeds(
+    base_seed: u64,
+    generation: usize,
+    matchup: usize,
+    opponent: usize,
+    game: usize,
+) -> [u64; SEAT_ORDERS] {
+    [evaluation_seed(base_seed, generation, matchup, opponent, game); SEAT_ORDERS]
+}
+
+fn checked_attempt_count(factors: &[usize]) -> Result<usize, String> {
+    factors.iter().try_fold(1usize, |total, factor| {
+        total
+            .checked_mul(*factor)
+            .ok_or_else(|| "CMA evaluation attempt count overflows usize".to_string())
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CmaAttemptCounts {
+    per_candidate: usize,
+    per_generation: usize,
+    total: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CmaRunRequest {
+    generations: usize,
+    population: usize,
+    games: usize,
+    base_seed: u64,
+    attempts: CmaAttemptCounts,
+}
+
+fn validate_cma_request(
+    generations: usize,
+    population: usize,
+    games: usize,
+    base_seed: u64,
+    matchup_count: usize,
+) -> Result<CmaAttemptCounts, String> {
+    if generations < 1 {
+        return Err("generations must be at least 1".to_string());
+    }
+    if population < 2 {
+        return Err("population must be at least 2".to_string());
+    }
+    if games < 1 {
+        return Err("games must be at least 1".to_string());
+    }
+    if base_seed == 0 {
+        return Err("seed must be explicitly set to a non-zero u64".to_string());
+    }
+    if matchup_count < 1 {
+        return Err("at least one fitness matchup is required".to_string());
+    }
+    let per_candidate = checked_attempt_count(&[
+        matchup_count,
+        OPPONENT_DIFFICULTIES.len(),
+        games,
+        SEAT_ORDERS,
+    ])?;
+    let per_generation = checked_attempt_count(&[per_candidate, population])?;
+    let total = checked_attempt_count(&[per_generation, generations])?;
+    Ok(CmaAttemptCounts {
+        per_candidate,
+        per_generation,
+        total,
+    })
+}
+
+fn opponent_difficulty_labels() -> Vec<&'static str> {
+    OPPONENT_DIFFICULTIES
+        .iter()
+        .map(|difficulty| match difficulty {
+            AiDifficulty::Easy => "Easy",
+            AiDifficulty::Medium => "Medium",
+            AiDifficulty::Hard => "Hard",
+            _ => unreachable!("CMA opponent pool contains only Easy, Medium, and Hard"),
+        })
+        .collect()
+}
+
+fn cma_config_record(
+    parameter_group: &str,
+    fitness_matchups: &[&str],
+    request: CmaRunRequest,
+) -> serde_json::Value {
+    let CmaRunRequest {
+        generations,
+        population,
+        games,
+        base_seed,
+        attempts,
+    } = request;
+    serde_json::json!({
+        "schema": CMA_CONFIG_SCHEMA,
+        "event": "config",
+        "parameter_group": parameter_group,
+        "fitness_matchups": fitness_matchups,
+        "opponent_pool": opponent_difficulty_labels(),
+        "paired_seat_orders": SEAT_ORDERS,
+        "population": population,
+        "games_per_fitness_cell": games,
+        "generations": generations,
+        "candidates_total": generations * population,
+        "attempts_per_candidate": attempts.per_candidate,
+        "attempts_per_generation": attempts.per_generation,
+        "attempts_total": attempts.total,
+        "base_seed": base_seed,
+        "seed_schedule": "common_random_numbers_splitmix64_v1",
+        "draws_excluded_from_fitness": false,
+        "no_winner_score": NO_WINNER_SCORE,
+    })
+}
+
+fn cma_progress_record(
+    generation: usize,
+    candidate_index: usize,
+    generation_candidates_completed: usize,
+    candidates_completed: usize,
+    evaluation: CandidateEvaluation,
+    request: CmaRunRequest,
+) -> serde_json::Value {
+    let CmaRunRequest {
+        generations,
+        population,
+        attempts,
+        ..
+    } = request;
+    assert_eq!(
+        evaluation.outcomes.attempts(),
+        attempts.per_candidate,
+        "candidate outcome accounting must match configured attempts"
+    );
+    serde_json::json!({
+        "schema": CMA_PROGRESS_SCHEMA,
+        "event": "candidate_complete",
+        "generation": generation,
+        "generations": generations,
+        "candidate_index": candidate_index,
+        "generation_candidates_completed": generation_candidates_completed,
+        "candidates_completed": candidates_completed,
+        "population": population,
+        "candidates_total": generations * population,
+        "fitness": evaluation.fitness,
+        "wins": evaluation.outcomes.wins,
+        "losses": evaluation.outcomes.losses,
+        "draws": evaluation.outcomes.draws,
+        "start_failures": evaluation.outcomes.start_failures,
+        "turn_limits": evaluation.outcomes.turn_limits,
+        "stuck": evaluation.outcomes.stuck,
+        "panics": evaluation.outcomes.panics,
+        "no_winner": evaluation.outcomes.no_winner(),
+        "candidate_attempts": evaluation.outcomes.attempts(),
+        "attempts_completed": candidates_completed * attempts.per_candidate,
+        "attempts_total": attempts.total,
+    })
+}
+
+fn emit_cma_record(prefix: &str, record: &serde_json::Value) {
+    eprintln!(
+        "{prefix} {}",
+        serde_json::to_string(record).expect("CMA telemetry serializes")
+    );
+}
+
+fn cma_schedule_manifest_fields(
+    attempts_per_candidate: usize,
+    attempts_per_generation: usize,
+    attempts_total: usize,
+) -> serde_json::Map<String, serde_json::Value> {
+    serde_json::json!({
+        "seed_schedule": "common_random_numbers_splitmix64_v1",
+        "attempts_per_candidate": attempts_per_candidate,
+        "attempts_per_generation": attempts_per_generation,
+        "attempts_total": attempts_total,
+        "draws_excluded_from_fitness": false,
+        "no_winner_score": NO_WINNER_SCORE,
+    })
+    .as_object()
+    .expect("CMA schedule provenance is an object")
+    .clone()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 fn build_matchup_payload(db: &CardDatabase, spec: &MatchupSpec) -> Result<DeckPayload, String> {
     let p0 = resolve_deck_ref(&spec.p0).map_err(|err| format!("{} p0: {err}", spec.id))?;
     let p1 = resolve_deck_ref(&spec.p1).map_err(|err| format!("{} p1: {err}", spec.id))?;
@@ -728,36 +1182,145 @@ fn build_matchup_payload(db: &CardDatabase, spec: &MatchupSpec) -> Result<DeckPa
     Ok(resolve_deck_list(db, &deck_list))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GameOutcome {
+    Winner { player: PlayerId },
+    Draw,
+    StartFailure,
+    TurnLimit,
+    Stuck,
+    Panic,
+}
+
+impl GameOutcome {
+    fn winner(self) -> Option<PlayerId> {
+        match self {
+            Self::Winner { player } => Some(player),
+            Self::Draw | Self::StartFailure | Self::TurnLimit | Self::Stuck | Self::Panic => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CandidateOutcomeCounts {
+    wins: usize,
+    losses: usize,
+    draws: usize,
+    start_failures: usize,
+    turn_limits: usize,
+    stuck: usize,
+    panics: usize,
+}
+
+impl CandidateOutcomeCounts {
+    fn attempts(self) -> usize {
+        self.wins
+            + self.losses
+            + self.draws
+            + self.start_failures
+            + self.turn_limits
+            + self.stuck
+            + self.panics
+    }
+
+    fn no_winner(self) -> usize {
+        self.draws + self.start_failures + self.turn_limits + self.stuck + self.panics
+    }
+
+    fn execution_failures(self) -> usize {
+        self.start_failures + self.turn_limits + self.stuck + self.panics
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.wins += other.wins;
+        self.losses += other.losses;
+        self.draws += other.draws;
+        self.start_failures += other.start_failures;
+        self.turn_limits += other.turn_limits;
+        self.stuck += other.stuck;
+        self.panics += other.panics;
+    }
+
+    fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "wins": self.wins,
+            "losses": self.losses,
+            "draws": self.draws,
+            "start_failures": self.start_failures,
+            "turn_limits": self.turn_limits,
+            "stuck": self.stuck,
+            "panics": self.panics,
+            "no_winner": self.no_winner(),
+            "execution_failures": self.execution_failures(),
+            "attempts": self.attempts(),
+        })
+    }
+
+    fn record(&mut self, outcome: GameOutcome, candidate_is_p0: bool) {
+        match outcome {
+            GameOutcome::Winner { player }
+                if (candidate_is_p0 && player == PlayerId(0))
+                    || (!candidate_is_p0 && player == PlayerId(1)) =>
+            {
+                self.wins += 1;
+            }
+            GameOutcome::Winner { .. } => self.losses += 1,
+            GameOutcome::Draw => self.draws += 1,
+            GameOutcome::StartFailure => self.start_failures += 1,
+            GameOutcome::TurnLimit => self.turn_limits += 1,
+            GameOutcome::Stuck => self.stuck += 1,
+            GameOutcome::Panic => self.panics += 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CandidateEvaluation {
+    fitness: f64,
+    outcomes: CandidateOutcomeCounts,
+}
+
 /// Run a single game with separate AI configs for each player.
-/// Returns the winner (if any) and the turn count.
+/// Returns a typed terminal/failure outcome so the fitness denominator never
+/// conflates engine failures, turn caps, and rules draws.
 fn run_game(
     payload: &DeckPayload,
     seed: u64,
     config_p0: &AiConfig,
     config_p1: &AiConfig,
-) -> (Option<PlayerId>, u32) {
-    let mut state = GameState::new_two_player(seed);
-    engine::game::deck_loading::load_deck_into_state(&mut state, payload);
+) -> GameOutcome {
+    let setup = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut state = GameState::new_two_player(seed);
+        engine::game::deck_loading::load_deck_into_state(&mut state, payload);
 
-    // Start game, skip mulligan for speed
-    let _ = start_game_skip_mulligan(&mut state);
+        // Start game, skip mulligan for speed. This API is infallible; setup
+        // panics are nevertheless attributed separately from in-game panics.
+        let _ = start_game_skip_mulligan(&mut state);
 
-    let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
-    let mut ai_configs: HashMap<PlayerId, AiConfig> = HashMap::new();
-    ai_configs.insert(PlayerId(0), config_p0.clone().into_measurement(seed));
-    ai_configs.insert(
-        PlayerId(1),
-        config_p1.clone().into_measurement(seed.wrapping_add(1)),
-    );
-
-    let mut ai_rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed);
-    let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
+        let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
+        let mut ai_configs: HashMap<PlayerId, AiConfig> = HashMap::new();
+        ai_configs.insert(PlayerId(0), config_p0.clone().into_measurement(seed));
+        ai_configs.insert(
+            PlayerId(1),
+            config_p1.clone().into_measurement(seed.wrapping_add(1)),
+        );
+        let ai_rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed);
+        let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
+        (state, ai_players, ai_configs, ai_rng, ai_session)
+    }));
+    let (mut state, ai_players, ai_configs, mut ai_rng, ai_session) = match setup {
+        Ok(setup) => setup,
+        Err(_) => return GameOutcome::StartFailure,
+    };
     loop {
         if let WaitingFor::GameOver { winner } = &state.waiting_for {
-            return (*winner, state.turn_number);
+            return match winner {
+                Some(player) => GameOutcome::Winner { player: *player },
+                None => GameOutcome::Draw,
+            };
         }
         if state.turn_number >= MAX_TURNS {
-            return (None, state.turn_number);
+            return GameOutcome::TurnLimit;
         }
 
         let results = match std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -770,56 +1333,73 @@ fn run_game(
             )
         })) {
             Ok(results) => results,
-            Err(_) => return (None, state.turn_number),
+            Err(_) => return GameOutcome::Panic,
         };
         if results.is_empty() {
             // No actions could be taken — game is stuck
-            return (None, state.turn_number);
+            return GameOutcome::Stuck;
         }
     }
 }
 
 /// Evaluate fitness of a parameter vector by playing games across matchups.
-/// Returns the average win rate of the candidate config vs the baseline.
+/// Returns the fail-closed win rate and exact outcome attribution.
 fn evaluate_fitness(
     group: TuneGroup,
     params: &[f64],
     matchups: &[(DeckPayload, &str)],
     games_per_matchup: usize,
     base_seed: u64,
-) -> f64 {
+    generation: usize,
+) -> CandidateEvaluation {
     let candidate = params_to_config_for(group, params);
-    let opponent_pool = [AiDifficulty::Easy, AiDifficulty::Medium, AiDifficulty::Hard];
-    let mut total_wins = 0usize;
-    let mut total_games = 0usize;
+    let mut outcomes = CandidateOutcomeCounts::default();
 
     for (matchup_idx, (payload, _name)) in matchups.iter().enumerate() {
-        for (opponent_idx, opponent_difficulty) in opponent_pool.iter().enumerate() {
+        for (opponent_idx, opponent_difficulty) in OPPONENT_DIFFICULTIES.iter().enumerate() {
             let opponent = create_config(*opponent_difficulty, Platform::Native);
             for game_idx in 0..games_per_matchup {
-                let seed = base_seed
-                    .wrapping_add(matchup_idx as u64 * 100_000)
-                    .wrapping_add(opponent_idx as u64 * 10_000)
-                    .wrapping_add(game_idx as u64);
+                let paired_seeds = paired_evaluation_seeds(
+                    base_seed,
+                    generation,
+                    matchup_idx,
+                    opponent_idx,
+                    game_idx,
+                );
 
                 let paired = [
-                    (true, run_game(payload, seed, &candidate, &opponent)),
-                    (false, run_game(payload, seed, &opponent, &candidate)),
+                    (
+                        true,
+                        run_game(payload, paired_seeds[0], &candidate, &opponent),
+                    ),
+                    (
+                        false,
+                        run_game(payload, paired_seeds[1], &opponent, &candidate),
+                    ),
                 ];
-                for (candidate_is_p0, (winner, _turns)) in paired {
-                    let Some(_) = winner else {
-                        continue;
-                    };
-                    if candidate_won(winner, candidate_is_p0) {
-                        total_wins += 1;
-                    }
-                    total_games += 1;
+                for (candidate_is_p0, outcome) in paired {
+                    // A draw, turn cap, stuck engine, or caught panic is a
+                    // completed attempt worth zero, never missing data. Omitting
+                    // candidate-dependent failures from the denominator can
+                    // otherwise reward fragile parameter vectors.
+                    outcomes.record(outcome, candidate_is_p0);
                 }
             }
         }
     }
 
-    total_wins as f64 / total_games.max(1) as f64
+    CandidateEvaluation {
+        fitness: fitness_from_attempt_counts(outcomes.wins, outcomes.attempts()),
+        outcomes,
+    }
+}
+
+fn fitness_from_attempt_counts(wins: usize, attempts: usize) -> f64 {
+    if attempts == 0 {
+        NO_WINNER_SCORE
+    } else {
+        wins as f64 / attempts as f64
+    }
 }
 
 fn print_usage() {
@@ -829,12 +1409,47 @@ fn print_usage() {
     eprintln!("  --generations N   CMA-ES generations (default: 100)");
     eprintln!("  --population N    Population size (default: 50)");
     eprintln!("  --games N         Games per matchup per fitness eval (default: 20)");
-    eprintln!("  --seed S          RNG seed (default: time-based)");
+    eprintln!(
+        "  --fitness-matchups IDS  Comma-separated fitness matchup IDs (default: {})",
+        FITNESS_MATCHUP_IDS.join(",")
+    );
+    eprintln!("  --seed S          Required non-zero RNG seed");
     eprintln!("  --output PATH     Output JSON path (default: <data-root>/cma-tuned-weights.json)");
     eprintln!(
         "  --group NAME      Parameter group: eval|penalties|keywords|archetype (default: eval)"
     );
     eprintln!("  --validate        Validate the tuned artifact at --output");
+}
+
+fn required_option_value<'a>(
+    args: &'a [String],
+    index: usize,
+    option: &str,
+) -> Result<&'a str, String> {
+    args.get(index)
+        .map(String::as_str)
+        .ok_or_else(|| format!("{option} requires a value"))
+}
+
+fn option_value_or_exit<'a>(args: &'a [String], index: usize, option: &str) -> &'a str {
+    required_option_value(args, index, option).unwrap_or_else(|err| {
+        eprintln!("{err}");
+        print_usage();
+        std::process::exit(1);
+    })
+}
+
+fn parsed_option_or_exit<T>(args: &[String], index: usize, option: &str) -> T
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let value = option_value_or_exit(args, index, option);
+    value.parse().unwrap_or_else(|err| {
+        eprintln!("invalid {option} value {value:?}: {err}");
+        print_usage();
+        std::process::exit(1);
+    })
 }
 
 fn main() {
@@ -855,34 +1470,52 @@ fn main() {
     let mut output: Option<PathBuf> = None;
     let mut validate = false;
     let mut group = TuneGroup::Eval;
+    let mut fitness_matchup_ids: Vec<String> = FITNESS_MATCHUP_IDS
+        .iter()
+        .map(|id| (*id).to_string())
+        .collect();
 
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
             "--generations" => {
                 i += 1;
-                generations = args[i].parse().expect("invalid --generations");
+                generations = parsed_option_or_exit(&args, i, "--generations");
             }
             "--population" => {
                 i += 1;
-                population = args[i].parse().expect("invalid --population");
+                population = parsed_option_or_exit(&args, i, "--population");
             }
             "--games" => {
                 i += 1;
-                games = args[i].parse().expect("invalid --games");
+                games = parsed_option_or_exit(&args, i, "--games");
+            }
+            "--fitness-matchups" => {
+                i += 1;
+                let value =
+                    required_option_value(&args, i, "--fitness-matchups").unwrap_or_else(|err| {
+                        eprintln!("{err}; expected a comma-separated matchup list");
+                        print_usage();
+                        std::process::exit(1);
+                    });
+                fitness_matchup_ids = parse_fitness_matchup_ids(value).unwrap_or_else(|err| {
+                    eprintln!("invalid --fitness-matchups: {err}");
+                    std::process::exit(1);
+                });
             }
             "--seed" => {
                 i += 1;
-                seed = Some(args[i].parse().expect("invalid --seed"));
+                seed = Some(parsed_option_or_exit(&args, i, "--seed"));
             }
             "--output" => {
                 i += 1;
-                output = Some(PathBuf::from(&args[i]));
+                output = Some(PathBuf::from(option_value_or_exit(&args, i, "--output")));
             }
             "--group" => {
                 i += 1;
-                group = TuneGroup::from_label(&args[i]).unwrap_or_else(|| {
-                    eprintln!("invalid --group '{}'", args[i]);
+                let value = option_value_or_exit(&args, i, "--group");
+                group = TuneGroup::from_label(value).unwrap_or_else(|| {
+                    eprintln!("invalid --group '{value}'");
                     print_usage();
                     std::process::exit(1);
                 });
@@ -898,6 +1531,49 @@ fn main() {
         }
         i += 1;
     }
+
+    let base_seed = seed.unwrap_or_else(|| {
+        eprintln!("--seed is required and must be non-zero");
+        std::process::exit(1);
+    });
+    if base_seed == 0 {
+        eprintln!("--seed is required and must be non-zero");
+        std::process::exit(1);
+    }
+    if validate {
+        let holdout_games = if games == 20 { 100 } else { games };
+        validate_holdout_games(holdout_games).unwrap_or_else(|err| {
+            eprintln!("Invalid holdout configuration: {err}");
+            std::process::exit(1);
+        });
+    }
+    let borrowed_matchup_ids: Vec<&str> = fitness_matchup_ids.iter().map(String::as_str).collect();
+    let cma_request = if validate {
+        None
+    } else {
+        validate_fitness_matchup_ids(&borrowed_matchup_ids).unwrap_or_else(|err| {
+            eprintln!("Invalid fitness matchup set: {err}");
+            std::process::exit(1);
+        });
+        let attempts = validate_cma_request(
+            generations,
+            population,
+            games,
+            base_seed,
+            borrowed_matchup_ids.len(),
+        )
+        .unwrap_or_else(|err| {
+            eprintln!("Invalid CMA configuration: {err}");
+            std::process::exit(1);
+        });
+        Some(CmaRunRequest {
+            generations,
+            population,
+            games,
+            base_seed,
+            attempts,
+        })
+    };
 
     let output_path = output.unwrap_or_else(|| data_root.join("cma-tuned-weights.json"));
 
@@ -921,21 +1597,16 @@ fn main() {
         std::process::exit(1);
     });
 
-    let base_seed = seed.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    });
-
     if validate {
         let holdout = build_holdout_matchups(&db).unwrap_or_else(|err| {
             eprintln!("Error building holdout matchups: {err}");
             std::process::exit(1);
         });
-        run_validate(&holdout, games, base_seed, &output_path);
+        if !run_validate(&holdout, games, base_seed, &output_path) {
+            std::process::exit(1);
+        }
     } else {
-        let resolved = build_tuning_matchups(&db, FITNESS_MATCHUP_IDS).unwrap_or_else(|err| {
+        let resolved = build_tuning_matchups(&db, &borrowed_matchup_ids).unwrap_or_else(|err| {
             eprintln!("Error building fitness matchups: {err}");
             std::process::exit(1);
         });
@@ -944,11 +1615,8 @@ fn main() {
         run_cmaes(
             group,
             &fitness_matchups,
-            generations,
-            population,
-            games,
-            base_seed,
             &output_path,
+            cma_request.expect("CMA dimensions were validated before loading card data"),
         );
     }
 }
@@ -972,9 +1640,18 @@ fn run_validate(
     games: usize,
     base_seed: u64,
     tuned_path: &std::path::Path,
-) {
+) -> bool {
     let games = if games == 20 { 100 } else { games }; // Default to 100 for validate
+    validate_holdout_games(games).unwrap_or_else(|err| {
+        eprintln!("Invalid holdout configuration: {err}");
+        std::process::exit(1);
+    });
     let r3 = |v: f64| (v * 1000.0).round() / 1000.0;
+
+    let artifact = validate_tuning_manifest_for_holdout(tuned_path).unwrap_or_else(|err| {
+        eprintln!("Refusing holdout validation: {err}");
+        std::process::exit(1);
+    });
 
     eprintln!("=== Paired Holdout Validation ===");
     eprintln!("Games per matchup: {games}");
@@ -982,7 +1659,9 @@ fn run_validate(
     eprintln!("Opponent pool: Easy, Medium, Hard");
 
     let baseline_config = create_config(AiDifficulty::Medium, Platform::Native);
-    let learned_config = load_cma_tuned_config(tuned_path).unwrap_or_else(|err| {
+    // Parse the exact bytes whose SHA-256 the preflight accepted. Re-reading the
+    // path here would allow a concurrent replacement between verification and use.
+    let learned_config = load_cma_tuned_config_bytes(&artifact).unwrap_or_else(|err| {
         eprintln!("Error loading tuned artifact: {err}");
         std::process::exit(1);
     });
@@ -992,6 +1671,8 @@ fn run_validate(
     let mut total_flipped_w_to_l = 0usize;
     let mut total_flipped_l_to_w = 0usize;
     let mut total_unchanged = 0usize;
+    let mut total_baseline_outcomes = CandidateOutcomeCounts::default();
+    let mut total_learned_outcomes = CandidateOutcomeCounts::default();
 
     for (matchup_idx, (payload, matchup)) in matchups.iter().enumerate() {
         eprintln!("\nHoldout: {}", matchup.id);
@@ -1002,12 +1683,11 @@ fn run_validate(
             let mut flipped_w_to_l = 0usize;
             let mut flipped_l_to_w = 0usize;
             let mut unchanged = 0usize;
+            let mut baseline_outcomes = CandidateOutcomeCounts::default();
+            let mut learned_outcomes = CandidateOutcomeCounts::default();
 
             for game_idx in 0..games {
-                let seed = base_seed
-                    .wrapping_add(matchup_idx as u64 * 100_000)
-                    .wrapping_add(opponent_idx as u64 * 10_000)
-                    .wrapping_add(game_idx as u64);
+                let seed = holdout_evaluation_seed(base_seed, matchup_idx, opponent_idx, game_idx);
                 let candidate_is_p0 = game_idx % 2 == 0;
                 let (baseline_p0, baseline_p1) = if candidate_is_p0 {
                     (&baseline_config, &opponent_config)
@@ -1020,8 +1700,12 @@ fn run_validate(
                     (&opponent_config, &learned_config)
                 };
 
-                let (baseline_winner, _) = run_game(payload, seed, baseline_p0, baseline_p1);
-                let (learned_winner, _) = run_game(payload, seed, learned_p0, learned_p1);
+                let baseline_outcome = run_game(payload, seed, baseline_p0, baseline_p1);
+                let learned_outcome = run_game(payload, seed, learned_p0, learned_p1);
+                baseline_outcomes.record(baseline_outcome, candidate_is_p0);
+                learned_outcomes.record(learned_outcome, candidate_is_p0);
+                let baseline_winner = baseline_outcome.winner();
+                let learned_winner = learned_outcome.winner();
                 let baseline_won = candidate_won(baseline_winner, candidate_is_p0);
                 let learned_won = candidate_won(learned_winner, candidate_is_p0);
 
@@ -1042,10 +1726,19 @@ fn run_validate(
             total_flipped_w_to_l += flipped_w_to_l;
             total_flipped_l_to_w += flipped_l_to_w;
             total_unchanged += unchanged;
+            total_baseline_outcomes.merge(baseline_outcomes);
+            total_learned_outcomes.merge(learned_outcomes);
             let flips = flipped_w_to_l + flipped_l_to_w;
             let sign_test_p = (flips > 0)
                 .then(|| sign_test_mid_p_upper_tail(flips, flipped_w_to_l.max(flipped_l_to_w)));
-            let status = validation_status(flipped_w_to_l, flipped_l_to_w, sign_test_p);
+            let execution_failures =
+                baseline_outcomes.execution_failures() + learned_outcomes.execution_failures();
+            let status = validation_status_with_failures(
+                flipped_w_to_l,
+                flipped_l_to_w,
+                sign_test_p,
+                execution_failures,
+            );
 
             eprintln!(
                 "  {:?}: baseline={:.1}% learned={:.1}% W→L={} L→W={} p={} {status}",
@@ -1070,6 +1763,9 @@ fn run_validate(
                 "flipped_w_to_l": flipped_w_to_l,
                 "flipped_l_to_w": flipped_l_to_w,
                 "unchanged": unchanged,
+                "baseline_outcomes": baseline_outcomes.to_json(),
+                "learned_outcomes": learned_outcomes.to_json(),
+                "execution_failures": execution_failures,
                 "sign_test_p": sign_test_p.map(r3),
                 "status": status,
             }));
@@ -1080,8 +1776,15 @@ fn run_validate(
     let aggregate_p = (total_flips > 0).then(|| {
         sign_test_mid_p_upper_tail(total_flips, total_flipped_w_to_l.max(total_flipped_l_to_w))
     });
-    let aggregate_status =
-        validation_status(total_flipped_w_to_l, total_flipped_l_to_w, aggregate_p);
+    let total_execution_failures =
+        total_baseline_outcomes.execution_failures() + total_learned_outcomes.execution_failures();
+    let aggregate_status = validation_status_with_failures(
+        total_flipped_w_to_l,
+        total_flipped_l_to_w,
+        aggregate_p,
+        total_execution_failures,
+    );
+    let validation_valid = total_execution_failures == 0;
 
     eprintln!("\n=== Summary ===");
     eprintln!(
@@ -1102,16 +1805,21 @@ fn run_validate(
         "opponent_pool": opponent_pool.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>(),
         "games_per_cell": games,
         "base_seed": base_seed,
+        "seed_schedule": "holdout_splitmix64_v1",
         "rows": rows,
         "aggregate": {
             "flipped_w_to_l": total_flipped_w_to_l,
             "flipped_l_to_w": total_flipped_l_to_w,
             "unchanged": total_unchanged,
+            "baseline_outcomes": total_baseline_outcomes.to_json(),
+            "learned_outcomes": total_learned_outcomes.to_json(),
+            "execution_failures": total_execution_failures,
             "sign_test_p": aggregate_p.map(r3),
             "status": aggregate_status,
         },
-        "improvement_detected": aggregate_status == "IMPROVED",
-        "regression_detected": aggregate_status == "REGRESSED",
+        "validation_valid": validation_valid,
+        "improvement_detected": validation_valid && aggregate_status == "IMPROVED",
+        "regression_detected": validation_valid && aggregate_status == "REGRESSED",
     });
 
     let json = serde_json::to_string_pretty(&result).unwrap();
@@ -1119,6 +1827,7 @@ fn run_validate(
     std::fs::write(&output_path, &json).unwrap();
     eprintln!("\nResults written to {}", output_path.display());
     println!("{json}");
+    validation_valid
 }
 
 fn candidate_won(winner: Option<PlayerId>, candidate_is_p0: bool) -> bool {
@@ -1137,6 +1846,19 @@ fn validation_status(w_to_l: usize, l_to_w: usize, sign_test_p: Option<f64>) -> 
         "SHIFTED"
     } else {
         "UNCHANGED"
+    }
+}
+
+fn validation_status_with_failures(
+    w_to_l: usize,
+    l_to_w: usize,
+    sign_test_p: Option<f64>,
+    execution_failures: usize,
+) -> &'static str {
+    if execution_failures > 0 {
+        "INVALID_EXECUTION_FAILURE"
+    } else {
+        validation_status(w_to_l, l_to_w, sign_test_p)
     }
 }
 
@@ -1174,12 +1896,16 @@ fn config_hash(config: &AiConfig) -> String {
 fn run_cmaes(
     group: TuneGroup,
     matchups: &[(DeckPayload, &str)],
-    generations: usize,
-    population: usize,
-    games: usize,
-    base_seed: u64,
     output_path: &std::path::Path,
+    request: CmaRunRequest,
 ) {
+    let CmaRunRequest {
+        generations,
+        population,
+        games,
+        base_seed,
+        attempts,
+    } = request;
     eprintln!("=== CMA-ES AI Weight Tuning ===");
     let parameter_names = group.parameter_names();
     eprintln!(
@@ -1188,15 +1914,20 @@ fn run_cmaes(
         parameter_names.len()
     );
 
+    emit_cma_record(
+        "CMA_CONFIG",
+        &cma_config_record(
+            group.label(),
+            &matchups.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+            request,
+        ),
+    );
+
     let baseline = create_config(AiDifficulty::Medium, Platform::Native);
     let initial = initial_params_for(group);
 
     let mut cma = CmaEs::new(parameter_names.len(), initial, 0.3, population);
-    let mut rng = if base_seed != 0 {
-        <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(base_seed)
-    } else {
-        <rand::rngs::StdRng as rand::SeedableRng>::from_os_rng()
-    };
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(base_seed);
 
     let mut best_fitness = 0.0f64;
 
@@ -1204,7 +1935,7 @@ fn run_cmaes(
         let candidates = cma.sample(&mut rng);
 
         // Evaluate population (parallel if rayon is available)
-        let gen_seed = base_seed.wrapping_add((gen as u64) * 10000);
+        let generation_candidates_completed = AtomicUsize::new(0);
 
         #[cfg(feature = "tune")]
         let fitnesses: Vec<f64> = {
@@ -1213,13 +1944,26 @@ fn run_cmaes(
                 .par_iter()
                 .enumerate()
                 .map(|(i, params)| {
-                    evaluate_fitness(
-                        group,
-                        params,
-                        matchups,
-                        games,
-                        gen_seed.wrapping_add(i as u64 * 1000),
-                    )
+                    let evaluation =
+                        evaluate_fitness(group, params, matchups, games, base_seed, gen);
+                    // Relaxed ordering is sufficient: this counter is telemetry
+                    // only. Indexed parallel collect still determines the fitness
+                    // vector's candidate order and therefore CMA-ES behavior.
+                    let local_done =
+                        generation_candidates_completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    let completed = gen * population + local_done;
+                    emit_cma_record(
+                        "CMA_PROGRESS",
+                        &cma_progress_record(
+                            gen + 1,
+                            i + 1,
+                            local_done,
+                            completed,
+                            evaluation,
+                            request,
+                        ),
+                    );
+                    evaluation.fitness
                 })
                 .collect()
         };
@@ -1229,13 +1973,22 @@ fn run_cmaes(
             .iter()
             .enumerate()
             .map(|(i, params)| {
-                evaluate_fitness(
-                    group,
-                    params,
-                    matchups,
-                    games,
-                    gen_seed.wrapping_add(i as u64 * 1000),
-                )
+                let evaluation = evaluate_fitness(group, params, matchups, games, base_seed, gen);
+                let local_done =
+                    generation_candidates_completed.fetch_add(1, Ordering::Relaxed) + 1;
+                let completed = gen * population + local_done;
+                emit_cma_record(
+                    "CMA_PROGRESS",
+                    &cma_progress_record(
+                        gen + 1,
+                        i + 1,
+                        local_done,
+                        completed,
+                        evaluation,
+                        request,
+                    ),
+                );
+                evaluation.fitness
             })
             .collect();
 
@@ -1284,6 +2037,9 @@ fn run_cmaes(
         "population": population,
         "games_per_eval": games,
         "best_fitness": r3(best_fitness),
+        "seed_schedule": "common_random_numbers_splitmix64_v1",
+        "draws_excluded_from_fitness": false,
+        "no_winner_score": NO_WINNER_SCORE,
         "parameters": parameters,
         "weights": {
             "life": r3(w.life),
@@ -1308,24 +2064,38 @@ fn run_cmaes(
 
     let json = serde_json::to_string_pretty(&result).unwrap();
     std::fs::write(output_path, &json).unwrap();
-    let manifest = serde_json::json!({
+    let artifact_sha256 = sha256_hex(json.as_bytes());
+    let mut manifest = serde_json::json!({
         "kind": "cma_tuning_manifest",
         "artifact_kind": CMA_TUNED_KIND,
         "group": group.label(),
         "artifact_path": output_path,
+        "artifact_sha256": artifact_sha256,
+        // A hash is provenance only when the binary was built from that clean,
+        // committed source and launched with the Phase checkout as cwd. External
+        // launchers must bind source/binary/card-data hashes; a standalone dirty
+        // build must not treat this field as execution authority.
         "git_sha": command_output("git", &["rev-parse", "--short=12", "HEAD"]),
         "seed": base_seed,
         "parameter_names": parameter_names,
         "fitness_decks": matchups.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+        "fitness_matchups": matchups.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
         "holdout_decks": HOLDOUT_MATCHUP_IDS,
         "opponent_pool": ["Easy", "Medium", "Hard"],
-        "draws_excluded_from_fitness": true,
         "paired_mirrored_seeds": true,
         "games_per_eval": games,
         "generations": generations,
         "population": population,
         "baseline_config_hash": config_hash(&baseline),
     });
+    manifest
+        .as_object_mut()
+        .expect("CMA manifest is an object")
+        .extend(cma_schedule_manifest_fields(
+            attempts.per_candidate,
+            attempts.per_generation,
+            attempts.total,
+        ));
     let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
     let manifest_path = manifest_output_path(output_path);
     std::fs::write(&manifest_path, manifest_json).unwrap();
@@ -1437,5 +2207,452 @@ mod tests {
         assert!((l[0][0] - 1.0).abs() < 1e-10);
         assert!((l[1][1] - 1.0).abs() < 1e-10);
         assert!((l[1][0]).abs() < 1e-10);
+    }
+
+    #[test]
+    fn configurable_fitness_matchups_reject_ambiguous_sets() {
+        validate_fitness_matchup_ids(FITNESS_MATCHUP_IDS).unwrap();
+        assert_eq!(
+            parse_fitness_matchup_ids(" red-vs-green,blue-vs-green ").unwrap(),
+            ["red-vs-green", "blue-vs-green"]
+        );
+        assert!(parse_fitness_matchup_ids("red-vs-green,,blue-vs-green")
+            .unwrap_err()
+            .contains("empty component"));
+        assert!(parse_fitness_matchup_ids(",red-vs-green")
+            .unwrap_err()
+            .contains("empty component"));
+        assert!(validate_fitness_matchup_ids(&[])
+            .unwrap_err()
+            .contains("at least one"));
+        assert!(
+            validate_fitness_matchup_ids(&["red-vs-green", "red-vs-green"])
+                .unwrap_err()
+                .contains("duplicate")
+        );
+        assert!(validate_fitness_matchup_ids(&[HOLDOUT_MATCHUP_IDS[0]])
+            .unwrap_err()
+            .contains("holdout"));
+        assert!(validate_fitness_matchup_ids(&["not-a-matchup"])
+            .unwrap_err()
+            .contains("unknown"));
+    }
+
+    #[test]
+    fn evaluation_seed_schedule_is_reproducible_common_and_generation_specific() {
+        assert_eq!(
+            evaluation_seed(344_742_925_125, 0, 0, 0, 0),
+            0xb7bd_75be_eb79_11c0
+        );
+        assert_eq!(
+            evaluation_seed(344_742_925_125, 4, 2, 1, 7),
+            0xa1a1_163b_9d6a_fa6f
+        );
+        assert_eq!(evaluation_seed(99, 3, 1, 2, 7), 0xb799_3560_1c87_3eb3);
+        let a = evaluation_seed(344_742_925_125, 4, 2, 1, 7);
+        let repeated = evaluation_seed(344_742_925_125, 4, 2, 1, 7);
+        assert_eq!(
+            a, repeated,
+            "same generation coordinates must replay exactly"
+        );
+
+        // Candidate identity is intentionally not a seed coordinate. Every
+        // candidate receives this same schedule within one generation.
+        let candidate_1_schedule = (0..8)
+            .map(|game| evaluation_seed(99, 3, 1, 2, game))
+            .collect::<Vec<_>>();
+        let candidate_2_schedule = (0..8)
+            .map(|game| evaluation_seed(99, 3, 1, 2, game))
+            .collect::<Vec<_>>();
+        assert_eq!(candidate_1_schedule, candidate_2_schedule);
+
+        assert_ne!(
+            evaluation_seed(99, 3, 1, 2, 7),
+            evaluation_seed(99, 4, 1, 2, 7),
+            "different generations must use different game seeds"
+        );
+        let paired = paired_evaluation_seeds(99, 3, 1, 2, 7);
+        assert_eq!(
+            paired[0], paired[1],
+            "mirrored candidate seat roles must reuse the exact game seed"
+        );
+    }
+
+    #[test]
+    fn evaluation_seed_sample_has_no_coordinate_aliases() {
+        let mut seeds = HashSet::new();
+        for generation in 0..20 {
+            for matchup in 0..32 {
+                for opponent in 0..OPPONENT_DIFFICULTIES.len() {
+                    for game in 0..20 {
+                        let seed =
+                            evaluation_seed(344_742_925_125, generation, matchup, opponent, game);
+                        assert!(
+                            seeds.insert(seed),
+                            "sampled evaluation coordinate tuple must have a unique seed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn holdout_seed_schedule_is_domain_separated_and_has_no_additive_aliases() {
+        assert_eq!(
+            holdout_evaluation_seed(344_742_925_125, 2, 1, 7),
+            0x35a4_1355_7c7e_82f5
+        );
+        assert_ne!(
+            holdout_evaluation_seed(99, 0, 0, 10_000),
+            holdout_evaluation_seed(99, 0, 1, 0)
+        );
+        assert_ne!(
+            holdout_evaluation_seed(99, 0, 0, 100_000),
+            holdout_evaluation_seed(99, 1, 0, 0)
+        );
+        assert_ne!(
+            holdout_evaluation_seed(99, 1, 2, 7),
+            evaluation_seed(99, 0, 1, 2, 7)
+        );
+    }
+
+    #[test]
+    fn machine_telemetry_records_exact_attempt_accounting() {
+        let request = CmaRunRequest {
+            generations: 20,
+            population: 48,
+            games: 2,
+            base_seed: 344_742_925_125,
+            attempts: CmaAttemptCounts {
+                per_candidate: 24,
+                per_generation: 1152,
+                total: 23040,
+            },
+        };
+        let config = cma_config_record("eval", &["red-vs-green", "white-vs-red"], request);
+        assert_eq!(config["schema"], CMA_CONFIG_SCHEMA);
+        assert_eq!(config["parameter_group"], "eval");
+        assert_eq!(config["candidates_total"], 960);
+        assert_eq!(config["attempts_per_candidate"], 24);
+        assert_eq!(config["attempts_per_generation"], 1152);
+        assert_eq!(config["attempts_total"], 23040);
+        assert_eq!(config["paired_seat_orders"], 2);
+        assert_eq!(config["draws_excluded_from_fitness"], false);
+        assert_eq!(config["no_winner_score"], 0.0);
+        let config_keys: HashSet<&str> = config
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            config_keys,
+            [
+                "schema",
+                "event",
+                "parameter_group",
+                "fitness_matchups",
+                "opponent_pool",
+                "paired_seat_orders",
+                "population",
+                "games_per_fitness_cell",
+                "generations",
+                "candidates_total",
+                "attempts_per_candidate",
+                "attempts_per_generation",
+                "attempts_total",
+                "base_seed",
+                "seed_schedule",
+                "draws_excluded_from_fitness",
+                "no_winner_score",
+            ]
+            .into_iter()
+            .collect()
+        );
+
+        let evaluation = CandidateEvaluation {
+            fitness: 10.0 / 24.0,
+            outcomes: CandidateOutcomeCounts {
+                wins: 10,
+                losses: 8,
+                draws: 2,
+                start_failures: 0,
+                turn_limits: 1,
+                stuck: 2,
+                panics: 1,
+            },
+        };
+        let progress = cma_progress_record(3, 17, 8, 104, evaluation, request);
+        assert_eq!(progress["schema"], CMA_PROGRESS_SCHEMA);
+        assert_eq!(progress["generation"], 3);
+        assert_eq!(progress["candidate_index"], 17);
+        assert_eq!(progress["generation_candidates_completed"], 8);
+        assert_eq!(progress["candidates_completed"], 104);
+        assert_eq!(progress["fitness"], 10.0 / 24.0);
+        assert_eq!(progress["wins"], 10);
+        assert_eq!(progress["losses"], 8);
+        assert_eq!(progress["draws"], 2);
+        assert_eq!(progress["start_failures"], 0);
+        assert_eq!(progress["turn_limits"], 1);
+        assert_eq!(progress["stuck"], 2);
+        assert_eq!(progress["panics"], 1);
+        assert_eq!(progress["no_winner"], 6);
+        assert_eq!(progress["candidate_attempts"], 24);
+        assert_eq!(progress["attempts_completed"], 2496);
+        assert_eq!(progress["attempts_total"], 23040);
+        let progress_keys: HashSet<&str> = progress
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            progress_keys,
+            [
+                "schema",
+                "event",
+                "generation",
+                "generations",
+                "candidate_index",
+                "generation_candidates_completed",
+                "candidates_completed",
+                "population",
+                "candidates_total",
+                "fitness",
+                "wins",
+                "losses",
+                "draws",
+                "start_failures",
+                "turn_limits",
+                "stuck",
+                "panics",
+                "no_winner",
+                "candidate_attempts",
+                "attempts_completed",
+                "attempts_total",
+            ]
+            .into_iter()
+            .collect()
+        );
+
+        let manifest_fields = cma_schedule_manifest_fields(24, 1152, 23040);
+        assert_eq!(
+            manifest_fields["seed_schedule"],
+            "common_random_numbers_splitmix64_v1"
+        );
+        assert_eq!(manifest_fields["attempts_per_candidate"], 24);
+        assert_eq!(manifest_fields["attempts_per_generation"], 1152);
+        assert_eq!(manifest_fields["attempts_total"], 23040);
+        assert_eq!(manifest_fields["draws_excluded_from_fitness"], false);
+        assert_eq!(manifest_fields["no_winner_score"], 0.0);
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "candidate outcome accounting must match configured attempts")]
+    fn telemetry_rejects_mismatched_attempt_accounting() {
+        let evaluation = CandidateEvaluation {
+            fitness: 1.0,
+            outcomes: CandidateOutcomeCounts {
+                wins: 1,
+                ..CandidateOutcomeCounts::default()
+            },
+        };
+        let request = CmaRunRequest {
+            generations: 1,
+            population: 2,
+            games: 1,
+            base_seed: 1,
+            attempts: CmaAttemptCounts {
+                per_candidate: 2,
+                per_generation: 4,
+                total: 4,
+            },
+        };
+        let _ = cma_progress_record(1, 1, 1, 1, evaluation, request);
+    }
+
+    #[test]
+    fn no_winner_outcomes_score_zero_and_remain_attributed() {
+        let mut outcomes = CandidateOutcomeCounts::default();
+        outcomes.record(GameOutcome::Draw, true);
+        outcomes.record(GameOutcome::StartFailure, true);
+        outcomes.record(GameOutcome::TurnLimit, true);
+        outcomes.record(GameOutcome::Stuck, false);
+        outcomes.record(GameOutcome::Panic, false);
+        assert_eq!(outcomes.attempts(), 5);
+        assert_eq!(outcomes.no_winner(), 5);
+        assert_eq!(
+            fitness_from_attempt_counts(outcomes.wins, outcomes.attempts()),
+            0.0
+        );
+
+        outcomes.record(
+            GameOutcome::Winner {
+                player: PlayerId(0),
+            },
+            true,
+        );
+        assert_eq!(
+            fitness_from_attempt_counts(outcomes.wins, outcomes.attempts()),
+            1.0 / 6.0
+        );
+    }
+
+    #[test]
+    fn holdout_execution_failures_invalidate_apparent_improvement() {
+        assert_eq!(
+            validation_status_with_failures(0, 10, Some(0.001), 1),
+            "INVALID_EXECUTION_FAILURE"
+        );
+        assert_eq!(
+            validation_status_with_failures(0, 10, Some(0.001), 0),
+            "IMPROVED"
+        );
+    }
+
+    #[test]
+    fn cma_request_validation_rejects_invalid_or_overflowing_dimensions() {
+        assert!(validate_cma_request(0, 2, 1, 1, 1).is_err());
+        assert!(validate_cma_request(1, 1, 1, 1, 1).is_err());
+        assert!(validate_cma_request(1, 2, 0, 1, 1).is_err());
+        assert!(validate_cma_request(1, 2, 1, 0, 1).is_err());
+        assert!(validate_cma_request(1, 2, 1, 1, 0).is_err());
+        assert!(
+            validate_cma_request(usize::MAX, usize::MAX, usize::MAX, 1, usize::MAX)
+                .unwrap_err()
+                .contains("overflows")
+        );
+
+        assert_eq!(
+            validate_cma_request(20, 48, 2, 344_742_925_125, 3).unwrap(),
+            CmaAttemptCounts {
+                per_candidate: 36,
+                per_generation: 1728,
+                total: 34560,
+            }
+        );
+    }
+
+    #[test]
+    fn missing_fitness_matchup_option_value_is_graceful() {
+        let args = vec!["ai-tune".to_string(), "data".to_string()];
+        let error = required_option_value(&args, 2, "--fitness-matchups").unwrap_err();
+        assert_eq!(error, "--fitness-matchups requires a value");
+    }
+
+    #[test]
+    fn holdout_games_require_balanced_seat_counts() {
+        validate_holdout_games(2).unwrap();
+        validate_holdout_games(100).unwrap();
+        assert!(validate_holdout_games(0)
+            .unwrap_err()
+            .contains("at least 2"));
+        assert!(validate_holdout_games(3)
+            .unwrap_err()
+            .contains("must be even"));
+    }
+
+    fn valid_tuning_manifest(artifact: &[u8]) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "cma_tuning_manifest",
+            "artifact_kind": CMA_TUNED_KIND,
+            "artifact_sha256": sha256_hex(artifact),
+            "seed": 344_742_925_125u64,
+            "fitness_decks": FITNESS_MATCHUP_IDS,
+            "fitness_matchups": FITNESS_MATCHUP_IDS,
+            "holdout_decks": HOLDOUT_MATCHUP_IDS,
+            "opponent_pool": ["Easy", "Medium", "Hard"],
+            "paired_mirrored_seeds": true,
+            "seed_schedule": "common_random_numbers_splitmix64_v1",
+            "draws_excluded_from_fitness": false,
+            "no_winner_score": 0.0,
+            "games_per_eval": 2,
+            "population": 48,
+            "generations": 20,
+            "attempts_per_candidate": 36,
+            "attempts_per_generation": 1728,
+            "attempts_total": 34560,
+        })
+    }
+
+    #[test]
+    fn holdout_preflight_requires_disjoint_artifact_bound_tuning_manifest() {
+        let stem = format!("phase-ai-holdout-preflight-{}", std::process::id());
+        let tuned_path = std::env::temp_dir().join(format!("{stem}.json"));
+        let manifest_path = manifest_output_path(&tuned_path);
+        let tuned_artifact = br#"{"kind":"cma_tuned_weights","weights":{}}"#;
+        std::fs::write(&tuned_path, tuned_artifact).unwrap();
+
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&valid_tuning_manifest(tuned_artifact)).unwrap(),
+        )
+        .unwrap();
+        validate_tuning_manifest_for_holdout(&tuned_path).unwrap();
+
+        let mut missing_alias = valid_tuning_manifest(tuned_artifact);
+        missing_alias
+            .as_object_mut()
+            .unwrap()
+            .remove("fitness_matchups");
+        std::fs::write(&manifest_path, serde_json::to_vec(&missing_alias).unwrap()).unwrap();
+        assert!(validate_tuning_manifest_for_holdout(&tuned_path)
+            .unwrap_err()
+            .contains("missing fitness_matchups"));
+
+        let mut wrong_alias_type = valid_tuning_manifest(tuned_artifact);
+        wrong_alias_type["fitness_matchups"] = serde_json::json!("red-vs-green");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&wrong_alias_type).unwrap(),
+        )
+        .unwrap();
+        assert!(validate_tuning_manifest_for_holdout(&tuned_path)
+            .unwrap_err()
+            .contains("missing fitness_matchups"));
+
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&valid_tuning_manifest(tuned_artifact)).unwrap(),
+        )
+        .unwrap();
+
+        std::fs::write(&tuned_path, b"tampered or swapped weights").unwrap();
+        assert!(validate_tuning_manifest_for_holdout(&tuned_path)
+            .unwrap_err()
+            .contains("SHA-256 mismatch"));
+        std::fs::write(&tuned_path, tuned_artifact).unwrap();
+
+        let mut overlap = valid_tuning_manifest(tuned_artifact);
+        overlap["fitness_decks"] = serde_json::json!([HOLDOUT_MATCHUP_IDS[0]]);
+        overlap["fitness_matchups"] = overlap["fitness_decks"].clone();
+        std::fs::write(&manifest_path, serde_json::to_vec(&overlap).unwrap()).unwrap();
+        assert!(validate_tuning_manifest_for_holdout(&tuned_path).is_err());
+
+        let mut excluded_failures = valid_tuning_manifest(tuned_artifact);
+        excluded_failures["draws_excluded_from_fitness"] = serde_json::json!(true);
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&excluded_failures).unwrap(),
+        )
+        .unwrap();
+        assert!(validate_tuning_manifest_for_holdout(&tuned_path)
+            .unwrap_err()
+            .contains("denominator"));
+
+        std::fs::remove_file(manifest_path).unwrap();
+        assert!(validate_tuning_manifest_for_holdout(&tuned_path)
+            .unwrap_err()
+            .contains("failed to read"));
+        std::fs::remove_file(tuned_path).unwrap();
     }
 }
