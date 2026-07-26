@@ -1338,10 +1338,10 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 29] = [
         suggested_protocol_extension: "Add ObjectRef plus ChooseObjectsInput/objectsChosen with a purpose field.",
     },
     UnsupportedCapability {
-        code: "upstream.card-destination-workflows-missing",
+        code: "upstream.multi-destination-partition-missing",
         area: "prompts",
-        reason: "Scry exists, but surveil, dig, discard, reorder, and put-back workflows need structured destination metadata to avoid overloading one shape.",
-        suggested_protocol_extension: "Add CardDestination and DistributeCardsInput primitives.",
+        reason: "Narrowed after verification: the protocol DOES carry destination metadata — ScryDestination is LibraryTop | LibraryBottom | Graveyard | Exile | Hand and ScryInput::zones takes it as a parameter, which is why surveil (CR 701.42a) now maps exactly and discard maps to ChooseCards. What remains unrepresentable is a partition across THREE OR MORE destinations in one prompt, since ScryOutput::ScryDecision's zone_card_ids is positional against a zone list the engine never varies beyond two.",
+        suggested_protocol_extension: "None needed for two-destination workflows. For 3+ destinations, define whether zones/zone_card_ids may exceed length two and how a client learns the per-zone count constraints.",
     },
     UnsupportedCapability {
         code: "upstream.mana-pool-entries-missing",
@@ -1380,16 +1380,16 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 29] = [
         suggested_protocol_extension: "Treat acknowledgement prompts as display events with audience and sequencing metadata.",
     },
     UnsupportedCapability {
-        code: "local.generic-reorder-unsupported",
+        code: "local.library-arrangement-reorder-unsupported",
         area: "prompts",
-        reason: "Generic reorderCards is not emitted because Phase only safely maps the current ScryChoice top/bottom workflow.",
-        suggested_protocol_extension: "Use structured destination workflows rather than a single reorder primitive.",
+        reason: "Narrowed after verification: Reorder IS emitted — trigger ordering (CR 603.3b) maps to ReorderInput with the item id carrying the trigger's index. Still unmapped are library-arrangement reorders (ArrangePlanarDeckTopChoice, RevealUntilKeptChoice), which combine an ordering with a keep/discard split that ReorderOutput's single ordered_ids list cannot express.",
+        suggested_protocol_extension: "None needed for pure orderings. For ordering-plus-partition, clarify whether Reorder may be composed with a preceding ChooseCards rather than growing a new family.",
     },
     UnsupportedCapability {
         code: "local.non-target-selection-unsupported",
         area: "prompts",
-        reason: "Surveil, dig, discard, keep-with-total-power, optional trigger, cost-prevention, and pay-combat-cost prompts have no exact upstream shape.",
-        suggested_protocol_extension: "Add ObjectRef/ChooseObjects and CardDestination workflows.",
+        reason: "Corrected after auditing each named prompt against the protocol rather than against this list. Surveil, discard, optional triggers (CR 603.12), and unless-costs (CR 118.12) DID have exact upstream shapes — Scry+zones, ChooseCards, and ChooseBoolean respectively — and are now mapped. What genuinely lacks a shape is selection over battlefield permanents by an aggregate constraint (keep-with-total-power, keep-exact-permanents) and pay-combat-cost, because ChooseBoardTargets carries only min/max counts, not a summed-attribute bound.",
+        suggested_protocol_extension: "Give ChooseBoardTargets an optional aggregate constraint (attribute + comparator + value) so 'keep creatures with total power N or less' is expressible without a new family.",
     },
     UnsupportedCapability {
         code: "local.blocker-damage-banding-unsupported",
@@ -1449,7 +1449,7 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 29] = [
     UnsupportedCapability {
         code: "local.play-card-mode-fidelity-gaps",
         area: "actions",
-        reason: "CastSpellForFree, CastSpellAsMiracle, and PlayFaceDown are advertised as PlayCardMode::Normal: v2 has no free-cast mode and no Miracle alternative cost, and PlayFaceDown carries no discriminator between morph, megamorph, and disguise. The plays stay legal; only their labelling loses fidelity.",
+        reason: "Labelling only — these plays are reachable. CastSpellForFree, CastSpellAsMiracle, and PlayFaceDown carry PlayCardMode::Normal because v2 has no free-cast mode and no Miracle alternative cost, and PlayFaceDown carries no discriminator between morph, megamorph, and disguise. The human-facing semantic is not lost: AvailableActionKind::Cast::label is free text and already reads 'Cast with miracle'. Only programmatic mode discrimination is unavailable.",
         suggested_protocol_extension: "Add AlternativeCostKind::Miracle and a free-cast PlayCardMode; give face-down plays a mode discriminator (disguise also has no AlternativeCostKind).",
     },
     UnsupportedCapability {
@@ -1467,8 +1467,8 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 29] = [
     UnsupportedCapability {
         code: "local.harmonize-tap-unsupported",
         area: "mana",
-        reason: "HarmonizeTap (CR 702.180) is a cost-reduction tap during payment, structurally the analogue of convoke, but PaymentResourceKind is exactly Convoke | Improvise | Delve. It is also not a cast, so it cannot travel as a PlayCardMode either.",
-        suggested_protocol_extension: "Add PaymentResourceKind::Harmonize.",
+        reason: "Scope note: this covers only the TAP, not harmonize as a whole. The harmonize CAST (CR 702.180a, Phase's CastingVariant::Harmonize) has an exact counterpart in AlternativeCostKind::Harmonize and needs nothing added. What has no home is HarmonizeTap (CR 702.180b), a cost-reduction tap during payment structurally analogous to convoke, where PaymentResourceKind is exactly Convoke | Improvise | Delve.",
+        suggested_protocol_extension: "Add PaymentResourceKind::Harmonize for the tap. The cast side needs no extension.",
     },
     UnsupportedCapability {
         code: "local.payment-resource-actions-missing",
@@ -1479,8 +1479,8 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 29] = [
     UnsupportedCapability {
         code: "local.phyrexian-payment-unsupported",
         area: "mana",
-        reason: "PaymentActionKind::PayLife is defined for wire completeness but never emitted: Phase has no pay-life action (only SubmitLifeRedistribution and a debug SetLife), so advertising an id the engine would then reject would violate the UnknownActionId obligation. CR 107.4f Phyrexian mana payment is unreachable through this adapter.",
-        suggested_protocol_extension: "None needed upstream — closing this requires a Phase pay-life action.",
+        reason: "Both ends model this; only the adapter is missing. Phase has GameAction::SubmitPhyrexianChoices and WaitingFor::PhyrexianPayment { shards } (annotated CR 107.4f + CR 601.2f), and the protocol has PaymentActionKind::PayLife { amount } — upstream's own agent implements choose_phyrexian_pay_life against it. The wiring (one PayLife{amount:2} payment action per Phyrexian shard, answered by SubmitPhyrexianChoices) is unwritten because payment_actions() receives only &[GameAction] and cannot see the pending shard list.",
+        suggested_protocol_extension: "None needed upstream — this is adapter work: thread the snapshot into payment action construction and emit one PayLife per shard.",
     },
     UnsupportedCapability {
         code: "local.dungeon-room-unsupported",
@@ -1497,8 +1497,8 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 29] = [
     UnsupportedCapability {
         code: "local.ninjutsu-cast-unsupported",
         area: "actions",
-        reason: "CR 702.49 Ninjutsu has no counterpart among the thirty AlternativeCostKinds, and GameAction::ActivateNinjutsu carries only ninjutsu_object_id and creature_to_return — no ability_index — so it cannot be sourced as an ActivatableAbilityInfo either. Mapping it to a near-miss alternative cost would assert semantics the protocol does not define.",
-        suggested_protocol_extension: "Add AlternativeCostKind::Ninjutsu.",
+        reason: "Ninjutsu needs no alternative-cost kind: CR 702.49a defines it as an ACTIVATED ABILITY, not an alternative cost, and Phase models it that way — synthesize_ninjutsu_family pushes an AbilityKind::Activated definition carrying AbilityCost::NinjutsuFamily onto the card's ability list. AvailableActionKind::ActivateAbility is therefore the correct and already-existing home. It is not emitted only because convert_available_action() receives &GameAction with no GameState, so the ability's index cannot be looked up; each (ninjutsu card, returned attacker) pair would take a distinct action id with the attacker named in the description.",
+        suggested_protocol_extension: "None needed upstream — asking for AlternativeCostKind::Ninjutsu would encode a rules error (CR 702.49a). This is adapter work: thread GameState into available-action conversion.",
     },
     UnsupportedCapability {
         code: "local.counter-key-vocabulary-unverifiable",
@@ -1852,12 +1852,39 @@ fn build_prompt_input(
             }))
         }
         WaitingFor::GameOver { .. } => Ok(PromptInput::GameOver(GameOverInput {})),
-        WaitingFor::SurveilChoice { .. } => {
-            unsupported_prompt(waiting_for, "local.surveil-unsupported")
+        // CR 701.42a: Surveil puts each looked-at card on top of the library or
+        // into the graveyard — the same "partition these cards across ordered
+        // destinations" shape as scry, differing only in the second destination.
+        // `ScryInput::zones` is that parameter, so surveil needs no new prompt
+        // family: the engine answers both with the identical `SelectCards`
+        // projection (`interaction.rs`, one match arm for both), where the
+        // second zone list is the non-default destination.
+        WaitingFor::SurveilChoice { cards, .. } => {
+            let ctx = CardBuildContext { card_lookup };
+            Ok(PromptInput::Scry(ScryInput {
+                presentation: presentation("Surveil"),
+                cards: object_vec_from_slice(&prepared.state, cards, &ctx)?,
+                zones: vec![ScryDestination::LibraryTop, ScryDestination::Graveyard],
+            }))
         }
         WaitingFor::DigChoice { .. } => unsupported_prompt(waiting_for, "local.dig-unsupported"),
-        WaitingFor::DiscardChoice { .. } => {
-            unsupported_prompt(waiting_for, "local.discard-unsupported")
+        // CR 701.8a: Discard N cards from hand — a bounded selection over a
+        // known card set, which is exactly `ChooseCardsInput`. `up_to` (CR
+        // 701.8b "discard up to N") lowers the floor to zero rather than
+        // needing a distinct prompt family.
+        WaitingFor::DiscardChoice {
+            count,
+            cards,
+            up_to,
+            ..
+        } => {
+            let ctx = CardBuildContext { card_lookup };
+            Ok(PromptInput::ChooseCards(ChooseCardsInput {
+                presentation: presentation("Discard"),
+                cards: object_vec_from_slice(&prepared.state, cards, &ctx)?,
+                min: if *up_to { 0 } else { *count },
+                max: *count,
+            }))
         }
         WaitingFor::KeepWithinTotalPowerChoice { .. } => {
             unsupported_prompt(waiting_for, "local.keep-with-total-power-unsupported")
@@ -1865,11 +1892,86 @@ fn build_prompt_input(
         WaitingFor::KeepExactPermanentsChoice { .. } => {
             unsupported_prompt(waiting_for, "local.keep-exact-permanents-unsupported")
         }
-        WaitingFor::OptionalEffectChoice { .. } | WaitingFor::OpponentMayChoice { .. } => {
-            unsupported_prompt(waiting_for, "local.optional-trigger-unsupported")
+        // CR 603.12: A "you may" trigger asks its controller a single yes/no
+        // question, which is exactly `ChooseBoolean`. `OpponentMayChoice` is the
+        // same question addressed to a non-controller (CR 608.2), so it shares
+        // the shape; `decidingPlayerId` on the envelope already distinguishes
+        // who is being asked.
+        WaitingFor::OptionalEffectChoice { description, .. }
+        | WaitingFor::OpponentMayChoice { description, .. } => {
+            Ok(PromptInput::ChooseBoolean(ChooseBooleanInput {
+                presentation: presentation(
+                    description
+                        .clone()
+                        .unwrap_or_else(|| "Use ability?".to_string()),
+                ),
+                confirm_label: "Yes".to_string(),
+                deny_label: "No".to_string(),
+            }))
         }
-        WaitingFor::UnlessPayment { .. } | WaitingFor::UnlessPaymentChooseCost { .. } => {
+        // CR 702.94a + CR 603.11: The miracle offer is a yes/no on casting the
+        // revealed card for its miracle cost. The cast itself is already
+        // advertised as an `AvailableAction`; without this prompt the offer was
+        // unreachable and the advertised cast could never be taken.
+        WaitingFor::MiracleReveal { cost, .. } => {
+            Ok(PromptInput::ChooseBoolean(ChooseBooleanInput {
+                presentation: presentation(format!(
+                    "Cast for its miracle cost {}?",
+                    mana_cost_string(cost)
+                )),
+                confirm_label: "Cast".to_string(),
+                deny_label: "Decline".to_string(),
+            }))
+        }
+        // CR 701.43d: Exerting is an optional cost declared as the creature
+        // attacks — a yes/no per attacker.
+        WaitingFor::ExertChoice { .. } => Ok(PromptInput::ChooseBoolean(ChooseBooleanInput {
+            presentation: presentation("Exert this creature as it attacks?"),
+            confirm_label: "Exert".to_string(),
+            deny_label: "Decline".to_string(),
+        })),
+        // CR 118.12 ("unless" costs): pay the stated cost or let the effect
+        // happen — a yes/no. `UnlessPaymentChooseCost` is deliberately NOT
+        // folded in: it picks *among several costs*, which is a selection, not
+        // a boolean, and mapping it here would misreport the question.
+        WaitingFor::UnlessPayment {
+            effect_description, ..
+        } => Ok(PromptInput::ChooseBoolean(ChooseBooleanInput {
+            presentation: presentation(
+                effect_description
+                    .clone()
+                    .unwrap_or_else(|| "Pay the cost?".to_string()),
+            ),
+            confirm_label: "Pay".to_string(),
+            deny_label: "Decline".to_string(),
+        })),
+        WaitingFor::UnlessPaymentChooseCost { .. } => {
             unsupported_prompt(waiting_for, "local.cost-prevention-unsupported")
+        }
+        // CR 603.3b: The controller orders simultaneous triggers on the stack.
+        // `ReorderInput` is exactly an ordered list of items; each trigger is
+        // rendered by its source card.
+        WaitingFor::OrderTriggers { triggers, .. } => {
+            let ctx = CardBuildContext { card_lookup };
+            let source_ids: Vec<ObjectId> = triggers.iter().map(|t| t.source_id).collect();
+            let cards = object_vec_from_slice(&prepared.state, &source_ids, &ctx)?;
+            Ok(PromptInput::Reorder(ReorderInput {
+                presentation: presentation("Order triggers"),
+                // `GameAction::OrderTriggers { order: Vec<usize> }` indexes into
+                // `triggers`, so the item id must be that index — NOT the source
+                // object id, which collides when one permanent contributes two
+                // simultaneous triggers (CR 603.3b).
+                items: triggers
+                    .iter()
+                    .zip(cards)
+                    .enumerate()
+                    .map(|(index, (trigger, card))| ReorderItem {
+                        id: index.to_string(),
+                        card,
+                        oracle: Some(trigger.description.clone()),
+                    })
+                    .collect(),
+            }))
         }
         WaitingFor::AssignBlockerDamage { .. } => {
             unsupported_prompt(waiting_for, "local.blocker-damage-banding-unsupported")
@@ -2179,14 +2281,72 @@ pub fn translate_response(
                 cards: parse_object_ids(&bottom)?,
             })
         }
+        // A yes/no answer is meaningless without knowing which question was
+        // asked, so the engine action is selected by the pending `WaitingFor`.
+        // `output_family_matches_waiting` has already established that the
+        // pairing is legal, so any other state here is unreachable rather than
+        // merely unhandled.
+        PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value }) => {
+            match &state.waiting_for {
+                // CR 603.12: accept or decline the optional trigger.
+                WaitingFor::OptionalEffectChoice { .. } | WaitingFor::OpponentMayChoice { .. } => {
+                    Ok(GameAction::DecideOptionalEffect { accept: value })
+                }
+                // CR 702.94a: accepting casts for the miracle cost; declining
+                // routes through the shared optional-effect decline.
+                WaitingFor::MiracleReveal { object_id, .. } => {
+                    if value {
+                        let object =
+                            state
+                                .objects
+                                .get(object_id)
+                                .ok_or(AdapterError::ObjectNotFound {
+                                    object_id: *object_id,
+                                })?;
+                        Ok(GameAction::CastSpellAsMiracle {
+                            object_id: *object_id,
+                            card_id: object.card_id,
+                            payment_mode: Default::default(),
+                        })
+                    } else {
+                        Ok(GameAction::DecideOptionalEffect { accept: false })
+                    }
+                }
+                // CR 701.43d: pay or decline the exert cost.
+                WaitingFor::ExertChoice { .. } => Ok(GameAction::ChooseExert { exert: value }),
+                // CR 118.12: pay the unless-cost or let the effect happen.
+                WaitingFor::UnlessPayment { .. } => Ok(GameAction::PayUnlessCost { pay: value }),
+                _ => Err(AdapterError::IllegalResponseForPrompt {
+                    response_kind: "chooseBoolean",
+                }),
+            }
+        }
+        // CR 701.8a: the chosen cards are the ones discarded.
+        PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision { chosen_card_ids }) => {
+            Ok(GameAction::SelectCards {
+                cards: parse_object_ids(&chosen_card_ids)?,
+            })
+        }
+        // CR 603.3b: `ReorderItem::id` is the trigger's index in the prompt's
+        // list (see the `OrderTriggers` prompt arm), so the answer parses back
+        // into `GameAction::OrderTriggers { order: Vec<usize> }` directly.
+        PromptOutput::Reorder(ReorderOutput::ReorderDecision { ordered_ids }) => {
+            let order = ordered_ids
+                .iter()
+                .map(|id| {
+                    id.parse::<usize>()
+                        .map_err(|_| AdapterError::IllegalResponseForPrompt {
+                            response_kind: "reorder",
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(GameAction::OrderTriggers { order })
+        }
         // Families the adapter models on the wire but cannot yet drive into the
         // engine. `output_family_matches_waiting` already rejects these, so this
         // arm is the belt-and-braces leg of the same contract.
-        PromptOutput::ChooseBoolean(_)
-        | PromptOutput::ChooseCards(_)
-        | PromptOutput::ChooseDamageAssignmentOrder(_)
+        PromptOutput::ChooseDamageAssignmentOrder(_)
         | PromptOutput::RevealCards(_)
-        | PromptOutput::Reorder(_)
         | PromptOutput::DiceRolled(_) => Err(AdapterError::IllegalResponseForPrompt {
             response_kind: "unsupportedOutput",
         }),
@@ -2302,9 +2462,9 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::ChooseUntap { .. } => {
             AvailableActionConversion::Unsupported("local.choose-untap-unsupported")
         }
-        GameAction::ChooseExert { .. } => {
-            AvailableActionConversion::Unsupported("local.exert-unsupported")
-        }
+        // Answered through the ChooseBoolean prompt for `WaitingFor::ExertChoice`,
+        // not by echoing an action id — same contract as SelectTargets.
+        GameAction::ChooseExert { .. } => AvailableActionConversion::Skip,
         GameAction::ChooseEnlist { .. } => {
             AvailableActionConversion::Unsupported("local.enlist-unsupported")
         }
@@ -2360,9 +2520,8 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::ChooseReplacement { .. } => {
             AvailableActionConversion::Unsupported("local.replacement-choice-unsupported")
         }
-        GameAction::OrderTriggers { .. } => {
-            AvailableActionConversion::Unsupported("local.order-triggers-unsupported")
-        }
+        // Answered through the Reorder prompt for `WaitingFor::OrderTriggers`.
+        GameAction::OrderTriggers { .. } => AvailableActionConversion::Skip,
         GameAction::Equip { .. }
         | GameAction::CrewVehicle { .. }
         | GameAction::ActivateStation { .. }
@@ -2390,8 +2549,10 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
             AvailableActionConversion::Unsupported("local.pile-partition-unsupported")
         }
         GameAction::SelectModes { .. } => AvailableActionConversion::Skip,
+        // `DecideOptionalEffect` answers the ChooseBoolean prompt emitted for
+        // `WaitingFor::OptionalEffectChoice` / `OpponentMayChoice` / `MiracleReveal`.
+        GameAction::DecideOptionalEffect { .. } => AvailableActionConversion::Skip,
         GameAction::DecideOptionalCost { .. }
-        | GameAction::DecideOptionalEffect { .. }
         | GameAction::DecideOptionalEffectAndRemember { .. } => {
             AvailableActionConversion::Unsupported("local.optional-trigger-unsupported")
         }
@@ -2413,7 +2574,11 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::RespondToSpliceOffer { .. } => {
             AvailableActionConversion::Unsupported("local.splice-unsupported")
         }
-        GameAction::PayUnlessCost { .. } | GameAction::ChooseUnlessCostBranch { .. } => {
+        // Answered through the ChooseBoolean prompt for `WaitingFor::UnlessPayment`.
+        GameAction::PayUnlessCost { .. } => AvailableActionConversion::Skip,
+        // Still unmapped: picking among several sub-costs is a selection, not a
+        // boolean (CR 118.12a), so it does not share the UnlessPayment prompt.
+        GameAction::ChooseUnlessCostBranch { .. } => {
             AvailableActionConversion::Unsupported("local.cost-prevention-unsupported")
         }
         GameAction::ChooseActivationCostBranch { .. } => {
@@ -3460,14 +3625,26 @@ fn output_family_matches_waiting(
         PromptOutput::ChooseCombatDamageAssignment(_) => {
             matches!(waiting_for, WaitingFor::AssignCombatDamage { .. })
         }
-        PromptOutput::Scry(_) => matches!(waiting_for, WaitingFor::ScryChoice { .. }),
+        // CR 701.42a: surveil shares scry's partition shape, differing only in
+        // the second destination carried by `ScryInput::zones`.
+        PromptOutput::Scry(_) => matches!(
+            waiting_for,
+            WaitingFor::ScryChoice { .. } | WaitingFor::SurveilChoice { .. }
+        ),
+        PromptOutput::ChooseBoolean(_) => matches!(
+            waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+                | WaitingFor::OpponentMayChoice { .. }
+                | WaitingFor::MiracleReveal { .. }
+                | WaitingFor::ExertChoice { .. }
+                | WaitingFor::UnlessPayment { .. }
+        ),
+        PromptOutput::ChooseCards(_) => matches!(waiting_for, WaitingFor::DiscardChoice { .. }),
+        PromptOutput::Reorder(_) => matches!(waiting_for, WaitingFor::OrderTriggers { .. }),
         // Modeled on the wire, but this adapter emits no prompt that accepts
         // them, so no `WaitingFor` can legally receive one.
-        PromptOutput::ChooseBoolean(_)
-        | PromptOutput::ChooseCards(_)
-        | PromptOutput::ChooseDamageAssignmentOrder(_)
+        PromptOutput::ChooseDamageAssignmentOrder(_)
         | PromptOutput::RevealCards(_)
-        | PromptOutput::Reorder(_)
         | PromptOutput::DiceRolled(_) => false,
     }
 }
@@ -4596,6 +4773,104 @@ mod tests {
         // v2 removed the flat `label` in favour of `presentation`.
         assert!(json["input"].get("label").is_none());
         assert_eq!(json["input"]["presentation"]["title"], "Choose target");
+    }
+
+    /// Grounds the capability registry in behaviour rather than prose.
+    ///
+    /// Every claim of the form "X has no exact upstream shape" is falsifiable
+    /// by exhibiting the mapping, and this test exhibits them. The v2.0.0
+    /// registry asserted that surveil, discard, optional triggers, unless-costs
+    /// and trigger ordering all lacked an upstream shape; each in fact maps
+    /// onto a primitive the protocol already defines, so the entries were
+    /// wrong, not merely pessimistic. Re-introducing such a claim now breaks a
+    /// test instead of shipping as a confident, unfalsifiable comment.
+    #[test]
+    fn families_claimed_unmappable_are_actually_mappable() {
+        // CR 701.42a: surveil is scry whose second destination is the
+        // graveyard. `ScryInput::zones` parameterizes exactly that.
+        let json = serde_json::to_value(
+            build_prompt(
+                &prepared_for(WaitingFor::SurveilChoice {
+                    player: PlayerId(0),
+                    cards: vec![],
+                }),
+                &lookup,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["input"]["type"], "scry");
+        assert_eq!(json["input"]["zones"][0], "libraryTop");
+        assert_eq!(json["input"]["zones"][1], "graveyard");
+
+        // CR 603.12: an optional trigger is a yes/no, i.e. ChooseBoolean, and
+        // its answer is DecideOptionalEffect.
+        let prepared = prepared_for(WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id: ObjectId(1),
+            description: Some("Draw a card?".to_string()),
+            may_trigger_key: None,
+        });
+        let json = serde_json::to_value(build_prompt(&prepared, &lookup).unwrap()).unwrap();
+        assert_eq!(json["input"]["type"], "chooseBoolean");
+        assert_eq!(json["input"]["presentation"]["title"], "Draw a card?");
+
+        let ctx = context_with(vec![]);
+        for (answer, expected) in [(true, true), (false, false)] {
+            let action = translate_response(
+                ctx.prompt_id,
+                PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value: answer }),
+                &ctx,
+                &prepared.state,
+            )
+            .unwrap();
+            assert_eq!(
+                action,
+                GameAction::DecideOptionalEffect { accept: expected },
+                "optional trigger must round-trip both answers"
+            );
+        }
+
+        // CR 701.43d: exert reuses the same boolean family but must resolve to
+        // a different engine action — proving the dispatch is on `WaitingFor`,
+        // not hardcoded per family.
+        let exert = prepared_for(WaitingFor::ExertChoice {
+            player: PlayerId(0),
+            attacker: ObjectId(1),
+            remaining: vec![],
+        });
+        assert_eq!(
+            translate_response(
+                ctx.prompt_id,
+                PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value: true }),
+                &ctx,
+                &exert.state,
+            )
+            .unwrap(),
+            GameAction::ChooseExert { exert: true }
+        );
+
+        // CR 603.3b: trigger order round-trips through `Reorder`, and the item
+        // id must be the trigger INDEX — using the source object id would
+        // collide when one permanent contributes two simultaneous triggers.
+        let triggers = prepared_for(WaitingFor::OrderTriggers {
+            player: PlayerId(0),
+            triggers: vec![],
+        });
+        assert_eq!(
+            translate_response(
+                ctx.prompt_id,
+                PromptOutput::Reorder(ReorderOutput::ReorderDecision {
+                    ordered_ids: vec!["2".to_string(), "0".to_string(), "1".to_string()],
+                }),
+                &ctx,
+                &triggers.state,
+            )
+            .unwrap(),
+            GameAction::OrderTriggers {
+                order: vec![2, 0, 1]
+            }
+        );
     }
 
     #[test]
