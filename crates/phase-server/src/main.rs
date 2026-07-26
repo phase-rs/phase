@@ -92,12 +92,38 @@ type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
 type SharedDraftState = Arc<Mutex<DraftSessionManager>>;
 const SPECTATOR_PLAYER_ID: PlayerId = PlayerId(u8::MAX);
-#[cfg(windows)]
-// Windows gives the process' primary thread a comparatively small stack. A
-// persisted game is a deeply nested rules snapshot, so restore it on a
-// purpose-sized thread rather than letting one saved session prevent the
-// server from reaching its health endpoint on the next launch.
-const PERSISTED_SESSION_RESTORE_STACK_BYTES: usize = 16 * 1024 * 1024;
+/// Stack size for every thread that can run the engine: the runtime *owner*
+/// thread spawned in `main`, plus Tokio's worker and blocking threads.
+///
+/// Rust's default thread stack is 2 MiB and a single WebSocket action already
+/// spends most of it: `handle_socket`'s async state machine plus the engine
+/// and AI call chain under `run_ai` measured at ~1.35 MiB on a *turn-3*
+/// four-player Commander game. `GameState` is moved by value through that
+/// chain (`AiActionResult::state`, every `state.clone()`), so the budget is
+/// roughly "how many `GameState` values are live on the stack at once" — it is
+/// near-constant in board size, which is why an early game overruns it just as
+/// readily as a late one. Overrunning is not a catchable panic, so
+/// `panic = "unwind"` in `[profile.server-release]` cannot contain it: the
+/// process aborts and every player loses the game.
+///
+/// `GameState`'s inline size has since been cut from 30,112 B to 12,464 B
+/// (see `engine/src/types/game_state_size.rs`, which pins it), and 32 MiB is
+/// retained anyway, deliberately:
+///
+///   * the measured high-water does **not** fall in proportion to the struct.
+///     On the equivalent bisected fixture the struct shrank 2.42x while the
+///     stack high-water fell only ~1.36x — the remainder is recursion and
+///     call-frame overhead that does not scale with `GameState`;
+///   * AI search depth is data-driven, so no static size fix bounds
+///     `depth x chain_depth x sizeof`;
+///   * `[profile.server-release]` (`opt-level = 2`, `lto = "thin"`,
+///     `codegen-units = 16`) uses measurably more stack than `ai_commander`'s
+///     profile;
+///   * the cost is reserved *address space*, not committed memory.
+///
+/// 32 MiB matches what `ai_commander` and `duel_suite` already use for this
+/// same engine recursion.
+const RUNTIME_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
 type SharedDraftPools = Arc<draft_pools::DraftPools>;
 /// Spectator senders keyed by draft_code. Each spectator has a visibility + sender.
 type SharedDraftSpectators = Arc<
@@ -114,24 +140,15 @@ type SharedDraftSpectators = Arc<
 /// Spectator senders keyed by game code (live games only).
 type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
 
-#[cfg(windows)]
-fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
-    let json = json.to_owned();
-    let restore = std::thread::Builder::new()
-        .name("phase-session-restore".to_owned())
-        .stack_size(PERSISTED_SESSION_RESTORE_STACK_BYTES)
-        .spawn(move || {
-            let persisted = serde_json::from_str::<server_core::PersistedSession>(&json)
-                .map_err(|error| error.to_string())?;
-            Ok(GameSession::from_persisted(persisted, db.as_ref()))
-        })
-        .map_err(|error| format!("could not start restore thread: {error}"))?;
-    restore
-        .join()
-        .map_err(|_| "persisted session restore thread panicked".to_owned())?
-}
-
-#[cfg(not(windows))]
+/// Deserializing a persisted session is deeply nested and stack-hungry — and
+/// boxing a field does not help here, because `Box<T>::deserialize` still
+/// builds `T` on the stack before moving it into the allocation. It needs a
+/// large stack, and it now has one without a platform fork: the sole caller
+/// runs inside `serve()`, which `main` drives on the `phase-server-runtime`
+/// thread at `RUNTIME_THREAD_STACK_BYTES`. The former `#[cfg(windows)]` arm
+/// hopped onto a purpose-sized 16 MiB thread; against a 32 MiB runtime owner
+/// that is a *downgrade* on the one platform that reported the overflow, so
+/// both arms are gone and the restore runs inline.
 fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
     let persisted = serde_json::from_str::<server_core::PersistedSession>(json)
         .map_err(|error| error.to_string())?;
@@ -922,8 +939,31 @@ impl SocketIdentity {
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// `thread_stack_size` governs Tokio's worker and blocking threads, but
+/// `block_on` polls the root future on the **calling** thread — so `serve()`'s
+/// own body (including the persisted-session restore) would run on the process
+/// primary thread with whatever stack the OS handed it. `#[tokio::main]`
+/// expands to exactly the same `build().block_on(..)` shape, so this is a
+/// pre-existing gap rather than a regression: close it by owning the runtime
+/// from a thread whose stack we chose.
+fn main() {
+    std::thread::Builder::new()
+        .name("phase-server-runtime".to_owned())
+        .stack_size(RUNTIME_THREAD_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(RUNTIME_THREAD_STACK_BYTES)
+                .build()
+                .expect("failed to build the Tokio runtime")
+                .block_on(serve());
+        })
+        .expect("spawn phase-server runtime thread")
+        .join()
+        .expect("phase-server runtime thread panicked");
+}
+
+async fn serve() {
     let cli = Cli::parse();
 
     let _log_guard = logging::init_logging(cli.log_dir.as_deref(), cli.log_json);
