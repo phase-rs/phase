@@ -1902,7 +1902,7 @@ pub(crate) fn aggregate_property_over(
     }
 }
 
-fn object_count_zone_object_ids(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
+fn filter_zone_object_ids(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
     let zones = filter.extract_zones();
     let zones = if zones.is_empty() {
         vec![crate::types::zones::Zone::Battlefield]
@@ -1915,15 +1915,17 @@ fn object_count_zone_object_ids(state: &GameState, filter: &TargetFilter) -> Vec
         .collect()
 }
 
-/// Candidate universe for `object_count_matching_ids`: union ledger, explicit
-/// zones, and recursive branch populations for every boolean node.
-fn object_count_candidate_universe(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
+/// Candidate universe for evaluating `filter`: union ledger, explicit zones,
+/// and recursive branch populations for every boolean node. Recursing per
+/// branch preserves a branch without a zone constraint as a battlefield domain
+/// even when its sibling names another zone.
+fn filter_candidate_universe(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
     match filter {
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             let mut seen = HashSet::new();
             let mut out = Vec::new();
             for branch in filters {
-                for id in object_count_candidate_universe(state, branch) {
+                for id in filter_candidate_universe(state, branch) {
                     if seen.insert(id) {
                         out.push(id);
                     }
@@ -1934,12 +1936,12 @@ fn object_count_candidate_universe(state: &GameState, filter: &TargetFilter) -> 
         TargetFilter::Not { filter: inner } => {
             let mut seen = HashSet::new();
             let mut out = Vec::new();
-            for id in object_count_zone_object_ids(state, filter) {
+            for id in filter_zone_object_ids(state, filter) {
                 if seen.insert(id) {
                     out.push(id);
                 }
             }
-            for id in object_count_candidate_universe(state, inner) {
+            for id in filter_candidate_universe(state, inner) {
                 if seen.insert(id) {
                     out.push(id);
                 }
@@ -1947,10 +1949,8 @@ fn object_count_candidate_universe(state: &GameState, filter: &TargetFilter) -> 
             out
         }
         TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
-        TargetFilter::TrackedSetFiltered { filter, .. } => {
-            object_count_candidate_universe(state, filter)
-        }
-        _ => object_count_zone_object_ids(state, filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => filter_candidate_universe(state, filter),
+        _ => filter_zone_object_ids(state, filter),
     }
 }
 
@@ -1960,7 +1960,7 @@ pub(crate) fn object_count_matching_ids(
     filter_ctx: &FilterContext<'_>,
     source_id: ObjectId,
 ) -> Vec<ObjectId> {
-    let mut ids: Vec<ObjectId> = object_count_candidate_universe(state, filter)
+    let mut ids: Vec<ObjectId> = filter_candidate_universe(state, filter)
         .into_iter()
         .filter(|&id| matches_target_filter(state, id, filter, filter_ctx))
         .collect();
@@ -4439,7 +4439,7 @@ fn object_id_for_scope(
 
 /// CR 122.1: Distinct counter kinds present on objects matching `filter`
 /// (controller-relative, CR 109.4). Mirrors `DistinctColorsAmongPermanents`'s
-/// resolver (zone from `filter.extract_in_zone()`, `zone_object_ids`,
+/// resolver (zones from `filter.extract_zones()`, `zone_object_ids`,
 /// `matches_target_filter`), enumerating only positive-count counter kinds the
 /// same way proliferate does. Returns a `Vec<CounterType>` SORTED by
 /// `CounterType::as_str`
@@ -4456,27 +4456,31 @@ pub(crate) fn distinct_counter_kinds_among(
     let mut seen: HashSet<CounterType> = HashSet::new();
     // CR 608.2c + CR 122.1: parent-target domains ("it", "that permanent",
     // or an indexed parent slot) resolve through the same ability-bound
-    // authority as other resolution effects. Predicate domains instead scan
-    // the exact zone declared by `InZone`, defaulting to the battlefield.
-    let object_ids: Vec<ObjectId> = if matches!(
-        filter,
-        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
-    ) {
-        filter_ctx
+    // authorities as other resolution effects. Predicate domains instead scan
+    // every zone declared by `InZone` / `InAnyZone`, defaulting to the
+    // battlefield only when the filter declares no zone.
+    let object_ids: Vec<ObjectId> = match filter {
+        TargetFilter::ParentTarget => filter_ctx
             .ability
             .map(|ability| {
                 crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter)
             })
-            .unwrap_or_default()
-    } else {
-        let zone = filter
-            .extract_in_zone()
-            .unwrap_or(crate::types::zones::Zone::Battlefield);
-        crate::game::targeting::zone_object_ids(state, zone)
-            .iter()
-            .copied()
+            .unwrap_or_default(),
+        TargetFilter::ParentTargetSlot { index } => filter_ctx
+            .ability
+            .and_then(|ability| {
+                crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+            })
+            .and_then(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .into_iter()
+            .collect(),
+        _ => filter_candidate_universe(state, filter)
+            .into_iter()
             .filter(|id| matches_target_filter(state, *id, filter, filter_ctx))
-            .collect()
+            .collect(),
     };
     for id in object_ids {
         if let Some(obj) = state.objects.get(&id) {
@@ -6860,6 +6864,322 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), perm_a), 2);
+    }
+
+    /// CR 400.1 + CR 122.1: an `InAnyZone` counter-kind domain scans every
+    /// declared zone exactly. It must not collapse to the battlefield or to the
+    /// first zone in the property.
+    #[test]
+    fn distinct_counter_kinds_among_preserves_in_any_zone_domain() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exiled".to_string(),
+            Zone::Exile,
+        );
+        let graveyard = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Graveyard".to_string(),
+            Zone::Graveyard,
+        );
+        let battlefield = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Battlefield".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+        state
+            .objects
+            .get_mut(&graveyard)
+            .unwrap()
+            .counters
+            .insert(CounterType::Lore, 1);
+        state
+            .objects
+            .get_mut(&battlefield)
+            .unwrap()
+            .counters
+            .insert(CounterType::Loyalty, 1);
+
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: Vec::new(),
+            controller: None,
+            properties: vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Exile, Zone::Graveyard],
+            }],
+        });
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &filter, &ctx),
+            vec![CounterType::Lore, CounterType::Stun],
+        );
+    }
+
+    /// CR 400.1 + CR 122.1: a disjunctive domain preserves each branch's
+    /// candidate universe. An unzoned creature branch defaults to the
+    /// battlefield even when its sibling explicitly names the graveyard.
+    #[test]
+    fn distinct_counter_kinds_among_preserves_mixed_cross_zone_or_domain() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exiled".to_string(),
+            Zone::Exile,
+        );
+        let graveyard = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Graveyard".to_string(),
+            Zone::Graveyard,
+        );
+        let battlefield = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Battlefield".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state
+            .objects
+            .get_mut(&graveyard)
+            .unwrap()
+            .counters
+            .insert(CounterType::Lore, 1);
+        state
+            .objects
+            .get_mut(&battlefield)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&battlefield)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: Vec::new(),
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: Vec::new(),
+                    controller: None,
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+            ],
+        };
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &filter, &ctx),
+            vec![CounterType::Lore, CounterType::Stun],
+        );
+    }
+
+    /// CR 400.1 + CR 122.1: two explicitly zoned disjuncts contribute both
+    /// candidate populations while excluding objects in an unrelated zone.
+    #[test]
+    fn distinct_counter_kinds_among_preserves_explicit_cross_zone_or_domain() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exiled".to_string(),
+            Zone::Exile,
+        );
+        let graveyard = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Graveyard".to_string(),
+            Zone::Graveyard,
+        );
+        let battlefield = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Battlefield".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state
+            .objects
+            .get_mut(&graveyard)
+            .unwrap()
+            .counters
+            .insert(CounterType::Lore, 1);
+        state
+            .objects
+            .get_mut(&battlefield)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let zone_filter = |zone| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: Vec::new(),
+                controller: None,
+                properties: vec![FilterProp::InZone { zone }],
+            })
+        };
+        let filter = TargetFilter::Or {
+            filters: vec![zone_filter(Zone::Exile), zone_filter(Zone::Graveyard)],
+        };
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &filter, &ctx),
+            vec![CounterType::Plus1Plus1, CounterType::Lore],
+        );
+    }
+
+    /// CR 608.2c + CR 122.1: an indexed parent domain reads the flattened root
+    /// target slots, not the resolving tail node's most-recent local target.
+    #[test]
+    fn distinct_counter_kinds_among_parent_slot_uses_chain_root() {
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&first)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state
+            .objects
+            .get_mut(&second)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(first)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(second)],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+
+        let local_tail = |index| {
+            ResolvedAbility::new(
+                Effect::ChooseCounterKind {
+                    target: TargetFilter::ParentTargetSlot { index },
+                },
+                vec![TargetRef::Object(second)],
+                source,
+                PlayerId(0),
+            )
+        };
+        let first_ability = local_tail(0);
+        let first_ctx = FilterContext::from_ability(&first_ability);
+        assert_eq!(
+            distinct_counter_kinds_among(
+                &state,
+                &TargetFilter::ParentTargetSlot { index: 0 },
+                &first_ctx,
+            ),
+            vec![CounterType::Plus1Plus1],
+        );
+
+        let second_ability = local_tail(1);
+        let second_ctx = FilterContext::from_ability(&second_ability);
+        assert_eq!(
+            distinct_counter_kinds_among(
+                &state,
+                &TargetFilter::ParentTargetSlot { index: 1 },
+                &second_ctx,
+            ),
+            vec![CounterType::Stun],
+        );
     }
 
     #[test]
