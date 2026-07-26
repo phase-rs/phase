@@ -71,6 +71,10 @@ fn moonmist_cast_transforms_all_humans_without_target_selection() {
         .add_creature(P1, "Goblin", 2, 2)
         .with_subtypes(vec!["Goblin"])
         .id();
+    let single_faced_human = scenario
+        .add_creature(P1, "Human C", 2, 2)
+        .with_subtypes(vec!["Human"])
+        .id();
     let moonmist = scenario
         .add_spell_to_hand_from_oracle(P0, "Moonmist", true, MOONMIST)
         .with_mana_cost(ManaCost::zero())
@@ -96,6 +100,10 @@ fn moonmist_cast_transforms_all_humans_without_target_selection() {
         "a non-Human must stay unchanged"
     );
     assert!(
+        !state.objects[&single_faced_human].transformed,
+        "a single-faced Human must be a no-op under CR 701.27c"
+    );
+    assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
         "Moonmist must resolve without a target-selection prompt"
     );
@@ -118,6 +126,19 @@ fn moonmist_cast_transforms_all_humans_without_target_selection() {
 /// separate face guard.
 #[test]
 fn thats_no_moonmist_front_face_restriction_stays_unimplemented() {
+    let supported_population = parse_effect("Transform all artifacts and Phyrexian creatures.");
+    assert!(
+        matches!(
+            supported_population,
+            Effect::Transform {
+                scope: EffectScope::All,
+                ..
+            }
+        ),
+        "the population without the face-state suffix must reach the mass-transform parser; \
+         got {supported_population:?}"
+    );
+
     let effect =
         parse_effect("Transform all artifacts and Phyrexian creatures on their front face.");
     assert!(
