@@ -317,7 +317,7 @@ describe("PermanentCard", () => {
     expect(attachmentLayer.style.zIndex).toBe("5");
     expect(nestedAttachmentLayer.style.zIndex).toBe("5");
 
-    fireEvent.mouseEnter(host);
+    fireEvent.pointerEnter(host, { pointerType: "mouse" });
 
     expect(host.style.zIndex).toBe("80");
     expect(attachmentLayer.style.zIndex).toBe("5");
@@ -329,7 +329,7 @@ describe("PermanentCard", () => {
     const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
     const nestedAttachment = container.querySelector('[data-object-id="3"]') as HTMLElement;
 
-    fireEvent.mouseEnter(nestedAttachment);
+    fireEvent.pointerEnter(nestedAttachment, { pointerType: "mouse" });
 
     expect(host.style.zIndex).toBe("80");
   });
@@ -378,7 +378,7 @@ describe("PermanentCard", () => {
     });
     expect(container.querySelector('[data-object-id="4"]')).toBeNull();
 
-    fireEvent.mouseEnter(container.querySelector('[data-object-id="1"]') as HTMLElement);
+    fireEvent.pointerEnter(container.querySelector('[data-object-id="1"]') as HTMLElement, { pointerType: "mouse" });
     expect(container.querySelector('[data-object-id="4"]')).toBeNull();
 
     act(() => {
@@ -641,7 +641,7 @@ describe("PermanentCard", () => {
     expect(queryByLabelText("Exiled Two")).toBeNull();
     expect(container.textContent).toContain("+1");
 
-    fireEvent.mouseEnter(container.querySelector('[data-object-id="1"]') as HTMLElement);
+    fireEvent.pointerEnter(container.querySelector('[data-object-id="1"]') as HTMLElement, { pointerType: "mouse" });
 
     expect(queryByLabelText("Exiled Two")).not.toBeNull();
   });
@@ -651,15 +651,94 @@ describe("PermanentCard", () => {
     const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
     const attachment = container.querySelector('[data-object-id="2"]') as HTMLElement;
 
-    fireEvent.mouseEnter(host);
+    fireEvent.pointerEnter(host, { pointerType: "mouse" });
     expect(useUiStore.getState().inspectedObjectId).toBe(1);
 
-    fireEvent.mouseEnter(attachment);
+    fireEvent.pointerEnter(attachment, { pointerType: "mouse" });
     expect(useUiStore.getState().inspectedObjectId).toBe(2);
 
-    fireEvent.mouseLeave(attachment, { relatedTarget: host });
+    fireEvent.pointerLeave(attachment, { pointerType: "mouse", relatedTarget: host });
     expect(useUiStore.getState().inspectedObjectId).toBe(1);
     expect(useUiStore.getState().hoveredObjectId).toBe(1);
+  });
+
+  // A remote-desktop session does not enumerate the local mouse as a HID, so the
+  // guest browser reports no hover-capable input — while still delivering honest
+  // `pointerenter` events with `pointerType: "mouse"`. Gating on the capability
+  // query killed battlefield hover outright on those hosts; gating on the event's
+  // own pointerType is what makes this environment work.
+  it("previews on a host whose hover capability queries all report false", () => {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+    Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 0 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1920 });
+
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.pointerEnter(host, { pointerType: "mouse" });
+
+    expect(useUiStore.getState().inspectedObjectId).toBe(1);
+    // The card-lift/z-index hover state is a second, independent symptom: it
+    // rides on hoverObject, which only this inline gate calls.
+    expect(useUiStore.getState().hoveredObjectId).toBe(1);
+    expect(host.style.zIndex).toBe("80");
+
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+  });
+
+  it("clears the hover lift when the pointer leaves for a non-card element", () => {
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.pointerEnter(host, { pointerType: "mouse" });
+    expect(useUiStore.getState().hoveredObjectId).toBe(1);
+
+    fireEvent.pointerLeave(host, { pointerType: "mouse", relatedTarget: document.body });
+
+    expect(useUiStore.getState().hoveredObjectId).toBeNull();
+  });
+
+  it("ignores a touch-synthesized pointer enter", () => {
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.pointerEnter(host, { pointerType: "touch" });
+
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
+    expect(useUiStore.getState().hoveredObjectId).toBeNull();
+  });
+
+  it("still cancels the long-press timer through the merged pointer-leave handler", () => {
+    // useLongPress owns an onPointerLeave of its own and the hover handler wins
+    // the key collision, so it must delegate — otherwise the timer survives the
+    // leave and opens a sticky preview over whatever the pointer moved on to.
+    vi.useFakeTimers();
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.pointerDown(host, {
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: "touch",
+    });
+    fireEvent.pointerLeave(host, { pointerId: 1, pointerType: "touch", relatedTarget: document.body });
+    act(() => vi.advanceTimersByTime(500));
+
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
+    expect(useUiStore.getState().previewSticky).toBe(false);
+    vi.useRealTimers();
   });
 
   it("targets the attached permanent itself when the attachment is clicked", () => {
