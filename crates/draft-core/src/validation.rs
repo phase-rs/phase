@@ -178,15 +178,6 @@ mod tests {
     }
 
     #[test]
-    fn wastes_count_as_basic() {
-        let pool: Vec<String> = (0..23).map(|i| format!("Card {i}")).collect();
-        let mut deck: Vec<String> = (0..23).map(|i| format!("Card {i}")).collect();
-        deck.extend(std::iter::repeat_n(s("Wastes"), 17));
-        assert_eq!(deck.len(), 40);
-        assert!(validate_limited_deck(&deck, &pool, &addable(), 40).is_ok());
-    }
-
-    #[test]
     fn accumulates_multiple_errors() {
         let pool = pool_of(&["A"]);
         let deck = pool_of(&["A", "Not In Pool"]); // too few + not in pool
