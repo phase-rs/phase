@@ -6,12 +6,13 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until, take_while_m_n};
 use nom::character::complete::{char, digit1, space0};
 use nom::combinator::{all_consuming, map, map_res, not, opt, peek, recognize, value};
-use nom::multi::{many0, many1};
+use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{delimited, preceded};
 use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
 use crate::types::ability::PtValue;
+use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterType, KEYWORD_COUNTERS};
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -338,6 +339,82 @@ pub fn parse_color(input: &str) -> OracleResult<'_, ManaColor> {
         value(ManaColor::Red, tag("red")),
         value(ManaColor::Green, tag("green")),
     ))
+    .parse(input)
+}
+
+/// CR 205.2a: Parse a single printed card-type word into its [`CoreType`].
+///
+/// Enumerates the CR 205.2a card-type list ("artifact, battle, conspiracy,
+/// creature, dungeon, enchantment, instant, kindred, land, phenomenon, plane,
+/// planeswalker, scheme, sorcery, and vanguard") plus the errata'd legacy
+/// "tribal" spelling of kindred (CR 308.3). Operates on already-lowercased text.
+///
+/// "vanguard" is absent because [`CoreType`] models no Vanguard variant — the
+/// Vanguard variant's avatar cards are out of scope for the engine, so there is
+/// nothing to map the word onto.
+///
+/// Ordering note: "planeswalker" MUST precede "plane" — they share a prefix and
+/// `alt` commits to the first success, so the reverse order would parse
+/// "planeswalker" as `Plane` with a stray "swalker" remainder.
+///
+/// This combinator matches a bare word with no trailing word-boundary check, so
+/// callers that parse a full phrase must verify the remainder themselves (e.g.
+/// via `all_consuming`) rather than accepting a prefix match.
+pub fn parse_core_type(input: &str) -> OracleResult<'_, CoreType> {
+    alt((
+        value(CoreType::Artifact, tag("artifact")),
+        value(CoreType::Battle, tag("battle")),
+        value(CoreType::Conspiracy, tag("conspiracy")),
+        value(CoreType::Creature, tag("creature")),
+        value(CoreType::Dungeon, tag("dungeon")),
+        value(CoreType::Enchantment, tag("enchantment")),
+        value(CoreType::Instant, tag("instant")),
+        value(CoreType::Kindred, tag("kindred")),
+        value(CoreType::Tribal, tag("tribal")),
+        value(CoreType::Land, tag("land")),
+        value(CoreType::Phenomenon, tag("phenomenon")),
+        value(CoreType::Planeswalker, tag("planeswalker")),
+        value(CoreType::Plane, tag("plane")),
+        value(CoreType::Scheme, tag("scheme")),
+        value(CoreType::Sorcery, tag("sorcery")),
+    ))
+    .parse(input)
+}
+
+/// CR 205.2a + CR 205.2b: Parse a disjunction of printed card-type words into
+/// the set of types that satisfy the gate — "instant or sorcery", "artifact or
+/// enchantment", "artifact, creature, or enchantment".
+///
+/// CR 205.2b ("objects satisfy the criteria for any effect that applies to any
+/// of their card types") is why a disjunction lowers to a *set*: consumers such
+/// as `AbilityCondition::RevealedHasCardType` match with `any`, so listing every
+/// printed leg is exactly the OR semantics the Oracle text prints.
+///
+/// Accepts both the Oxford-comma list form and the bare two-term "A or B" form.
+/// A single type word is a well-formed one-element disjunction, so this is a
+/// drop-in superset of [`parse_core_type`].
+pub fn parse_core_type_disjunction(input: &str) -> OracleResult<'_, Vec<CoreType>> {
+    separated_list1(parse_core_type_disjunction_separator, parse_core_type).parse(input)
+}
+
+/// Separator between the legs of a CR 205.2a card-type disjunction. Ordered
+/// longest-first so the Oxford comma in "artifact, creature, or enchantment" is
+/// consumed whole rather than leaving a dangling "or ".
+///
+/// Deliberately accepts only the disjunctive "or" forms. A printed "and"
+/// between card types is a CONJUNCTION naming one object that has both types
+/// ("artifact creature", "an artifact and creature card"), which is not the
+/// `any`-match set this combinator builds — admitting it here would silently
+/// widen a both-types gate into an either-type gate.
+fn parse_core_type_disjunction_separator(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>(", or "),
+            tag(" or "),
+            tag(", "),
+        )),
+    )
     .parse(input)
 }
 
@@ -1974,5 +2051,86 @@ mod tests {
             assert_eq!(kind, expected, "input: {input:?}");
         }
         assert!(parse_alt_cost_keyword_name_to_kind("unknown").is_err());
+    }
+
+    /// CR 205.2a: every card-type word the enum models maps to its `CoreType`.
+    #[test]
+    fn test_parse_core_type_covers_cr_205_2a_words() {
+        let cases = [
+            ("artifact", CoreType::Artifact),
+            ("battle", CoreType::Battle),
+            ("conspiracy", CoreType::Conspiracy),
+            ("creature", CoreType::Creature),
+            ("dungeon", CoreType::Dungeon),
+            ("enchantment", CoreType::Enchantment),
+            ("instant", CoreType::Instant),
+            ("kindred", CoreType::Kindred),
+            ("tribal", CoreType::Tribal),
+            ("land", CoreType::Land),
+            ("phenomenon", CoreType::Phenomenon),
+            ("plane", CoreType::Plane),
+            ("scheme", CoreType::Scheme),
+            ("sorcery", CoreType::Sorcery),
+        ];
+        for (input, expected) in cases {
+            let (rest, parsed) = parse_core_type(input).unwrap();
+            assert_eq!(parsed, expected, "input: {input:?}");
+            assert!(rest.is_empty(), "input {input:?} left remainder {rest:?}");
+        }
+        assert!(parse_core_type("goblin").is_err());
+    }
+
+    /// "planeswalker" shares a prefix with "plane"; `alt` commits to its first
+    /// success, so the longer word must win or the remainder is corrupted.
+    #[test]
+    fn test_parse_core_type_prefers_planeswalker_over_plane() {
+        let (rest, parsed) = parse_core_type("planeswalker").unwrap();
+        assert_eq!(parsed, CoreType::Planeswalker);
+        assert!(rest.is_empty(), "planeswalker left remainder {rest:?}");
+    }
+
+    /// CR 205.2a + CR 205.2b: a printed disjunction carries every leg.
+    #[test]
+    fn test_parse_core_type_disjunction_carries_every_leg() {
+        let cases: [(&str, Vec<CoreType>); 4] = [
+            ("sorcery", vec![CoreType::Sorcery]),
+            (
+                "instant or sorcery",
+                vec![CoreType::Instant, CoreType::Sorcery],
+            ),
+            (
+                "artifact, creature, or enchantment",
+                vec![
+                    CoreType::Artifact,
+                    CoreType::Creature,
+                    CoreType::Enchantment,
+                ],
+            ),
+            ("land, instant", vec![CoreType::Land, CoreType::Instant]),
+        ];
+        for (input, expected) in cases {
+            let (rest, parsed) = parse_core_type_disjunction(input).unwrap();
+            assert_eq!(parsed, expected, "input: {input:?}");
+            assert!(rest.is_empty(), "input {input:?} left remainder {rest:?}");
+        }
+    }
+
+    /// A printed "and" between card types is a conjunction naming one object
+    /// with BOTH types, not the `any`-match set this combinator builds — it must
+    /// not be swallowed as a disjunction separator.
+    #[test]
+    fn test_parse_core_type_disjunction_rejects_and_conjunction() {
+        let (rest, parsed) = parse_core_type_disjunction("artifact and creature").unwrap();
+        assert_eq!(parsed, vec![CoreType::Artifact]);
+        assert_eq!(rest, " and creature");
+    }
+
+    /// A trailing non-type clause must not be consumed: `separated_list1` has to
+    /// backtrack over the dangling comma rather than failing the whole parse.
+    #[test]
+    fn test_parse_core_type_disjunction_backtracks_over_trailing_clause() {
+        let (rest, parsed) = parse_core_type_disjunction("instant, then draw a card").unwrap();
+        assert_eq!(parsed, vec![CoreType::Instant]);
+        assert_eq!(rest, ", then draw a card");
     }
 }

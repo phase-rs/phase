@@ -22708,3 +22708,57 @@ fn bbfu10_ledger_variant_reaches_filter_prop_scan() {
         "negative control: a prop-free ledger filter must still read false",
     );
 }
+
+/// CR 205.2a + CR 205.2b + CR 608.2c (issue #518): every shipped card printing
+/// an "if it's an instant or sorcery card" gate must carry BOTH printed legs.
+///
+/// `RevealedHasCardType` matches `card_types` with `any`, so a dropped leg makes
+/// the gate silently false for that type. Before the fix the gate body reduced
+/// the type phrase to its last word, so all five of these cards parsed to a
+/// bare `[Sorcery]` and never fired on an instant.
+///
+/// Drives the real shipped Oracle text through `parse_oracle_text` (the full
+/// synthesis entry point) and asserts over the serialized parse, so the check is
+/// independent of which ability kind each card routes through — these five span
+/// triggers, activated abilities, and chained sub-abilities.
+#[test]
+fn instant_or_sorcery_reveal_gates_keep_both_legs() {
+    // (card name, oracle text) — verified against client/public/card-data.json.
+    let cards: [(&str, &str); 5] = [
+        (
+            "Hidetsugu and Kairi",
+            "Flying\nWhen Hidetsugu and Kairi enters, draw three cards, then put two cards from your hand on top of your library in any order.\nWhen Hidetsugu and Kairi dies, exile the top card of your library. Target opponent loses life equal to its mana value. If it's an instant or sorcery card, you may cast it without paying its mana cost.",
+        ),
+        (
+            "Oriq Loremage",
+            "{T}: Search your library for a card, put it into your graveyard, then shuffle. If it's an instant or sorcery card, put a +1/+1 counter on this creature.",
+        ),
+        (
+            "The Biblioplex",
+            "{T}: Add {C}.\n{2}, {T}: Look at the top card of your library. If it's an instant or sorcery card, you may reveal it and put it into your hand. If you don't put the card into your hand, you may put it into your graveyard. Activate only if you have exactly zero or seven cards in hand.",
+        ),
+        (
+            "Planeswalker's Mischief",
+            "{3}{U}: Target opponent reveals a card at random from their hand. If it's an instant or sorcery card, exile it. You may cast it without paying its mana cost for as long as it remains exiled. At the beginning of the next end step, if you haven't cast it, return it to its owner's hand. Activate only as a sorcery.",
+        ),
+        (
+            "Cryptic Pursuit",
+            "Whenever you cast an instant or sorcery spell from your hand, manifest the top card of your library.\nWhenever a face-down creature you control dies, exile it if it's an instant or sorcery card. You may cast that card until the end of your next turn.",
+        ),
+    ];
+
+    for (name, oracle_text) in cards {
+        let parsed = parse_oracle_text(oracle_text, name, &[], &[], &[]);
+        let json = serde_json::to_string(&parsed)
+            .unwrap_or_else(|e| panic!("{name} should serialize: {e}"));
+
+        assert!(
+            json.contains(r#""card_types":["Instant","Sorcery"]"#),
+            "{name}: the instant-or-sorcery gate must carry both legs"
+        );
+        assert!(
+            !json.contains(r#""card_types":["Sorcery"]"#),
+            "{name}: no bare [Sorcery] gate should survive — the instant leg was dropped"
+        );
+    }
+}
