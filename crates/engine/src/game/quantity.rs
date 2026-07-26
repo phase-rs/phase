@@ -2056,6 +2056,33 @@ fn tracked_set_object_ids(
         .unwrap_or_default()
 }
 
+/// Return the positive population explicitly supplied by a normalized branch
+/// term. A surrounding conjunction uses this population as the universe for
+/// predicate-valued negations nested below an `Or`.
+fn filter_population_anchor_ids(state: &GameState, filter: &TargetFilter) -> Option<Vec<ObjectId>> {
+    let ids = match filter {
+        TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
+        TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => {
+            tracked_set_object_ids(state, *id)
+        }
+        TargetFilter::Not { .. } | TargetFilter::Or { .. } | TargetFilter::And { .. } => {
+            return None;
+        }
+        _ => {
+            let zones = filter.extract_zones();
+            if zones.is_empty() {
+                return None;
+            }
+            zones
+                .into_iter()
+                .flat_map(|zone| crate::game::targeting::zone_object_ids(state, zone))
+                .collect()
+        }
+    };
+    let mut seen = HashSet::new();
+    Some(ids.into_iter().filter(|id| seen.insert(*id)).collect())
+}
+
 /// Match object ids within the population declared by `filter`.
 ///
 /// Disjunctive branches own independent populations: an unzoned branch
@@ -2089,11 +2116,24 @@ fn matching_object_ids_in_filter_universe(
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for branch in filter_disjunctive_branches(filter, FilterTermRole::Predicate) {
+        let mut anchor_populations = branch
+            .iter()
+            .filter_map(|term| filter_population_anchor_ids(state, &term.filter));
+        let mut anchored_branch_ids = anchor_populations.next();
+        if let Some(branch_ids) = &mut anchored_branch_ids {
+            for population in anchor_populations {
+                let population: HashSet<ObjectId> = population.into_iter().collect();
+                branch_ids.retain(|id| population.contains(id));
+            }
+        }
         let population_terms: Vec<&FilterPopulationTerm> = branch
             .iter()
             .filter(|term| term.role == FilterTermRole::Population)
             .collect();
-        let mut branch_ids = if let Some(first) = population_terms.first() {
+        let has_population_anchor = anchored_branch_ids.is_some();
+        let mut branch_ids = if let Some(anchored) = anchored_branch_ids {
+            anchored
+        } else if let Some(first) = population_terms.first() {
             matching_object_ids_in_filter_universe(state, &first.filter, filter_ctx)
         } else {
             let combined = TargetFilter::And {
@@ -2102,16 +2142,18 @@ fn matching_object_ids_in_filter_universe(
             .normalized();
             filter_candidate_universe(state, &combined)
         };
-        for term in population_terms.into_iter().skip(1) {
-            let matching: HashSet<ObjectId> =
-                matching_object_ids_in_filter_universe(state, &term.filter, filter_ctx)
-                    .into_iter()
-                    .collect();
-            branch_ids.retain(|id| matching.contains(id));
+        if !has_population_anchor {
+            for term in population_terms.iter().skip(1) {
+                let matching: HashSet<ObjectId> =
+                    matching_object_ids_in_filter_universe(state, &term.filter, filter_ctx)
+                        .into_iter()
+                        .collect();
+                branch_ids.retain(|id| matching.contains(id));
+            }
         }
         branch_ids.retain(|id| {
             branch.iter().all(|term| {
-                term.role == FilterTermRole::Population
+                (!has_population_anchor && term.role == FilterTermRole::Population)
                     || target_filter_matches_population_semantics(
                         state,
                         *id,
@@ -8648,6 +8690,181 @@ mod tests {
             object_count_matching_ids(&state, &filter, &ctx, ObjectId(0)),
             vec![green],
             "a nested negation evaluates against the enclosing ledger population"
+        );
+    }
+
+    #[test]
+    fn object_count_matching_ids_nested_or_not_uses_explicit_graveyard_population() {
+        let mut state = GameState::new_two_player(46);
+        let red = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red".to_string(),
+            Zone::Graveyard,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Green".to_string(),
+            Zone::Graveyard,
+        );
+        let battlefield_green = create_object(
+            &mut state,
+            CardId(407),
+            PlayerId(1),
+            "Battlefield Green".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&red).unwrap().color = vec![ManaColor::Red];
+        state.objects.get_mut(&green).unwrap().color = vec![ManaColor::Green];
+        state.objects.get_mut(&battlefield_green).unwrap().color = vec![ManaColor::Green];
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }])),
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::Typed(TypedFilter::card().properties(
+                                vec![FilterProp::HasColor {
+                                    color: ManaColor::Red,
+                                }],
+                            ))),
+                        },
+                        TargetFilter::None,
+                    ],
+                },
+            ],
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+
+        assert_eq!(
+            object_count_matching_ids(&state, &filter, &ctx, ObjectId(0)),
+            vec![green],
+            "a negated Or branch must use the enclosing graveyard population"
+        );
+    }
+
+    #[test]
+    fn object_count_matching_ids_nested_or_not_uses_last_zone_changed_population() {
+        let mut state = GameState::new_two_player(46);
+        let red = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red".to_string(),
+            Zone::Graveyard,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Green".to_string(),
+            Zone::Graveyard,
+        );
+        let untracked_green = create_object(
+            &mut state,
+            CardId(407),
+            PlayerId(1),
+            "Untracked Green".to_string(),
+            Zone::Graveyard,
+        );
+        for id in [red, green, untracked_green] {
+            state.objects.get_mut(&id).unwrap().color = if id == red {
+                vec![ManaColor::Red]
+            } else {
+                vec![ManaColor::Green]
+            };
+        }
+        state.last_zone_changed_ids = vec![red, green];
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::LastZoneChanged,
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::Typed(TypedFilter::card().properties(
+                                vec![FilterProp::HasColor {
+                                    color: ManaColor::Red,
+                                }],
+                            ))),
+                        },
+                        TargetFilter::None,
+                    ],
+                },
+            ],
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+
+        assert_eq!(
+            object_count_matching_ids(&state, &filter, &ctx, ObjectId(0)),
+            vec![green],
+            "a negated Or branch must use the enclosing zone-change ledger"
+        );
+    }
+
+    #[test]
+    fn object_count_matching_ids_nested_or_not_uses_tracked_set_population() {
+        let mut state = GameState::new_two_player(46);
+        let red = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red".to_string(),
+            Zone::Exile,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Green".to_string(),
+            Zone::Exile,
+        );
+        let untracked_green = create_object(
+            &mut state,
+            CardId(407),
+            PlayerId(1),
+            "Untracked Green".to_string(),
+            Zone::Exile,
+        );
+        for id in [red, green, untracked_green] {
+            state.objects.get_mut(&id).unwrap().color = if id == red {
+                vec![ManaColor::Red]
+            } else {
+                vec![ManaColor::Green]
+            };
+        }
+        let tracked = TrackedSetId(1);
+        state.tracked_object_sets.insert(tracked, vec![red, green]);
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::TrackedSet { id: tracked },
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::Typed(TypedFilter::card().properties(
+                                vec![FilterProp::HasColor {
+                                    color: ManaColor::Red,
+                                }],
+                            ))),
+                        },
+                        TargetFilter::None,
+                    ],
+                },
+            ],
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+
+        assert_eq!(
+            object_count_matching_ids(&state, &filter, &ctx, ObjectId(0)),
+            vec![green],
+            "a negated Or branch must use the enclosing tracked set"
         );
     }
 
