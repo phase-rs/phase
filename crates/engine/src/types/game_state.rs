@@ -15770,6 +15770,16 @@ impl GameState {
         })
     }
 
+    /// CR 800.4: Begin the distinct execution node for one player leaving the
+    /// game, so every mutation the leave sweep performs is attributed to the
+    /// leave rather than to whatever rules work was in flight when the
+    /// state-based action fired.
+    pub(crate) fn begin_player_leave_journal_node(&mut self) -> RulesExecutionNodeRef {
+        self.resolved_rules_journal
+            .begin_player_leave()
+            .expect("resolved-rules journal command ordinal overflow")
+    }
+
     /// CR 605.3b: Begin the distinct, immediate execution node for one
     /// activated mana ability. A nested activation records its active parent as
     /// the causal dependency without changing activation behavior.

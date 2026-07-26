@@ -91,6 +91,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         ResolvedRulesCommand::ObjectCease(command) => {
             engine::game::zones::apply_resolved_object_cease(state, command).unwrap();
         }
+        ResolvedRulesCommand::PlayerLeave(command) => {
+            engine::game::elimination::apply_resolved_player_leave(state, command).unwrap();
+        }
         ResolvedRulesCommand::LedgerEdit(command) => {
             engine::game::ledger::apply_resolved_ledger_edit(state, command).unwrap();
         }
@@ -202,6 +205,7 @@ fn exact_mana_spend_rejects_a_second_removal() {
             | ResolvedRulesCommand::ControllerOverride(_)
             | ResolvedRulesCommand::EntryProvenance(_)
             | ResolvedRulesCommand::ObjectCease(_)
+            | ResolvedRulesCommand::PlayerLeave(_)
             | ResolvedRulesCommand::LedgerEdit(_)
             | ResolvedRulesCommand::LibraryShuffle(_)
             | ResolvedRulesCommand::ZoneChange(_)

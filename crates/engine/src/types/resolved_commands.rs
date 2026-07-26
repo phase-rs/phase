@@ -347,6 +347,32 @@ pub enum ResolvedObjectCeaseReplayInvariantError {
     OwnerMismatch { expected: PlayerId, found: PlayerId },
 }
 
+/// One exact CR 800.4 player departure.
+///
+/// The departure itself is two writes — the player's `is_eliminated` flag and
+/// their append to `eliminated_players` — that always move together, so they are
+/// one command rather than two. Everything the CR 800.4 sweep does afterwards
+/// (exiling owned objects, reverting control effects, clearing the stack)
+/// already journals through its own family; this command carries the departure,
+/// and the surrounding `PlayerLeave` node carries the causal grouping.
+///
+/// There is no `expected_old` field: "was still in the game" is the precondition,
+/// and a stored copy could only ever hold one value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPlayerLeaveCommand {
+    pub player: PlayerId,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved player departure.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedPlayerLeaveReplayInvariantError {
+    #[error("player-leave command references an unknown player {0:?}")]
+    UnknownPlayer(PlayerId),
+    #[error("player-leave command re-eliminates player {0:?}, who had already left")]
+    AlreadyEliminated(PlayerId),
+}
+
 /// The audience that received one exact revealed-card fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedInformationAudience {
@@ -596,6 +622,7 @@ pub enum ResolvedRulesCommand {
     ControllerOverride(ResolvedControllerOverrideCommand),
     EntryProvenance(ResolvedEntryProvenanceCommand),
     ObjectCease(ResolvedObjectCeaseCommand),
+    PlayerLeave(ResolvedPlayerLeaveCommand),
     Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
@@ -1271,6 +1298,42 @@ impl ResolvedRulesJournal {
         Ok(identity)
     }
 
+    /// CR 800.4: Begin the distinct execution node for one player leaving the
+    /// game.
+    ///
+    /// A leave is not a proposal: every mutation the CR 800.4 sweep performs —
+    /// the owned-object exiles, the control-effect reversions, the stack
+    /// removals — is caused by the leave itself, not by whatever rules work
+    /// happened to be in flight when the state-based action fired. Giving the
+    /// leave its own node keeps those commands attributed to it, so a replay can
+    /// identify the sweep as one causal unit.
+    pub fn begin_player_leave(
+        &mut self,
+    ) -> Result<RulesExecutionNodeRef, ResolvedRulesJournalError> {
+        self.ensure_command_capacity()?;
+        self.ensure_node_capacity()?;
+        let command = self.allocate_command();
+        let ordinal = self.allocate_node();
+        let identity = RulesExecutionNodeRef::PlayerLeave(command);
+        self.entries.push(ResolvedCommandJournalEntry {
+            ordinal: command,
+            node: identity,
+            command: None,
+        });
+        self.nodes.push(SettlementNode {
+            ordinal,
+            identity,
+            kind: RulesExecutionNodeKind::PlayerLeave,
+            caused_by: None,
+            depends_on: Vec::new(),
+            bundle_parent: None,
+            produced_pips: Vec::new(),
+            spent_pips: Vec::new(),
+            journal_ordinals: vec![command],
+        });
+        Ok(identity)
+    }
+
     pub fn begin_activated_mana(
         &mut self,
         source: ObjectIncarnationRef,
@@ -1536,6 +1599,14 @@ impl ResolvedRulesJournal {
         self.append_command(command.cause, ResolvedRulesCommand::ObjectCease(command))
     }
 
+    /// Records one exact CR 800.4 player departure under its causal node.
+    pub fn record_player_leave(
+        &mut self,
+        command: ResolvedPlayerLeaveCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::PlayerLeave(command))
+    }
+
     /// Records one exact bounded resolution-frame transition under its causal node.
     pub fn record_frame_transition(
         &mut self,
@@ -1761,6 +1832,7 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::ControllerOverride(_)
                 | ResolvedRulesCommand::EntryProvenance(_)
                 | ResolvedRulesCommand::ObjectCease(_)
+                | ResolvedRulesCommand::PlayerLeave(_)
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
                 | ResolvedRulesCommand::LibraryShuffle(_)
@@ -2076,6 +2148,17 @@ impl ResolvedRulesJournal {
                         "cease command names a zone objects never cease from, or has an \
                          unrelated cause"
                             .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::PlayerLeave(command) => {
+                // CR 800.4: a departure is caused by the leave node opened for
+                // it, never by an unrelated proposal that happened to be live.
+                if entry.node != command.cause
+                    || !matches!(command.cause, RulesExecutionNodeRef::PlayerLeave(_))
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "player-leave command is not attributed to a player-leave node".to_string(),
                     ));
                 }
             }

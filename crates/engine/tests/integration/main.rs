@@ -99,6 +99,7 @@ mod cr733_resolved_enter_tapped;
 mod cr733_resolved_entry_retags;
 mod cr733_resolved_frame_transition;
 mod cr733_resolved_object_cease;
+mod cr733_resolved_player_leave;
 mod cr733_resolved_transform;
 mod cr733_resolved_trigger_collection;
 mod cr733_resolved_zone_change;
