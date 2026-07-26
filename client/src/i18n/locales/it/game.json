@@ -248,6 +248,7 @@
     "target": "Bersaglio",
     "copy": "Copia",
     "copyTooltip": "Copia pedina di una carta reale",
+    "cantBeBlocked": "Non può essere bloccata",
     "ringBearer": "Anello",
     "ringBearerTooltip": "Portatore dell'Anello",
     "hiddenAttachments": "+{{count}} more attached",
@@ -499,13 +500,22 @@
     "clickToFocus": "clicca per mettere a fuoco"
   },
   "manaPool": {
+    "onlyForSpell": "Spendi solo per lanciare magie",
     "onlyForSpellType": "Spendi solo per lanciare magie di un tipo specifico",
     "onlyForCreatureType": "Spendi solo per lanciare una magia creatura del tipo scelto",
     "onlyForTypeSpellsOrAbilities": "Spendi solo su magie o abilità di un tipo specifico",
+    "onlyForTaggedActivation": "Spendi solo per attivare abilità di un tipo specifico",
     "onlyForSpellWithKeywordKind": "Spendi solo per lanciare magie con una parola chiave specifica",
     "onlyForSpellWithKeywordKindFromZone": "Spendi solo per lanciare magie con parola chiave da un cimitero",
+    "onlyForSpellWithManaValue": "Spendi solo per lanciare magie che soddisfano un requisito di valore di mana",
+    "onlyForSpellMatchingCostCriteria": "Spendi solo per lanciare magie che soddisfano un requisito di costo",
+    "onlyForSpellWithColorCount": "Spendi solo per lanciare magie che soddisfano un requisito sul numero di colori",
+    "onlyForSpellFromZone": "Spendi solo per lanciare magie da una zona consentita",
+    "onlyForFaceDownSpell": "Spendi solo per lanciare magie a faccia in giù",
     "onlyForActivation": "Spendi solo per attivare abilità",
     "onlyForXCosts": "Spendi solo su costi che includono {X}",
+    "onlyForAny": "Spendi solo per uno degli usi elencati",
+    "onlyForSpecialAction": "Spendi solo per un'azione speciale specifica",
     "convokePayment": "Pagamento di Convocare",
     "grantsProperty": "Concede una proprietà alla magia",
     "grantCantBeCountered": "Spendi per questa magia per renderla impossibile da neutralizzare"
@@ -653,6 +663,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Deve bloccare {{attacker}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1701,9 +1712,30 @@
     "targetCreature": "il bersaglio creatura",
     "targetChoice": "questa scelta del bersaglio"
   },
+  "giftRecipient": {
+    "title": "Scegli il destinatario del dono",
+    "subtitle": "Scegli quale avversario riceve il dono promesso."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Promettere un dono?",
+      "pay": "Prometti {{gift}}",
+      "decline": "Lancia senza promettere",
+      "kind": {
+        "card": "una carta",
+        "treasure": "un Tesoro",
+        "food": "un Cibo",
+        "tappedFish": "un Pesce TAPpato"
+      }
+    }
+  },
   "clashOpponent": {
     "title": "Scegli l'avversario per lo scontro",
     "subtitle": "Scegli quale avversario si scontrerà con te."
+  },
+  "zoneOpponentChooser": {
+    "title": "Scegli avversario",
+    "subtitle": "Scegli quale avversario effettua la scelta."
   },
   "pileOpponent": {
     "title": "Choose Opponent",

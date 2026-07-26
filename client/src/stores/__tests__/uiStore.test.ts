@@ -1,7 +1,7 @@
 import { act } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { useUiStore } from "../uiStore";
+import { blockerAssignmentPairs, useUiStore } from "../uiStore";
 
 describe("uiStore", () => {
   beforeEach(() => {
@@ -10,9 +10,12 @@ describe("uiStore", () => {
         selectedObjectId: null,
         hoveredObjectId: null,
         inspectedObjectId: null,
+        inspectedFaceIndex: 0,
+        altHeld: false,
         selectedCardIds: [],
         fullControl: false,
         autoPass: false,
+        blockerAssignments: new Map(),
       });
     });
   });
@@ -30,6 +33,32 @@ describe("uiStore", () => {
   it("inspectObject sets inspectedObjectId", () => {
     act(() => useUiStore.getState().inspectObject(99));
     expect(useUiStore.getState().inspectedObjectId).toBe(99);
+  });
+
+  it("inspecting a different object resets a pinned altHeld", () => {
+    act(() => {
+      useUiStore.getState().inspectObject(1);
+      useUiStore.getState().setAltHeld(true);
+    });
+    expect(useUiStore.getState().altHeld).toBe(true);
+
+    // Switching to a new card dismisses the old preview — Alt must not leak.
+    act(() => useUiStore.getState().inspectObject(2));
+    expect(useUiStore.getState().inspectedObjectId).toBe(2);
+    expect(useUiStore.getState().altHeld).toBe(false);
+  });
+
+  it("re-inspecting the same object preserves a pinned altHeld", () => {
+    act(() => {
+      useUiStore.getState().inspectObject(5);
+      useUiStore.getState().setAltHeld(true);
+    });
+
+    // Re-hover / face flip on the same card keeps the reader pinned.
+    act(() => useUiStore.getState().inspectObject(5, 1));
+    expect(useUiStore.getState().inspectedObjectId).toBe(5);
+    expect(useUiStore.getState().inspectedFaceIndex).toBe(1);
+    expect(useUiStore.getState().altHeld).toBe(true);
   });
 
   it("addSelectedCard appends to selectedCardIds", () => {
@@ -95,6 +124,22 @@ describe("uiStore", () => {
     expect(useUiStore.getState().autoPass).toBe(false);
     act(() => useUiStore.getState().toggleAutoPass());
     expect(useUiStore.getState().autoPass).toBe(true);
+  });
+
+  it("retains multiple attackers for one blocker and removes only the chosen pair", () => {
+    act(() => {
+      useUiStore.getState().assignBlocker(10, 100);
+      useUiStore.getState().assignBlocker(10, 101);
+      useUiStore.getState().assignBlocker(10, 100);
+    });
+
+    expect(blockerAssignmentPairs(useUiStore.getState().blockerAssignments)).toEqual([
+      [10, 100],
+      [10, 101],
+    ]);
+
+    act(() => useUiStore.getState().removeBlockerAssignment(10, 100));
+    expect(blockerAssignmentPairs(useUiStore.getState().blockerAssignments)).toEqual([[10, 101]]);
   });
 
   it("toggleDebugClickModeButtonVisible flips the pinned click-mode control", () => {

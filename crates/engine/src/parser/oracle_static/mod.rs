@@ -127,7 +127,7 @@ mod support {
         apply_spell_keyword_subject_constraints, fold_grant_cap_rider,
         parse_chosen_qualifier_subject, parse_continuous_modifications,
         parse_quoted_ability_modifications, push_grant_clause_modifications, split_keyword_list,
-        RuleStaticPredicate,
+        with_protection_does_not_remove, RuleStaticPredicate,
     };
     pub(super) use super::restriction::{
         parse_cant_be_activated_exemption_in_text, parse_cast_and_activate_only_during,
@@ -221,6 +221,11 @@ pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
 pub(crate) fn lower_static_ir(ir: &StaticIr) -> crate::types::ability::StaticDefinition {
     let mut def = ir.definition.clone();
     shared::populate_active_zones_from_condition(&mut def);
+    // CR 611.3a: a bare counter anaphor in a per-recipient continuous static
+    // names the affected object, not the source. Rebound here — after every
+    // builder has produced its definition — so the transform is single-authority
+    // rather than repeated in anthem / type_change / grammar.
+    shared::bind_counter_anaphor_to_recipient(&mut def);
     def
 }
 

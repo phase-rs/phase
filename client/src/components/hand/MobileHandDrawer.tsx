@@ -294,7 +294,7 @@ const DrawerCard = memo(function DrawerCard({
       {/* @container overlay sized to the card so the pips scale in cqi with the
           drawer card's width instead of a fixed px size. */}
       <div className="pointer-events-none absolute inset-0 @container">
-        <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" className="absolute right-[4%] top-[2%]" />
+        <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" />
       </div>
     </button>
   );

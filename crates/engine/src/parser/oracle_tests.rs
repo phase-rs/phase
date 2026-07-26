@@ -3687,7 +3687,14 @@ fn leadership_vacuum_returns_target_players_commanders_to_command_zone() {
             destination,
             target:
                 TargetFilter::Typed(TypedFilter {
-                    controller: Some(ControllerRef::You),
+                    // CR 109.4 + CR 115.10a (issue #6505): "each commander THEY
+                    // control" is the TARGET player's commanders, not the
+                    // caster's. The anaphoric "they" now lowers to `ScopedPlayer`
+                    // (bound to the declared target player by the resolution-time
+                    // `scoped_player` stamp), fixing the same class as Strategic
+                    // Betrayal. Previously it wrongly resolved to `You` (the
+                    // caster), contradicting this test's own name.
+                    controller: Some(ControllerRef::ScopedPlayer),
                     properties,
                     ..
                 }),
@@ -14805,6 +14812,57 @@ fn twinflame_full_parse() {
             }
         }
         other => panic!("expected CreateDelayedTrigger, got {other:?}"),
+    }
+}
+
+/// CR 115.1d + CR 601.2c + CR 707.2 (issue #6509): Doppelgang — "For each of X
+/// target permanents, create X tokens that are copies of that permanent." The
+/// single-sentence for-each-of distributor must (a) target EXACTLY X permanents
+/// (`MultiTargetSpec::exact(X)`) and (b) create X copies of each chosen target
+/// (`CopyTokenOf { target: Typed(permanent), count: X }`). Previously this
+/// resolved without effect because the inline targeted set never lowered.
+#[test]
+fn doppelgang_full_parse() {
+    use crate::types::ability::{
+        Effect, MultiTargetSpec, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+    };
+
+    let r = parse(
+        "For each of X target permanents, create X tokens that are copies of that permanent.",
+        "Doppelgang",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+
+    assert_eq!(r.abilities.len(), 1, "expected single spell ability");
+    let ab = &r.abilities[0];
+
+    let x = QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    };
+
+    // Exactly X targets, each a permanent.
+    assert_eq!(
+        ab.multi_target,
+        Some(MultiTargetSpec::exact(x.clone())),
+        "Doppelgang must target exactly X permanents"
+    );
+
+    match &*ab.effect {
+        Effect::CopyTokenOf { target, count, .. } => {
+            let TargetFilter::Typed(tf) = target else {
+                panic!("copy source must be the chosen permanent targets, got {target:?}");
+            };
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Permanent),
+                "copy source must filter permanents, not resolve an anaphor"
+            );
+            assert_eq!(*count, x, "each target yields X copies");
+        }
+        other => panic!("expected CopyTokenOf, got {other:?}"),
     }
 }
 

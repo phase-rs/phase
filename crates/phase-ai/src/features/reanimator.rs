@@ -235,28 +235,58 @@ fn effect_is_reanimation(effect: &Effect) -> bool {
     )
 }
 
-/// CR 701.17a / CR 701.9a: an effect that fills the controller's own graveyard.
+/// CR 701.17a / CR 701.9a / CR 701.25a / CR 701.20e: an effect that fills the
+/// controller's own graveyard.
+///
+/// **Single authority for "does this effect load my own graveyard".** Shared by
+/// the reanimator axis (what is there to bring back) and the graveyard
+/// type-diversity axis (how wide the graveyard's type spread is). Those axes
+/// measure different resources but ask this one question identically, so they
+/// must not answer it from two divergent local copies.
+///
 /// A self-mill must deposit into the graveyard (not exile); a discard always
-/// goes to the graveyard. Both must be controller-scoped — a `Player`-targeted
-/// mill/discard is opponent disruption (Mind Rot, Glimpse the Unthinkable), not
-/// a self-enabler.
-fn effect_fills_own_graveyard(effect: &Effect) -> bool {
+/// goes there. `Surveil` (CR 701.25a) and a `Dig` whose *rest* goes to the
+/// graveyard (CR 701.20e — "look at N, put one in hand, the rest into your
+/// graveyard") both deposit as well, and the latter is the densest type-spread
+/// filler on the board. Every form must be controller-scoped — a
+/// `Player`-targeted mill/discard is opponent disruption (Mind Rot, Glimpse the
+/// Unthinkable), not a self-enabler.
+pub(crate) fn effect_fills_own_graveyard(effect: &Effect) -> bool {
     match effect {
         Effect::Mill {
             target,
             destination,
             ..
         } => *destination == Zone::Graveyard && target_fills_own_graveyard(target),
-        Effect::Discard { target, .. } => target_fills_own_graveyard(target),
+        Effect::Discard { target, .. } | Effect::DiscardCard { target, .. } => {
+            target_fills_own_graveyard(target)
+        }
+        Effect::Surveil { target, .. } => target_fills_own_graveyard(target),
+        // CR 701.20e: only the rest-to-graveyard form deposits; a Dig whose
+        // remainder goes to the bottom of the library fills nothing.
+        Effect::Dig {
+            player,
+            rest_destination,
+            ..
+        } => *rest_destination == Some(Zone::Graveyard) && target_fills_own_graveyard(player),
         _ => false,
     }
 }
 
-/// CR 608.2c: "you mill/discard" (`Controller`) and the unspecified default
-/// (`Any`, e.g. "discard two cards" / "mill three cards") load the resolving
-/// player's own graveyard. An explicitly targeted `Player` is opponent-facing.
+/// CR 608.2c: "you mill/discard" (`Controller`), the source itself (`SelfRef`),
+/// an explicitly you-controlled scope (`Typed { controller: You }`), and the
+/// unspecified default (`Any`, e.g. "discard two cards" / "mill three cards")
+/// all load the resolving player's own graveyard. An explicitly targeted
+/// `Player` is opponent-facing.
 fn target_fills_own_graveyard(filter: &TargetFilter) -> bool {
-    matches!(filter, TargetFilter::Controller | TargetFilter::Any)
+    match filter {
+        TargetFilter::Controller | TargetFilter::Any | TargetFilter::SelfRef => true,
+        TargetFilter::Typed(typed) => matches!(typed.controller, Some(ControllerRef::You)),
+        TargetFilter::Or { filters } => filters.iter().any(target_fills_own_graveyard),
+        // Every constraint of a conjunction must hold for the match.
+        TargetFilter::And { filters } => filters.iter().all(target_fills_own_graveyard),
+        _ => false,
+    }
 }
 
 /// CR 608.2b: unwrap a reanimation target filter. Accepts a filter that

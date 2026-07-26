@@ -91,7 +91,7 @@ fn throw_index(runner: &GameRunner, cap: ObjectId) -> usize {
 
 fn give_generic_mana(runner: &mut GameRunner, player: engine::types::player::PlayerId, n: usize) {
     for _ in 0..n {
-        runner.state_mut().add_mana_to_pool(
+        let _ = runner.state_mut().add_mana_to_pool(
             player,
             ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
         );

@@ -26,6 +26,10 @@ use crate::types::keywords::WardCost;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
+use crate::types::resolved_commands::{
+    ResolvedTriggerCollection, ResolvedTriggerCollectionCommand,
+    ResolvedTriggerCollectionReplayInvariantError,
+};
 use crate::types::statics::{
     StaticMode, SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
 };
@@ -304,6 +308,57 @@ impl PendingTriggerContext {
     }
 }
 
+/// Applies exact trigger/LKI collection output without rerunning trigger matching.
+///
+/// CR 603.2 + CR 603.3b: pending contexts preserve their resolved firing and
+/// placement order. CR 603.10 + CR 603.10a: a logical zone-change final pass
+/// appends its last-known-information-aware settlement. CR 603.2c: consumed
+/// event occurrences prevent a duplicate generic priority collection.
+pub fn apply_resolved_trigger_collection(
+    state: &mut GameState,
+    command: &ResolvedTriggerCollectionCommand,
+) -> Result<(), ResolvedTriggerCollectionReplayInvariantError> {
+    match &command.collection {
+        ResolvedTriggerCollection::DeferPending { contexts } => {
+            state.deferred_triggers.extend(contexts.clone());
+        }
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences } => {
+            state
+                .consumed_before_priority_trigger_events
+                .extend(occurrences.clone());
+        }
+    }
+    Ok(())
+}
+
+/// Resolves, applies, and journals one non-empty trigger/LKI collection append.
+///
+/// Empty vectors are no-ops, so they deliberately do not allocate a causal
+/// node or add a journal entry.
+pub fn resolve_and_apply_trigger_collection(
+    state: &mut GameState,
+    collection: ResolvedTriggerCollection,
+) -> Result<(), ResolvedTriggerCollectionReplayInvariantError> {
+    let is_empty = match &collection {
+        ResolvedTriggerCollection::DeferPending { contexts } => contexts.is_empty(),
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences } => occurrences.is_empty(),
+    };
+    if is_empty {
+        return Ok(());
+    }
+
+    let command = ResolvedTriggerCollectionCommand {
+        collection,
+        cause: state.current_or_begin_rules_execution_node(),
+    };
+    apply_resolved_trigger_collection(state, &command)?;
+    state
+        .resolved_rules_journal
+        .record_trigger_collection(command)
+        .expect("resolved trigger collection must have a live journal cause");
+    Ok(())
+}
+
 fn matching_batched_trigger_events(
     state: &GameState,
     event_batch: &[GameEvent],
@@ -338,6 +393,45 @@ fn matching_batched_trigger_events(
             contextual_batched_trigger_event(state, candidate, trig_def, source_context)
         })
         .collect()
+}
+
+/// CR 508.1 + CR 603.2: Split an attack declaration into the singleton event
+/// contexts required by an event-referential attacker demonstrative. A plural
+/// declaration has no single object for "that Wolf" to bind.
+fn singleton_attack_events(
+    defending_player: PlayerId,
+    attacks: Vec<(ObjectId, crate::game::combat::AttackTarget)>,
+) -> Vec<GameEvent> {
+    attacks
+        .into_iter()
+        .map(|(attacker, target)| GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player,
+            attacks: vec![(attacker, target)],
+        })
+        .collect()
+}
+
+fn split_attack_event_into_singletons(event: &GameEvent) -> Option<Vec<GameEvent>> {
+    let GameEvent::AttackersDeclared {
+        defending_player,
+        attacker_ids,
+        attacks,
+    } = event
+    else {
+        return None;
+    };
+    let matching_attacks = attacker_ids
+        .iter()
+        .map(|attacker| {
+            let target = attacks
+                .iter()
+                .find_map(|(attacker_id, target)| (*attacker_id == *attacker).then_some(*target))
+                .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
+            (*attacker, target)
+        })
+        .collect();
+    Some(singleton_attack_events(*defending_player, matching_attacks))
 }
 
 fn contextual_batched_trigger_event(
@@ -1385,6 +1479,24 @@ fn collect_matching_triggers_inner(
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
                 .collect()
+            } else if matches!(trig_def.mode, TriggerMode::YouAttack)
+                && ability.has_event_source_force_block_recursive()
+            {
+                let matching = super::trigger_matchers::matching_you_attack_pairs(
+                    event,
+                    trig_def,
+                    &source_context,
+                    state,
+                );
+                match event {
+                    GameEvent::AttackersDeclared {
+                        defending_player, ..
+                    } => singleton_attack_events(*defending_player, matching),
+                    _ => Vec::new(),
+                }
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else if matches!(trig_def.mode, TriggerMode::Blocks) {
                 super::trigger_matchers::matching_block_events(
                     event,
@@ -1444,6 +1556,16 @@ fn collect_matching_triggers_inner(
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
                 .collect()
+            } else if ability.has_event_source_force_block_recursive() {
+                // CR 603.2 + CR 608.2c: every event-source force-block branch
+                // owns one unambiguous attacker. The ordinary attack modes
+                // above narrow by their own matcher; this fallback preserves
+                // singleton identity for any additional attack trigger mode.
+                split_attack_event_into_singletons(event)
+                    .unwrap_or_else(|| vec![event.clone()])
+                    .into_iter()
+                    .map(|trigger_event| vec![trigger_event])
+                    .collect()
             } else {
                 vec![vec![event.clone()]]
             };
@@ -2183,7 +2305,11 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment(
         .collect();
     group.append_delivery_events(&zone_change_events)?;
     let pending = collect_logical_zone_trigger_segment(state, group, &zone_change_events);
-    state.deferred_triggers.extend(pending);
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::DeferPending { contexts: pending },
+    )
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2235,7 +2361,13 @@ pub(crate) fn complete_logical_zone_trigger_collection(
     group.stamp_battlefield_departures()?;
     sync_logical_zone_change_departure_stamps(group, final_events);
     let settlement = collect_logical_zone_trigger_settlement(state, group)?;
-    state.deferred_triggers.extend(settlement);
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::DeferPending {
+            contexts: settlement,
+        },
+    )
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2305,9 +2437,10 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
         .iter()
         .map(|occurrence| occurrence.event.clone())
         .collect();
-    state
-        .consumed_before_priority_trigger_events
-        .extend(events.iter().enumerate().filter_map(|(index, event)| {
+    let occurrences = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
             matches!(event, GameEvent::ZoneChanged { .. })
                 .then(|| {
                     unclaimed_owned_zone_events
@@ -2322,7 +2455,13 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
                         occurrence: trigger_event_occurrence(events, index),
                     }
                 })
-        }));
+        })
+        .collect();
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences },
+    )
+    .expect("consumed-before-priority trigger journal cause must be live");
 }
 
 /// Collect the one final observer pass owned by a completed logical zone-change
@@ -4600,13 +4739,36 @@ fn dispatch_collected_triggers(state: &mut GameState, pending: Vec<PendingTrigge
     let _ = drain_deferred_triggers_after_trigger_construction(state, &mut events_out);
 }
 
-/// Clear transient cast-tally booleans/color breakdown on all objects after
-/// trigger collection. `mana_spent_to_cast_amount` is intentionally NOT
-/// cleared: it is a historical fact about the object (how much mana was
-/// spent to cast it) used by spell resolution effects like "deals damage
-/// equal to the amount of mana spent to cast this spell" (Molten Note) and
-/// by CR 603.4 intervening-if resolution re-checks (Hungry Graffalon /
-/// Topiary Lecturer Increment).
+/// Clear the transient `mana_spent_to_cast` boolean on all objects after
+/// trigger collection, and clear all five cast-payment stamps (the bool,
+/// `colors_spent_to_cast`, `mana_spent_to_cast_amount`, `phyrexian_life_paid`,
+/// `mana_spent_source_snapshots`) on objects outside the Battlefield/Stack
+/// provenance zones, via the single authority
+/// `GameObject::clear_cast_payment_stamps`.
+///
+/// CR 601.2h + CR 603.4: for objects on the **Battlefield** or **Stack** the
+/// payment stamps survive (issue #5943). `mana_spent_to_cast_amount` is a
+/// historical fact about the object (how much mana was spent to cast it)
+/// used by spell resolution effects like "deals damage equal to the amount
+/// of mana spent to cast this spell" (Molten Note) and by CR 603.4
+/// intervening-if resolution re-checks (Hungry Graffalon / Topiary Lecturer
+/// Increment). The per-color tally `colors_spent_to_cast` feeds a
+/// "if {W}{W} was spent to cast it" ETB intervening-if (Emptiness,
+/// CR 107.4e hybrid pips) re-checked when the triggered ability *resolves*,
+/// and a spend-color rider on a spell still on the stack reads the tally at
+/// its own resolution. Clearing them here for those zones made every such
+/// rider silently do nothing at the re-check.
+///
+/// Like `cast_from_zone`, all five payment stamps are cleared once the
+/// object leaves the Battlefield|Stack provenance zones (CR 400.7 family):
+/// a spell that was COUNTERED or fizzled goes Stack → Graveyard, so
+/// `reset_for_battlefield_exit` never runs on it — it loses its payment
+/// record at the next collection pass instead, mirroring `cast_from_zone`.
+/// Leaving any stamp behind would let a reanimation produce a battlefield
+/// permanent with a phantom payment record (Satoru-class "no mana was
+/// spent" reads, `CastManaSpentMetric`). On battlefield exit,
+/// `reset_for_battlefield_exit` (the CR 400.7 exit-clear authority) clears
+/// them through the same helper.
 ///
 /// CR 603.4: `cast_from_zone` is likewise preserved for permanents on the
 /// battlefield — a `WasCast` / "if you cast it" ETB intervening-if is
@@ -4628,9 +4790,19 @@ fn clear_post_collection_transients(state: &mut GameState) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         if !matches!(obj.zone, Zone::Battlefield | Zone::Stack) {
             obj.cast_from_zone = None;
+            // CR 601.2h + CR 603.4 + CR 107.4e (issue #5943): the payment
+            // stamps must stay readable on Battlefield/Stack objects for
+            // intervening-if re-checks at resolution ("if {W}{W} was spent to
+            // cast it"). Everywhere else the cast provenance is no longer
+            // meaningful — a countered/fizzled spell went Stack → Graveyard,
+            // so `reset_for_battlefield_exit` (the exit-clear authority for
+            // battlefield objects, CR 400.7) never ran on it. Clear all five
+            // payment stamps through the single authority, mirroring
+            // `cast_from_zone`, so none of them leak onto a later object
+            // identity via reanimation.
+            obj.clear_cast_payment_stamps();
         }
         obj.mana_spent_to_cast = false;
-        obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
     }
 }
 
@@ -5815,6 +5987,25 @@ pub(crate) fn take_pending_trigger_event_batch(
     }
 }
 
+/// CR 603.3d + CR 509.1c: Extract the one unambiguous attacker named by a
+/// singleton attack trigger. Trigger construction completes before priority, so
+/// this reads the same live incarnation that the stack-push binding observed.
+fn event_attacker_from_trigger_event(
+    state: &GameState,
+    trigger_event: Option<&GameEvent>,
+) -> Option<ObjectIncarnationRef> {
+    let GameEvent::AttackersDeclared { attacker_ids, .. } = trigger_event? else {
+        return None;
+    };
+    let [attacker_id] = attacker_ids.as_slice() else {
+        return None;
+    };
+    state
+        .objects
+        .get(attacker_id)
+        .map(ObjectIncarnationRef::from_object)
+}
+
 /// CR 603.3 + CR 603.3c + CR 603.3d: Push a pending trigger to the stack with
 /// its event batch keyed by entry id. Returns the new entry's `ObjectId` so
 /// callers can stash it in `state.pending_trigger_entry` when the entry is
@@ -5921,6 +6112,11 @@ pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
     if let Some(origin) = may_trigger_origin {
         ability.set_may_trigger_origin_recursive(origin);
     }
+    // CR 400.7 + CR 509.1c: Bind either grammatical named-attacker form at
+    // stack creation. In particular, "that Wolf" is the exact object from the
+    // narrowed attack-trigger event, not the triggered ability's source.
+    let event_attacker = event_attacker_from_trigger_event(state, trigger_event.as_ref());
+    ability.bind_force_block_attacker_recursive(event_attacker);
     seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
     seed_event_context_parent_targets(&mut ability, trigger_event.as_ref());
 
@@ -6088,6 +6284,25 @@ fn assign_pending_trigger_entry_ability(
     entry_id: ObjectId,
     source_ability: &ResolvedAbility,
 ) -> bool {
+    let trigger_event = state
+        .stack
+        .iter()
+        .rev()
+        .find(|entry| entry.id == entry_id)
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event.as_ref(),
+            _ => None,
+        });
+    let mut assigned_ability = source_ability.clone();
+    // CR 603.3d: Target/mode construction replaces the provisional stack
+    // ability before any player receives priority. Rebind event-referential
+    // force-blocks here so that replacement cannot discard the stack-time
+    // identity for "that Wolf".
+    assigned_ability.bind_force_block_attacker_recursive(event_attacker_from_trigger_event(
+        state,
+        trigger_event,
+    ));
+
     let Some(entry) = state
         .stack
         .iter_mut()
@@ -6099,7 +6314,7 @@ fn assign_pending_trigger_entry_ability(
     let ability = entry
         .ability_mut()
         .expect("pending_trigger_entry must reference a TriggeredAbility stack entry");
-    *ability = source_ability.clone();
+    *ability = assigned_ability;
     true
 }
 
@@ -6374,6 +6589,9 @@ fn dispatch_pending_trigger_context(
     };
 
     if target_slots.is_empty() {
+        if trigger.distribute.is_some() {
+            trigger.ability.distribution = Some(Vec::new());
+        }
         // CR 605.1b: Triggered mana abilities don't use the stack — they resolve
         // immediately at the moment the trigger event occurs. Classify via the
         // single-authority `is_triggered_mana_ability` (ResolvedAbility form),
@@ -6445,36 +6663,40 @@ fn dispatch_pending_trigger_context(
                     // in the emit above and are not part of the division.
                     let assigned_targets =
                         super::ability_utils::distribution_targets(&trigger.ability);
-                    if assigned_targets.len() == 1 {
-                        trigger.ability.distribution =
-                            Some(vec![(assigned_targets[0].clone(), total)]);
-                    } else {
-                        // CR 601.2d + CR 603.3d: Distribute-among with targets
-                        // already chosen but division still pending. Push the
-                        // entry to the stack FIRST (ability has `targets`
-                        // populated, `distribution` still empty), then prompt
-                        // for division. `engine_stack::finalize_trigger_target_selection`
-                        // mutates the on-stack entry's `ability.distribution`
-                        // when the division choice completes.
-                        let player = trigger.controller;
-                        let pending_for_state = trigger.clone();
-                        let entry_id = push_pending_trigger_to_stack_with_event_batch(
-                            state,
-                            trigger,
-                            trigger_events.clone(),
-                            events_out,
-                        );
-                        state.pending_trigger_event_batch = trigger_events;
-                        state.pending_trigger = Some(pending_for_state);
-                        state.pending_trigger_entry = Some(entry_id);
-                        state.waiting_for = crate::types::game_state::WaitingFor::DistributeAmong {
-                            player,
-                            total,
-                            targets: assigned_targets,
-                            unit,
-                        };
-                        restore_trigger_event_context(state, context_snapshot);
-                        return TriggerDispatchDisposition::Paused;
+                    match assigned_targets.as_slice() {
+                        [] => trigger.ability.distribution = Some(Vec::new()),
+                        [target] => {
+                            trigger.ability.distribution = Some(vec![(target.clone(), total)]);
+                        }
+                        _ => {
+                            // CR 601.2d + CR 603.3d: Distribute-among with targets
+                            // already chosen but division still pending. Push the
+                            // entry to the stack FIRST (ability has `targets`
+                            // populated, `distribution` still empty), then prompt
+                            // for division. `engine_stack::finalize_trigger_target_selection`
+                            // mutates the on-stack entry's `ability.distribution`
+                            // when the division choice completes.
+                            let player = trigger.controller;
+                            let pending_for_state = trigger.clone();
+                            let entry_id = push_pending_trigger_to_stack_with_event_batch(
+                                state,
+                                trigger,
+                                trigger_events.clone(),
+                                events_out,
+                            );
+                            state.pending_trigger_event_batch = trigger_events;
+                            state.pending_trigger = Some(pending_for_state);
+                            state.pending_trigger_entry = Some(entry_id);
+                            state.waiting_for =
+                                crate::types::game_state::WaitingFor::DistributeAmong {
+                                    player,
+                                    total,
+                                    targets: assigned_targets,
+                                    unit,
+                                };
+                            restore_trigger_event_context(state, context_snapshot);
+                            return TriggerDispatchDisposition::Paused;
+                        }
                     }
                 }
             }
@@ -8002,6 +8224,16 @@ fn evaluate_trigger_condition_with_source(
         TriggerCondition::SourceEnteredThisTurn => source_context.is_some_and(|source| {
             source.source_read(state).entered_battlefield_turn() == Some(state.turn_number)
         }),
+        // CR 400.7 + CR 508.1 + CR 603.4: the condition is tied to the
+        // trigger source's observed incarnation, not its storage id. It is
+        // checked both when the trigger is created and when it resolves.
+        TriggerCondition::SourceAttackedThisCombat => source_context.is_some_and(|source| {
+            state.combat.as_ref().is_some_and(|combat| {
+                combat
+                    .attacking_incarnations_this_combat
+                    .contains(&source.identity.reference)
+            })
+        }),
         TriggerCondition::EchoDue => {
             source_context.is_some_and(|source| source.source_read(state).echo_due())
         }
@@ -9443,10 +9675,20 @@ fn record_trigger_fired_with_ref(
 
     match constraint {
         TriggerConstraint::OncePerTurn => {
-            state.triggers_fired_this_turn.insert(key.clone());
+            crate::game::ledger::record_trigger_fired(
+                state,
+                key.clone(),
+                crate::types::resolved_commands::ResolvedTriggerLedgerEdit::OncePerTurn,
+            )
+            .expect("once-per-turn trigger must have a valid ledger prefix");
         }
         TriggerConstraint::OncePerGame => {
-            state.triggers_fired_this_game.insert(key.clone());
+            crate::game::ledger::record_trigger_fired(
+                state,
+                key.clone(),
+                crate::types::resolved_commands::ResolvedTriggerLedgerEdit::OncePerGame,
+            )
+            .expect("once-per-game trigger must have a valid ledger prefix");
         }
         TriggerConstraint::OncePerOpponentPerTurn => {
             // CR 603.2: The trigger event only matches the first life-loss event
@@ -9463,10 +9705,14 @@ fn record_trigger_fired_with_ref(
             if opponent_id == controller || state.active_player != opponent_id {
                 return;
             }
-            let per_opponent_key = (key.clone(), opponent_id);
-            state
-                .triggers_fired_this_turn_per_opponent
-                .insert(per_opponent_key);
+            crate::game::ledger::record_trigger_fired(
+                state,
+                key.clone(),
+                crate::types::resolved_commands::ResolvedTriggerLedgerEdit::OncePerOpponentPerTurn {
+                    opponent: opponent_id,
+                },
+            )
+            .expect("per-opponent trigger must have a valid ledger prefix");
         }
         TriggerConstraint::OnlyDuringYourTurn
         | TriggerConstraint::OnlyDuringOpponentsTurn
@@ -9477,12 +9723,21 @@ fn record_trigger_fired_with_ref(
         | TriggerConstraint::AtClassLevel { .. } => {
             // No tracking needed — checked at fire time via game/object/event state
         }
-        // CR 603.4: Increment fire count for MaxTimesPerTurn tracking.
+        // Increment the captured fire count for MaxTimesPerTurn tracking.
         TriggerConstraint::MaxTimesPerTurn { .. } => {
-            *state
+            let expected_old = state
                 .trigger_fire_counts_this_turn
-                .entry(key.clone())
-                .or_insert(0) += 1;
+                .get(key)
+                .copied()
+                .unwrap_or(0);
+            crate::game::ledger::record_trigger_fired(
+                state,
+                key.clone(),
+                crate::types::resolved_commands::ResolvedTriggerLedgerEdit::MaxTimesPerTurn {
+                    expected_old,
+                },
+            )
+            .expect("max-times trigger must have a valid ledger prefix");
         }
     }
 }
@@ -9921,6 +10176,11 @@ pub(super) fn build_triggered_ability_from_context(
             resolved.set_scoped_player_recursive(state.active_player);
         }
         resolved.set_trigger_source_recursive(source_context.clone());
+        // CR 400.7 + CR 509.1c: Source-referential force-block instructions
+        // latch their source incarnation as soon as the triggered ability is
+        // instantiated. EventSource remains intentionally unbound until the
+        // individual attack event is attached below.
+        resolved.bind_force_block_attacker_recursive(None);
         if let Some(definition_ref) = definition_ref {
             resolved.set_trigger_definition_ref_recursive(definition_ref.clone());
         }
@@ -11096,6 +11356,35 @@ pub mod tests {
         id
     }
 
+    fn make_divided_damage_etb_source(
+        state: &mut GameState,
+        min_targets: usize,
+        target: TargetFilter,
+    ) -> ObjectId {
+        let source = make_creature(state, PlayerId(0), "Divided Damage Source", 3, 3);
+        let mut execute = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target,
+                damage_source: None,
+                excess: None,
+            },
+        );
+        execute.multi_target = Some(MultiTargetSpec::unlimited(min_targets));
+        execute.distribute = Some(DistributionUnit::Damage);
+
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.entered_battlefield_turn = Some(1);
+        obj.trigger_definitions.push(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .execute(execute)
+                .valid_card(TargetFilter::SelfRef)
+                .destination(Zone::Battlefield),
+        );
+        source
+    }
+
     /// CR 109.5 + CR 603.2: the `EventSourceControlledBy { Opponent }` trigger
     /// constraint (Guerrilla Tactics) fires only when the discard's cause is a
     /// spell/ability controlled by an opponent — not a self-caused discard or one
@@ -11952,6 +12241,170 @@ pub mod tests {
                 },
             ],
             "CR 509.3d creates one stack trigger per qualifying blocker"
+        );
+    }
+
+    /// CR 603.3 + CR 508.1 + CR 509.1c: Tolsimir's source-referential
+    /// intervening-if and its event-referential "that Wolf" are different
+    /// identities. The parsed trigger must bind the attacking Wolf at stack
+    /// creation and force the chosen opposing creature to block that Wolf, not
+    /// Tolsimir. If Tolsimir did not attack, no trigger is created.
+    #[test]
+    fn tolsimir_attack_trigger_runs_from_parser_through_stack_to_block_legality() {
+        use crate::game::combat::{validate_blockers, AttackTarget, AttackerInfo, CombatState};
+        use crate::types::actions::GameAction;
+
+        const ORACLE: &str = "Whenever a Wolf you control attacks, if Tolsimir, Midnight's Light attacked this combat, target creature an opponent controls blocks that Wolf this combat if able.";
+
+        let parsed =
+            crate::parser::oracle_trigger::parse_trigger_line(ORACLE, "Tolsimir, Midnight's Light");
+
+        let mut no_tolsimir_attack = setup();
+        let inactive_tolsimir = make_creature(
+            &mut no_tolsimir_attack,
+            PlayerId(0),
+            "Tolsimir, Midnight's Light",
+            3,
+            4,
+        );
+        let inactive_wolf = make_creature(&mut no_tolsimir_attack, PlayerId(0), "Wolf", 2, 2);
+        {
+            let wolf = no_tolsimir_attack
+                .objects
+                .get_mut(&inactive_wolf)
+                .expect("wolf exists");
+            wolf.card_types.subtypes.push("Wolf".to_string());
+            wolf.base_card_types = wolf.card_types.clone();
+        }
+        let inactive = no_tolsimir_attack
+            .objects
+            .get_mut(&inactive_tolsimir)
+            .expect("Tolsimir exists");
+        inactive.trigger_definitions.push(parsed.clone());
+        std::sync::Arc::make_mut(&mut inactive.base_trigger_definitions).push(parsed.clone());
+        no_tolsimir_attack.layers_dirty.mark_full();
+        no_tolsimir_attack.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                inactive_wolf,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            )],
+            ..CombatState::default()
+        });
+        let inactive_event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![inactive_wolf],
+            defending_player: PlayerId(1),
+            attacks: vec![(inactive_wolf, AttackTarget::Player(PlayerId(1)))],
+        };
+        assert!(
+            collect_pending_triggers(&mut no_tolsimir_attack, &[inactive_event]).is_empty(),
+            "the intervening-if prevents the trigger when Tolsimir did not attack"
+        );
+
+        let mut state = setup();
+        let tolsimir = make_creature(&mut state, PlayerId(0), "Tolsimir, Midnight's Light", 3, 4);
+        let wolf = make_creature(&mut state, PlayerId(0), "First Wolf", 2, 2);
+        let second_wolf = make_creature(&mut state, PlayerId(0), "Second Wolf", 2, 2);
+        let blocker = make_creature(&mut state, PlayerId(1), "Opponent Bear", 2, 2);
+        let second_blocker = make_creature(&mut state, PlayerId(1), "Opponent Elk", 2, 2);
+        for wolf_id in [wolf, second_wolf] {
+            let wolf = state.objects.get_mut(&wolf_id).expect("wolf exists");
+            wolf.card_types.subtypes.push("Wolf".to_string());
+            wolf.base_card_types = wolf.card_types.clone();
+        }
+        let source = state.objects.get_mut(&tolsimir).expect("Tolsimir exists");
+        source.trigger_definitions.push(parsed.clone());
+        std::sync::Arc::make_mut(&mut source.base_trigger_definitions).push(parsed);
+        state.layers_dirty.mark_full();
+        let attacking_incarnations_this_combat = [tolsimir, wolf, second_wolf]
+            .into_iter()
+            .map(|id| ObjectIncarnationRef::from_object(&state.objects[&id]))
+            .collect();
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::new(tolsimir, AttackTarget::Player(PlayerId(1)), PlayerId(1)),
+                AttackerInfo::new(wolf, AttackTarget::Player(PlayerId(1)), PlayerId(1)),
+                AttackerInfo::new(second_wolf, AttackTarget::Player(PlayerId(1)), PlayerId(1)),
+            ],
+            attacking_incarnations_this_combat,
+            ..CombatState::default()
+        });
+        let attack_event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![wolf, second_wolf],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (wolf, AttackTarget::Player(PlayerId(1))),
+                (second_wolf, AttackTarget::Player(PlayerId(1))),
+            ],
+        };
+        assert!(
+            check_trigger_condition(
+                &state,
+                &TriggerCondition::SourceAttackedThisCombat,
+                PlayerId(0),
+                Some(tolsimir),
+                Some(&attack_event),
+            ),
+            "Tolsimir's observed incarnation attacked during this combat"
+        );
+        let pending = collect_pending_triggers(&mut state, std::slice::from_ref(&attack_event));
+        assert_eq!(
+            pending.len(),
+            2,
+            "each matching Wolf receives an individual event-bound trigger"
+        );
+        for (attacker, target) in [(wolf, blocker), (second_wolf, second_blocker)] {
+            let singleton_event = GameEvent::AttackersDeclared {
+                attacker_ids: vec![attacker],
+                defending_player: PlayerId(1),
+                attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+            };
+            process_triggers(&mut state, &[singleton_event]);
+            let waiting = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+                .expect("target selection setup must succeed")
+                .expect("Tolsimir trigger must request its target");
+            let WaitingFor::TriggerTargetSelection { target_slots, .. } = &waiting else {
+                panic!("expected trigger target selection, got {waiting:?}");
+            };
+            assert_eq!(
+                target_slots.len(),
+                1,
+                "the parsed target survives to stack setup"
+            );
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(target)),
+                "production target selection must expose the chosen opposing creature"
+            );
+            state.waiting_for = waiting;
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                },
+            )
+            .expect("production target choice must succeed");
+        }
+        let mut resolution_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolution_events);
+        crate::game::stack::resolve_top(&mut state, &mut resolution_events);
+        // CR 613.1: ForceBlock installs a transient continuous effect; blocker
+        // validation reads its layer-applied static definition.
+        crate::game::layers::flush_layers(&mut state);
+
+        assert!(
+            validate_blockers(&state, &[]).is_err(),
+            "the selected creature must block the event Wolf if able"
+        );
+        assert!(
+            validate_blockers(&state, &[(blocker, wolf), (second_blocker, second_wolf)]).is_ok(),
+            "each selected creature must block its own event Wolf"
+        );
+        assert!(
+            validate_blockers(&state, &[(blocker, second_wolf), (second_blocker, wolf)]).is_err(),
+            "the two event-attacker bindings cannot cross"
         );
     }
 
@@ -16142,6 +16595,132 @@ pub mod tests {
         let pending = state.pending_trigger.as_ref().unwrap();
         assert_eq!(pending.source_id, trigger_creature);
         assert_eq!(pending.controller, PlayerId(0));
+    }
+
+    #[test]
+    fn divided_trigger_with_no_legal_targets_uses_empty_distribution() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = make_divided_damage_etb_source(
+            &mut state,
+            0,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+        );
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                source,
+                Zone::Hand,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                Vec::new(),
+            )],
+        );
+
+        assert!(state.pending_trigger.is_none());
+        let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack[0].kind else {
+            panic!("expected triggered ability");
+        };
+        assert_eq!(ability.distribution, Some(Vec::new()));
+
+        let mut safety_bound = 4;
+        while !state.stack.is_empty() && safety_bound > 0 {
+            let actor = state.priority_player;
+            crate::game::engine::apply(&mut state, actor, GameAction::PassPriority)
+                .expect("targetless divided trigger should resolve");
+            safety_bound -= 1;
+        }
+        assert!(state.stack.is_empty(), "targetless trigger must not hang");
+    }
+
+    #[test]
+    fn divided_trigger_auto_selects_one_target_and_assigns_full_amount() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let target = make_creature(&mut state, PlayerId(1), "Only Target", 2, 2);
+        let source = make_divided_damage_etb_source(
+            &mut state,
+            1,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+        );
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                source,
+                Zone::Hand,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                Vec::new(),
+            )],
+        );
+
+        assert!(state.pending_trigger.is_none());
+        let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack[0].kind else {
+            panic!("expected triggered ability");
+        };
+        assert_eq!(ability.targets, vec![TargetRef::Object(target)]);
+        assert_eq!(
+            ability.distribution,
+            Some(vec![(TargetRef::Object(target), 4)])
+        );
+    }
+
+    #[test]
+    fn divided_trigger_all_decline_finalizes_with_empty_distribution() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = make_divided_damage_etb_source(
+            &mut state,
+            0,
+            TargetFilter::Typed(TypedFilter::creature()),
+        );
+        let _other_target = make_creature(&mut state, PlayerId(1), "Other Target", 2, 2);
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                source,
+                Zone::Hand,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                Vec::new(),
+            )],
+        );
+        let waiting_for = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+            .expect("begin target selection")
+            .expect("any-number trigger must prompt when targets exist");
+        state.waiting_for = waiting_for;
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectTargets {
+                targets: Vec::new(),
+            },
+        )
+        .expect("declining every target should finalize the trigger");
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.pending_trigger.is_none());
+        assert!(state.pending_trigger_entry.is_none());
+        let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack[0].kind else {
+            panic!("expected triggered ability");
+        };
+        assert_eq!(ability.distribution, Some(Vec::new()));
+
+        let mut safety_bound = 4;
+        while !state.stack.is_empty() && safety_bound > 0 {
+            let actor = state.priority_player;
+            crate::game::engine::apply(&mut state, actor, GameAction::PassPriority)
+                .expect("all-declined divided trigger should resolve");
+            safety_bound -= 1;
+        }
+        assert!(state.stack.is_empty(), "all-declined trigger must not hang");
     }
 
     /// CR 601.2d + CR 603.3d: A triggered ability with a divided effect
@@ -21517,6 +22096,7 @@ pub mod tests {
                 power: None,
                 toughness: None,
                 loyalty: Some(4),
+                printed_loyalty: None,
                 defense: None,
                 card_types: CardType {
                     supertypes: vec![],
@@ -24116,6 +24696,80 @@ pub mod tests {
         assert!(
             !check_trigger_condition(&state, &condition, PlayerId(0), Some(satoru), Some(&event),),
             "a mana-paid cast must not satisfy Satoru's intervening-if at resolution"
+        );
+    }
+
+    /// CR 601.2h + CR 603.4 (issue #5943): the per-color tally must survive
+    /// `clear_post_collection_transients` for a battlefield object so a
+    /// spend-color intervening-if ("if {W}{W} was spent to cast it",
+    /// Emptiness) still holds at the resolution re-check — while a graveyard
+    /// sibling's tally is cleared (its cast provenance is no longer
+    /// meaningful).
+    #[test]
+    fn mana_color_spent_survives_transient_clear_on_battlefield_only() {
+        let mut state = setup();
+        let battlefield_obj = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Emptiness".to_string(),
+            Zone::Battlefield,
+        );
+        let graveyard_obj = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Fizzled Emptiness".to_string(),
+            Zone::Graveyard,
+        );
+        for id in [battlefield_obj, graveyard_obj] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.colors_spent_to_cast.add(ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            let lki = obj.snapshot_for_mana_spent();
+            obj.mana_spent_source_snapshots
+                .push(crate::types::game_state::ManaSpentSourceSnapshot { source_id: id, lki });
+        }
+
+        clear_post_collection_transients(&mut state);
+
+        let cond = TriggerCondition::ManaColorSpent {
+            color: ManaColor::White,
+            minimum: 2,
+        };
+        assert!(
+            check_trigger_condition(&state, &cond, PlayerId(0), Some(battlefield_obj), None),
+            "battlefield object's {{W}}{{W}} tally must survive the post-collection clear"
+        );
+        // Reach-guard pair: same stamping, same condition — only the zone
+        // differs, so the negative below cannot pass vacuously.
+        assert!(
+            !check_trigger_condition(&state, &cond, PlayerId(0), Some(graveyard_obj), None),
+            "graveyard object's tally must be cleared by the post-collection clear"
+        );
+        // Issue #5943 fix-round: the amount and payment-source snapshots ride
+        // the SAME lifecycle as the per-color tally (single authority:
+        // `clear_cast_payment_stamps`) — preserved on the battlefield object,
+        // cleared on the graveyard sibling so a countered spell cannot be
+        // reanimated with a phantom payment record.
+        let bf = &state.objects[&battlefield_obj];
+        assert_eq!(
+            bf.mana_spent_to_cast_amount, 2,
+            "battlefield object's spent-mana amount must survive the clear"
+        );
+        assert_eq!(
+            bf.mana_spent_source_snapshots.len(),
+            1,
+            "battlefield object's payment-source snapshots must survive the clear"
+        );
+        let gy = &state.objects[&graveyard_obj];
+        assert_eq!(
+            gy.mana_spent_to_cast_amount, 0,
+            "graveyard object's spent-mana amount must be cleared"
+        );
+        assert!(
+            gy.mana_spent_source_snapshots.is_empty(),
+            "graveyard object's payment-source snapshots must be cleared"
         );
     }
 
@@ -27390,6 +28044,7 @@ pub mod tests {
             timestamp: 1,
             duration: Duration::Permanent,
             affected: TargetFilter::SpecificObject { id: recipient },
+            affected_recipient: None,
             modifications: vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Suspend {
                     count: 0,
@@ -27485,6 +28140,7 @@ pub mod tests {
                 affected: TargetFilter::SpecificObject {
                     id: exile_recipient,
                 },
+                affected_recipient: None,
                 modifications: vec![ContinuousModification::AddKeyword {
                     keyword: Keyword::Suspend {
                         count: 0,
@@ -27625,6 +28281,7 @@ pub mod tests {
                     timestamp: 1 + i as u64,
                     duration: Duration::Permanent,
                     affected: TargetFilter::SpecificObject { id: card },
+                    affected_recipient: None,
                     modifications: vec![ContinuousModification::AddKeyword {
                         keyword: Keyword::Suspend {
                             count: 0,
@@ -28456,7 +29113,7 @@ pub mod tests {
             | Keyword::LivingMetal
             | Keyword::Bloodthirst(_)
             | Keyword::Amplify(_)
-            | Keyword::Devour(_)
+            | Keyword::Devour { .. }
             | Keyword::Toxic(_)
             | Keyword::Saddle(_)
             | Keyword::Teamwork(_)
@@ -31124,6 +31781,7 @@ pub mod tests {
             library_position: None,
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
 
         crate::game::engine::apply_as_current(

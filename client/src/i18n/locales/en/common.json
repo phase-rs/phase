@@ -15,6 +15,24 @@
     "enter": "Enter fullscreen",
     "exit": "Exit fullscreen"
   },
+  "nativeEngineProgress": {
+    "title": "Updating native engine",
+    "resolving": "Finding the correct local server…",
+    "downloadingBinary": "Downloading updated server…",
+    "verifying": "Verifying server…",
+    "downloadingData": "Downloading game data…",
+    "spawning": "Starting local server…",
+    "ready": "Native engine ready",
+    "failed": "Unable to prepare native engine"
+  },
+  "engineBadge": {
+    "native": "Native engine",
+    "nativeTooltip": "This game is running on the desktop app's native engine.",
+    "inBrowser": "In-browser engine",
+    "inBrowserTooltip": "Native engine unavailable — this game is running in-browser.",
+    "versionMismatchTooltip": "Native engine version mismatch — this game is running in-browser.",
+    "notAttemptedTooltip": "This game is running in-browser — the native engine wasn't used for it."
+  },
   "buildBadge": {
     "downloading": "downloading… {{progress}}%",
     "checking": "checking…",
@@ -22,6 +40,7 @@
     "updatePending": "update pending after game",
     "cards": "cards {{age}} ({{commit}})",
     "cardDataTitle": "Card data generated {{date}} from {{commit}}",
+    "desktopAppVersion": "Desktop app v{{version}}",
     "checkForUpdates": "Check for updates",
     "updaterDebugInfo": "Updater debug info",
     "updaterIssue": "Updater issue: {{error}}",
@@ -246,7 +265,13 @@
     "youPlayFirst": "You play first",
     "playerPlaysFirst": "{{name}} plays first",
     "heads": "Heads",
-    "tails": "Tails"
+    "tails": "Tails",
+    "coinFlip": "Coin flip",
+    "wonCoinFlip": "{{name}} won the flip",
+    "lostCoinFlip": "{{name}} lost the flip",
+    "turnOrder": "Turn order",
+    "turnOrderItem": "Turn {{turn}}: {{name}}",
+    "youTakeTurn": "You take turn {{turn}}"
   },
   "chrome": {
     "back": "Back",

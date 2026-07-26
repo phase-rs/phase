@@ -406,6 +406,13 @@ pub(crate) enum ReplicateKind {
     /// CR 608.2c: "Repeat this process for <keywords>." — replicate the antecedent
     /// conditional keyword-COUNTER clause per keyword (Kathril, Aspect Warper).
     CounterPlacement,
+    /// CR 702.1c + CR 608.2c: "The same is true for <keywords>." — replicate the antecedent
+    /// conditional PERPETUAL keyword-GRANT clause per keyword (Mutable Pupa). Each
+    /// replicated grant is gated on the entering object having THAT keyword, an
+    /// independent OR-branch (unlike `StaticGrant`, whose Odric antecedent carries
+    /// no per-keyword condition). Digital-only Alchemy (no CR entry for
+    /// "perpetually").
+    PerpetualKeywordGrant,
 }
 
 /// Per-clause IR: captures everything about a single parsed chunk before chain assembly.

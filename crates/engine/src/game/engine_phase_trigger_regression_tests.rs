@@ -2701,6 +2701,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         library_position: None,
         is_cost_payment: false,
         enters_modified_if: None,
+        duration: None,
     };
     state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
         Box::new(ResolvedAbility::new(
@@ -2776,6 +2777,7 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
         library_position: None,
         is_cost_payment: false,
         enters_modified_if: None,
+        duration: None,
     };
 
     let result = apply_as_current(
@@ -2826,6 +2828,7 @@ fn effect_zone_choice_up_to_respects_min_count() {
         library_position: None,
         is_cost_payment: false,
         enters_modified_if: None,
+        duration: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] });
@@ -3445,6 +3448,7 @@ fn copy_target_choice_resolves_become_copy() {
         source_id: clone_id,
         valid_targets: vec![target_id],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     // Player chooses to copy Grizzly Bears
@@ -3539,6 +3543,7 @@ fn copy_target_choice_applies_copied_enter_with_counters_replacement_before_sba(
         source_id: assassin,
         valid_targets: vec![ghave],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     apply_as_current(
@@ -3612,6 +3617,7 @@ fn echoing_deeps_copying_sunken_citadel_prompts_for_the_copied_color_choice() {
         source_id: deeps,
         valid_targets: vec![citadel],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     let result = apply_as_current(
@@ -3919,6 +3925,7 @@ fn copy_target_choice_fires_granted_etb_trigger_against_deferred_entry_event() {
         source_id: assassin,
         valid_targets: vec![bear],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     apply_as_current(
@@ -4100,6 +4107,7 @@ fn copy_target_choice_surfaces_interactive_trigger_prompt_for_deferred_entry() {
         source_id: assassin,
         valid_targets: vec![bear],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     let _waiting = apply_as_current(
@@ -4179,6 +4187,7 @@ fn copy_target_choice_rejects_invalid_target() {
         source_id: clone_id,
         valid_targets: vec![valid_id], // Bird is NOT in valid targets
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     // Try to choose invalid target
@@ -4329,6 +4338,7 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
         source_id: spidey,
         valid_targets: vec![elesh],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     let result = apply_as_current(
@@ -4505,6 +4515,7 @@ fn reflexive_when_you_do_fires_after_become_copy_replacement() {
         source_id: cloner,
         valid_targets: vec![source_card],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     // Accumulate events across the full resolution so we can count

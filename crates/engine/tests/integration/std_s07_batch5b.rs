@@ -98,6 +98,7 @@ fn add_aang_dfc(state: &mut GameState) -> ObjectId {
         power: Some(6),
         toughness: Some(6),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![],

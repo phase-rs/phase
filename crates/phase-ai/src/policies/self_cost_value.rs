@@ -15,7 +15,8 @@ use engine::types::player::PlayerId;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::self_cost::{
-    benefit_is_trivial, real_self_cost, self_cost_in_scope, synergy_justifies_self_cost,
+    benefit_is_trivial, real_self_cost, self_cost_in_scope, self_counter_cost_preview,
+    synergy_justifies_self_cost, SelfCounterCostPreview,
 };
 use crate::features::DeckFeatures;
 
@@ -58,6 +59,13 @@ impl TacticalPolicy for SelfCostValuePolicy {
         let Some(ability) = ctx.effective_activated_ability() else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
         };
+
+        if let Some(verdict) = counter_replenishment_verdict(
+            self_counter_cost_preview(ctx.state, ctx.ai_player, *source_id, &ability),
+            ctx.penalties(),
+        ) {
+            return verdict;
+        }
 
         if ability.ability_tag == Some(AbilityTag::Cycling) {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_cycling_deferred"));
@@ -111,6 +119,33 @@ impl TacticalPolicy for SelfCostValuePolicy {
     }
 }
 
+/// Conservatively prices the exact self-counter-replenishment preview.
+///
+/// CR 614.1: A replacement can prevent the counter event or redirect it to an
+/// unsupported event class. Either outcome means this policy cannot assume the
+/// activation repays its counter cost, so both receive the bounded penalty.
+/// Applied, choice-required, and transformed outcomes remain neutral because
+/// they do not establish that replenishment has failed.
+fn counter_replenishment_verdict(
+    preview: Option<SelfCounterCostPreview>,
+    penalties: &crate::config::PolicyPenalties,
+) -> Option<PolicyVerdict> {
+    let reason = match preview {
+        Some(SelfCounterCostPreview::Prevented) => "self_cost_counter_replacement_prevented",
+        Some(SelfCounterCostPreview::Unsupported) => "self_cost_counter_replacement_unsupported",
+        Some(
+            SelfCounterCostPreview::Applied
+            | SelfCounterCostPreview::ChoiceRequired
+            | SelfCounterCostPreview::Transformed,
+        )
+        | None => return None,
+    };
+    Some(PolicyVerdict::strong(
+        -penalties.self_cost_counter_replacement_prevented_penalty,
+        PolicyReason::new(reason),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,15 +162,17 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
-        ManaContribution, ManaProduction, ObjectScope, QuantityExpr, QuantityRef, SacrificeCost,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ManaContribution, ManaProduction, ObjectScope, QuantityExpr, QuantityModification,
+        QuantityRef, ReplacementDefinition, SacrificeCost, StaticDefinition, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     use engine::types::card_type::CoreType;
-    use engine::types::counter::CounterType;
+    use engine::types::counter::{CounterMatch, CounterType};
     use engine::types::game_state::{GameState, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::{Keyword, KeywordKind};
     use engine::types::player::PlayerId;
+    use engine::types::replacements::ReplacementEvent;
     use engine::types::zones::Zone;
     use std::sync::Arc;
 
@@ -244,6 +281,37 @@ mod tests {
             count: QuantityExpr::Fixed { value: 1 },
             target,
         }
+    }
+
+    fn self_counter_replenisher() -> AbilityDefinition {
+        activated(
+            put_counter(CounterType::Plus1Plus1, TargetFilter::SelfRef),
+            AbilityCost::RemoveCounter {
+                count: 1,
+                counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
+                target: None,
+                selection: Default::default(),
+            },
+        )
+    }
+
+    fn install_counter_replacement(state: &mut GameState, modification: QuantityModification) {
+        let replacement = create_object(
+            state,
+            CardId(next_id()),
+            AI,
+            "Counter replacement".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&replacement)
+            .expect("replacement exists")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(modification),
+            );
     }
 
     // --- state / context helpers -----------------------------------------
@@ -395,10 +463,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },
@@ -1259,5 +1324,156 @@ mod tests {
             *Arc::make_mut(&mut obj.abilities) = vec![ability];
         }
         assert_not_reject(&verdict_for(&state, source, plain_features()));
+    }
+
+    #[test]
+    fn self_counter_replenishment_preview_outcomes_only_penalize_prevention() {
+        let applied = |_state: &mut GameState| {};
+        let transformed = |state: &mut GameState| {
+            install_counter_replacement(state, QuantityModification::DOUBLE);
+        };
+        let prevented = |state: &mut GameState| {
+            install_counter_replacement(state, QuantityModification::Prevent);
+        };
+        let choice_required = |state: &mut GameState| {
+            install_counter_replacement(state, QuantityModification::DOUBLE);
+            install_counter_replacement(state, QuantityModification::Plus { value: 1 });
+        };
+
+        for (install, expected_preview, expected_reason, penalized) in [
+            (
+                applied as fn(&mut GameState),
+                SelfCounterCostPreview::Applied,
+                "self_cost_value_na",
+                false,
+            ),
+            (
+                transformed as fn(&mut GameState),
+                SelfCounterCostPreview::Transformed,
+                "self_cost_value_na",
+                false,
+            ),
+            (
+                prevented as fn(&mut GameState),
+                SelfCounterCostPreview::Prevented,
+                "self_cost_counter_replacement_prevented",
+                true,
+            ),
+            (
+                choice_required as fn(&mut GameState),
+                SelfCounterCostPreview::ChoiceRequired,
+                "self_cost_value_na",
+                false,
+            ),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            install(&mut state);
+            let source = source_with(
+                &mut state,
+                "Counter Replenisher",
+                &[CoreType::Creature],
+                self_counter_replenisher(),
+            );
+            state
+                .objects
+                .get_mut(&source)
+                .expect("source exists")
+                .counters
+                .insert(CounterType::Plus1Plus1, 1);
+
+            let ability = state.objects[&source]
+                .abilities
+                .first()
+                .expect("counter replenisher ability");
+            assert_eq!(
+                self_counter_cost_preview(&state, AI, source, ability),
+                Some(expected_preview),
+                "replacement preview must reach the expected outcome"
+            );
+
+            let result = verdict_for(&state, source, plain_features());
+            if penalized {
+                assert!(matches!(
+                    result,
+                    PolicyVerdict::Score { delta, reason }
+                        if delta < 0.0 && reason.kind == expected_reason
+                ));
+            } else {
+                assert_neutral(&result, expected_reason);
+            }
+        }
+    }
+
+    #[test]
+    fn self_counter_replenishment_preview_accepts_single_cost_composite() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = self_counter_replenisher();
+        let remove_counter = ability.cost.take().expect("counter payment");
+        ability.cost = Some(AbilityCost::Composite {
+            costs: vec![remove_counter],
+        });
+        let source = source_with(
+            &mut state,
+            "Composite Counter Replenisher",
+            &[CoreType::Creature],
+            ability,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .expect("source exists")
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        let ability = state.objects[&source]
+            .abilities
+            .first()
+            .expect("counter replenisher ability");
+        assert_eq!(
+            self_counter_cost_preview(&state, AI, source, ability),
+            Some(SelfCounterCostPreview::Applied)
+        );
+    }
+
+    #[test]
+    fn self_counter_replenishment_preview_rejects_multi_cost_composite() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = self_counter_replenisher();
+        let remove_counter = ability.cost.take().expect("counter payment");
+        ability.cost = Some(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, remove_counter],
+        });
+        let source = source_with(
+            &mut state,
+            "Composite Counter Replenisher",
+            &[CoreType::Creature],
+            ability,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .expect("source exists")
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        let ability = state.objects[&source]
+            .abilities
+            .first()
+            .expect("counter replenisher ability");
+        assert_eq!(self_counter_cost_preview(&state, AI, source, ability), None);
+    }
+
+    #[test]
+    fn self_counter_rewritten_preview_is_conservatively_deprioritized() {
+        let config = AiConfig::default();
+
+        assert!(matches!(
+            counter_replenishment_verdict(
+                Some(SelfCounterCostPreview::Unsupported),
+                &config.policy_penalties,
+            ),
+            Some(PolicyVerdict::Score { delta, reason })
+                if delta < 0.0 && reason.kind == "self_cost_counter_replacement_unsupported"
+        ));
     }
 }

@@ -271,10 +271,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
         }
     }
 
@@ -643,10 +640,7 @@ mod tests {
         let decision = decision();
         let candidate = CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Pass),
         };
         let ctx = PolicyContext {
             state: &state,

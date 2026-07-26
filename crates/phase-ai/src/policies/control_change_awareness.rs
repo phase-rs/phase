@@ -296,10 +296,7 @@ mod tests {
             action: GameAction::SelectTargets {
                 targets: vec![selected],
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Target),
         };
         let config = AiConfig::default();
         let context = make_config_context(&config);
@@ -326,10 +323,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         let config = AiConfig::default();
         let context = make_config_context(&config);

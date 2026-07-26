@@ -193,6 +193,9 @@ pub fn cast_paradigm_copy(
     copy_obj.is_token = true;
     copy_obj.tapped = false;
     copy_obj.prepared = None;
+    // CR 707.10: the paradigm copy is put on the stack without paying mana —
+    // reset the cast-payment stamps inherited from the exiled source's cast.
+    copy_obj.clear_cast_payment_stamps();
     // Back-face is preserved from clone — not needed for copy behavior.
     state.objects.insert(copy_id, copy_obj);
 
@@ -221,6 +224,88 @@ pub fn cast_paradigm_copy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 707.10 (issue #5943): the paradigm copy is put on the stack without
+    /// paying mana — it must carry NO cast-payment record even though it
+    /// clones the exiled source object. The source keeps its own record
+    /// (reach-guard).
+    #[test]
+    fn paradigm_copy_resets_cast_payment_stamps() {
+        use std::sync::Arc;
+
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Paradigm Source".to_string(),
+            Zone::Exile,
+        );
+        {
+            let lki = state.objects[&source_id].snapshot_for_mana_spent();
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.abilities = Arc::new(vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("paradigm test spell", "paradigm test spell body"),
+            )]);
+            // Stamp all five cast-payment fields non-default, including a
+            // synthetic Phyrexian life payment, to verify the copy reset.
+            obj.mana_spent_to_cast = true;
+            obj.colors_spent_to_cast
+                .add(crate::types::mana::ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
+            obj.mana_spent_source_snapshots
+                .push(crate::types::game_state::ManaSpentSourceSnapshot { source_id, lki });
+        }
+        // Production arming path — creates the ParadigmSource exile link that
+        // `cast_paradigm_copy` validates.
+        assert!(arm_paradigm(
+            &mut state,
+            source_id,
+            controller,
+            "Paradigm Source"
+        ));
+
+        let mut events = Vec::new();
+        let copy_id = cast_paradigm_copy(&mut state, source_id, controller, &mut events)
+            .expect("paradigm copy cast succeeds");
+
+        assert_ne!(copy_id, source_id, "the copy is a distinct object");
+        let copy = state.objects.get(&copy_id).expect("copy object exists");
+        assert!(!copy.mana_spent_to_cast, "copy: bool must be default");
+        assert!(
+            copy.colors_spent_to_cast.is_empty(),
+            "copy: per-color tally must be default (spend-color riders must not re-fire)"
+        );
+        assert_eq!(
+            copy.mana_spent_to_cast_amount, 0,
+            "copy: amount must be default"
+        );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
+        assert!(
+            copy.mana_spent_source_snapshots.is_empty(),
+            "copy: payment-source snapshots must be default"
+        );
+        // Reach-guard: the SOURCE keeps its payment record.
+        assert_eq!(
+            state.objects[&source_id].mana_spent_to_cast_amount, 2,
+            "exiled source keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&source_id].phyrexian_life_paid, 1,
+            "exiled source keeps its own Phyrexian life-payment record"
+        );
+    }
 
     #[test]
     fn arm_paradigm_primes_once_per_name() {

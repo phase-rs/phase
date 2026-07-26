@@ -17,7 +17,7 @@ use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 
-use super::{MulliganPolicy, MulliganScore, TurnOrder};
+use super::{is_land_source, MulliganPolicy, MulliganScore, TurnOrder};
 
 /// Commitment threshold below which this policy opts out.
 const COMMITMENT_THRESHOLD: f32 = 0.3;
@@ -60,8 +60,10 @@ impl MulliganPolicy for AristocratsKeepablesMulligan {
             let Some(obj) = state.objects.get(&oid) else {
                 continue;
             };
-            if obj.card_types.core_types.contains(&CoreType::Land) {
+            if is_land_source(obj) {
                 land_count += 1;
+            }
+            if obj.card_types.core_types.contains(&CoreType::Land) {
                 continue;
             }
             // Identity lookup — outlet_names carries only structurally-verified

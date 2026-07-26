@@ -1234,6 +1234,7 @@ fn lower_as_enters_anchor_word_modal(
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         };
         result.statics.push(placeholder);
     }

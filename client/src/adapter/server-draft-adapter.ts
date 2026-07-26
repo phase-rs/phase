@@ -603,6 +603,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           your_player: PlayerId;
           legal_actions?: GameAction[];
           auto_pass_recommended?: boolean;
+          mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
           legal_actions_by_object?: Record<string, GameAction[]>;
           derived?: GameState["derived"];
@@ -612,6 +613,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           {
             actions: data.legal_actions ?? [],
             autoPassRecommended: data.auto_pass_recommended ?? false,
+            manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
           },
@@ -632,6 +634,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           events: GameEvent[];
           legal_actions?: GameAction[];
           auto_pass_recommended?: boolean;
+          mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
           legal_actions_by_object?: Record<string, GameAction[]>;
           log_entries?: GameLogEntry[];
@@ -642,6 +645,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           {
             actions: data.legal_actions ?? [],
             autoPassRecommended: data.auto_pass_recommended ?? false,
+            manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
           },

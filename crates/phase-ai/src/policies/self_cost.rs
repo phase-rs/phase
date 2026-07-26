@@ -23,15 +23,16 @@
 //! predicates into a `PolicyVerdict`.
 
 use engine::game::bracket_estimate::CommanderBracketTier;
+use engine::game::effects::counters::{preview_counter_addition, CounterAdditionPreview};
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::players;
 use engine::game::quantity::resolve_quantity;
 use engine::types::ability::{AbilityCost, AbilityDefinition, Effect, QuantityExpr, TargetFilter};
 use engine::types::card_type::CoreType;
-use engine::types::counter::CounterType;
+use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::GameState;
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -84,6 +85,84 @@ pub(crate) fn self_cost_in_scope(cost: &AbilityCost) -> bool {
             costs.iter().any(self_cost_in_scope)
         }
         _ => false,
+    }
+}
+
+/// Replacement-aware fact for the narrow "remove N typed counters from this,
+/// then put exactly N of that type on this" activated-ability shape.
+///
+/// This is intentionally not a general counter-value model. It only protects a
+/// self-cost that claims to replenish its own exact counter payment, where a
+/// replacement preventing the add would turn the activation into a pure loss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelfCounterCostPreview {
+    Applied,
+    Prevented,
+    ChoiceRequired,
+    Transformed,
+    Unsupported,
+}
+
+pub(crate) fn self_counter_cost_preview(
+    state: &GameState,
+    actor: PlayerId,
+    source_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> Option<SelfCounterCostPreview> {
+    let (count, counter_type) = self_counter_removal_cost(ability.cost.as_ref()?)?;
+    let Effect::PutCounter {
+        counter_type: replenished_type,
+        count: QuantityExpr::Fixed { value },
+        target: TargetFilter::SelfRef,
+    } = &*ability.effect
+    else {
+        return None;
+    };
+    if ability.sub_ability.is_some()
+        || ability.else_ability.is_some()
+        || counter_type != replenished_type
+        || *value != i32::try_from(count).ok()?
+    {
+        return None;
+    }
+
+    let source = state.objects.get(&source_id)?;
+    if source.controller != actor {
+        return None;
+    }
+    match preview_counter_addition(
+        state,
+        actor,
+        ObjectIncarnationRef::from_object(source),
+        counter_type.clone(),
+        count,
+    )? {
+        CounterAdditionPreview::Applied { .. } => Some(SelfCounterCostPreview::Applied),
+        CounterAdditionPreview::Prevented => Some(SelfCounterCostPreview::Prevented),
+        CounterAdditionPreview::ChoiceRequired { .. } => {
+            Some(SelfCounterCostPreview::ChoiceRequired)
+        }
+        CounterAdditionPreview::Transformed { .. } => Some(SelfCounterCostPreview::Transformed),
+        CounterAdditionPreview::Unsupported => Some(SelfCounterCostPreview::Unsupported),
+    }
+}
+
+/// Extract the narrow self-counter payment this preview understands. Parser
+/// output may wrap one cost in `Composite`; multi-cost composites are outside
+/// this exact replenishment check because the preview does not value their
+/// additional payment components.
+fn self_counter_removal_cost(cost: &AbilityCost) -> Option<(u32, &CounterType)> {
+    match cost {
+        AbilityCost::RemoveCounter {
+            count,
+            counter_type: CounterMatch::OfType(counter_type),
+            target: None,
+            ..
+        } => Some((*count, counter_type)),
+        AbilityCost::Composite { costs } if costs.len() == 1 => {
+            self_counter_removal_cost(&costs[0])
+        }
+        _ => None,
     }
 }
 

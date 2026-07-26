@@ -19,7 +19,7 @@ use engine::analysis::decision_template::{
     TargetPin, TargetSchedule,
 };
 use engine::analysis::loop_check::{LoopCertificate, ShortcutProposal, ShortcutResponse, WinKind};
-use engine::analysis::resource::{BoardDelta, ResourceAxis};
+use engine::analysis::resource::{loop_states_equal_modulo_resources, BoardDelta, ResourceAxis};
 use engine::game::engine::{apply, EngineError};
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::ability::{Effect, TargetRef};
@@ -194,6 +194,9 @@ fn setup_3p_draw(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
 /// partition each cycle: fallers = {P1}, non-fallers = {P0, P2} — so `live_mandatory_loop_winner`
 /// refuses to name a winner (CR 104.2a). P1 starts very high so it never dies inside the drive
 /// window: the test asserts the mid-loop grind (no crown), not a natural CR 704.5a death.
+/// The headroom is deliberate and far exceeds `PRIMED_LOOP_BEATS` — P1 ends the capped drive
+/// ~14 points below its 1000 start, hundreds of points from lethal. Do NOT trim it to match
+/// the cap; the slack is what keeps the no-death premise robust to engine drift.
 fn setup_3p_subset_lethal(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
@@ -272,6 +275,55 @@ fn drive_collect(runner: &mut GameRunner, cap: usize) -> (Vec<GameEvent>, Waitin
         }
     }
     (all, runner.state().waiting_for.clone())
+}
+
+/// [`drive_collect`] plus a measured answer to "did the drive actually reach the board-recurrent
+/// regime inside `cap`?" — the third element is `true` once some prior in
+/// `GameState::loop_detect_ring` has compared equal to the live state modulo resources
+/// ([`loop_states_equal_modulo_resources`], the engine's own public predicate; the test does not
+/// reimplement recurrence).
+///
+/// Why that witnesses the classification: the sampler only pushes a prior while the stack is
+/// non-empty at a `Priority` beat, and `GameState`'s `PartialEq` compares both, so a ring hit
+/// forces the §3 bridge conjuncts (engine.rs) to have held at that state — i.e.
+/// `find_live_loop_winner` → `live_mandatory_loop_winner` ran on it. It is deliberately STRONGER
+/// than "the classifier ran": the classifier is called on every sampled beat, so a `false` here
+/// does not mean it never ran — it means the loop never recurred, which is the regime every
+/// no-crown assertion below assumes. Note the engine's own faller partition short-circuits
+/// (`nonfallers.len() != 1`, loop_check.rs) BEFORE its recurrence gate for these subset-lethal
+/// fixtures; the recurrence witnessed here is the state property, not that specific branch.
+///
+/// Only the equality disjunct is checked: the engine's gate is
+/// `loop_states_equal_modulo_resources || loop_states_cover_modulo_growth`, and the latter is
+/// `pub(crate)` (resource.rs), so an integration test cannot call it. Measured, both fixtures
+/// still hit the equality disjunct; a fixture that drifted entirely into the coverability regime
+/// would fail this guard and need it widened, not the cap raised.
+///
+/// Checked per beat, because recurrence is PHASE-dependent, not monotone: measured over caps
+/// {1, 2, 3, 4, 8, 24} it holds at 2 and 8 and not at 1/3/4/24 (period 6), so inspecting only
+/// the terminal state would report `false` on a perfectly primed loop. The scan short-circuits
+/// at the first hit — measured 5.6–17.5 ms per drive, priming at beat 2.
+fn drive_collect_primed(runner: &mut GameRunner, cap: usize) -> (Vec<GameEvent>, WaitingFor, bool) {
+    let mut all: Vec<GameEvent> = Vec::new();
+    let mut primed = false;
+    for _ in 0..cap {
+        if !matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. } | WaitingFor::OrderTriggers { .. }
+        ) {
+            break;
+        }
+        let (events, _) = drive_collect(runner, 1);
+        all.extend(events);
+        if !primed {
+            let state = runner.state();
+            primed = state
+                .loop_detect_ring
+                .iter()
+                .any(|prior| loop_states_equal_modulo_resources(prior, state));
+        }
+    }
+    (all, runner.state().waiting_for.clone(), primed)
 }
 
 // ────────────────────────────── T-OFF ──────────────────────────────
@@ -1099,6 +1151,48 @@ fn interactive_queued_opponent_concede_no_deadlock() {
 
 // ───────────── T-subset-lethal (D2 — nonfallers.len()==1 guard) ─────────────
 
+/// Drive cap for the three tests below. Measured beats actually consumed at this cap, per
+/// drive: `setup_3p_subset_lethal` **24/24** (both tests), `setup_3p_both_fall(1000, 1050)`
+/// **24/24**, `setup_3p_both_fall(1000, 1000)` **0/24**. The first three genuinely pay every
+/// beat — that bridge deliberately falls through to the pre-feature grind, so their drives
+/// never reach `drive_collect`'s terminal-state exit. The equal-life half is the exception and
+/// costs nothing at ANY cap: its loop is mandatory with a single non-faller, so the natural
+/// bridge already crowned `GameOver{Some(P0)}` while the kick-off resolved, and the drive
+/// returns on beat 0. That is pre-existing and cap-independent — it is why shrinking this
+/// constant speeds up three drives, not four.
+///
+/// Measured per-beat cost, `setup_3p_subset_lethal`: ~40 ms at invariant state (stack 1,
+/// 4 objects). `setup_3p_both_fall` is NOT flat — its stack grows 13 → 45 and its per-beat
+/// cost 78 → 152 ms over 200 beats — so its justification rests on verdict invariance, not on
+/// periodicity.
+///
+/// MEASURED — DO NOT CHANGE to a value outside the swept set {4, 8, 12, 16, 24, 32, 48, 64,
+/// 100} without re-running the cap sweep (an unswept *lowering* is as uncovered as a raise).
+/// Across that whole swept range the PASS/FAIL verdict and every reach-guard of the three
+/// tests below are invariant, and each test's revert-probe still flips it to FAIL at every
+/// cap ≥ 4 (weakened `nonfallers.len() != 1`; bypassed E1-measure `live_mandatory_loop_winner`
+/// gate; removed F2 `fallers_lives_pairwise_equal` re-check). Board recurrence — the regime
+/// every assertion below assumes — is first observed at **beat 2** (measured over caps
+/// {1, 2, 3, 4, 8, 24}), so more beats buy zero discrimination and only burn wall clock; 24 is
+/// itself a swept value, 12× that priming point and 6× the smallest swept cap, not an
+/// interpolation.
+///
+/// The cap does NOT stand on the sweep alone: each test below carries an explicit
+/// [`drive_collect_primed`] guard that FAILS if the loop has not reached board recurrence inside
+/// the cap — proven discriminating by forcing this constant to 1, which flips all three tests to
+/// FAIL on that guard. That closes the cap-adequacy question, and only that.
+///
+/// It does NOT close a separate, pre-existing blind spot, and no cap does either. Measured:
+/// suppressing the live-detect bridge outright (make its `!loop_detect_ring.is_empty()` conjunct
+/// unreachable in engine.rs) leaves all three tests below GREEN at this cap AND at cap 500,
+/// while the offer-dependent `vito_2p_optional_offer_declare_crowns` and
+/// `interactive_queued_opponent_concede_no_deadlock` FAIL. The guard does not catch that either:
+/// the ring SAMPLER is a separate gate (engine.rs, `resolved_this_beat && …`) that the
+/// suppression does not touch, so the ring still fills and this guard still reports primed.
+/// A negative "did not crown" test cannot distinguish a refused classification from a disabled
+/// one; the positive-side tests named above are what cover it.
+const PRIMED_LOOP_BEATS: usize = 24;
+
 /// D2: a 3p loop that drains ONLY P1 (P2 a bystander, life delta 0) must NOT crown.
 /// `live_mandatory_loop_winner` (loop_check.rs) partitions living into fallers/non-fallers and
 /// requires `nonfallers.len() == 1` (CR 104.2a — determinate only when EVERY other living
@@ -1108,13 +1202,15 @@ fn interactive_queued_opponent_concede_no_deadlock() {
 /// pre-feature grind.
 ///
 /// REVERT-FAIL: weaken the `nonfallers.len() != 1` gate to an "any-faller wins" rewrite and
-/// this MANDATORY loop is wrongly crowned `GameOver{winner: Some(P0)}` — flipping the two
-/// no-crown assertions below. (Passes today, proving the gate holds.)
+/// this MANDATORY loop is wrongly crowned `GameOver{winner: Some(P0)}` — flipping the `wf`
+/// no-crown assertion below, which is the sole discriminator here: under that mutation the
+/// event-scan assertion measurably stays TRUE (no `GameOver{Some}` lands in the collected
+/// events) at every cap from 4 to 100. (Passes today, proving the gate holds.)
 #[test]
 fn interactive_3p_subset_lethal_does_not_crown() {
     let (mut runner, kickoff) = setup_3p_subset_lethal(LoopDetectionMode::Interactive);
     let _ = runner.cast(kickoff).resolve();
-    let (events, wf) = drive_collect(&mut runner, 500);
+    let (events, wf, primed) = drive_collect_primed(&mut runner, PRIMED_LOOP_BEATS);
 
     // Positive reach-guard: the drain loop genuinely ran on P1 while P2 stayed untouched — we
     // are in the subset-lethal regime the gate must refuse, not an unrelated upstream no-op.
@@ -1144,6 +1240,19 @@ fn interactive_3p_subset_lethal_does_not_crown() {
     assert!(
         !matches!(wf, WaitingFor::LoopShortcut { .. }),
         "subset-lethal loop must NOT raise a LoopShortcut offer, got {wf:?}"
+    );
+
+    // Reach-guard on the regime itself (see `drive_collect_primed`): the drive really did reach
+    // a board-recurrent state, so `live_mandatory_loop_winner` ran on the subset-lethal loop the
+    // assertions above are about — they refused a real classification rather than never posing
+    // one. Deliberately LAST here: this test's classification and its wrongful-crown failure
+    // mode live in the same drive, so under the weakened-gate defect the crown must report as a
+    // crown (the `wf` assertion above) — measured, a guard placed first steals that panic (M1
+    // crowns at beat ~1, before recurrence) and reports the wrong cause.
+    assert!(
+        primed,
+        "the loop never reached a board-recurrent state within {PRIMED_LOOP_BEATS} beats — this \
+         is not the primed-loop regime the assertions above assume, so they passed vacuously"
     );
 }
 
@@ -1277,7 +1386,17 @@ fn vito_2p_optional_offer_declare_crowns() {
 fn injected_3p_one_faller_no_crown() {
     let (mut runner, kickoff) = setup_3p_subset_lethal(LoopDetectionMode::Interactive);
     let _ = runner.cast(kickoff).resolve();
-    let (_events, _wf) = drive_collect(&mut runner, 500);
+    let (_events, _wf, primed) = drive_collect_primed(&mut runner, PRIMED_LOOP_BEATS);
+
+    // Reach-guard on the regime (see `drive_collect_primed`): the board reached a genuine
+    // recurrence, so the E1 clone-drive below has a real cycle to measure rather than an
+    // un-primed board. (It witnesses the live bridge's frame pair, not the E1 measure's own
+    // boundary/work pair — those are different frames.)
+    assert!(
+        primed,
+        "the loop never reached a board-recurrent state within {PRIMED_LOOP_BEATS} beats — the \
+         E1 measure below would have no primed cycle, so its no-crown assertion is vacuous"
+    );
 
     // Reach-guard: the drain loop genuinely ran (P1 bled, alive) and P2 is untouched — this
     // is the subset-lethal regime the E1 measure must refuse.
@@ -1399,6 +1518,9 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
             slot: slot.clone(),
             kind: DecisionPointKind::Targets {
                 legal_targets: vec![TargetRef::Player(P1)],
+                min_targets: 1,
+                max_targets: 1,
+                ordered: true,
             },
         }],
         convoke_tappable_count: 0,
@@ -1472,11 +1594,11 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
 fn injected_3p_unequal_life_pin_all_no_crown() {
     // Drive one primed cycle of a confirmed 3p both-fall drain and report the terminal
     // waiting_for.
-    fn drive_confirmed(p1_life: i32, p2_life: i32) -> WaitingFor {
+    fn drive_confirmed(p1_life: i32, p2_life: i32) -> (WaitingFor, bool) {
         let (mut runner, kickoff) =
             setup_3p_both_fall(LoopDetectionMode::Interactive, p1_life, p2_life);
         let _ = runner.cast(kickoff).resolve();
-        let (_events, _wf) = drive_collect(&mut runner, 200);
+        let (_events, _wf, primed) = drive_collect_primed(&mut runner, PRIMED_LOOP_BEATS);
         // Reach-guard: both opponents bled equally (loop primed, both are fallers) and stay
         // pairwise-offset by the initial gap (equal deltas preserve the difference).
         assert!(
@@ -1501,11 +1623,20 @@ fn injected_3p_unequal_life_pin_all_no_crown() {
             })
             .expect("P0 declares UntilLethal");
         accept_all_opponents(&mut runner);
-        runner.state().waiting_for.clone()
+        (runner.state().waiting_for.clone(), primed)
     }
 
     // UNEQUAL absolute life (gap 50) ⇒ NO crown (F2 staggered-death veto).
-    let unequal = drive_confirmed(1000, 1050);
+    let (unequal, unequal_primed) = drive_confirmed(1000, 1050);
+    // Reach-guard on the regime (see `drive_collect_primed`) — asserted on THIS half only: the
+    // equal-life half below is measured to consume 0 beats (already crowned as the kick-off
+    // resolved), so it has no drive in which to recur. This is the half the F2 revert-probe
+    // flips, so the whole discriminator lives on the guarded side.
+    assert!(
+        unequal_primed,
+        "the loop never reached a board-recurrent state within {PRIMED_LOOP_BEATS} beats — this \
+         is not the ≥2-faller primed regime the assertions below assume"
+    );
     assert!(
         !matches!(unequal, WaitingFor::GameOver { winner: Some(_) }),
         "unequal-life ≥2-faller drain must NOT crown (CR 704.3 simultaneity), got {unequal:?}"
@@ -1516,7 +1647,7 @@ fn injected_3p_unequal_life_pin_all_no_crown() {
     );
 
     // EQUAL absolute life ⇒ CROWN (reach-guard: the F2 check is not always-reject).
-    let equal = drive_confirmed(1000, 1000);
+    let (equal, _) = drive_confirmed(1000, 1000);
     assert_eq!(
         equal,
         WaitingFor::GameOver { winner: Some(P0) },
@@ -3824,6 +3955,9 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
                     TargetRef::Player(P1),
                     TargetRef::Object(battlefield),
                 ],
+                min_targets: 1,
+                max_targets: 1,
+                ordered: true,
             },
         }],
         convoke_tappable_count: 0,
@@ -3845,7 +3979,7 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
         let WaitingFor::LoopShortcut { schema, .. } = wf else {
             panic!("expected LoopShortcut, got {wf:?}");
         };
-        let DecisionPointKind::Targets { legal_targets } = &schema.points[0].kind else {
+        let DecisionPointKind::Targets { legal_targets, .. } = &schema.points[0].kind else {
             panic!("expected a Targets point, got {:?}", schema.points[0].kind);
         };
         legal_targets.clone()

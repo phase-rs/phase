@@ -21,6 +21,28 @@ use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit}
 use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::TriggerMode;
 
+fn tap_land_action(state: &GameState, object_id: ObjectId) -> GameAction {
+    let player = state
+        .waiting_for
+        .acting_player()
+        .expect("tap-land test requires one acting player");
+    super::mana_sources::activatable_mana_actions_for_player(state, player)
+        .into_iter()
+        .find(|action| {
+            matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == object_id)
+        })
+        .expect("land must expose a semantic mana action")
+}
+
+fn apply_tap_land_as_current(
+    state: &mut GameState,
+    object_id: ObjectId,
+) -> Result<ActionResult, EngineError> {
+    let action = tap_land_action(state, object_id);
+    apply_as_current(state, action)
+}
+
 /// Create a simple test ability definition.
 fn make_draw_ability(num_cards: u32) -> AbilityDefinition {
     AbilityDefinition::new(
@@ -50,16 +72,37 @@ fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
 #[test]
 fn cards_revealed_events_are_remembered_publicly() {
     let mut state = GameState::new_two_player(42);
-    let card_id = ObjectId(42);
+    let card_id = create_object(
+        &mut state,
+        CardId(42),
+        PlayerId(1),
+        "Known Card".to_string(),
+        Zone::Hand,
+    );
     let events = vec![GameEvent::CardsRevealed {
         player: PlayerId(1),
         card_ids: vec![card_id],
         card_names: vec!["Known Card".to_string()],
     }];
+    let pre_state = state.clone();
 
-    remember_public_reveals(&mut state, &events);
+    remember_public_reveals(&mut state, &events, 0);
 
     assert!(state.public_revealed_cards.contains(&card_id));
+    let command = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .find_map(|entry| match &entry.command {
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::Information(command)) => {
+                Some(command.clone())
+            }
+            _ => None,
+        })
+        .expect("published reveal must record its exact information command");
+    let mut replay = pre_state;
+    replay.apply_resolved_information(&command).unwrap();
+    assert_eq!(replay.public_revealed_cards, state.public_revealed_cards);
 }
 
 /// CR 603.3d regression — reported turn-34 Commander freeze (All Will Be
@@ -1553,6 +1596,7 @@ fn room_back_face(name: &str) -> BackFaceData {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType::default(),
         mana_cost: ManaCost::default(),
@@ -2162,6 +2206,137 @@ fn cancel_auto_pass_routes_by_actor() {
         !state.auto_pass.contains_key(&PlayerId(0)),
         "P0's auto-pass should have been cancelled"
     );
+}
+
+/// Actor-scoped preference mutations must not advance an already-active
+/// auto-pass session. Before admission moved into `apply`, server-core returned
+/// directly for these six actions; routing through the shared boundary must
+/// preserve that no-progression behavior.
+#[test]
+fn actor_scoped_preferences_do_not_advance_active_auto_pass() {
+    let preferences = vec![
+        GameAction::CancelAutoPass,
+        GameAction::SetPhaseStops {
+            stops: vec![crate::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: crate::types::phase::PhaseStopScope::AllTurns,
+            }],
+        },
+        GameAction::SetPriorityPassingMode {
+            mode: crate::types::game_state::PriorityPassingMode::SkipLowUseWindows,
+        },
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::ClearAll,
+        },
+        GameAction::SetMayTriggerAutoChoice {
+            op: MayTriggerAutoChoiceOp::ClearAll,
+        },
+        GameAction::SetTriggerOrderTemplate {
+            op: TriggerOrderTemplateOp::ClearAll,
+        },
+    ];
+
+    for action in preferences {
+        let mut state = setup_game_at_main_phase();
+        state.auto_pass.insert(
+            PlayerId(0),
+            crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+                until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        match &action {
+            GameAction::CancelAutoPass => {
+                state.auto_pass.insert(
+                    PlayerId(1),
+                    crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+                        until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+                    },
+                );
+            }
+            GameAction::SetPriorityYield { .. } => state.add_priority_yield(
+                PlayerId(1),
+                crate::types::game_state::YieldTarget::AllCopies {
+                    card_id: CardId(1),
+                    trigger_description: None,
+                },
+            ),
+            GameAction::SetMayTriggerAutoChoice { .. } => state.set_may_trigger_auto_choice(
+                may_trigger_key(PlayerId(1), ObjectId(1)),
+                crate::types::game_state::AutoMayChoice::Accept,
+            ),
+            GameAction::SetTriggerOrderTemplate { .. } => {
+                state.set_trigger_order_template(persistent_order_template(PlayerId(1), 1));
+            }
+            GameAction::SetPhaseStops { .. } | GameAction::SetPriorityPassingMode { .. } => {}
+            _ => unreachable!("preference list is exhaustive"),
+        }
+        let waiting_for = state.waiting_for.clone();
+        let priority_passes = state.priority_passes.clone();
+
+        let result = apply(&mut state, PlayerId(1), action.clone())
+            .expect("actor-scoped preference should be accepted out of priority");
+
+        assert!(
+            result.events.is_empty(),
+            "{} must not auto-pass or emit game events",
+            action.variant_name()
+        );
+        assert_eq!(
+            state.waiting_for,
+            waiting_for,
+            "{} advanced priority",
+            action.variant_name()
+        );
+        assert_eq!(
+            state.priority_passes,
+            priority_passes,
+            "{} changed the priority-pass sequence",
+            action.variant_name()
+        );
+        assert!(
+            state.auto_pass.contains_key(&PlayerId(0)),
+            "{} consumed P0's active auto-pass session",
+            action.variant_name()
+        );
+        match action {
+            GameAction::CancelAutoPass => assert!(
+                !state.auto_pass.contains_key(&PlayerId(1)),
+                "CancelAutoPass must remove the actor's own session"
+            ),
+            GameAction::SetPhaseStops { stops } => assert_eq!(
+                state.phase_stops.get(&PlayerId(1)),
+                Some(&stops),
+                "SetPhaseStops must persist the actor's stops"
+            ),
+            GameAction::SetPriorityPassingMode { mode } => assert_eq!(
+                state.priority_passing_modes.get(&PlayerId(1)),
+                Some(&mode),
+                "SetPriorityPassingMode must persist the actor's mode"
+            ),
+            GameAction::SetPriorityYield { .. } => assert!(
+                !state
+                    .priority_yields
+                    .iter()
+                    .any(|yielded| yielded.player == PlayerId(1)),
+                "SetPriorityYield::ClearAll must clear the actor's yields"
+            ),
+            GameAction::SetMayTriggerAutoChoice { .. } => assert!(
+                state
+                    .may_trigger_auto_choices
+                    .iter()
+                    .all(|record| record.key.player != PlayerId(1)),
+                "SetMayTriggerAutoChoice::ClearAll must clear the actor's choices"
+            ),
+            GameAction::SetTriggerOrderTemplate { .. } => assert!(
+                state
+                    .decision_templates
+                    .iter()
+                    .all(|template| template.owner != PlayerId(1)),
+                "SetTriggerOrderTemplate::ClearAll must clear the actor's templates"
+            ),
+            _ => unreachable!("preference list is exhaustive"),
+        }
+    }
 }
 
 // --- GameAction::SetPriorityYield (CR 117.3d + CR 400.7 + CR 704.5d) ---
@@ -3989,6 +4164,7 @@ fn engine_error_display() {
 #[test]
 fn apply_rejects_action_from_wrong_actor() {
     let mut state = setup_game_at_main_phase();
+    let before = state.clone();
     // `setup_game_at_main_phase` leaves P0 with priority.
     assert_eq!(
         turn_control::authorized_submitter(&state),
@@ -4001,6 +4177,10 @@ fn apply_rejects_action_from_wrong_actor() {
     assert!(
         matches!(result, Err(EngineError::WrongPlayer)),
         "expected WrongPlayer, got {result:?}"
+    );
+    assert_eq!(
+        state, before,
+        "authorization rejection must restore every boundary-side mutation"
     );
 
     // P0 submitting the same action must succeed.
@@ -4194,6 +4374,56 @@ fn apply_rejects_spoofed_concede() {
 }
 
 #[test]
+fn game_over_rejects_ordinary_actions_but_keeps_preferences_actor_scoped() {
+    let mut state = setup_game_at_main_phase();
+    state.waiting_for = WaitingFor::GameOver {
+        winner: Some(PlayerId(0)),
+    };
+    let before = state.clone();
+
+    let pass = apply(&mut state, PlayerId(0), GameAction::PassPriority);
+    assert!(matches!(pass, Err(EngineError::WrongPlayer)));
+    assert_eq!(
+        state, before,
+        "rejected ordinary action must not mutate GameOver"
+    );
+
+    let concede = apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::Concede {
+            player_id: PlayerId(1),
+        },
+    );
+    assert!(matches!(concede, Err(EngineError::WrongPlayer)));
+    assert_eq!(
+        state, before,
+        "rejected self-concede must not mutate GameOver"
+    );
+
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::SetPhaseStops {
+            stops: vec![crate::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: crate::types::phase::PhaseStopScope::AllTurns,
+            }],
+        },
+    )
+    .expect("preferences remain actor-scoped after GameOver");
+    assert!(matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    assert_eq!(
+        state.phase_stops.get(&PlayerId(1)),
+        Some(&vec![crate::types::phase::PhaseStop {
+            phase: Phase::End,
+            scope: crate::types::phase::PhaseStopScope::AllTurns,
+        }]),
+        "actor-scoped preference must persist after GameOver"
+    );
+}
+
+#[test]
 fn tap_land_for_mana_produces_correct_color() {
     let mut state = setup_game_at_main_phase();
     state.priority_passes.insert(PlayerId(1));
@@ -4228,11 +4458,7 @@ fn tap_land_for_mana_produces_correct_color() {
         );
     }
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    let result = apply_tap_land_as_current(&mut state, land_id).unwrap();
 
     assert!(state.objects[&land_id].tapped);
     assert_eq!(
@@ -4287,11 +4513,7 @@ fn tap_land_for_mana_uses_priority_player_during_opponents_turn() {
         );
     }
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    let result = apply_tap_land_as_current(&mut state, land_id).unwrap();
 
     assert!(state.objects[&land_id].tapped);
     assert_eq!(
@@ -4342,11 +4564,7 @@ fn tapped_lands_produce_distinct_pip_ids() {
     }
 
     for land_id in land_ids {
-        apply_as_current(
-            &mut state,
-            GameAction::TapLandForMana { object_id: land_id },
-        )
-        .unwrap();
+        apply_tap_land_as_current(&mut state, land_id).unwrap();
     }
 
     let ids: Vec<u64> = state.players[0]
@@ -4426,7 +4644,7 @@ fn untap_land_for_mana_refunds_aura_bonus_no_infinite_mana() {
 
     // Tap the Forest. Land emits {G}; aura's trigger fires via
     // run_post_action_pipeline and adds another {G}.
-    apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+    apply_tap_land_as_current(&mut state, forest).unwrap();
     assert_eq!(
         state.players[0]
             .mana_pool
@@ -4451,7 +4669,7 @@ fn untap_land_for_mana_refunds_aura_bonus_no_infinite_mana() {
 
     // Re-tap and re-untap to verify no compounding across cycles.
     for _ in 0..3 {
-        apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+        apply_tap_land_as_current(&mut state, forest).unwrap();
         assert_eq!(state.players[0].mana_pool.total(), 2);
         apply_as_current(
             &mut state,
@@ -5009,7 +5227,7 @@ fn vorinclex_mana_doubling_trigger_fires_on_tap() {
     }
 
     // Tap the Forest — should produce {G} (land) + {G} (Vorinclex doubler).
-    apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+    apply_tap_land_as_current(&mut state, forest).unwrap();
     assert_eq!(
         state.players[0]
             .mana_pool
@@ -5091,14 +5309,7 @@ fn vorinclex_cant_untap_trigger_fires_on_opponent_tap() {
     }
 
     // Opponent taps the Forest
-    apply(
-        &mut state,
-        PlayerId(1),
-        GameAction::TapLandForMana {
-            object_id: opp_forest,
-        },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, opp_forest).unwrap();
     // The trigger should have been placed on the stack.
     assert!(
         !state.stack.is_empty() || !state.transient_continuous_effects.is_empty(),
@@ -5148,21 +5359,18 @@ fn tap_land_rejects_already_tapped() {
         let obj = state.objects.get_mut(&land_id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.card_types.subtypes.push("Forest".to_string());
-        obj.tapped = true;
     }
-
-    let result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    );
+    let action = tap_land_action(&state, land_id);
+    state.objects.get_mut(&land_id).unwrap().tapped = true;
+    let before = state.clone();
+    let result = apply_as_current(&mut state, action);
 
     assert!(result.is_err());
+    assert_eq!(state, before, "hostile stale mana action must be pure");
 }
 
 #[test]
-fn multi_mana_land_rejects_tap_land_for_mana() {
-    // Dual lands with multiple mana abilities must use ActivateAbility to
-    // select which color — TapLandForMana is ambiguous for multi-option lands.
+fn multi_mana_land_exposes_one_semantic_action_per_option() {
     let mut state = setup_game_at_main_phase();
 
     let dual_id = create_object(
@@ -5209,14 +5417,17 @@ fn multi_mana_land_rejects_tap_land_for_mana() {
         );
     }
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: dual_id },
-    );
-    assert!(
-        result.is_err(),
-        "TapLandForMana should reject multi-mana lands"
-    );
+    let actions: Vec<_> =
+        super::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(0))
+            .into_iter()
+            .filter(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+        if selection.source.object_id == dual_id)
+            })
+            .collect();
+    assert_eq!(actions.len(), 2);
+    apply_as_current(&mut state, actions[0].clone()).unwrap();
+    assert!(state.objects[&dual_id].tapped);
 }
 
 #[test]
@@ -5649,13 +5860,7 @@ fn full_turn_integration_with_mulligan() {
         .unwrap();
 
     // Tap land for mana
-    let _result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana {
-            object_id: land_on_bf,
-        },
-    )
-    .unwrap();
+    let _result = apply_tap_land_as_current(&mut state, land_on_bf).unwrap();
     assert_eq!(
         state.players[0]
             .mana_pool
@@ -8009,27 +8214,24 @@ fn holdout_settlement_second_mana_ability_prompts_for_creature_then_adds_mana() 
         .expect("Holdout Settlement should expose legal mana actions");
     assert!(holdout_actions.iter().any(|action| matches!(
         action,
-        GameAction::ActivateAbility {
-            source_id,
-            ability_index: 0
-        } if *source_id == holdout
+        GameAction::TapLandForMana { selection }
+            if selection.source.object_id == holdout && selection.ability_index == Some(0)
     )));
-    assert!(holdout_actions.iter().any(|action| matches!(
-        action,
-        GameAction::ActivateAbility {
-            source_id,
-            ability_index: 1
-        } if *source_id == holdout
-    )));
+    let green_action = holdout_actions
+        .iter()
+        .find(|action| {
+            matches!(
+                action,
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == holdout
+                        && selection.ability_index == Some(1)
+                        && selection.mana_type == ManaType::Green
+            )
+        })
+        .cloned()
+        .expect("Holdout Settlement should expose its semantic green mana action");
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::ActivateAbility {
-            source_id: holdout,
-            ability_index: 1,
-        },
-    )
-    .unwrap();
+    let result = apply_as_current(&mut state, green_action).unwrap();
 
     match result.waiting_for {
         WaitingFor::PayCost {
@@ -8058,28 +8260,12 @@ fn holdout_settlement_second_mana_ability_prompts_for_creature_then_adds_mana() 
     .unwrap();
     assert!(matches!(
         result.waiting_for,
-        WaitingFor::ChooseManaColor {
-            player: PlayerId(0),
-            ..
-        }
-    ));
-    assert!(state.objects.get(&holdout).unwrap().tapped);
-    assert!(state.objects.get(&creature).unwrap().tapped);
-
-    let result = apply_as_current(
-        &mut state,
-        GameAction::ChooseManaColor {
-            choice: crate::types::game_state::ManaChoice::SingleColor(ManaType::Green),
-            count: 1,
-        },
-    )
-    .unwrap();
-    assert!(matches!(
-        result.waiting_for,
         WaitingFor::Priority {
             player: PlayerId(0)
         }
     ));
+    assert!(state.objects.get(&holdout).unwrap().tapped);
+    assert!(state.objects.get(&creature).unwrap().tapped);
     assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
 }
 
@@ -8632,11 +8818,7 @@ fn tap_land_records_in_lands_tapped_for_mana() {
     let mut state = setup_game_at_main_phase();
     let land_id = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
 
     let tracked = &state.lands_tapped_for_mana[&PlayerId(0)];
     assert!(tracked.contains(&land_id));
@@ -8647,11 +8829,7 @@ fn untap_land_removes_mana_and_untaps() {
     let mut state = setup_game_at_main_phase();
     let land_id = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
     assert!(state.objects[&land_id].tapped);
     assert_eq!(
         state.players[0]
@@ -8691,8 +8869,8 @@ fn untap_one_of_two_tapped_lands_preserves_other() {
     let land1 = create_forest(&mut state, PlayerId(0));
     let land2 = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(&mut state, GameAction::TapLandForMana { object_id: land1 }).unwrap();
-    apply_as_current(&mut state, GameAction::TapLandForMana { object_id: land2 }).unwrap();
+    apply_tap_land_as_current(&mut state, land1).unwrap();
+    apply_tap_land_as_current(&mut state, land2).unwrap();
     assert_eq!(
         state.players[0]
             .mana_pool
@@ -8726,11 +8904,7 @@ fn untap_rejects_when_mana_already_spent() {
     let mut state = setup_game_at_main_phase();
     let land_id = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
 
     state.players[0].mana_pool.spend(ManaType::Green);
     assert_eq!(state.players[0].mana_pool.total(), 0);
@@ -8747,11 +8921,7 @@ fn pass_priority_clears_lands_tapped_for_mana() {
     let mut state = setup_game_at_main_phase();
     let land_id = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
     assert!(!state.lands_tapped_for_mana.is_empty());
 
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
@@ -8763,13 +8933,7 @@ fn play_land_clears_lands_tapped_for_mana() {
     let mut state = setup_game_at_main_phase();
     let tapped_land = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana {
-            object_id: tapped_land,
-        },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, tapped_land).unwrap();
     assert!(!state.lands_tapped_for_mana.is_empty());
 
     let hand_land = create_object(
@@ -8870,11 +9034,7 @@ fn untap_during_mana_payment_returns_mana_payment() {
     }) = &result
     {
         // Tap the land during ManaPayment
-        apply_as_current(
-            &mut state,
-            GameAction::TapLandForMana { object_id: land_id },
-        )
-        .unwrap();
+        apply_tap_land_as_current(&mut state, land_id).unwrap();
         assert!(state.lands_tapped_for_mana[&PlayerId(0)].contains(&land_id));
 
         // Untap it — should return ManaPayment, not Priority
@@ -8900,11 +9060,7 @@ fn zone_change_removes_stale_tracking() {
     let land_id = create_forest(&mut state, PlayerId(0));
 
     // Tap the land
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
     assert!(state.lands_tapped_for_mana[&PlayerId(0)].contains(&land_id));
 
     // Move the land to graveyard (e.g., destroyed)
@@ -9124,11 +9280,16 @@ fn reorder_hand_rejects_non_permutation() {
     let a = ObjectId(100);
     let b = ObjectId(101);
     state.players[0].hand = crate::im::Vector::from(vec![a, b]);
+    let before = state.clone();
 
     // Wrong length.
     let err = apply(&mut state, p0, GameAction::ReorderHand { order: vec![a] })
         .expect_err("wrong length must error");
     assert!(matches!(err, EngineError::InvalidAction(_)));
+    assert_eq!(
+        state, before,
+        "a reducer rejection must restore transient boundary state as well as the hand"
+    );
 
     // Right length, wrong contents.
     let stranger = ObjectId(999);
@@ -9141,6 +9302,10 @@ fn reorder_hand_rejects_non_permutation() {
     )
     .expect_err("stranger id must error");
     assert!(matches!(err, EngineError::InvalidAction(_)));
+    assert_eq!(
+        state, before,
+        "each rejected reducer attempt must leave the complete state unchanged"
+    );
 
     // Hand unchanged after rejected calls.
     assert_eq!(

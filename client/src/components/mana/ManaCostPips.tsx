@@ -2,23 +2,37 @@ import type { ManaCost } from "../../adapter/types.ts";
 import { manaCostToShards } from "../../viewmodel/costLabel.ts";
 import { ManaSymbol } from "./ManaSymbol.tsx";
 
-type PipSize = "2xs" | "xs" | "sm" | "md" | "lg" | "fluid";
+type PipSize = "2xs" | "xs" | "sm" | "md" | "fluid";
 
 const PIP_SIZES: Record<PipSize, { container: string; gap: string; backdrop: string }> = {
   "2xs": { container: "w-[10px] h-[10px] p-[0px]", gap: "gap-[0.5px]", backdrop: "-inset-x-[1px] top-[2px] -bottom-[3px]" },
   xs: { container: "w-[12px] h-[12px] p-[0px]", gap: "gap-[0.5px]", backdrop: "-inset-x-[1px] top-[2px] -bottom-[4px]" },
   sm: { container: "w-[18px] h-[18px] p-[0px]", gap: "gap-[1px]", backdrop: "-inset-x-[2px] top-[4px] -bottom-[8px]" },
   md: { container: "w-[22px] h-[22px] p-[2px]", gap: "gap-[1px]", backdrop: "-inset-x-[3px] -top-[2px] -bottom-[4px]" },
-  lg: { container: "w-[28px] h-[28px] py-[2px] px-[2.5px]", gap: "gap-[0.5px]", backdrop: "-inset-x-[3px] -top-[2px] -bottom-[4px]" },
   // Card-relative sizing in container-query inline units (1cqi = 1% of the
   // nearest `@container` ancestor's width). Consumers that pass `size="fluid"`
   // MUST wrap the pips in an element with `container-type: inline-size` sized to
-  // the card (e.g. an `absolute inset-0 @container` overlay). 15cqi matches the
-  // fixed `md` (22px) pip on a ~145px desktop hand card, then scales down with
-  // the card so pips never look oversized on smaller layouts. Secondary
-  // dimensions use the same md ratios (p 9.1%, gap 4.5%, backdrop 13.6/9.1/18.2%).
-  fluid: { container: "w-[15cqi] h-[15cqi] p-[1.4cqi]", gap: "gap-[0.7cqi]", backdrop: "-inset-x-[2cqi] -top-[1.4cqi] -bottom-[2.7cqi]" },
+  // the card (e.g. an `absolute inset-0 @container` overlay); the badge then
+  // anchors itself over the printed cost via FLUID_ANCHOR.
+  //
+  // The badge stands in for the card's PRINTED mana cost (it shows the engine's
+  // effective cost), so its geometry is calibrated against that cost rather than
+  // against any fixed px size. Measured on M15-frame art, a printed symbol is
+  // ~5.2% of the card's width, so the 0.4cqi padding sizes the symbol to exactly
+  // that and the 6cqi disk reads as a thin ring around it. The printed symbols
+  // on the same card are legible at this size, which is what makes it enough.
+  //
+  // Keep the three values solving 5*container + 4*gap = 32cqi: that is the
+  // widest cost the frame carries (five symbols), and 32cqi is what clears the
+  // card name instead of running through it.
+  fluid: { container: "w-[6cqi] h-[6cqi] p-[0.4cqi]", gap: "gap-[0.5cqi]", backdrop: "-inset-x-[0.5cqi] -top-[0.5cqi] -bottom-[1cqi]" },
 };
+
+// Where the printed cost sits on an M15 frame: right edge ~7% in from the card's
+// right edge, top edge ~5.4% down from its top. Owning this here keeps the
+// anchor in lockstep with the pip diameter above — the two only look right
+// together, and every card overlay wants the same placement.
+const FLUID_ANCHOR = "absolute right-[6.5%] top-[5%]";
 
 interface ManaCostPipsProps {
   cost: ManaCost;
@@ -37,7 +51,7 @@ export function ManaCostPips({ cost, isReduced, size = "md", className = "" }: M
   const s = PIP_SIZES[size];
 
   return (
-    <div className={`pointer-events-none ${className}`}>
+    <div className={`pointer-events-none ${size === "fluid" ? FLUID_ANCHOR : ""} ${className}`}>
       <div className={`relative flex ${s.gap}`}>
         <div
           data-mana-cost-backdrop

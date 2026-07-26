@@ -1159,6 +1159,7 @@ fn real_4p_mana_and_token_boundary_drains_mana_and_still_collapses() {
         power: Some(1),
         toughness: Some(1),
         loyalty: None,
+        printed_loyalty: None,
         keywords: vec![],
         abilities: std::sync::Arc::default(),
         trigger_definitions: std::sync::Arc::default(),

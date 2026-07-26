@@ -15,11 +15,13 @@ pub mod control;
 pub mod enchantments;
 pub mod energy;
 pub mod equipment;
+pub mod graveyard_types;
 pub mod landfall;
 pub mod lifegain;
 pub mod mana_ramp;
 pub mod mill;
 pub mod plus_one_counters;
+pub mod poison;
 pub mod reanimator;
 pub mod spellslinger_prowess;
 pub mod tokens_wide;
@@ -36,11 +38,13 @@ pub use control::ControlFeature;
 pub use enchantments::EnchantmentsFeature;
 pub use energy::EnergyFeature;
 pub use equipment::EquipmentFeature;
+pub use graveyard_types::GraveyardTypesFeature;
 pub use landfall::LandfallFeature;
 pub use lifegain::LifegainFeature;
 pub use mana_ramp::ManaRampFeature;
 pub use mill::MillFeature;
 pub use plus_one_counters::PlusOneCountersFeature;
+pub use poison::PoisonFeature;
 pub use reanimator::ReanimatorFeature;
 pub use spellslinger_prowess::SpellslingerProwessFeature;
 pub use tokens_wide::TokensWideFeature;
@@ -78,6 +82,10 @@ pub struct DeckFeatures {
     pub reanimator: ReanimatorFeature,
     pub mill: MillFeature,
     pub energy: EnergyFeature,
+    /// CR 104.3d: the alternate poison win clock (toxic / infect / proliferate).
+    pub poison: PoisonFeature,
+    /// CR 207.2c + CR 205.2a: delirium / descend graveyard type-diversity.
+    pub graveyard_types: GraveyardTypesFeature,
     /// Declaration-derived: the deck's declared bracket tier. Unlike the
     /// other fields here, this is not structurally detected from card text —
     /// it is a per-deck declaration set at deck-analysis time from deck
@@ -122,6 +130,8 @@ impl DeckFeatures {
             reanimator: reanimator::detect(deck),
             mill: mill::detect(deck),
             energy: energy::detect(deck),
+            poison: poison::detect(deck),
+            graveyard_types: graveyard_types::detect(deck),
             bracket_tier: tier,
         }
     }

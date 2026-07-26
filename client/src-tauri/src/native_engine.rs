@@ -25,10 +25,19 @@ use crate::native_bridge::BridgeHandle;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// `CREATE_NO_WINDOW` — suppress the console window Windows allocates for a
+/// console-subsystem child when spawned from this GUI-subsystem shell. Without
+/// it, launching the native `phase-server.exe` flashes/leaves a cmd window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const SERVER_ARTIFACT_PUBLIC_KEY: &str = "RWRDZxG2otNoKLblrgD00kM0a8U0CRZUGHpNCr3W+3ik1E84XHcB6hZe";
 const NATIVE_ENGINE_DIRECTORY: &str = "native-engine";
 const CACHE_DIRECTORY: &str = "cache/sha256";
+const LOG_DIRECTORY: &str = "logs";
 const SPAWN_RECORD_FILE: &str = "native-engine-spawn-record.json";
 const RELEASE_RATCHET_FILE: &str = "native-engine-highest-release-version.json";
 const PREVIEW_RATCHET_FILE: &str = "native-engine-preview-generated-at.json";
@@ -114,6 +123,7 @@ pub enum NativeEngineProgressPhase {
     DownloadingData,
     Spawning,
     Ready,
+    Failed,
 }
 
 /// Structured IPC failures let the frontend choose its normal WASM fallback.
@@ -337,8 +347,24 @@ impl NativeEngineFiles {
         self.key_directory(key).join(binary_file_name())
     }
 
+    fn binary_signature(&self, key: &NativeEngineKey) -> PathBuf {
+        self.key_directory(key)
+            .join(format!("{}.minisig", binary_file_name()))
+    }
+
     fn data_directory(&self, key: &NativeEngineKey) -> PathBuf {
         self.key_directory(key).join("data")
+    }
+
+    /// Version-independent path for the server's game-persistence database.
+    /// Keyed by channel only (not the version/fingerprint that names
+    /// `key_directory`), so saved games survive engine updates within a channel
+    /// while `preview` and `release` stay isolated — they load different
+    /// content and must not share sessions.
+    fn games_db(&self, key: &NativeEngineKey) -> PathBuf {
+        self.base
+            .join("games")
+            .join(format!("{}.db", key.channel()))
     }
 
     fn cache_directory(&self) -> PathBuf {
@@ -347,6 +373,14 @@ impl NativeEngineFiles {
 
     fn cache_blob(&self, sha256: &str) -> PathBuf {
         self.cache_directory().join(sha256)
+    }
+
+    fn log_directory(&self) -> PathBuf {
+        self.base.join(LOG_DIRECTORY)
+    }
+
+    fn startup_log(&self) -> PathBuf {
+        self.log_directory().join("server-startup.log")
     }
 
     fn spawn_record(&self) -> PathBuf {
@@ -415,6 +449,7 @@ impl Default for NativeEngineState {
 }
 
 static ENGINE_STATE: OnceLock<Mutex<NativeEngineState>> = OnceLock::new();
+static LATEST_PROGRESS: OnceLock<Mutex<Option<NativeEngineProgress>>> = OnceLock::new();
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) enum NativeBridgeRegistryError {
@@ -424,6 +459,10 @@ pub(crate) enum NativeBridgeRegistryError {
 
 fn engine_state() -> &'static Mutex<NativeEngineState> {
     ENGINE_STATE.get_or_init(|| Mutex::new(NativeEngineState::default()))
+}
+
+fn latest_progress() -> &'static Mutex<Option<NativeEngineProgress>> {
+    LATEST_PROGRESS.get_or_init(|| Mutex::new(None))
 }
 
 pub(crate) fn register_native_engine_bridge(
@@ -490,11 +529,32 @@ pub async fn ensure_native_engine(
     app: AppHandle,
     key: NativeEngineKey,
 ) -> Result<NativeEngineReady, NativeEngineError> {
-    tauri::async_runtime::spawn_blocking(move || ensure_native_engine_sync(&app, key))
+    let progress_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || ensure_native_engine_sync(&app, key))
         .await
         .map_err(|error| NativeEngineError::Internal {
             detail: error.to_string(),
-        })?
+        })
+        .and_then(|result| result);
+    // Single authority for the terminal phase. `ensure_native_engine_sync`
+    // returns early on both the healthy-in-process and adopted-record paths,
+    // so emitting `Ready` inside it would leave those runs ending on a
+    // non-terminal phase — and a listener waiting for one would wait forever.
+    match &result {
+        Ok(ready) => emit_progress(
+            &progress_app,
+            NativeEngineProgressPhase::Ready,
+            Some(ready.port.to_string()),
+        ),
+        Err(_) => emit_progress(&progress_app, NativeEngineProgressPhase::Failed, None),
+    }
+    result
+}
+
+/// Returns the latest provisioning progress for listeners that register late.
+#[tauri::command]
+pub fn native_engine_progress() -> Option<NativeEngineProgress> {
+    latest_progress().lock().ok()?.clone()
 }
 
 /// Stops the held or adopted native server and removes its persisted record.
@@ -566,22 +626,7 @@ fn ensure_native_engine_sync(
         None => resolve_artifact(app, &client, &files, &key)?,
     };
 
-    emit_progress(
-        app,
-        NativeEngineProgressPhase::DownloadingBinary,
-        Some(key.directory_name()),
-    );
-    let binary = fetch_bytes(&client, &resolved.binary_url)?;
-    let signature = fetch_bytes(&client, &resolved.binary_signature_url)?;
-    emit_progress(
-        app,
-        NativeEngineProgressPhase::Verifying,
-        Some("server binary".to_owned()),
-    );
-    verify_signature(&binary, &signature)?;
-    let binary_path = files.binary(&key);
-    write_atomically(&binary_path, &binary)?;
-    make_executable(&binary_path)?;
+    let binary_path = provision_binary(app, &client, &files, &key, &resolved)?;
 
     emit_progress(app, NativeEngineProgressPhase::DownloadingData, None);
     assemble_data(&client, Some(app), &files, &key, &resolved.data)?;
@@ -591,6 +636,9 @@ fn ensure_native_engine_sync(
     let (mut child, stdin) = spawn_server(
         &binary_path,
         &files.data_directory(&key),
+        &files.games_db(&key),
+        &files.log_directory(),
+        &files.startup_log(),
         port,
         key.origin(),
     )?;
@@ -622,11 +670,6 @@ fn ensure_native_engine_sync(
     if let Err(error) = gc_after_successful_spawn(&files, &key) {
         eprintln!("native engine GC after successful spawn failed: {error:?}");
     }
-    emit_progress(
-        app,
-        NativeEngineProgressPhase::Ready,
-        Some(port.to_string()),
-    );
     Ok(NativeEngineReady { port })
 }
 
@@ -724,6 +767,66 @@ fn fetch_verified_bytes(client: &Client, url: &str) -> Result<Vec<u8>, NativeEng
     let signature = fetch_bytes(client, &format!("{url}.minisig"))?;
     verify_signature(&bytes, &signature)?;
     Ok(bytes)
+}
+
+/// Reuses a previously verified server binary for the same typed key. The
+/// minisign signature is retained alongside the executable so every launch
+/// still verifies what it is about to execute; a missing or invalid cache is
+/// simply replaced from the first-party artifact source.
+fn provision_binary(
+    app: &AppHandle,
+    client: &Client,
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+    resolved: &ResolvedArtifact,
+) -> Result<PathBuf, NativeEngineError> {
+    let binary_path = files.binary(key);
+    if cached_binary_is_verified(files, key)? {
+        return Ok(binary_path);
+    }
+
+    emit_progress(
+        app,
+        NativeEngineProgressPhase::DownloadingBinary,
+        Some(key.directory_name()),
+    );
+    let binary = fetch_bytes(client, &resolved.binary_url)?;
+    let signature = fetch_bytes(client, &resolved.binary_signature_url)?;
+    emit_progress(
+        app,
+        NativeEngineProgressPhase::Verifying,
+        Some("server binary".to_owned()),
+    );
+    verify_signature(&binary, &signature)?;
+    write_atomically(&binary_path, &binary)?;
+    write_atomically(&files.binary_signature(key), &signature)?;
+    make_executable(&binary_path)?;
+    Ok(binary_path)
+}
+
+fn cached_binary_is_verified(
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+) -> Result<bool, NativeEngineError> {
+    cached_binary_is_verified_with_key(SERVER_ARTIFACT_PUBLIC_KEY, files, key)
+}
+
+fn cached_binary_is_verified_with_key(
+    public_key: &str,
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+) -> Result<bool, NativeEngineError> {
+    let binary = match fs::read(files.binary(key)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(NativeEngineError::storage(error)),
+    };
+    let signature = match fs::read(files.binary_signature(key)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(NativeEngineError::storage(error)),
+    };
+    Ok(verify_signature_with_key(public_key, &binary, &signature).is_ok())
 }
 
 fn fetch_bytes(client: &Client, url: &str) -> Result<Vec<u8>, NativeEngineError> {
@@ -979,26 +1082,51 @@ fn reserve_port() -> Result<u16, NativeEngineError> {
 fn spawn_server(
     binary: &Path,
     data_directory: &Path,
+    games_db: &Path,
+    log_directory: &Path,
+    startup_log: &Path,
     port: u16,
     origin: &str,
 ) -> Result<(Child, ChildStdin), NativeEngineError> {
-    let mut child = Command::new(binary)
+    fs::create_dir_all(log_directory).map_err(NativeEngineError::storage)?;
+    let startup_log = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(startup_log)
+        .map_err(NativeEngineError::storage)?;
+    let mut command = Command::new(binary);
+    command
         .env("PORT", port.to_string())
         .env("PHASE_DATA_DIR", data_directory)
+        .env("PHASE_GAMES_DB", games_db)
         .args([
             "--bind",
             "127.0.0.1",
             "--exit-on-stdin-close",
+            // A desktop shell hosts one local player: keep the suspended solo
+            // game resumable until replaced (no stale purge, no reconnect expiry).
+            "--single-user",
             "--allowed-origin",
             origin,
         ])
+        .arg("--log-dir")
+        .arg(log_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| NativeEngineError::Spawn {
-            detail: error.to_string(),
-        })?;
+        // Early startup failures happen before phase-server initializes its
+        // structured logger. Keep the latest one beside its rolling logs so a
+        // server that exits before `/health` is diagnosable without a console.
+        .stderr(Stdio::from(startup_log));
+
+    // The shell is a GUI-subsystem app but phase-server is console-subsystem, so
+    // Windows would otherwise pop a console window for the child on every launch.
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command.spawn().map_err(|error| NativeEngineError::Spawn {
+        detail: error.to_string(),
+    })?;
     let stdin = child.stdin.take().ok_or_else(|| NativeEngineError::Spawn {
         detail: "native engine stdin pipe was unavailable".to_owned(),
     })?;
@@ -1102,6 +1230,7 @@ fn kill_recorded_process_if_ours(record: &SpawnRecord, files: &NativeEngineFiles
     {
         let _ = Command::new("taskkill")
             .args(["/PID", &record.pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
             .status();
     }
 }
@@ -1141,6 +1270,7 @@ fn process_is_plausibly_ours(pid: u32, binary: &Path) -> bool {
 fn process_is_plausibly_ours(pid: u32, binary: &Path) -> bool {
     let output = Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output();
     let Ok(output) = output else {
         return false;
@@ -1350,7 +1480,11 @@ fn binary_file_name() -> String {
 }
 
 fn emit_progress(app: &AppHandle, phase: NativeEngineProgressPhase, detail: Option<String>) {
-    let _ = app.emit(PROGRESS_EVENT, NativeEngineProgress { phase, detail });
+    let progress = NativeEngineProgress { phase, detail };
+    if let Ok(mut latest) = latest_progress().lock() {
+        *latest = Some(progress.clone());
+    }
+    let _ = app.emit(PROGRESS_EVENT, progress);
 }
 
 #[cfg(test)]
@@ -1476,6 +1610,23 @@ mod tests {
             verify_signature_with_key(TEST_PUBLIC_KEY, b"tampered", TEST_SIGNATURE.as_bytes())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn cached_binary_requires_its_matching_signature() {
+        let files = test_files("binary-cache");
+        let key = release_key("1.2.3");
+        write_atomically(&files.binary(&key), TEST_BYTES).unwrap();
+        write_atomically(&files.binary_signature(&key), TEST_SIGNATURE.as_bytes()).unwrap();
+
+        assert!(cached_binary_is_verified_with_key(TEST_PUBLIC_KEY, &files, &key).unwrap());
+
+        write_atomically(&files.binary(&key), b"tampered").unwrap();
+        assert!(!cached_binary_is_verified_with_key(TEST_PUBLIC_KEY, &files, &key).unwrap());
+
+        remove_file_if_exists(&files.binary_signature(&key)).unwrap();
+        assert!(!cached_binary_is_verified_with_key(TEST_PUBLIC_KEY, &files, &key).unwrap());
+        fs::remove_dir_all(files.app_directory).unwrap();
     }
 
     #[test]

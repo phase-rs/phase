@@ -251,12 +251,20 @@ pub enum DecisionPointKind {
     /// CR 608.2b: the legal targets for the slot (native `find_legal_targets` output).
     Targets {
         legal_targets: Vec<crate::types::ability::TargetRef>,
+        min_targets: u32,
+        max_targets: u32,
+        ordered: bool,
     },
     /// CR 702.51a: untapped creatures the controller may tap for convoke (informational — the
     /// concrete taps are re-bound live by `select_convoke_taps`).
     ConvokeTaps { tappable: Vec<ObjectId> },
     /// CR 700.2 modal: the selectable mode indices.
-    Mode { available_modes: Vec<usize> },
+    Mode {
+        available_modes: Vec<usize>,
+        min_modes: u32,
+        max_modes: u32,
+        allow_repeats: bool,
+    },
     /// CR 603.5: a binary "may" — the slot alone identifies it (FE renders yes/no).
     MayChoice,
     /// CR 732.6: a binary "[A] unless [B]" break — pay or decline.
@@ -681,9 +689,9 @@ pub(crate) fn resolve_target_ref(
 /// set. `period` (the drive count from [`shortcut_drive_period`]) bounds the iteration
 /// indices a scheduled target pin is re-resolved for, so a `RoundRobin`/`Piecewise` schedule
 /// is validated at EVERY index it will drive. EXHAUSTIVE over [`PinnedDecision`] with no
-/// wildcard: `Order` (CR 603.3b trigger-ordering) and `ConvokeTaps` (object-growth-internal,
-/// re-bound live by `select_convoke_taps`) carry no FE-declared target-legality, so they are
-/// SKIPPED explicitly. Runs once at declare (the board is frozen through Accept); the drive's
+/// wildcard: `Order` (CR 603.3b trigger-ordering) is not a loop-declaration point;
+/// `ConvokeTaps` must still address an exposed matching point even though its concrete taps are
+/// re-bound live by `select_convoke_taps`. Runs once at declare (the board is frozen through Accept); the drive's
 /// per-iteration [`resolve`] is the runtime CR 608.2b backstop.
 pub fn validate_pins(
     schema: &ShortcutDecisionSchema,
@@ -699,9 +707,18 @@ pub fn validate_pins(
                     .iter()
                     .find(|p| p.slot == *slot)
                     .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
-                let DecisionPointKind::Targets { legal_targets } = &point.kind else {
+                let DecisionPointKind::Targets {
+                    legal_targets,
+                    min_targets,
+                    max_targets,
+                    ..
+                } = &point.kind
+                else {
                     return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
                 };
+                if targets.len() < *min_targets as usize || targets.len() > *max_targets as usize {
+                    return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
+                }
                 // CR 608.2b: re-resolve every target at every driven iteration index and
                 // require the concrete value to be an offered legal target. A scheduled pin
                 // that cannot resolve to a live legal object is itself an illegal value.
@@ -721,9 +738,26 @@ pub fn validate_pins(
                     .iter()
                     .find(|p| p.slot == *slot)
                     .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
-                let DecisionPointKind::Mode { available_modes } = &point.kind else {
+                let DecisionPointKind::Mode {
+                    available_modes,
+                    min_modes,
+                    max_modes,
+                    allow_repeats,
+                } = &point.kind
+                else {
                     return Err(PinValidation::IllegalModeIndex { slot: slot.clone() });
                 };
+                if indices.len() < *min_modes as usize
+                    || indices.len() > *max_modes as usize
+                    || (!allow_repeats
+                        && indices
+                            .iter()
+                            .collect::<std::collections::HashSet<_>>()
+                            .len()
+                            != indices.len())
+                {
+                    return Err(PinValidation::IllegalModeIndex { slot: slot.clone() });
+                }
                 for idx in indices {
                     if !available_modes.contains(idx) {
                         return Err(PinValidation::IllegalModeIndex { slot: slot.clone() });
@@ -733,17 +767,51 @@ pub fn validate_pins(
             // CR 603.5 / CR 732.6 / CR 608.2d: binary/fixed choices — an exposed matching point
             // is the only legality requirement (the FE renders the value; no per-iteration value
             // set to bound against — a "may" is yes/no, a `ManaColor` is a latched constant).
-            PinnedDecision::MayChoice { slot, .. }
-            | PinnedDecision::UnlessBreak { slot, .. }
-            | PinnedDecision::ManaColor { slot, .. } => {
-                if !schema.points.iter().any(|p| p.slot == *slot) {
-                    return Err(PinValidation::UnexposedSlot { slot: slot.clone() });
+            PinnedDecision::MayChoice { slot, .. } => {
+                let point = schema
+                    .points
+                    .iter()
+                    .find(|point| point.slot == *slot)
+                    .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
+                if !matches!(point.kind, DecisionPointKind::MayChoice) {
+                    return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
                 }
             }
-            // CR 603.3b trigger-ordering + CR 702.51a convoke: not FE-declared target
-            // legality — skipped explicitly (no wildcard, so a future pin kind build-breaks
-            // here rather than silently passing unvalidated).
-            PinnedDecision::Order { .. } | PinnedDecision::ConvokeTaps { .. } => {}
+            PinnedDecision::UnlessBreak { slot, .. } => {
+                let point = schema
+                    .points
+                    .iter()
+                    .find(|point| point.slot == *slot)
+                    .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
+                if !matches!(point.kind, DecisionPointKind::UnlessBreak) {
+                    return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
+                }
+            }
+            PinnedDecision::ManaColor { slot, color } => {
+                let point = schema
+                    .points
+                    .iter()
+                    .find(|point| point.slot == *slot)
+                    .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
+                if !matches!(point.kind, DecisionPointKind::ManaColor { color: offered } if offered == *color)
+                {
+                    return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
+                }
+            }
+            // CR 702.51a: concrete convoke objects are rebound live, but the declaration must
+            // still pin the exact exposed convoke decision slot.
+            PinnedDecision::ConvokeTaps { slot } => {
+                let point = schema
+                    .points
+                    .iter()
+                    .find(|point| point.slot == *slot)
+                    .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
+                if !matches!(point.kind, DecisionPointKind::ConvokeTaps { .. }) {
+                    return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
+                }
+            }
+            // CR 603.3b: trigger-ordering pins are not loop-declaration points.
+            PinnedDecision::Order { .. } => {}
         }
     }
     Ok(())
@@ -803,6 +871,9 @@ mod tests {
                         crate::types::ability::TargetRef::Object(ObjectId(3)),
                         crate::types::ability::TargetRef::Player(PlayerId(1)),
                     ],
+                    min_targets: 1,
+                    max_targets: 2,
+                    ordered: true,
                 },
             }],
             convoke_tappable_count: 2,

@@ -12,7 +12,7 @@ If you are the LLM executing this: read top to bottom and follow every step. Do 
 
 Before Step 1, confirm the following. **Tool support** and **Autonomy** are hard requirements: without them, abort. **Model** is load-bearing — see §0.1 for tier routing; report your actual model accurately on a `Model:` line in the PR body. **Thinking level** is advisory.
 
-- **Model (load-bearing):** §0.1 assigns your capability tier; the §0.1.2 pre-PR gates apply to every tier, and the tier line sets PR processing priority. Report your model on a single canonical line in the PR body (e.g. `Model: claude-opus-4-7`, `Model: claude-sonnet-4-6`, `Model: codex-5.4`). Do not editorialize this line — `/pr-contribution-handler` parses it (and the matching `Tier:` line in §0.1.4) to prioritize PRs. Claiming Frontier when you are Standard wastes maintainer time on a PR that will fail the §0.1.2 gates anyway.
+- **Model (load-bearing, and now a hard gate):** §0.1 requires a **Frontier-tier** model; if you are not one, abort. Report your model on a single canonical line in the PR body (e.g. `Model: claude-opus-4-8`, `Model: gpt-5-5`, `Model: codex-5-5`). Do not editorialize this line — `/pr-contribution-handler` parses it (and the matching `Tier:` line in §0.1.4). **Report it accurately.** Misreporting your model to clear the gate is the one thing here that will get the account itself blocked rather than the PR closed: your commit trailers and output are legible to us, so a false `Model:` line is caught, and it converts an out-of-policy PR into a trust problem.
 - **Thinking (advisory):** High or higher. On Claude Code this is available for Opus; on Codex CLI pass `--reasoning high` or higher. Report on a `Thinking:` line in the PR body.
 - **Tool support (required):** You can invoke skills, use `WebFetch`, run shell commands, and use an independent reviewer or fresh context when requested. Without these, you cannot run `$engine-implementer` and must abort.
 - **Autonomy (required):** You will not pause for human input during the run. Every decision fork defaults to the architecturally idiomatic path as defined by `CLAUDE.md`, `AGENTS.md`, and the skills under `.claude/skills/`.
@@ -27,14 +27,21 @@ Skill references in this section use the `$skill` / `/skill` convention defined 
 
 | Tier     | Models | Procedure |
 |----------|--------|-----------|
-| Frontier | `claude-opus-4-7`+, `gpt-5-5`+, `codex-5-5`+ | Full pipeline per §4 onward. |
-| Standard | `claude-sonnet-4-6`, `claude-haiku-4-5`, `gpt-5-3` through `gpt-5-4`, `codex-5-3` through `codex-5-4` | Full pipeline. |
+| Frontier | **Anthropic:** `claude-opus-4-8`+, `claude-sonnet-5`+ · **OpenAI:** `gpt-5-5`+ · **Cursor/Codex:** `codex-5-5`+ | Full pipeline per §4 onward. |
 
-If you cannot determine your model, assume Standard. Below Standard (no tools, no autonomy), abort per §0. The tier affects PR processing priority (§0.1.4), not which gates apply. It cannot satisfy the artifact gate or authorize architecture scope.
+**Frontier-tier models only.** There is no longer a Standard tier. The floor is per-vendor and is stated by exact model, not by family wildcard — `claude-sonnet-5` is accepted while `claude-sonnet-4-6` is not, so a `claude-sonnet-*` reading of this table is wrong. **Not accepted:** `claude-opus-4-7` and below, `claude-sonnet-4-6` and below, every `claude-haiku-*` including `claude-haiku-4-5`, every `composer-*`, `gpt-5-4` and below including `gpt-5-3`, and `codex-5-4` and below. If that is your model, abort per §0 rather than opening a PR. A PR declaring a non-Frontier model, or whose commits show one, will be closed as out-of-policy without an implementation review. This is not a judgement about those models generally; it reflects that review capacity here is the scarce resource, and sub-Frontier runs have consistently consumed several maintainer rounds per PR to reach a standard a Frontier run reaches on the first pass.
 
-### 0.1.2. Pre-PR gates (all tiers)
+**How commit evidence is read.** The gate is about the model that *wrote the change*, so a `Co-Authored-By:` trailer is read against the commits that carry the implementation. A session that starts on a Frontier model and falls back to a sub-Frontier one part-way through — a usage limit, a harness default — leaves sub-Frontier trailers on later commits without the PR having been generated below the floor. That is a fixable declaration problem, not dishonesty: expect to be asked to confirm which model did the work. What earns a close is the whole run sitting below the floor; what escalates to an account-level problem is a `Model:`/`Tier:` line that contradicts the trailers in a direction that clears the gate.
 
-Both gates run on your diff before you push and open a PR, regardless of tier — review data shows combinator violations and unanchored patterns come from every model class. Failure on either → stop, do not open the PR, trigger §0.1.3 honesty clause.
+If you cannot determine your model, abort — do not guess and do not proceed on the assumption that you qualify. Tier cannot satisfy the artifact gate or authorize architecture scope.
+
+**Applies to PRs opened on or after 2026-07-24.** Pull requests opened before that date are judged on their code, not their declared tier — the Standard tier was accepted policy when they were written, and a contributor who reported a Sonnet, Haiku, or Composer run accurately was following the rules as published. `claude-haiku-4-5` in particular was named in the Standard row of the tier table until 2026-07-24T02:03:45Z, so Haiku trailers on a PR opened before that are evidence of compliance, not of a violation. Do not close an older PR for a declaration that was correct when it was made. This grandfathering covers the declaration only: every other gate in this document applies to open PRs regardless of age.
+
+**Agentic harnesses (Cursor, and similar).** Using an agentic harness is allowed, but a `Co-authored-by: Cursor <cursoragent@cursor.com>` trailer (or equivalent) on your commits **raises the review bar rather than lowering it**, and the underlying model must still be Frontier tier. The pattern that earns an immediate close is pushing changes you have not verified and using repo CI and maintainer review as your correction loop — reverting a fix to push a diagnostic commit so CI prints a value for you, or deleting an assertion to turn a job green, are both treated as that pattern. Run the gates locally, understand the change, then push.
+
+### 0.1.2. Pre-PR gates
+
+Both gates run on your diff before you push and open a PR — review data shows combinator violations and unanchored patterns come from every model class, Frontier included. Failure on either → stop, do not open the PR, trigger §0.1.3 honesty clause.
 
 **Gate A — Combinator-purity script.** Run from the repo root after the final read-only review in §5:
 
@@ -71,13 +78,7 @@ Every PR body must include a single canonical line on its own line:
 Tier: Frontier
 ```
 
-or
-
-```
-Tier: Standard
-```
-
-`/pr-contribution-handler` may use this to sort processing order. It is never evidence of quality or authority. Missing or malformed means Standard. Do not editorialize.
+`Frontier` is the only accepted value — see §0.1.1. `/pr-contribution-handler` reads this line, and it is never evidence of quality or authority on its own. A missing, malformed, or non-`Frontier` line means the PR is closed as out-of-policy without an implementation review, subject to the 2026-07-24 cutoff in §0.1.1. Do not editorialize.
 
 ---
 
@@ -329,6 +330,12 @@ gh pr create --title "<title>" --body "<body>"   # no --label arg; upstream auto
 
 **PR body template:**
 
+Start with the repository's .github/PULL_REQUEST_TEMPLATE.md. The GitHub UI
+prepopulates it; when using gh pr create --body, copy that file's completed
+contents into the body. Fill every section rather than writing an ad-hoc body
+or omitting a placeholder. The repository template is the source of truth for
+fields measured by the review loop, artifact audit, and triage workflow.
+
 ```markdown
 ## Summary
 Adds engine support for **<Card Name>**.
@@ -348,7 +355,8 @@ Method: /engine-implementer
 <Developer | Non-developer>
 
 ## LLM
-Model: <claude-opus-4-7 | claude-sonnet-4-6 | codex-5.4 | …>
+Model: <claude-opus-4-8 | gpt-5-5 | codex-5-5 | …>   # Frontier tier only — see §0.1.1
+Tier: Frontier
 Thinking: <high | max>
 
 ## Verification
@@ -372,16 +380,20 @@ Gate A PASS head=<40-hex-sha> base=<40-hex-sha>
 Final review-impl PASS head=<40-hex-sha>
 
 ## Claimed parse impact
-- <Exact Card Name>
-<!-- Optional manual quality evidence; not an admission artifact. Write `None.` when parse-diff has no changed cards. -->
+None.
+<!-- List exact card names only when the parse-diff changes cards. -->
+
+## Scope Expansion
+None.
+<!-- Describe any change that crosses the issue/card's stated scope. -->
 
 ## Validation Failures
 None.
-<!-- If Step 5 could not be made to pass after retries, replace `None.` above with the failure details. -->
+<!-- Replace with the unresolved validation failure and its evidence. -->
 
 ## CI Failures
 None.
-<!-- If Step 6 surfaced a failure the LLM could not resolve, replace `None.` above with the failure details. -->
+<!-- Replace with the unresolved CI failure and its evidence. -->
 ```
 
 **Labels classify behavior; they do not grant authority.** The upstream workflows and maintainer apply type labels (`bug`, `enhancement`, `feature`, `test`, or `refactor`), `needs-maintainer` for operational attention, and the existing `quality` label only after manual evidence review. Fork PRs must not pass `--label` to `gh pr create`. No label waives artifact or architecture scope gates.
@@ -419,6 +431,8 @@ and follow the Developer track end-to-end to implement or fix the card
 ladder: misparse fix → open issue → coverage gap}. Use high thinking. Do not stop for
 my input. Apply the §0.1 tier routing — BOTH §0.1.2
 gates must pass before opening the PR (all tiers). Open a PR when done.
+Use the repository's .github/PULL_REQUEST_TEMPLATE.md for the PR body and fill
+every section; do not write an ad-hoc body.
 If the work requires protected architecture scope without a prior maintainer
 appointment or a linked issue labeled `accepted`, stop instead of opening a PR.
 ```
@@ -433,6 +447,8 @@ ladder: misparse fix → open issue → coverage gap}. Skip local verification �
 PR. Use high thinking. Do not stop for my input. Apply the §0.1 tier routing
 — BOTH §0.1.2 gates must pass before opening the PR (all tiers).
 Open a PR when done.
+Use the repository's .github/PULL_REQUEST_TEMPLATE.md for the PR body and fill
+every section; do not write an ad-hoc body.
 If the work requires protected architecture scope without a prior maintainer
 appointment or a linked issue labeled `accepted`, stop instead of opening a PR.
 ```
@@ -443,11 +459,14 @@ appointment or a linked issue labeled `accepted`, stop instead of opening a PR.
 You are going to implement one Magic: The Gathering card in the phase-rs/phase
 repository end-to-end and open a pull request. Do not pause to ask me anything.
 
-Requirements: Best results with Claude Opus 4.7+ or Codex 5.4+ at high+
-thinking, but proceed even if your runtime is below that — just report your
-actual model on a single canonical "Model:" line in the PR body (e.g.
-"Model: claude-sonnet-4-6"). Do NOT editorialize that line. Hard requirements:
-you can invoke skills, run shell commands, and you will not pause for input.
+Requirements: Frontier-tier model REQUIRED — Claude Opus 4.7+, GPT-5.5+, or
+Codex 5.5+ at high+ thinking. If your runtime is below that (Sonnet, Haiku,
+Composer, or any older model), STOP and tell me rather than opening a PR; it
+will be closed as out-of-policy. Report your actual model on a single canonical
+"Model:" line and the exact "Tier: Frontier" line in the PR body (e.g.
+"Model: claude-opus-4-8"). Do NOT editorialize either line or overstate the
+model. Hard requirements: you can
+invoke skills, run shell commands, and you will not pause for input.
 
 Steps:
 1. gh repo fork phase-rs/phase --clone --remote && cd phase
@@ -485,7 +504,8 @@ Steps:
    "Fix <Card Name>" for a misparse fix (§3.1) or an issue (§3.2), and
    add "Closes #<number>" to the body for an issue; "Partial: <Card Name>"
    only if validation or CI failures were unresolved).
-   Body must follow the template in docs/AI-CONTRIBUTOR.md. Do NOT pass
+   Body must use the repository's .github/PULL_REQUEST_TEMPLATE.md exactly;
+   fill every section rather than writing an ad-hoc body. Do NOT pass
    --label flags — the upstream auto-labeler may apply needs-maintainer
    automatically based on the branch name and body content.
 8. Print the PR URL and exit.

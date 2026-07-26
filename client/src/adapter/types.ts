@@ -322,7 +322,7 @@ export interface MeldSelection {
 // display-only badges + Confirm gating. `#[serde(tag = "kind")]` in the engine.
 export type CombatRequirement =
   | { kind: "MustAttack"; players: PlayerId[]; sources?: ObjectId[] }
-  | { kind: "MustBlock"; sources?: ObjectId[] }
+  | { kind: "MustBlock"; sources?: ObjectId[]; attackers?: ObjectId[] }
   | { kind: "CantAttack"; sources?: ObjectId[] }
   | { kind: "CantBlock"; sources?: ObjectId[] };
 
@@ -483,21 +483,93 @@ export type ManaPip =
 // keyword enum — serialized as a bare keyword string (e.g. "Flashback").
 export type KeywordKind = string;
 
+export type Comparator = "GT" | "LT" | "GE" | "LE" | "EQ" | "NE";
+
+export type AbilityActivationScope = "OfSpellType" | "Any";
+
+export type AbilityTag = {
+  type:
+    | "Boast"
+    | "Evolve"
+    | "Exhaust"
+    | "Outlast"
+    | "Cycling"
+    | "Backup"
+    | "PowerUp"
+    | "Equip"
+    | "Augment";
+};
+
+export type ZoneSpendPolarity = "From" | "NotFrom";
+
+export type ZoneSpend =
+  | Zone
+  | { zone: Zone; polarity?: ZoneSpendPolarity };
+
+export type SpellCostCriterion =
+  | { ManaValue: { comparator: Comparator; value: number } }
+  | "HasXInCost";
+
+export type SpecialAction =
+  | "CompanionToHand"
+  | "UnlockDoor"
+  | "Plot"
+  | "TurnFaceUp"
+  | "RollPlanarDie";
+
 export type ManaRestriction =
+  // "Spend this mana only to cast spells."
+  | "OnlyForSpell"
   // "Spend this mana only to cast creature/artifact spells."
   | { OnlyForSpellType: string }
   // "Spend this mana only to cast a creature spell of the chosen type."
   | { OnlyForCreatureType: string }
   // "Spend this mana only to cast creature spells or activate creature abilities."
-  | { OnlyForTypeSpellsOrAbilities: string }
+  | {
+      OnlyForTypeSpellsOrAbilities: {
+        spell_type: string;
+        ability: AbilityActivationScope;
+      };
+    }
+  // "Spend this mana only to activate an ability with the named engine tag."
+  | { OnlyForTaggedActivation: AbilityTag }
   // "Spend this mana only to cast spells with flashback."
   | { OnlyForSpellWithKeywordKind: KeywordKind }
   // "Spend this mana only to cast spells with flashback from a graveyard."
   | { OnlyForSpellWithKeywordKindFromZone: [KeywordKind, Zone] }
+  // "Spend this mana only to cast a spell whose mana value meets the threshold."
+  | {
+      OnlyForSpellWithManaValue: {
+        comparator: Comparator;
+        value: number;
+      };
+    }
+  // "Spend this mana only to cast a spell matching one of the cost criteria."
+  | {
+      OnlyForSpellMatchingCostCriteria: {
+        spell_type?: string;
+        criteria: SpellCostCriterion[];
+      };
+    }
+  // "Spend this mana only to cast a spell whose color count meets the threshold."
+  | {
+      OnlyForSpellWithColorCount: {
+        comparator: Comparator;
+        count: number;
+      };
+    }
+  // "Spend this mana only to cast a spell from, or not from, the named zone."
+  | { OnlyForSpellFromZone: ZoneSpend }
+  // "Spend this mana only to cast a face-down spell."
+  | "OnlyForFaceDownSpell"
   // "Spend this mana only to activate abilities."
   | "OnlyForActivation"
   // "Spend this mana only on costs that include {X}."
   | "OnlyForXCosts"
+  // "Spend this mana only on a payment satisfying any nested restriction."
+  | { OnlyForAny: ManaRestriction[] }
+  // "Spend this mana only on the named special action."
+  | { OnlyForSpecialAction: SpecialAction }
   // Internal convoke-tap marker — never surfaced to the player.
   | "ConvokePayment";
 
@@ -1023,6 +1095,16 @@ export interface GameObject {
     abilities: SerializedAbility[];
     color: ManaColor[];
     printed_ref?: PrintedRef | null;
+    /**
+     * Engine-owned discriminant for what this stored half actually IS. The
+     * `back_face` slot is shared by several printed layouts, so its presence
+     * alone does NOT mean the object is double-faced: CR 710 Kamigawa flip
+     * cards park their alternative (bottom) half here, and Adventure/Omen
+     * cards park their alternative spell here. Only `"Transform"`, `"Modal"`,
+     * and `"Meld"` are real second faces (CR 712). Absent when the engine has
+     * no layout to report.
+     */
+    layout_kind?: LayoutKind | null;
   } | null;
   /**
    * CR 702.143c-d: Whether this card in exile is foretold. Its owner may look
@@ -1037,9 +1119,52 @@ export interface PrintedRef {
   face_name: string;
 }
 
+/**
+ * Mirror of the engine's `types::card::LayoutKind` (serialized as its plain
+ * variant name). Describes the printed layout that produced an object's stored
+ * `back_face`.
+ */
+export type LayoutKind =
+  | "Single"
+  | "Split"
+  | "Flip"
+  | "Transform"
+  | "Meld"
+  | "Adventure"
+  | "Modal"
+  | "Omen"
+  | "Prepare";
+
 export interface ObjectIncarnationRef {
   object_id: ObjectId;
   incarnation: number;
+}
+
+export type ManaSourcePenalty =
+  | "None"
+  | "HasIrreversibleContinuation"
+  | { DealsDamageOnResolution: { fixed_amount: number | null } }
+  | { PaysLifeOnActivation: { fixed_amount: number | null } }
+  | "Sacrifices";
+
+export type ProductionOverride =
+  | { type: "SingleColor"; data: ManaType }
+  | { type: "Combination"; data: ManaType[] };
+
+export interface TapsForManaSelection {
+  source: ObjectIncarnationRef;
+  occurrence: TriggerDefinitionOccurrenceRef;
+  production_override: ProductionOverride;
+}
+
+export interface ManaSourceSelection {
+  source: ObjectIncarnationRef;
+  ability_index: number | null;
+  mana_type: ManaType;
+  atomic_combination: ManaType[] | null;
+  restrictions: ManaRestriction[];
+  penalty: ManaSourcePenalty;
+  taps_for_mana: TapsForManaSelection[];
 }
 
 export interface CopyEffectInstanceRef {
@@ -1481,6 +1606,13 @@ export type CastOfferKind =
       filter: TargetFilter;
       zones: Zone[];
       exile_instead_of_graveyard?: boolean;
+      // CR 406.6: source of the granting ability (engine serde-default;
+      // absent in payloads predating the field).
+      source?: ObjectId;
+      // CR 607.2a: THIS resolution's "exiled this way" batch (Plargg and
+      // Nassari); omitted when empty (no batch restriction). Display-only
+      // pass-through — the modal renders `candidates`.
+      member_pool?: ObjectId[];
     };
 
 // CR 103.5b: Which declare-point action a pending BottomCards obligation
@@ -1533,7 +1665,7 @@ export type WaitingFor =
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
-  | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null } }
+  | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" } } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
   | { type: "ReturnAsAuraTarget"; data: { player: PlayerId; source_id: ObjectId; returned_id: ObjectId; legal_targets: TargetRef[]; pending_effect: unknown } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
@@ -1561,7 +1693,7 @@ export type WaitingFor =
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
-  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; pending_cast: PendingCast } }
+  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; origin?: string; gift_kind?: { type: string }; pending_cast: PendingCast } }
   | { type: "CostTypeChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; pending_cast: PendingCast } }
   | { type: "SpliceOffer"; data: { player: PlayerId; pending_cast: PendingCast; eligible: ObjectId[] } }
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
@@ -1686,7 +1818,11 @@ export type WaitingFor =
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[]; source_id: ObjectId } }
   | { type: "LearnChoice"; data: { player: PlayerId; hand_cards: ObjectId[] } }
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
+  // CR 608.2d: "an opponent chooses" from a zone (multiplayer) — the controller
+  // picks WHICH opponent makes the choice before the zone choice is presented.
+  | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
+  | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
   | { type: "VoteChoice"; data: {
       player: PlayerId;
@@ -2038,7 +2174,7 @@ export type GameAction =
   | { type: "DeclareBlockers"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "MulliganDecision"; data: { choice: MulliganChoice } }
   | { type: "ReorderHand"; data: { order: ObjectId[] } }
-  | { type: "TapLandForMana"; data: { object_id: ObjectId } }
+  | { type: "TapLandForMana"; data: { selection: ManaSourceSelection } }
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
   // CR 118.3a: pin / unpin a specific pool unit during manual mana payment.
   | { type: "SpendPoolMana"; data: { pip_id: number } }
@@ -2119,8 +2255,11 @@ export type GameAction =
   // CR 702.99a: answer to CipherEncodeChoice — a creature to encode on, or null to decline.
   | { type: "CipherEncode"; data: { creature: ObjectId | null } }
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
+  // CR 608.2d: answer to ChooseFromZoneOpponentChooser — which opponent will choose.
+  | { type: "ChooseZoneOpponentChooser"; data: { opponent: PlayerId } }
   | { type: "ChoosePileOpponent"; data: { opponent: PlayerId } }
   | { type: "ChooseAnnouncingOpponent"; data: { opponent: PlayerId } }
+  | { type: "ChooseGiftRecipient"; data: { opponent: PlayerId } }
   | { type: "ChooseAssistPlayer"; data: { player: PlayerId | null } }
   | { type: "CommitAssistPayment"; data: { generic: number } }
   | {
@@ -2263,6 +2402,8 @@ export type GameEvent =
   | { type: "BecomesTarget"; data: { target: TargetRef; source_id: ObjectId } }
   | { type: "ReplacementApplied"; data: { source_id: ObjectId; event_type: string } }
   | { type: "Transformed"; data: { object_id: ObjectId } }
+  // CR 710.4: a Kamigawa flip permanent flipped to its alternative face.
+  | { type: "Flipped"; data: { object_id: ObjectId } }
   | { type: "DayNightChanged"; data: { new_state: string } }
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
   | { type: "TurnedFaceDown"; data: { object_id: ObjectId } }
@@ -2557,7 +2698,13 @@ export interface TurnOrderSlotView {
   player: PlayerId;
   slot_index: number;
   turns_from_now: number;
+  turn_number: number;
+  is_viewer?: boolean;
+  is_starting_player?: boolean;
 }
+
+/** CR 509.1g: engine-authored public `(blocker, attacker)` combat display pair. */
+export type BlockerAssignmentPair = [ObjectId, ObjectId];
 
 /**
  * Engine-authored projections computed at each state snapshot. Rides
@@ -2574,6 +2721,20 @@ export interface DerivedViews {
    * matters on the battlefield. Keyed by ObjectId-as-string.
    */
   battlefield_keyword_badges?: Record<string, Keyword[]>;
+  /**
+   * CR 509.1b: live, until-end-of-turn `CantBeBlocked` grants keyed by
+   * recipient ObjectId-as-string. A null value means the grant remains live
+   * while its source is not a public, phased-in battlefield object, so the UI
+   * shows the badge without naming an unavailable source.
+  */
+  temporary_cant_be_blocked?: Record<string, ObjectId | null>;
+
+  /**
+   * CR 509.1g: sorted public blocker-to-attacker pairs. BlockAssignmentLines
+   * renders these directly rather than deciding which combat relations are
+   * visible from raw combat state. Omitted when no creature is blocking.
+   */
+  blocker_assignment_pairs?: BlockerAssignmentPair[];
   /**
    * CR 613.2a + CR 707.2: battlefield permanents whose copiable values are
    * currently supplied by a copy effect (Clone, Phantasmal Image, Vesuvan
@@ -2638,6 +2799,8 @@ export interface DerivedViews {
    * intentional when extra turns put the same player in multiple slots.
    */
   turn_order?: TurnOrderSlotView[];
+  /** One-based projected turn position for the current viewer. */
+  viewer_turn_number?: number;
   /**
    * CR 732.2a: `∞` HUD rows — one per (engine-attributed player, pumped axis)
    * of every unbounded-resource loop. Empty/omitted when no loop is active. The
@@ -3037,6 +3200,7 @@ export const AdapterErrorCode = {
   ENGINE_UNRESPONSIVE: "ENGINE_UNRESPONSIVE",
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
+  DECK_REJECTED: "DECK_REJECTED",
   BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
   /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
   BRACKET_VIOLATION: "BRACKET_VIOLATION",
@@ -3171,6 +3335,8 @@ export interface StuckDecisionDiagnostic {
 export interface LegalActionsResult {
   actions: GameAction[];
   autoPassRecommended: boolean;
+  /** Exact engine-authored actions for the deterministic mana-payment shortcut. */
+  manaPaymentShortcutActions?: GameAction[];
   /** Effective mana costs for castable spells, keyed by object_id string. */
   spellCosts?: Record<string, ManaCost>;
   /**
@@ -3196,6 +3362,7 @@ export interface ViewerSnapshot {
   state: GameState;
   actions: GameAction[];
   autoPassRecommended: boolean;
+  manaPaymentShortcutActions?: GameAction[];
   spellCosts?: Record<string, ManaCost>;
   legalActionsByObject?: Record<string, GameAction[]>;
   /**
@@ -3270,6 +3437,7 @@ export function nextSnapshotSeq(): number {
 export const EMPTY_LEGAL_ACTIONS: LegalActionsResult = {
   actions: [],
   autoPassRecommended: false,
+  manaPaymentShortcutActions: [],
 };
 
 /**

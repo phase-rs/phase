@@ -5,6 +5,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection};
 use tracing::{error, info};
 
+/// How the game-session store bounds retention of `game_sessions` rows.
+///
+/// This is a property of the deployment, not of any individual save call, so it
+/// lives on the store and `save_session` is its single enforcement point.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SessionRetention {
+    /// Online server: every `game_code` persists independently. Many games run
+    /// concurrently across distinct seats, so a save only upserts its own row.
+    Multiplayer,
+    /// Single-user desktop instance: at most one solo game exists at a time.
+    /// The client tracks a single active-game pointer, so starting a new game
+    /// orphans the previous session server-side. Saving a new `game_code`
+    /// prunes every other game session, keeping the store bounded to one row
+    /// without relying on the stale-age purge (which single-user disables so a
+    /// suspended game never expires).
+    SingleUser,
+}
+
 /// SQLite-backed persistence for active game sessions.
 ///
 /// Uses `std::sync::Mutex` to make `Connection` `Send`, since
@@ -12,6 +30,7 @@ use tracing::{error, info};
 /// All operations acquire the lock briefly for a single SQL statement.
 pub struct GameDb {
     conn: Mutex<Connection>,
+    retention: SessionRetention,
 }
 
 #[derive(Debug, Clone)]
@@ -28,7 +47,7 @@ pub struct RatingDelta {
 impl GameDb {
     /// Open (or create) the game database at the given path.
     /// Enables WAL mode and creates the schema if needed.
-    pub fn open(path: &Path) -> rusqlite::Result<Self> {
+    pub fn open(path: &Path, retention: SessionRetention) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch(
@@ -70,19 +89,34 @@ impl GameDb {
         info!("Game database opened at {}", path.display());
         Ok(Self {
             conn: Mutex::new(conn),
+            retention,
         })
     }
 
     /// Persist a game session (upsert).
+    ///
+    /// Under [`SessionRetention::SingleUser`] this also prunes every other game
+    /// session in the same transaction, enforcing the "one active solo game"
+    /// invariant: starting a new game replaces the previous (now unreachable)
+    /// one instead of leaving it to accumulate, since single-user mode disables
+    /// the stale-age purge.
     pub fn save_session(&self, game_code: &str, json: &str) -> rusqlite::Result<()> {
         let now = now_epoch();
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        if self.retention == SessionRetention::SingleUser {
+            tx.execute(
+                "DELETE FROM game_sessions WHERE game_code != ?1",
+                params![game_code],
+            )?;
+        }
+        tx.execute(
             "INSERT INTO game_sessions (game_code, session_json, updated_at)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(game_code) DO UPDATE SET session_json = ?2, updated_at = ?3",
             params![game_code, json, now],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -297,7 +331,7 @@ mod tests {
 
     fn test_db() -> GameDb {
         let file = NamedTempFile::new().unwrap();
-        GameDb::open(file.path()).unwrap()
+        GameDb::open(file.path(), SessionRetention::Multiplayer).unwrap()
     }
 
     #[test]
@@ -319,6 +353,37 @@ mod tests {
         let all = db.load_all().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].1, "v2");
+    }
+
+    #[test]
+    fn single_user_save_prunes_other_game_sessions() {
+        let file = NamedTempFile::new().unwrap();
+        let db = GameDb::open(file.path(), SessionRetention::SingleUser).unwrap();
+
+        // First solo game.
+        db.save_session("GAME_A", "a").unwrap();
+        assert_eq!(db.load_all().unwrap().len(), 1);
+
+        // Re-saving the same game (autosave) keeps exactly one row.
+        db.save_session("GAME_A", "a2").unwrap();
+        let all = db.load_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].1, "a2");
+
+        // Starting a new game replaces the previous (now orphaned) session.
+        db.save_session("GAME_B", "b").unwrap();
+        let all = db.load_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, "GAME_B");
+    }
+
+    #[test]
+    fn multiplayer_save_retains_every_game_session() {
+        let db = test_db(); // SessionRetention::Multiplayer
+        db.save_session("GAME_A", "a").unwrap();
+        db.save_session("GAME_B", "b").unwrap();
+        // Online mode keeps every concurrent game independently.
+        assert_eq!(db.load_all().unwrap().len(), 2);
     }
 
     #[test]

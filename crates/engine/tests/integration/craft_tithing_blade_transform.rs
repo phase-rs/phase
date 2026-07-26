@@ -367,6 +367,7 @@ fn consuming_sepulcher_back_face() -> BackFaceData {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         // CR 712.14a: the back face is the permanent that exists after return.
         // Consuming Sepulcher is an Enchantment — distinct core type from the

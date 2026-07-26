@@ -296,6 +296,14 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::ManaSymbolsInManaCost {
                 scope: ObjectScope::Recipient,
                 ..
+            }
+            // CR 122.1 + CR 613.4c: "…for each [kind] counter on it/them" in a
+            // per-recipient continuous static counts the counters on the
+            // affected object, so the magnitude varies per recipient (Toxrill,
+            // Clamavus, Thelon of Havenwood, Luxior, Spark Rupture).
+            | QuantityRef::CountersOn {
+                scope: ObjectScope::Recipient,
+                ..
             } => true,
             QuantityRef::Power {
                 scope: ObjectScope::CostPaidObject,
@@ -726,6 +734,8 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         // magnitude. Enumerated explicitly (no wildcard) so a future
         // QuantityExpr-carrying variant forces a decision here.
         ContinuousModification::CopyValues { .. }
+        // CR 707.2c (Metamorphic Alteration): inert copy marker — no dynamic magnitude.
+        | ContinuousModification::CopyChosen
         | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
@@ -741,6 +751,9 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
+        // A granted object-hosted replacement carries no `QuantityExpr`
+        // magnitude — its `execute` (ChangeZone→Exile) has no dynamic value.
+        | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
@@ -1557,11 +1570,14 @@ fn resolve_event_scoped_ref(
                 },
         } => {
             let id = crate::game::targeting::extract_source_from_event(event)?;
+            // No latch routing: the read subject is the triggering SPELL from
+            // the event, never the listener's own latched source.
             resolve_mana_spent_to_cast_metric(
                 state,
                 id,
                 metric,
                 &FilterContext::from_source(state, id),
+                None,
             )
         }
         QuantityExpr::Ref {
@@ -1580,15 +1596,44 @@ pub(crate) fn resolve_mana_spent_to_cast_metric(
     cast_object: ObjectId,
     metric: &CastManaSpentMetric,
     filter_ctx: &FilterContext<'_>,
+    trigger_source: Option<&TriggerSourceContext>,
 ) -> Option<i32> {
-    let obj = state.objects.get(&cast_object)?;
+    // CR 603.4 + CR 400.7d + CR 608.2h: when the cast object IS the latched
+    // trigger source, read all three cast-payment stamps through the exact
+    // event-time authority (`source_read`) — a source that left its observed
+    // zone (or re-entered as a new incarnation, CR 400.7) answers from the
+    // latch; a later same-id object never answers for it. Mirrors how
+    // `check_trigger_condition`'s spend-color arms read the per-color tally.
+    let source_read = trigger_source
+        .filter(|source| source.identity.reference.object_id == cast_object)
+        .map(|source| source.source_read(state));
+    let (spent_amount, spent_colors, source_snapshots) = match source_read {
+        Some(crate::types::game_state::TriggerSourceRead::ExactLive(object)) => (
+            object.mana_spent_to_cast_amount,
+            &object.colors_spent_to_cast,
+            &object.mana_spent_source_snapshots,
+        ),
+        Some(crate::types::game_state::TriggerSourceRead::Latched(context)) => (
+            context.mana_spent_to_cast_amount,
+            &context.colors_spent_to_cast,
+            &context.mana_spent_source_snapshots,
+        ),
+        None => {
+            let object = state.objects.get(&cast_object)?;
+            (
+                object.mana_spent_to_cast_amount,
+                &object.colors_spent_to_cast,
+                &object.mana_spent_source_snapshots,
+            )
+        }
+    };
     Some(match metric {
-        CastManaSpentMetric::Total => u32_to_i32_saturating(obj.mana_spent_to_cast_amount),
+        CastManaSpentMetric::Total => u32_to_i32_saturating(spent_amount),
         CastManaSpentMetric::DistinctColors => {
-            usize_to_i32_saturating(obj.colors_spent_to_cast.distinct_colors())
+            usize_to_i32_saturating(spent_colors.distinct_colors())
         }
         CastManaSpentMetric::FromSource { source_filter } => usize_to_i32_saturating(
-            obj.mana_spent_source_snapshots
+            source_snapshots
                 .iter()
                 .filter(|snapshot| {
                     crate::game::filter::matches_target_filter_on_lki_snapshot(
@@ -1851,21 +1896,66 @@ pub(crate) fn aggregate_property_over(
     }
 }
 
-pub(crate) fn object_count_matching_ids(
-    state: &GameState,
-    filter: &TargetFilter,
-    filter_ctx: &FilterContext<'_>,
-    source_id: ObjectId,
-) -> Vec<ObjectId> {
+fn object_count_zone_object_ids(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
     let zones = filter.extract_zones();
     let zones = if zones.is_empty() {
         vec![crate::types::zones::Zone::Battlefield]
     } else {
         zones
     };
-    let mut ids: Vec<ObjectId> = zones
+    zones
         .into_iter()
         .flat_map(|zone| crate::game::targeting::zone_object_ids(state, zone))
+        .collect()
+}
+
+/// Candidate universe for `object_count_matching_ids`: union ledger, explicit
+/// zones, and recursive branch populations for every boolean node.
+fn object_count_candidate_universe(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
+    match filter {
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            let mut seen = HashSet::new();
+            let mut out = Vec::new();
+            for branch in filters {
+                for id in object_count_candidate_universe(state, branch) {
+                    if seen.insert(id) {
+                        out.push(id);
+                    }
+                }
+            }
+            out
+        }
+        TargetFilter::Not { filter: inner } => {
+            let mut seen = HashSet::new();
+            let mut out = Vec::new();
+            for id in object_count_zone_object_ids(state, filter) {
+                if seen.insert(id) {
+                    out.push(id);
+                }
+            }
+            for id in object_count_candidate_universe(state, inner) {
+                if seen.insert(id) {
+                    out.push(id);
+                }
+            }
+            out
+        }
+        TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            object_count_candidate_universe(state, filter)
+        }
+        _ => object_count_zone_object_ids(state, filter),
+    }
+}
+
+pub(crate) fn object_count_matching_ids(
+    state: &GameState,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    let mut ids: Vec<ObjectId> = object_count_candidate_universe(state, filter)
+        .into_iter()
         .filter(|&id| matches_target_filter(state, id, filter, filter_ctx))
         .collect();
     // Drop the triggering object for an "other than" filter (Valakut's "five
@@ -3043,7 +3133,18 @@ fn resolve_ref(
                 }),
             };
             cast_object
-                .and_then(|id| resolve_mana_spent_to_cast_metric(state, id, metric, &filter_ctx))
+                .and_then(|id| {
+                    // CR 603.4 + CR 400.7d: the resolver reads through the
+                    // latched trigger source when (and only when) it is the
+                    // cast object being asked about.
+                    resolve_mana_spent_to_cast_metric(
+                        state,
+                        id,
+                        metric,
+                        &filter_ctx,
+                        ctx.trigger_source.as_ref(),
+                    )
+                })
                 .unwrap_or(0)
         }
         // CR 903.4 + CR 903.4f: Number of distinct colors in the controller's
@@ -4421,13 +4522,26 @@ fn resolve_counters_on_scope(
         // (where the cleared field becomes `None`); the counter analogue must
         // be zone-keyed because an empty `HashMap<CounterType, u32>` is
         // `Some({})`, not `None`.
-        ObjectScope::Source | ObjectScope::EventSource => {
-            if matches!(scope, ObjectScope::Source) && ctx.trigger_source.is_some() {
+        // CR 608.2k: An `Anaphoric` counter read that reached runtime found no
+        // clause subject and no per-recipient static to bind it, so the pronoun
+        // names the ability's own object — "+1/+1 counters on him" on Red Hulk's
+        // Enrage reflex. Grouped with `Source` so the unbound anaphor keeps
+        // exactly the referent it had before the scope carried provenance.
+        ObjectScope::Source | ObjectScope::EventSource | ObjectScope::Anaphoric => {
+            if matches!(scope, ObjectScope::Source | ObjectScope::Anaphoric)
+                && ctx.trigger_source.is_some()
+            {
                 return source_lki_for_context(state, &ctx)
                     .map(|lki| counter_count_from_map(&lki.counters, counter_type))
                     .unwrap_or(0);
             }
-            let Some(object_id) = object_id_for_scope(state, scope, ctx, targets) else {
+            // An unbound anaphor resolves through the `Source` lookup — the
+            // generic scope helpers have no referent for `Anaphoric` itself.
+            let lookup_scope = match scope {
+                ObjectScope::Anaphoric => ObjectScope::Source,
+                other => other,
+            };
+            let Some(object_id) = object_id_for_scope(state, lookup_scope, ctx, targets) else {
                 return 0;
             };
             let live = state.objects.get(&object_id);
@@ -4846,9 +4960,19 @@ where
         // cost referent (slot 3: `cost_paid_object`). This arm differs from
         // `CostPaidObject` only in slot priority — instruction-order (608.2c)
         // first, vs. cost referent (608.2k) first.
+        //
+        // CR 608.2h: When the snapshot exists but its embedded LKI lacks the
+        // requested characteristic (cache-gap after a redirected sacrifice),
+        // fall through to live-then-LKI by object id — same ladder as
+        // `AmassedArmy` — so Consuming Vapors-class life gain still reads the
+        // sacrificed creature's toughness (issue #5925).
         ObjectScope::Demonstrative => ability
             .and_then(|a| a.effect_context_object.as_ref())
-            .and_then(|snapshot| lki_extract(&snapshot.lki))
+            .and_then(|snapshot| {
+                lki_extract(&snapshot.lki).or_else(|| {
+                    read_object_pt_by_id(state, snapshot.object_id, &obj_extract, &lki_extract)
+                })
+            })
             .or_else(|| {
                 // CR 400.7 + CR 608.2h: slot 2 trigger-event source uses exact
                 // ETB incarnation identity. Slots 1 and 3 are unchanged.
@@ -7578,6 +7702,360 @@ mod tests {
                 ObjectId(0),
             ),
             0
+        );
+    }
+
+    #[test]
+    fn resolve_object_count_by_shared_quality_last_zone_changed_color_max() {
+        use crate::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(44);
+        let red_a = create_object(
+            &mut state,
+            CardId(401),
+            PlayerId(1),
+            "Red A".to_string(),
+            Zone::Graveyard,
+        );
+        let red_b = create_object(
+            &mut state,
+            CardId(402),
+            PlayerId(1),
+            "Red B".to_string(),
+            Zone::Graveyard,
+        );
+        for id in [red_a, red_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.color = vec![ManaColor::Red];
+        }
+        state.last_zone_changed_ids = vec![red_a, red_b];
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountBySharedQuality {
+                filter: TargetFilter::LastZoneChanged,
+                quality: SharedQuality::Color,
+                aggregate: AggregateFunction::Max,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            2,
+            "two red cards milled this way must share red (Max bucket size 2)"
+        );
+    }
+
+    #[test]
+    fn resolve_object_count_by_shared_quality_last_zone_changed_colorless_max_zero() {
+        let mut state = GameState::new_two_player(45);
+        let colorless_a = create_object(
+            &mut state,
+            CardId(403),
+            PlayerId(1),
+            "Colorless A".to_string(),
+            Zone::Graveyard,
+        );
+        let colorless_b = create_object(
+            &mut state,
+            CardId(404),
+            PlayerId(1),
+            "Colorless B".to_string(),
+            Zone::Graveyard,
+        );
+        state.last_zone_changed_ids = vec![colorless_a, colorless_b];
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountBySharedQuality {
+                filter: TargetFilter::LastZoneChanged,
+                quality: SharedQuality::Color,
+                aggregate: AggregateFunction::Max,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            0,
+            "colorless milled pairs produce no shared-color bucket (Max 0)"
+        );
+    }
+
+    #[test]
+    fn object_count_matching_ids_applies_compound_last_zone_changed_filter() {
+        let mut state = GameState::new_two_player(46);
+        let red_a = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red A".to_string(),
+            Zone::Graveyard,
+        );
+        let red_b = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Red B".to_string(),
+            Zone::Graveyard,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(407),
+            PlayerId(1),
+            "Green C".to_string(),
+            Zone::Graveyard,
+        );
+        for (id, color) in [
+            (red_a, ManaColor::Red),
+            (red_b, ManaColor::Red),
+            (green, ManaColor::Green),
+        ] {
+            state.objects.get_mut(&id).unwrap().color = vec![color];
+        }
+        state.last_zone_changed_ids = vec![red_a, red_b, green];
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::LastZoneChanged,
+                TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+                    color: ManaColor::Red,
+                }])),
+            ],
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+        let ids = object_count_matching_ids(&state, &filter, &ctx, ObjectId(0));
+        assert_eq!(ids, vec![red_a, red_b]);
+    }
+
+    #[test]
+    fn object_count_matching_ids_or_last_zone_changed_includes_typed_outside_ledger() {
+        let mut state = GameState::new_two_player(46);
+        let red_a = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red A".to_string(),
+            Zone::Graveyard,
+        );
+        let red_b = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Red B".to_string(),
+            Zone::Graveyard,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(407),
+            PlayerId(1),
+            "Green C".to_string(),
+            Zone::Graveyard,
+        );
+        let red_on_battlefield = create_object(
+            &mut state,
+            CardId(408),
+            PlayerId(0),
+            "Red D".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, color) in [
+            (red_a, ManaColor::Red),
+            (red_b, ManaColor::Red),
+            (green, ManaColor::Green),
+            (red_on_battlefield, ManaColor::Red),
+        ] {
+            state.objects.get_mut(&id).unwrap().color = vec![color];
+        }
+        state.last_zone_changed_ids = vec![red_a, red_b, green];
+
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::LastZoneChanged,
+                TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+                    color: ManaColor::Red,
+                }])),
+            ],
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+        let ids = object_count_matching_ids(&state, &filter, &ctx, ObjectId(0));
+        assert_eq!(
+            ids.len(),
+            4,
+            "Or must union ledger objects with typed reds outside the ledger"
+        );
+        assert!(ids.contains(&red_on_battlefield));
+    }
+
+    #[test]
+    fn object_count_matching_ids_not_last_zone_changed_excludes_ledger() {
+        let mut state = GameState::new_two_player(46);
+        let red_a = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red A".to_string(),
+            Zone::Graveyard,
+        );
+        let red_b = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Red B".to_string(),
+            Zone::Graveyard,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(407),
+            PlayerId(1),
+            "Green C".to_string(),
+            Zone::Graveyard,
+        );
+        let red_on_battlefield = create_object(
+            &mut state,
+            CardId(408),
+            PlayerId(0),
+            "Red D".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, color) in [
+            (red_a, ManaColor::Red),
+            (red_b, ManaColor::Red),
+            (green, ManaColor::Green),
+            (red_on_battlefield, ManaColor::Red),
+        ] {
+            state.objects.get_mut(&id).unwrap().color = vec![color];
+        }
+        state.last_zone_changed_ids = vec![red_a, red_b, green];
+
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::LastZoneChanged),
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+        let ids = object_count_matching_ids(&state, &filter, &ctx, ObjectId(0));
+        assert_eq!(
+            ids,
+            vec![red_on_battlefield],
+            "Not(LastZoneChanged) must count battlefield objects outside the ledger"
+        );
+    }
+
+    #[test]
+    fn object_count_matching_ids_not_and_last_zone_changed_includes_nonmatching_ledger() {
+        let mut state = GameState::new_two_player(46);
+        let red_a = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red A".to_string(),
+            Zone::Graveyard,
+        );
+        let red_b = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Red B".to_string(),
+            Zone::Graveyard,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(407),
+            PlayerId(1),
+            "Green C".to_string(),
+            Zone::Graveyard,
+        );
+        let red_on_battlefield = create_object(
+            &mut state,
+            CardId(408),
+            PlayerId(0),
+            "Red D".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, color) in [
+            (red_a, ManaColor::Red),
+            (red_b, ManaColor::Red),
+            (green, ManaColor::Green),
+            (red_on_battlefield, ManaColor::Red),
+        ] {
+            state.objects.get_mut(&id).unwrap().color = vec![color];
+        }
+        state.last_zone_changed_ids = vec![red_a, red_b, green];
+
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::LastZoneChanged,
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Red,
+                        },
+                    ])),
+                ],
+            }),
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+        let ids = object_count_matching_ids(&state, &filter, &ctx, ObjectId(0));
+        assert!(ids.contains(&green));
+        assert!(ids.contains(&red_on_battlefield));
+        assert!(!ids.contains(&red_a));
+        assert!(!ids.contains(&red_b));
+    }
+
+    #[test]
+    fn object_count_matching_ids_and_or_last_zone_changed_includes_off_battlefield_ledger() {
+        let mut state = GameState::new_two_player(46);
+        let red_a = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red A".to_string(),
+            Zone::Graveyard,
+        );
+        let red_b = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Red B".to_string(),
+            Zone::Graveyard,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(407),
+            PlayerId(1),
+            "Green C".to_string(),
+            Zone::Graveyard,
+        );
+        let red_on_battlefield = create_object(
+            &mut state,
+            CardId(408),
+            PlayerId(0),
+            "Red D".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, color) in [
+            (red_a, ManaColor::Red),
+            (red_b, ManaColor::Red),
+            (green, ManaColor::Green),
+            (red_on_battlefield, ManaColor::Red),
+        ] {
+            state.objects.get_mut(&id).unwrap().color = vec![color];
+        }
+        state.last_zone_changed_ids = vec![red_a, red_b, green];
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::LastZoneChanged,
+                        TargetFilter::Typed(TypedFilter::card()),
+                    ],
+                },
+                TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+                    color: ManaColor::Red,
+                }])),
+            ],
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+        let ids = object_count_matching_ids(&state, &filter, &ctx, ObjectId(0));
+        assert_eq!(
+            ids,
+            vec![red_a, red_b, red_on_battlefield],
+            "nested And(Or(LC, Typed), Typed) must union ledger graveyard members with typed reds"
         );
     }
 

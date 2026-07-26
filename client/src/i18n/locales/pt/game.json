@@ -248,6 +248,7 @@
     "target": "Alvo",
     "copy": "Cópia",
     "copyTooltip": "Cópia em ficha de uma carta real",
+    "cantBeBlocked": "Não pode ser bloqueada",
     "ringBearer": "Anel",
     "ringBearerTooltip": "Portador do Anel",
     "hiddenAttachments": "+{{count}} more attached",
@@ -499,13 +500,22 @@
     "clickToFocus": "clique para focar"
   },
   "manaPool": {
+    "onlyForSpell": "Gaste apenas para conjurar mágicas",
     "onlyForSpellType": "Gaste apenas para conjurar mágicas de um tipo específico",
     "onlyForCreatureType": "Gaste apenas para conjurar uma mágica de criatura do tipo escolhido",
     "onlyForTypeSpellsOrAbilities": "Gaste apenas em mágicas ou habilidades de um tipo específico",
+    "onlyForTaggedActivation": "Gaste apenas para ativar habilidades de um tipo específico",
     "onlyForSpellWithKeywordKind": "Gaste apenas para conjurar mágicas com uma palavra-chave específica",
     "onlyForSpellWithKeywordKindFromZone": "Gaste apenas para conjurar mágicas com palavra-chave de um cemitério",
+    "onlyForSpellWithManaValue": "Gaste apenas para conjurar mágicas que atendam a um requisito de valor de mana",
+    "onlyForSpellMatchingCostCriteria": "Gaste apenas para conjurar mágicas que atendam a um requisito de custo",
+    "onlyForSpellWithColorCount": "Gaste apenas para conjurar mágicas que atendam a um requisito de quantidade de cores",
+    "onlyForSpellFromZone": "Gaste apenas para conjurar mágicas a partir de uma zona permitida",
+    "onlyForFaceDownSpell": "Gaste apenas para conjurar mágicas com a face voltada para baixo",
     "onlyForActivation": "Gaste apenas para ativar habilidades",
     "onlyForXCosts": "Gaste apenas em custos que incluam {X}",
+    "onlyForAny": "Gaste apenas em um dos usos listados",
+    "onlyForSpecialAction": "Gaste apenas em uma ação especial específica",
     "convokePayment": "Pagamento de convocação",
     "grantsProperty": "Concede uma propriedade à mágica",
     "grantCantBeCountered": "Gaste nesta mágica para que ela não possa ser anulada"
@@ -653,6 +663,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Deve bloquear {{attacker}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1701,9 +1712,30 @@
     "targetCreature": "o alvo de criatura",
     "targetChoice": "esta escolha de alvo"
   },
+  "giftRecipient": {
+    "title": "Escolher destinatário do presente",
+    "subtitle": "Escolha qual oponente recebe o presente prometido."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Prometer um presente?",
+      "pay": "Prometer {{gift}}",
+      "decline": "Conjurar sem prometer",
+      "kind": {
+        "card": "um card",
+        "treasure": "um Tesouro",
+        "food": "um Alimento",
+        "tappedFish": "um Peixe virado"
+      }
+    }
+  },
   "clashOpponent": {
     "title": "Escolher oponente para confronto",
     "subtitle": "Escolha qual oponente fará confronto com você."
+  },
+  "zoneOpponentChooser": {
+    "title": "Escolher oponente",
+    "subtitle": "Escolha qual oponente faz a escolha."
   },
   "pileOpponent": {
     "title": "Choose Opponent",

@@ -94,7 +94,7 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
   if (compact) {
     const tooltip = [
       `v${__APP_VERSION__} · ${__BUILD_HASH__}`,
-      shellVersion && `shell ${shellVersion}`,
+      shellVersion && t("buildBadge.desktopAppVersion", { version: shellVersion }),
       cardDataMeta &&
         t("buildBadge.cardDataTitle", {
           date: cardDataMeta.generated_at,
@@ -114,7 +114,6 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
           className="inline-flex items-center gap-1 font-mono text-[10.5px] leading-none text-slate-400 transition-colors hover:text-white"
         >
           <span>v{__APP_VERSION__}</span>
-          {shellVersion && <span>shell {shellVersion}</span>}
           <span className={`text-[11px] text-slate-500 ${isActive ? "animate-spin" : ""}`} aria-hidden>
             ↻
           </span>
@@ -157,7 +156,7 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
         {shellVersion && (
           <>
             <span className="text-slate-700">·</span>
-            <span>shell {shellVersion}</span>
+            <span>{t("buildBadge.desktopAppVersion", { version: shellVersion })}</span>
           </>
         )}
 
