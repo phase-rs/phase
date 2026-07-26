@@ -102,6 +102,13 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
             engine::game::stack::apply_resolved_stack_entry_finalize(state, command.as_ref())
                 .unwrap();
         }
+        ResolvedRulesCommand::UncommittedTriggerRemoval(command) => {
+            engine::game::stack::apply_resolved_uncommitted_trigger_removal(
+                state,
+                command.as_ref(),
+            )
+            .unwrap();
+        }
     }
 }
 

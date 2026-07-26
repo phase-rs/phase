@@ -1092,6 +1092,65 @@ pub enum ResolvedStackEntryFinalizeReplayInvariantError {
     PaidFactsMismatch(ObjectId),
 }
 
+/// One exact CR 603.3d removal of an uncommitted triggered ability.
+///
+/// The "push first, choose second" invariant puts a triggered ability on the
+/// stack BEFORE its choices are gathered, so the entry is live while a
+/// `WaitingFor` fills its slots. CR 603.3d: if no legal choices can be made for
+/// it, "the ability is simply removed from the stack."
+///
+/// TWO OUTCOMES, both mutating, which is why `removed` is an `Option` rather
+/// than a plain entry. `stack::pop_uncommitted_pending_trigger_entry` consumes
+/// `pending_trigger_entry` UNCONDITIONALLY and only then decides whether to pop:
+///
+/// * guard holds — the cursor is consumed AND the entry leaves the stack with
+///   both per-entry side tables.
+/// * guard fails — the cursor is consumed and NOTHING else, because the cursor
+///   outlived its entry (another path already removed it).
+///
+/// A command that modelled only the first would leave a replay of the second
+/// holding `pending_trigger_entry == Some(id)` while the real execution cleared
+/// it — a divergence needing no forged journal, only an honest replay.
+///
+/// The removed side-table VALUES are deliberately not recorded. Contrast
+/// [`ResolvedStackEntryFinalizeCommand`], which records `expected_old_paid_facts`
+/// because it INSTALLS a value and must verify the predecessor it overwrites.
+/// This command only removes rows keyed on the recorded entry's own id — nothing
+/// is installed and nothing is re-derived, so there is no invariant a recorded
+/// value would pin, and carrying `Vec<GameEvent>` batches would widen every
+/// journal entry for nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedUncommittedTriggerRemovalCommand {
+    /// The cursor value consumed by the `.take()`. Always present, because the
+    /// take is unconditional.
+    pub consumed_entry_id: ObjectId,
+    /// The entry actually removed, recorded verbatim so replay verifies the
+    /// whole object rather than trusting the id. `None` when the guard declined
+    /// to pop.
+    pub removed: Option<Box<StackEntry>>,
+    /// Stack depth AFTER the operation (CR 405.2).
+    pub resulting_depth: usize,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved CR 603.3d removal.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedUncommittedTriggerRemovalReplayInvariantError {
+    #[error("uncommitted-trigger removal expected pending cursor {expected:?}, found {found:?}")]
+    CursorMismatch {
+        expected: ObjectId,
+        found: Option<ObjectId>,
+    },
+    #[error("uncommitted-trigger removal targets depth {expected}, found {found}")]
+    DepthMismatch { expected: usize, found: usize },
+    #[error("uncommitted-trigger removal expected a different entry on top of the stack")]
+    RemovedEntryMismatch,
+    #[error(
+        "uncommitted-trigger removal recorded no pop, but {0:?} is on top and would have been popped"
+    )]
+    UnexpectedRemovableEntry(ObjectId),
+}
+
 /// Semantic command payload currently carried by a resolved-rules journal entry.
 ///
 /// Additional command families are intentionally added by their owning P2
@@ -1121,6 +1180,7 @@ pub enum ResolvedRulesCommand {
     TriggerCollection(ResolvedTriggerCollectionCommand),
     StackPush(Box<ResolvedStackPushCommand>),
     StackEntryFinalize(Box<ResolvedStackEntryFinalizeCommand>),
+    UncommittedTriggerRemoval(Box<ResolvedUncommittedTriggerRemovalCommand>),
 }
 
 /// An append-only trigger collection command has no replay-time precondition.
@@ -2187,6 +2247,17 @@ impl ResolvedRulesJournal {
         )
     }
 
+    /// Records one exact CR 603.3d uncommitted-trigger removal under its cause.
+    pub fn record_uncommitted_trigger_removal(
+        &mut self,
+        command: ResolvedUncommittedTriggerRemovalCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::UncommittedTriggerRemoval(Box::new(command)),
+        )
+    }
+
     fn begin_settlement(
         &mut self,
         identity_for: impl FnOnce(SettlementNodeOrdinal) -> RulesExecutionNodeRef,
@@ -2402,7 +2473,8 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::FrameTransition(_)
                 | ResolvedRulesCommand::TriggerCollection(_)
                 | ResolvedRulesCommand::StackPush(_)
-                | ResolvedRulesCommand::StackEntryFinalize(_) => {}
+                | ResolvedRulesCommand::StackEntryFinalize(_)
+                | ResolvedRulesCommand::UncommittedTriggerRemoval(_) => {}
             }
         }
         for node in &self.nodes {
@@ -2843,6 +2915,27 @@ impl ResolvedRulesJournal {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "stack-entry finalize command has an unrelated cause".to_string(),
                     ));
+                }
+            }
+            ResolvedRulesCommand::UncommittedTriggerRemoval(command) => {
+                // Cause-only, plus the one invariant checkable without state: a
+                // recorded pop must name the entry it removed. Everything else
+                // (the live cursor, the CR 405.2 depth, the exact entry on top)
+                // is state-dependent and is enforced by
+                // `stack::apply_resolved_uncommitted_trigger_removal`. There is
+                // no allocator receipt — a removal draws nothing.
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "uncommitted-trigger removal command has an unrelated cause".to_string(),
+                    ));
+                }
+                if let Some(removed) = command.removed.as_ref() {
+                    if removed.id != command.consumed_entry_id {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "uncommitted-trigger removal popped an entry other than its cursor"
+                                .to_string(),
+                        ));
+                    }
                 }
             }
         }

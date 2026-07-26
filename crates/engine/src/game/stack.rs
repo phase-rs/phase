@@ -17,6 +17,8 @@ use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
     ResolvedStackEntryFinalizeCommand, ResolvedStackEntryFinalizeReplayInvariantError,
     ResolvedStackPushCommand, ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError,
+    ResolvedUncommittedTriggerRemovalCommand,
+    ResolvedUncommittedTriggerRemovalReplayInvariantError,
 };
 use crate::types::zones::Zone;
 
@@ -292,13 +294,105 @@ pub fn apply_resolved_stack_entry_finalize(
 /// `engine::drop_mid_construction_pending_trigger`, which calls this and then
 /// clears it.
 pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
-    if let Some(entry_id) = state.pending_trigger_entry.take() {
-        if state.stack.back().map(|e| e.id) == Some(entry_id) {
-            state.stack.pop_back();
+    let Some(entry_id) = state.pending_trigger_entry.take() else {
+        // No cursor: nothing was consumed and nothing settled, so there is no
+        // mutation to journal.
+        return;
+    };
+    let removed = (state.stack.back().map(|e| e.id) == Some(entry_id))
+        .then(|| {
+            let entry = state.stack.pop_back().expect("the entry was just observed");
             state.stack_paid_facts.remove(&entry_id);
             state.stack_trigger_event_batches.remove(&entry_id);
+            entry
+        })
+        .map(Box::new);
+
+    // CR 733: journal AFTER the removal settles, and journal BOTH outcomes. The
+    // `.take()` above is unconditional, so a guard that declines to pop still
+    // consumed the cursor — recording only the popping case would leave a replay
+    // of the other holding a `pending_trigger_entry` the real execution cleared.
+    let cause = state.current_or_begin_rules_execution_node();
+    let command = ResolvedUncommittedTriggerRemovalCommand {
+        consumed_entry_id: entry_id,
+        removed,
+        resulting_depth: state.stack.len(),
+        cause,
+    };
+    state
+        .resolved_rules_journal
+        .record_uncommitted_trigger_removal(command)
+        .expect("resolved uncommitted trigger removal must have a live journal cause");
+}
+
+/// Installs one already-resolved CR 603.3d removal verbatim.
+///
+/// Nothing is re-derived: the entry is compared WHOLE against the recorded one
+/// rather than matched by id, so a replay whose stack top merely shares an id
+/// fails closed instead of discarding a different object. The two side tables are
+/// dropped by the recorded entry's own id.
+///
+/// Both recorded outcomes are honoured. `removed: None` means the original
+/// execution consumed the cursor without popping, so this refuses to pop — and
+/// asserts the predecessor agrees, because a replay whose top IS that entry would
+/// otherwise silently diverge from the execution being replayed.
+pub fn apply_resolved_uncommitted_trigger_removal(
+    state: &mut GameState,
+    command: &ResolvedUncommittedTriggerRemovalCommand,
+) -> Result<(), ResolvedUncommittedTriggerRemovalReplayInvariantError> {
+    if state.pending_trigger_entry != Some(command.consumed_entry_id) {
+        return Err(
+            ResolvedUncommittedTriggerRemovalReplayInvariantError::CursorMismatch {
+                expected: command.consumed_entry_id,
+                found: state.pending_trigger_entry,
+            },
+        );
+    }
+    let top_id = state.stack.back().map(|e| e.id);
+    match command.removed.as_deref() {
+        Some(recorded) => {
+            if state.stack.len() != command.resulting_depth + 1 {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::DepthMismatch {
+                        expected: command.resulting_depth + 1,
+                        found: state.stack.len(),
+                    },
+                );
+            }
+            if state.stack.back() != Some(recorded) {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::RemovedEntryMismatch,
+                );
+            }
+        }
+        None => {
+            if state.stack.len() != command.resulting_depth {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::DepthMismatch {
+                        expected: command.resulting_depth,
+                        found: state.stack.len(),
+                    },
+                );
+            }
+            if top_id == Some(command.consumed_entry_id) {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::UnexpectedRemovableEntry(
+                        command.consumed_entry_id,
+                    ),
+                );
+            }
         }
     }
+
+    state.pending_trigger_entry = None;
+    if command.removed.is_some() {
+        state.stack.pop_back();
+        state.stack_paid_facts.remove(&command.consumed_entry_id);
+        state
+            .stack_trigger_event_batches
+            .remove(&command.consumed_entry_id);
+    }
+    Ok(())
 }
 
 /// The ability currently represented by a stack entry for presentation.

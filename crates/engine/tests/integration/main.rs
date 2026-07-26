@@ -109,6 +109,7 @@ mod cr733_resolved_stack_push;
 mod cr733_resolved_token_creation;
 mod cr733_resolved_transform;
 mod cr733_resolved_trigger_collection;
+mod cr733_resolved_trigger_removal;
 mod cr733_resolved_zone_change;
 mod cr_annotations;
 mod craft_tithing_blade_transform;
