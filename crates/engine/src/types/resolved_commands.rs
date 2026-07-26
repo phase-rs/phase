@@ -16,7 +16,7 @@ use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
 use super::game_state::{
-    DelayedTrigger, SpellCastRecord, TransientContinuousEffect, ZoneChangeRecord,
+    DelayedTrigger, SpellCastRecord, StackEntry, TransientContinuousEffect, ZoneChangeRecord,
 };
 use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
@@ -913,6 +913,116 @@ pub struct ResolvedTriggerCollectionCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// Which rule put one object onto the stack.
+///
+/// This is a provenance discriminator, not an operand-set discriminator. Both
+/// arms record the same fields (see [`ResolvedStackPushCommand`]); a copy stack
+/// entry is structurally indistinguishable from an original, so the citing rule
+/// is not recoverable from the entry alone and has to be carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedStackPushOrigin {
+    /// CR 405.1 + CR 601.2a: an object was put onto the stack — a cast spell, or
+    /// an activated or triggered ability going on without a card.
+    Put,
+    /// CR 707.10: a *copy* of a spell or ability was put onto the stack. The
+    /// copy is not cast and not activated.
+    Copy,
+}
+
+/// One exact object landing on the stack.
+///
+/// CR 405.2: the stack keeps the order objects were added in, and each new
+/// object goes on top of everything already there. `resulting_position` is the
+/// index this entry occupies after its push, which for a top-of-stack append is
+/// also the live stack depth the applier must find before installing. It is
+/// RECORDED rather than re-derived at replay time for the same reason
+/// `ResolvedControllerOverrideCommand` records its snapshot indices: the
+/// resolve-time authority knows exactly where the entry landed, and trusting a
+/// replayed board's own depth would install at whatever position that board
+/// happens to have reached.
+///
+/// `resulting_position` is therefore a STORAGE-POSITION CANARY, and its
+/// `StackDepthMismatch` is a feature. It fails a replay closed the moment
+/// journal order stops matching execution order. That moment is currently
+/// reachable, because **stack POPS are not journaled yet**: CR 608.1
+/// resolve-pop, CR 603.3c/d abort-pop, CR 701.6a counter-removal, and
+/// CR 601.2a cast-abort each remove an entry with no corresponding record. As
+/// soon as any of those runs, the replayed depth diverges from every later
+/// recorded position and this precondition refuses rather than installing an
+/// entry at a position the recording never described.
+///
+/// **The stack family is consequently NOT end-to-end replayable until the pop
+/// units land.** That is a known, scheduled gap, not a defect, and the
+/// precondition must not be weakened to paper over it — a canary that has been
+/// silenced cannot warn. Until then this family is exact for prefixes that
+/// contain no pop, which is what its tests replay.
+///
+/// This is ONE parameterized command rather than a CR 405.1 sibling and a
+/// CR 707.10 sibling because the two authorities' divergence is entirely
+/// upstream of this record. Both stamp their source-referential values *into*
+/// `entry` before pushing — `push_to_stack` stamps the CR 701.27f generation
+/// only when unset, additionally stamps the CR 400.7 incarnation, and binds the
+/// CR 509.1c force-block source; `push_copy_to_stack` stamps the generation
+/// unconditionally and deliberately leaves the force-block binding alone. Every
+/// one of those differences is already resolved into a field value by the time
+/// the entry is recorded, so the two arms record identical operand sets and the
+/// only real difference is which rule to cite. `origin` carries that.
+///
+/// Nothing here is re-derived on replay: the applier installs the recorded
+/// entry verbatim, so the stamped generation, incarnation, and force-block
+/// referent survive exactly rather than being recomputed from a live rescan.
+///
+/// SCOPE: the push itself, which for a cast spell is only the first half of the
+/// cast. `announce_spell_on_stack` pushes at CR 601.2a with `ability: None` and
+/// `actual_mana_spent: 0`; the finalized ability and mana are retagged onto that
+/// same entry later at CR 601.2i (`casting_costs.rs`). So a recorded `Put` for a
+/// spell is the *announcement* snapshot, not the finalized spell.
+///
+/// That CR 601.2i retag is NOT a lone special case. It is one of roughly ten
+/// production sites that mutate an entry IN PLACE after it is on the stack,
+/// spread across cast finalization, triggers, copy retargeting, planechase, and
+/// the engine's own entry fix-ups. In-place mutation is a third mutation class
+/// alongside pushes and pops, and it is invisible to any census keyed on
+/// container verbs (`push_back` / `pop_back` / `retain`) because it reaches the
+/// element through `iter_mut()`. Whoever journals it is building a class, not
+/// patching a card, and none of it is journaled today.
+///
+/// `stack_paid_facts` is written immediately after that retag, so it moves
+/// atomically with cast FINALIZATION rather than with this push, and belongs to
+/// the same future unit. `stack_trigger_event_batches` likewise belongs to the
+/// trigger authorities. Neither side table has a writer inside either stack
+/// authority, which is why neither is part of this record.
+///
+/// An activated or triggered ability has no CR 601.2i phase: its entry is
+/// complete when it is pushed, so for those kinds the record IS the finished
+/// entry.
+///
+/// There is no allocator receipt because neither authority allocates: both are
+/// handed an already-built entry, and the CR 400.7 incarnation is read from the
+/// source rather than drawn. A recorded high-water here would have nothing
+/// behind it to validate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedStackPushCommand {
+    /// Boxed because `StackEntryKind` embeds a whole `ResolvedAbility`, which
+    /// would otherwise widen every `ResolvedRulesCommand` in the journal.
+    pub entry: Box<StackEntry>,
+    pub origin: ResolvedStackPushOrigin,
+    /// Zero-based index the entry occupies after the push (CR 405.2).
+    pub resulting_position: usize,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved stack push.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedStackPushReplayInvariantError {
+    #[error("stack-push command targets depth {expected}, found {found}")]
+    StackDepthMismatch { expected: usize, found: usize },
+    #[error("stack-push command would duplicate stack entry {0:?}")]
+    DuplicateStackEntry(ObjectId),
+    #[error("stack-push command references an unknown controller {0:?}")]
+    UnknownController(PlayerId),
+}
+
 /// Semantic command payload currently carried by a resolved-rules journal entry.
 ///
 /// Additional command families are intentionally added by their owning P2
@@ -940,6 +1050,7 @@ pub enum ResolvedRulesCommand {
     ZoneChange(Box<ResolvedZoneChangeCommand>),
     FrameTransition(Box<ResolvedFrameTransitionCommand>),
     TriggerCollection(ResolvedTriggerCollectionCommand),
+    StackPush(Box<ResolvedStackPushCommand>),
 }
 
 /// An append-only trigger collection command has no replay-time precondition.
@@ -1973,6 +2084,17 @@ impl ResolvedRulesJournal {
         )
     }
 
+    /// Records one exact object landing on the stack under its causal node.
+    pub fn record_stack_push(
+        &mut self,
+        command: ResolvedStackPushCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::StackPush(Box::new(command)),
+        )
+    }
+
     /// Records one exact trigger/LKI collection append under its causal node.
     pub fn record_trigger_collection(
         &mut self,
@@ -2197,7 +2319,8 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::LibraryShuffle(_)
                 | ResolvedRulesCommand::ZoneChange(_)
                 | ResolvedRulesCommand::FrameTransition(_)
-                | ResolvedRulesCommand::TriggerCollection(_) => {}
+                | ResolvedRulesCommand::TriggerCollection(_)
+                | ResolvedRulesCommand::StackPush(_) => {}
             }
         }
         for node in &self.nodes {
@@ -2607,6 +2730,20 @@ impl ResolvedRulesJournal {
                 if entry.node != command.cause {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "trigger-collection command has an unrelated cause".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::StackPush(command) => {
+                // Cause-only, like the frame-transition and trigger-collection
+                // arms. There is no allocator receipt to cross-check: neither
+                // stack authority draws an id or a timestamp, so this record
+                // holds no high-water that could be forged past. Its remaining
+                // preconditions (CR 405.2 depth, duplicate entry id, live
+                // controller) are all state-dependent and are enforced by
+                // `stack::apply_resolved_stack_push` where the state exists.
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "stack-push command has an unrelated cause".to_string(),
                     ));
                 }
             }

@@ -2995,6 +2995,13 @@ fn mass_all_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
+        // CR 701.27a + CR 115.10a: mass Transform's `target` is a resolution-time
+        // population scan (`target_filter()`==None), exactly like `TapAll`/`DestroyAll`.
+        | Effect::Transform {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DoublePTAll { target, .. } => Some(target),
         _ => None,
     }
@@ -3703,6 +3710,13 @@ fn effect_references_parent_target_combat_relation(effect: &Effect) -> bool {
         | Effect::ChangeZoneAll { target, .. }
         | Effect::DoublePTAll { target, .. }
         | Effect::DamageAll { target, .. }
+        // CR 701.27a + CR 115.10a: parity with the other mass-population `target`
+        // filters — mass Transform's population filter is walked here too.
+        | Effect::Transform {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::PutCounterAll { target, .. } => {
             filter_references_parent_target_combat_relation(target)
         }
@@ -3779,6 +3793,13 @@ fn effect_target_slot_filter(effect: &Effect) -> Option<TargetFilter> {
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
+        // CR 701.27a + CR 115.10a: mass Transform's population filter is a
+        // resolution-time scan, walked here like the other mass-`All` effects.
+        | Effect::Transform {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DoublePTAll { target, .. } => filter_target_slot_filter(target),
         _ => None,
     }
@@ -4857,8 +4878,15 @@ fn concretize_granting_object_in_effect(effect: &mut Effect, granter: ObjectId) 
         | Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
         | Effect::Counter { target, .. }
-        | Effect::Transform { target, .. }
-        // CR 710.4: same single-target-slot shape as `Transform`.
+        // CR 701.27a: only single-scope Transform carries a targetable slot that
+        // can bind a GrantingObject anaphor; the mass (`All`) scope's `target` is a
+        // population filter (mirrors the SetTapState Single-gate above).
+        | Effect::Transform {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
+        // CR 710.4: same single-target-slot shape as `Transform`'s single scope.
         | Effect::FlipPermanent { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }

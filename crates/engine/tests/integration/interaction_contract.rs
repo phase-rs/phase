@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use engine::analysis::decision_template::{
     DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount, ShortcutDecisionSchema,
 };
@@ -8,21 +10,23 @@ use engine::game::interaction::{
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
+use engine::game::DeckEntry;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CounterCostSelection,
     Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypedFilter, ZoneOwner,
 };
 use engine::types::actions::{GameAction, MulliganChoice};
+use engine::types::card::CardFace;
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
     AlternativeCastKeyword, AutoPassMode, CastPaymentMode, GameState, MulliganBottomEntry,
     MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason, PendingTriggerSummary,
-    TurnBoundary, WaitingFor,
+    PlayerDeckPool, TurnBoundary, WaitingFor,
 };
 use engine::types::identifiers::CardId;
 use engine::types::interaction::{
-    InteractionActionCode, InteractionAvailability, InteractionChoiceId,
+    AmountAssignment, InteractionActionCode, InteractionAvailability, InteractionChoiceId,
     InteractionManaAbilityActivationScope, InteractionManaRestriction,
     InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
     InteractionPreviewRequest, InteractionPreviewStatus, InteractionReasonCode,
@@ -32,6 +36,7 @@ use engine::types::interaction::{
     MAX_INTERACTION_LIST_LEN,
 };
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::match_config::MatchPhase;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -2498,4 +2503,180 @@ fn oversized_session_fails_closed_and_serial_rolls_to_next_generation() {
                 } => choices.iter().all(|choice| choice.id.as_str().len() <= 256),
             }
     }));
+}
+
+fn sideboard_deck_entry(name: &str, count: u32) -> DeckEntry {
+    DeckEntry {
+        card: CardFace {
+            name: name.to_string(),
+            ..Default::default()
+        },
+        count,
+    }
+}
+
+/// A Standard match between games with a registered 60/15 pool. `Aaa` sorts
+/// before `Bbb`, so the projection's candidate indices are stable.
+fn between_games_sideboard_state() -> GameState {
+    let mut state = GameState::new_two_player(11);
+    state.match_phase = MatchPhase::BetweenGames;
+    state.game_number = 2;
+    state.deck_pools = vec![PlayerDeckPool {
+        player: P0,
+        registered_main: Arc::new(vec![sideboard_deck_entry("Aaa", 60)]),
+        registered_sideboard: Arc::new(vec![sideboard_deck_entry("Bbb", 15)]),
+        current_main: Arc::new(vec![sideboard_deck_entry("Aaa", 60)]),
+        current_sideboard: Arc::new(vec![sideboard_deck_entry("Bbb", 15)]),
+        ..Default::default()
+    }];
+    // The projection recomputes its bounds from `deck_pools` + `format_config`
+    // via the same authority `handle_submit_sideboard` uses, so these published
+    // copies are the client's display hint, not the gate.
+    state.waiting_for = WaitingFor::BetweenGamesSideboard {
+        player: P0,
+        game_number: 2,
+        score: Default::default(),
+        min_main_deck_size: 60,
+        max_sideboard_size: Some(15),
+    };
+    state
+}
+
+fn deck_partition_opportunity(
+    view: &engine::types::interaction::ViewerInteraction,
+) -> (
+    &engine::types::interaction::InteractionOpportunity,
+    u32,
+    u32,
+) {
+    let opportunity = view
+        .opportunities
+        .iter()
+        .find(|opportunity| {
+            matches!(
+                &opportunity.response,
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::DeckPartition { .. },
+                    ..
+                }
+            )
+        })
+        .expect("a between-games seat is offered a deck-partition schema");
+    let InteractionOpportunityResponse::Schema {
+        spec:
+            InteractionResponseSpec::DeckPartition {
+                min_main_total,
+                max_main_total,
+                ..
+            },
+        ..
+    } = &opportunity.response
+    else {
+        unreachable!("filtered for DeckPartition above");
+    };
+    (opportunity, *min_main_total, *max_main_total)
+}
+
+fn partition_choice_ids(
+    opportunity: &engine::types::interaction::InteractionOpportunity,
+) -> Vec<InteractionChoiceId> {
+    let InteractionOpportunityResponse::Schema { candidates, .. } = &opportunity.response else {
+        unreachable!("deck partition is a schema response");
+    };
+    candidates.iter().map(|choice| choice.id.clone()).collect()
+}
+
+/// CR 100.2a + CR 100.4a + CR 100.5: `deck_size` is a *minimum* and non-Commander
+/// decks have no maximum, so the between-games schema must publish the interval
+/// the engine will accept — `[minimum, whole pool]` — not one exact size. A
+/// player who registered 60/15 may legally present anything from 60 up to all
+/// 75 cards; the sideboard cap is what pins the floor at 60.
+///
+/// This drives `HumanResponseModel::SideboardPartition` end-to-end (schema →
+/// submission → applied state) rather than calling `handle_submit_sideboard`
+/// directly, because the interaction layer carries its own copy of the gate.
+#[test]
+fn deck_partition_schema_publishes_an_interval_not_an_exact_deck_size() {
+    let mut state = between_games_sideboard_state();
+    bind(&mut state, "sideboard-interval");
+
+    let view = viewer_interaction(&state, P0);
+    let (opportunity, min_main_total, max_main_total) = deck_partition_opportunity(&view);
+    assert_eq!(
+        (min_main_total, max_main_total),
+        (60, 75),
+        "60-card minimum, and the whole 75-card pool may go to the main deck"
+    );
+    // No exact aggregate exists for a range, so `total` must stay absent.
+    assert!(opportunity
+        .surfaces
+        .contains(&InteractionPresentationSurface::Amount {
+            min: 60,
+            max: 75,
+            total: None,
+        }));
+
+    let choice_ids = partition_choice_ids(opportunity);
+    let interaction_id = opportunity.interaction_id.clone();
+
+    // 59 main cards would leave a 16-card sideboard: below the floor.
+    let too_small = preview_interaction(
+        &state,
+        P0,
+        &InteractionPreviewRequest {
+            request_id: PreviewRequestId("sideboard-too-small".to_string()),
+            interaction_id: interaction_id.clone(),
+            response: InteractionResponse::DeckPartition {
+                main: vec![AmountAssignment {
+                    choice_id: choice_ids[0].clone(),
+                    amount: 59,
+                }],
+            },
+        },
+    );
+    assert_eq!(
+        too_small.status,
+        InteractionPreviewStatus::Rejected {
+            reason: InteractionReasonCode::ConstraintUnsatisfied,
+        }
+    );
+
+    // 61/14 — siding one card in without siding one out. This is the exact
+    // shape the old exact-total contract rejected.
+    submit_interaction(
+        &mut state,
+        P0,
+        InteractionSubmission {
+            interaction_id,
+            response: InteractionResponse::DeckPartition {
+                main: vec![
+                    AmountAssignment {
+                        choice_id: choice_ids[0].clone(),
+                        amount: 60,
+                    },
+                    AmountAssignment {
+                        choice_id: choice_ids[1].clone(),
+                        amount: 1,
+                    },
+                ],
+            },
+        },
+    )
+    .expect("a 61-card main deck is legal when the sideboard still fits under 15");
+
+    let pool = &state.deck_pools[0];
+    assert_eq!(
+        pool.current_main
+            .iter()
+            .map(|entry| entry.count)
+            .sum::<u32>(),
+        61
+    );
+    assert_eq!(
+        pool.current_sideboard
+            .iter()
+            .map(|entry| entry.count)
+            .sum::<u32>(),
+        14
+    );
 }

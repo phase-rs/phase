@@ -170,6 +170,11 @@ pub fn apply_resolved_transform(
     obj.timestamp = command.resulting_timestamp;
     obj.transformation_count = command.resulting_transformation_count;
 
+    // CR 613.7g: the transform drew this timestamp during the original
+    // execution, so replay installs it rather than drawing a fresh one — and
+    // must carry the allocator past it or a later draw reissues it.
+    state.adopt_replayed_timestamp(command.resulting_timestamp);
+
     crate::game::layers::mark_layers_full(state);
 
     Ok(())

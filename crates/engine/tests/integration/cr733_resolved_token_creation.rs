@@ -128,6 +128,24 @@ fn token_creation_journals_an_exact_resolved_birth() {
         "CR 302.6: replay stamps the recorded entry turn, not the live one"
     );
 
+    // A birth draws from BOTH allocators, so replay must carry both past the
+    // values it installed. The object-id side is asserted by the applier's own
+    // high-water guard; this is the timestamp side, which is asserted by DRAWING
+    // so it pins the consequence rather than the counter field. Without it a
+    // later draw reissues this token's timestamp, and CR 613.7 orders effects
+    // within a layer by timestamp alone, leaving the two objects unordered.
+    let next_drawn = replay.next_timestamp();
+    assert!(
+        next_drawn > birth.entry_timestamp,
+        "CR 613.7d: replay installed entry timestamp {} but the next draw handed out {}",
+        birth.entry_timestamp,
+        next_drawn
+    );
+    assert!(
+        replay.next_object_id > token_id.0,
+        "CR 111.1: replay carries the object-id allocator past the id it installed"
+    );
+
     // The inverted precondition: this applier CREATES its subject, so a second
     // application is a typed invariant failure rather than a silent duplicate.
     assert!(

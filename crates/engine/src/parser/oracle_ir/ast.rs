@@ -4,11 +4,11 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
     CastingPermission, ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment,
-    CounterSourceRider, DoorLockOp, Duration, Effect, FaceDownProfile, ForceBlockAttackerRef,
-    LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
-    OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
-    SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetFilter,
+    CounterSourceRider, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile,
+    ForceBlockAttackerRef, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
+    SearchDestinationSplit, SearchSelectionConstraint, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -1211,6 +1211,10 @@ pub(crate) enum UtilityImperativeAst {
     },
     Transform {
         target: TargetFilter,
+        /// CR 701.27a vs CR 115.10a: `Single` is the legacy targeted/anaphoric
+        /// transform; `All` is the non-targeting mass transform ("transform all
+        /// Humans"). Mirrors `Effect::Transform`'s `scope` axis.
+        scope: EffectScope,
     },
     /// CR 710.4: the Kamigawa flip-card instruction ("flip this creature" /
     /// "flip it" / "flip <name>"). A sibling of [`UtilityImperativeAst::Transform`]

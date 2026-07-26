@@ -95,6 +95,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         ResolvedRulesCommand::TriggerCollection(command) => {
             engine::game::triggers::apply_resolved_trigger_collection(state, command).unwrap();
         }
+        ResolvedRulesCommand::StackPush(command) => {
+            engine::game::stack::apply_resolved_stack_push(state, command.as_ref()).unwrap();
+        }
     }
 }
 

@@ -53,16 +53,18 @@
     "matchScore": "Score du match {{p0}}-{{p1}}{{draws}}. Déplacez des cartes entre le deck principal et la réserve, puis soumettez.",
     "draws_one": " ({{count}} nul)",
     "draws_other": " ({{count}} nuls)",
-    "main": "Principal ({{count}}/{{total}})",
+    "main": "Principal ({{count}}, min. {{min}})",
     "sideboard": "Réserve ({{count}})",
+    "sideboardCapped": "Réserve ({{count}}/{{max}})",
     "moveFromSideboard": "Déplacez des cartes depuis la réserve.",
     "moveFromMain": "Déplacez des cartes depuis le deck principal.",
-    "matchesRegistered": "Le deck principal correspond à la taille enregistrée ({{total}}).",
-    "submitDisabled": "Le deck principal est à {{count}} / {{total}} — soumission désactivée.",
     "resetAria": "Réinitialiser au deck enregistré",
     "reset": "Réinitialiser",
     "submitAria": "Soumettre le deck pour la partie suivante",
-    "submitDeck": "Soumettre le deck"
+    "submitDeck": "Soumettre le deck",
+    "readyToSubmit": "Le deck est légal — prêt à soumettre.",
+    "belowMinimum": "Le deck principal doit contenir au moins {{min}} cartes — {{count}} actuellement.",
+    "overSideboardCap": "La réserve contient {{count}} cartes — maximum {{max}}."
   },
   "brokerOfflinePrompt": {
     "title": "Serveur du salon injoignable",

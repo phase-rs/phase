@@ -8040,6 +8040,20 @@ pub enum WaitingFor {
         player: PlayerId,
         game_number: u8,
         score: MatchScore,
+        /// CR 100.2a / CR 100.5: fewest cards this player's main deck may hold
+        /// when they submit. `deck_size` is a *minimum* — there is no maximum
+        /// deck size — so sideboarding need not be a one-for-one swap.
+        ///
+        /// Published here (rather than left for the UI to derive) so the
+        /// submit gate is the engine's own acceptance predicate. Computed by
+        /// `match_flow::sideboard_submission_bounds`, the single authority
+        /// `handle_submit_sideboard` also validates against.
+        #[serde(default)]
+        min_main_deck_size: u32,
+        /// CR 100.4a: most cards the sideboard may hold, or `None` when the
+        /// format imposes no cap. `Forbidden`-sideboard formats report `0`.
+        #[serde(default)]
+        max_sideboard_size: Option<u32>,
     },
     BetweenGamesChoosePlayDraw {
         player: PlayerId,
@@ -16368,6 +16382,24 @@ impl GameState {
         let ts = self.next_timestamp;
         self.next_timestamp += 1;
         ts
+    }
+
+    /// CR 613.7: carry the timestamp allocator past a timestamp that a CR 733
+    /// replay *installed* rather than drew.
+    ///
+    /// Every applier that stamps an object with a recorded timestamp must call
+    /// this. [`GameState::next_timestamp`] is the draw counter, so an applier
+    /// that installs a recorded value without advancing it leaves the counter
+    /// behind a timestamp already in use, and a later draw hands that same
+    /// timestamp to a second object. CR 613.7 orders effects within a layer
+    /// solely by timestamp, so the two are then unordered — a corruption that
+    /// needs no forged journal, only an honest replay.
+    ///
+    /// `max` keeps the counter monotone when commands replay in an order other
+    /// than the one they were drawn in. `saturating_add` is total; its clamp is
+    /// unreachable because no game performs `u64::MAX` draws.
+    pub(crate) fn adopt_replayed_timestamp(&mut self, timestamp: u64) {
+        self.next_timestamp = self.next_timestamp.max(timestamp.saturating_add(1));
     }
 
     pub fn may_trigger_auto_choice(&self, key: &MayTriggerAutoChoiceKey) -> Option<AutoMayChoice> {

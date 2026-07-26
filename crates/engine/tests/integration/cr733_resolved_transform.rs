@@ -37,6 +37,7 @@ fn transform_journals_an_exact_resolved_transform() {
     let mut spell = scenario.add_spell_to_hand(P0, "Rouse", true);
     spell.with_ability(Effect::Transform {
         target: TargetFilter::Typed(TypedFilter::creature()),
+        scope: engine::types::ability::EffectScope::Single,
     });
     let spell_id = spell.id();
 
@@ -122,5 +123,21 @@ fn transform_journals_an_exact_resolved_transform() {
     assert_eq!(
         replayed.timestamp, transform.resulting_timestamp,
         "CR 613.7g: replay installs the recorded timestamp instead of re-drawing one"
+    );
+
+    // CR 613.7: installing a recorded timestamp is only half the contract — the
+    // allocator must also be carried past it. `next_timestamp` is the draw
+    // counter, so an applier that installs 42 while leaving the counter at 5
+    // hands 42 out a second time later in the replay, and CR 613.7 orders
+    // effects within a layer by timestamp alone, leaving the two unordered.
+    // Asserted by DRAWING rather than by reading the counter, so this pins the
+    // observable consequence and not the field.
+    let next_drawn = replay.next_timestamp();
+    assert!(
+        next_drawn > transform.resulting_timestamp,
+        "CR 613.7: replay installed timestamp {} but the next draw handed out {}; \
+         two objects sharing a timestamp are unordered within their layer",
+        transform.resulting_timestamp,
+        next_drawn
     );
 }

@@ -1627,6 +1627,8 @@ mod tests {
                 p1_wins: 0,
                 draws: 0,
             },
+            min_main_deck_size: 0,
+            max_sideboard_size: None,
         };
 
         mgr.handle_disconnect(&code, PlayerId(0));

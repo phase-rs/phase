@@ -53,16 +53,18 @@
     "matchScore": "Wynik meczu {{p0}}-{{p1}}{{draws}}. Przenoś karty między talią główną a kartami bocznymi, a potem zatwierdź.",
     "draws_one": " ({{count}} remis)",
     "draws_other": " ({{count}} remisów)",
-    "main": "Główna ({{count}}/{{total}})",
+    "main": "Główna ({{count}}, min {{min}})",
     "sideboard": "Karty boczne ({{count}})",
+    "sideboardCapped": "Karty boczne ({{count}}/{{max}})",
     "moveFromSideboard": "Przenieś karty z kart bocznych.",
     "moveFromMain": "Przenieś karty z talii głównej.",
-    "matchesRegistered": "Talia główna odpowiada zarejestrowanemu rozmiarowi ({{total}}).",
-    "submitDisabled": "Talia główna ma {{count}} / {{total}} — zatwierdzanie wyłączone.",
     "resetAria": "Przywróć zarejestrowaną talię",
     "reset": "Resetuj",
     "submitAria": "Zatwierdź talię na następną grę",
-    "submitDeck": "Zatwierdź talię"
+    "submitDeck": "Zatwierdź talię",
+    "readyToSubmit": "Talia jest legalna — można zatwierdzić.",
+    "belowMinimum": "Talia główna wymaga co najmniej {{min}} kart — obecnie {{count}}.",
+    "overSideboardCap": "Karty boczne: {{count}} — maksimum {{max}}."
   },
   "brokerOfflinePrompt": {
     "title": "Serwer poczekalni nieosiągalny",

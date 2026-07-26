@@ -70,6 +70,8 @@
     "moveToSideboard": "Przenieś jedną kartę {{name}} do zaplecza",
     "moveToMain": "Przenieś jedną kartę {{name}} do talii głównej",
     "removeOne": "Usuń jedną kartę {{name}}",
+    "addOne": "Dodaj jedną kartę {{name}}",
+    "copyLimit": "{{name}} osiągnęła limit kopii",
     "makeCommander": "Ustaw {{name}} jako dowódcę",
     "makeCommanderTitle": "Ustaw jako mojego dowódcę",
     "chooseArtFor": "Wybierz grafikę dla {{name}}",

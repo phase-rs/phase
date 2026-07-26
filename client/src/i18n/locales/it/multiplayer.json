@@ -53,16 +53,18 @@
     "matchScore": "Punteggio della partita {{p0}}-{{p1}}{{draws}}. Sposta le carte tra principale e sideboard, poi invia.",
     "draws_one": " ({{count}} pareggio)",
     "draws_other": " ({{count}} pareggi)",
-    "main": "Principale ({{count}}/{{total}})",
+    "main": "Principale ({{count}}, min {{min}})",
     "sideboard": "Sideboard ({{count}})",
+    "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Sposta carte dalla sideboard.",
     "moveFromMain": "Sposta carte dal mazzo principale.",
-    "matchesRegistered": "Il mazzo principale corrisponde alla dimensione registrata ({{total}}).",
-    "submitDisabled": "Il mazzo principale è {{count}} / {{total}} — invio disabilitato.",
     "resetAria": "Reimposta al mazzo registrato",
     "reset": "Reimposta",
     "submitAria": "Invia il mazzo per la prossima partita",
-    "submitDeck": "Invia mazzo"
+    "submitDeck": "Invia mazzo",
+    "readyToSubmit": "Il mazzo è legale — pronto per l'invio.",
+    "belowMinimum": "Il mazzo principale richiede almeno {{min}} carte — ora {{count}}.",
+    "overSideboardCap": "Il sideboard ha {{count}} carte — massimo {{max}}."
   },
   "brokerOfflinePrompt": {
     "title": "Server della lobby irraggiungibile",
