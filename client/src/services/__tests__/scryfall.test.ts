@@ -813,3 +813,177 @@ describe("rateLimitedFetch (token/search API)", () => {
     expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("image size derivation", () => {
+  // The five-path-segment shape every real `cards.scryfall.io` URL has. The
+  // mainline `makeLocalDataMap` fixture is deliberately NOT used here: it emits
+  // `https://img.example/<Name>.jpg`, a one-segment URL that is not derivable,
+  // so every assertion below would pass vacuously against it.
+  const SLUG = "front/w/r/war-room.jpg";
+  const sized = (size: string, query = "") =>
+    `https://cards.scryfall.io/${size}/${SLUG}${query}`;
+  const SIZES = ["small", "normal", "large", "art_crop"] as const;
+
+  it("derives every size from every other size", async () => {
+    const { deriveImageUrl, imageUrlSize } = await loadScryfallModule();
+
+    for (const from of SIZES) {
+      expect(imageUrlSize(sized(from))).toBe(from);
+      for (const to of SIZES) {
+        const input = sized(from);
+        const derived = deriveImageUrl(input, to);
+        expect(derived).toBe(sized(to));
+        // Non-vacuity: a broken guard that returned its input unchanged would
+        // otherwise satisfy every same-size case and look green.
+        if (from !== to) expect(derived).not.toBe(input);
+      }
+    }
+  });
+
+  it("preserves the query string", async () => {
+    const { deriveImageUrl } = await loadScryfallModule();
+
+    const input = sized("normal", "?1783905318");
+    const derived = deriveImageUrl(input, "small");
+    expect(derived).toBe(
+      "https://cards.scryfall.io/small/front/w/r/war-room.jpg?1783905318",
+    );
+    expect(derived).not.toBe(input);
+  });
+
+  it("derives back faces", async () => {
+    const { deriveImageUrl } = await loadScryfallModule();
+
+    const input = "https://cards.scryfall.io/normal/back/w/r/war-room.jpg?1783905318";
+    const derived = deriveImageUrl(input, "small");
+    expect(derived).toBe(
+      "https://cards.scryfall.io/small/back/w/r/war-room.jpg?1783905318",
+    );
+    expect(derived).not.toBe(input);
+  });
+
+  it("returns non-derivable input unchanged, without throwing", async () => {
+    const { CARD_BACK_URL, deriveImageUrl, imageUrlSize } = await loadScryfallModule();
+
+    const nonDerivable = [
+      // Every face-down card renders through `useCardImage("")`.
+      "",
+      // `OpponentHand.test.tsx` mocks bare filenames — `new URL()` throws on these.
+      "Focused Opponent Card.png",
+      // Four path segments, so the card back never gets a ladder.
+      CARD_BACK_URL,
+      // One segment. Must stay byte-identical or `isPlaceholderImageUrl`'s `===`
+      // stops gating the printing-fallback chain.
+      "https://errors.scryfall.com/soon.jpg",
+      // Six segments.
+      "https://cards.scryfall.io/normal/front/w/r/extra/war-room.jpg",
+      // Five segments but an unrecognized size.
+      "https://cards.scryfall.io/png/front/w/r/war-room.png",
+    ];
+
+    for (const input of nonDerivable) {
+      expect(deriveImageUrl(input, "small")).toBe(input);
+      expect(imageUrlSize(input)).toBeNull();
+    }
+    expect(imageUrlSize(null)).toBeNull();
+    expect(imageUrlSize(undefined)).toBeNull();
+  });
+});
+
+describe("local face size resolution", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const NORMAL = "https://cards.scryfall.io/normal/front/w/r/war-room.jpg?1783905318";
+  const SMALL = "https://cards.scryfall.io/small/front/w/r/war-room.jpg?1783905318";
+  const ART_CROP = "https://cards.scryfall.io/art_crop/front/w/r/war-room.jpg?1783905318";
+
+  function makeSizedDataMap(key: string, name: string): Response {
+    return new Response(
+      JSON.stringify({
+        [key]: {
+          oracle_id: key,
+          face_names: [name.toLowerCase()],
+          faces: [{ normal: NORMAL, art_crop: ART_CROP }],
+          layout: "normal",
+          name,
+          mana_cost: "",
+          cmc: 0,
+          type_line: "Land",
+          colors: [],
+          color_identity: [],
+          keywords: [],
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  it("serves a real small asset from the stored normal URL", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSizedDataMap("war room", "War Room"));
+
+    const { fetchCardImageUrl } = await loadScryfallModule();
+    const url = await fetchCardImageUrl("War Room", 0, "small");
+
+    expect(url).toBe(SMALL);
+    expect(url).not.toBe(NORMAL);
+  });
+
+  it("collapses large to normal", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSizedDataMap("war room", "War Room"));
+
+    const { fetchCardImageUrl } = await loadScryfallModule();
+
+    expect(await fetchCardImageUrl("War Room", 0, "large")).toBe(NORMAL);
+  });
+
+  it("serves art_crop untouched", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSizedDataMap("war room", "War Room"));
+
+    const { fetchCardImageUrl } = await loadScryfallModule();
+
+    expect(await fetchCardImageUrl("War Room", 0, "art_crop")).toBe(ART_CROP);
+  });
+
+  it("serves a real small asset for local token images", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSizedDataMap("token:goblin", "Goblin"));
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const url = await fetchTokenImageUrl("Goblin", "small");
+
+    expect(url).toBe(SMALL);
+    expect(url).not.toBe(NORMAL);
+    // The local hit must short-circuit the Scryfall search API entirely.
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves a real small asset from printings, and still rejects placeholders", async () => {
+    const { resolvePrintingImageUrl } = await loadScryfallModule();
+    const printing = {
+      id: "real-printing",
+      set: "cmm",
+      set_name: "Commander Masters",
+      collector_number: "1054",
+      released_at: "2023-08-04",
+      border_color: "black",
+      frame_effects: [],
+      full_art: false,
+      faces: [{ normal: NORMAL, art_crop: ART_CROP }],
+    };
+
+    const small = resolvePrintingImageUrl(printing, 0, "small");
+    expect(small).toBe(SMALL);
+    expect(small).not.toBe(NORMAL);
+    expect(resolvePrintingImageUrl(printing, 0, "large")).toBe(NORMAL);
+
+    const placeholder = {
+      ...printing,
+      faces: [{
+        normal: "https://errors.scryfall.com/soon.jpg",
+        art_crop: "https://errors.scryfall.com/soon.jpg",
+      }],
+    };
+    expect(resolvePrintingImageUrl(placeholder, 0, "small")).toBeNull();
+  });
+});
