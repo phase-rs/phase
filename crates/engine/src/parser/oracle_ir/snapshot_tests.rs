@@ -366,6 +366,52 @@ fn student_of_warfare() {
     insta::assert_json_snapshot!("student_of_warfare_lowered", &lowered);
 }
 
+/// Leveler *body* static (Plan 05b, T2 witness).
+///
+/// `student_of_warfare` above reaches only the block-SUMMARY static
+/// (`oracle_level.rs:194`), synthesized from P/T and keyword lines. Kabira
+/// Vindicator prints a full sentence inside each LEVEL block, so it is the
+/// witness for the body arm (`oracle_level.rs:154`, via `parse_static_line`)
+/// — twice, once per block — while still carrying two block summaries.
+///
+/// The sibling multi arm (`:146`, `parse_static_line_multi`) has no pool
+/// witness: no printed LEVEL body line lowers to more than one static.
+#[test]
+fn kabira_vindicator() {
+    let (ir, lowered) = parse_two_layer(
+        "Level up {2}{W} ({2}{W}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 2-4\n3/6\nOther creatures you control get +1/+1.\nLEVEL 5+\n4/8\nOther creatures you control get +2/+2.",
+        "Kabira Vindicator",
+        &["Creature"],
+        &["Human", "Knight"],
+    );
+    insta::assert_json_snapshot!("kabira_vindicator_ir", &ir);
+    insta::assert_json_snapshot!("kabira_vindicator_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Spacecraft threshold lines (Plan 05b, T2 witness)
+// ---------------------------------------------------------------------------
+
+/// Both Spacecraft static arms on one card (CR 702.184a / CR 721.2).
+///
+/// `2+ | Other creatures you control get +1/+1.` takes the
+/// `parse_static_line` arm (`oracle_spacecraft.rs:256`); `12+ | Flying,
+/// lifelink` takes the keyword-only arm (`:178`). Nothing else in the two-layer
+/// corpus reaches either — Chalice of the Void carries `charge` counters but
+/// prints no threshold line — so without this fixture T2's Spacecraft
+/// conversion would be snapshot-invisible.
+#[test]
+fn lumen_class_frigate() {
+    let (ir, lowered) = parse_two_layer(
+        "Station (Tap another creature you control: Put charge counters equal to its power on this Spacecraft. Station only as a sorcery. It's an artifact creature at 12+.)\n2+ | Other creatures you control get +1/+1.\n12+ | Flying, lifelink",
+        "Lumen-Class Frigate",
+        &["Artifact"],
+        &["Spacecraft"],
+    );
+    insta::assert_json_snapshot!("lumen_class_frigate_ir", &ir);
+    insta::assert_json_snapshot!("lumen_class_frigate_lowered", &lowered);
+}
+
 // ---------------------------------------------------------------------------
 // Adventure
 // ---------------------------------------------------------------------------

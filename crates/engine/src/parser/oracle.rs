@@ -3829,8 +3829,11 @@ pub(crate) fn parse_oracle_ir(
     // header..=max(mod_lines) via `emit_span`).
     let (level_statics, level_consumed, level_ability_lines) =
         parse_level_blocks(&lines, card_name);
-    for (sd, first_line, last_line) in level_statics {
-        emitter.emit_span(first_line, last_line, OracleNodeIr::PreLoweredStatic(sd));
+    // Keeps `emit_span` rather than routing through `static_ir_at`: the
+    // `first..=last` range is load-bearing, and `static_ir_at` would also write
+    // the `last_static` peek mirror, which the leveler deliberately does not.
+    for (ir, first_line, last_line) in level_statics {
+        emitter.emit_span(first_line, last_line, OracleNodeIr::Static(ir));
     }
     // CR 711.2a + CR 711.2b: Re-parse ability lines found within LEVEL blocks through
     // the normal trigger/activated/static pipeline, then attach the level counter condition.
@@ -3925,8 +3928,8 @@ pub(crate) fn parse_oracle_ir(
         // resolves to the correct printed-trigger slot.
         let (sc_statics, sc_triggers, sc_abilities, consumed) =
             parse_spacecraft_threshold_lines(&lines, card_name, PrintedTriggerIndex::placeholder());
-        for (line, sd) in sc_statics {
-            emitter.static_at(line, sd);
+        for (line, ir) in sc_statics {
+            emitter.static_ir_at(line, ir);
         }
         for (line, trigger) in sc_triggers {
             emitter.trigger_at(line, trigger);
