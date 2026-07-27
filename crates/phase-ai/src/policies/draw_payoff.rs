@@ -299,6 +299,7 @@ fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::DeclareShortcut { .. }
         | GameAction::RespondToShortcut { .. }
         | GameAction::DeclineShortcut
-        | GameAction::PrecastCopyShortcut { .. } => false,
+        | GameAction::PrecastCopyShortcut { .. }
+        | GameAction::EndContinuousEffect { .. } => false,
     }
 }
