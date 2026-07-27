@@ -9,9 +9,9 @@ use std::sync::Arc;
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CastVariantPaid, Effect, QuantityExpr, QuantityModification,
-    ReplacementDefinition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition,
+    AbilityDefinition, AbilityKind, CastVariantPaid, DrawReplacementScope, Effect, QuantityExpr,
+    QuantityModification, ReplacementDefinition, StaticDefinition, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -1058,7 +1058,8 @@ fn add_prevent_draw_replacement(state: &mut GameState) {
     );
     let obj = state.objects.get_mut(&id).unwrap();
     obj.card_types.core_types.push(CoreType::Enchantment);
-    let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw);
+    let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+        .draw_scope(DrawReplacementScope::IndividualDraw);
     repl.quantity_modification = Some(QuantityModification::Prevent);
     obj.replacement_definitions.push(repl);
 }
