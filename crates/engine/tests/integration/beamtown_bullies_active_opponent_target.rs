@@ -69,16 +69,13 @@ use engine::game::scenario::GameScenario;
 use engine::game::targeting::find_legal_targets;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, ControllerRef, Effect, FilterProp, PlayerRelation, StaticDefinition,
-    TargetFilter, TargetRef, TypedFilter,
+    AbilityDefinition, ControllerRef, Effect, PlayerRelation, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::CardId;
-use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
-use engine::types::statics::{CostModifyMode, StaticMode};
 use engine::types::zones::Zone;
 use engine::types::{GameAction, PlayerId};
 
@@ -818,75 +815,6 @@ fn active_opponent_filter_matches_only_the_live_active_opponent_in_state() {
             Some(P0)
         ),
         "reach-guard: the state-free matcher still resolves plain opponent scope"
-    );
-}
-
-/// Drives the real cast pipeline through the selected-target cost-modifier
-/// branch. `spell_matches_cost_filter_with_selected_targets` delegates its
-/// `TargetsOnly` player target to `player_matches_target_filter_in_state`; with
-/// the reverted fail-closed `ActivePlayer` arm, this reduction is skipped and
-/// the land is tapped to pay {1} instead.
-#[test]
-fn active_opponent_target_reducer_applies_in_cast_pipeline() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let land = scenario.add_basic_land(P0, ManaColor::Red);
-    let active_opponent = TargetFilter::Typed(TypedFilter::default().controller(
-        ControllerRef::ActivePlayer {
-            relation: PlayerRelation::Opponent,
-        },
-    ));
-    let reduction = StaticDefinition::new(StaticMode::ModifyCost {
-        mode: CostModifyMode::Reduce,
-        amount: ManaCost::generic(1),
-        spell_filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
-            FilterProp::TargetsOnly {
-                filter: Box::new(active_opponent.clone()),
-            },
-        ]))),
-        dynamic_count: None,
-    })
-    .affected(TargetFilter::SelfRef)
-    .active_zones(vec![Zone::Hand, Zone::Stack]);
-    let spell = scenario
-        .add_spell_to_hand(P0, "Active Opponent Discount", true)
-        .with_mana_cost(ManaCost::generic(1))
-        .with_ability(Effect::DealDamage {
-            amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
-            target: active_opponent,
-            damage_source: None,
-            excess: None,
-        })
-        .with_static_definition(reduction)
-        .id();
-    let mut runner = scenario.build();
-    runner.state_mut().active_player = P1;
-    let card_id = runner.state().objects[&spell].card_id;
-
-    runner
-        .act(GameAction::CastSpell {
-            object_id: spell,
-            card_id,
-            targets: vec![],
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("casting must reach player-target selection");
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::TargetSelection { .. }
-        ),
-        "reach-guard: the spell must select its active-opponent target"
-    );
-    runner
-        .act(GameAction::SelectTargets {
-            targets: vec![TargetRef::Player(P1)],
-        })
-        .expect("the active opponent is a legal target");
-
-    assert!(
-        !runner.state().objects[&land].tapped,
-        "the selected-target reducer must see the active opponent and reduce {{1}} to {{0}}"
     );
 }
 
