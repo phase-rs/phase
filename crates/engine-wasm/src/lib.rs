@@ -16,6 +16,7 @@ use engine::game::engine::{
     apply, apply_for_simulation, resolve_all_fast_forward, ResolveAllCallbackDecision,
     ResolveAllFastForwardResult as BatchResolveResult,
 };
+use engine::game::interaction::bind_interaction_authority;
 use engine::game::preview::{compute_preview_diff, preview_auto_payment_sources};
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
@@ -29,6 +30,7 @@ use engine::game::{
 use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
 use engine::types::game_state::{PersistedGameState, TrustedGameStateEnvelope, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::interaction::InteractionSessionId;
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::{GameAction, GameState, PlayerId, ReplayHeader, ReplayLog};
@@ -42,6 +44,34 @@ fn decode_restored_game_state(json_str: &str) -> Result<GameState, JsValue> {
     serde_json::from_str::<PersistedGameState>(json_str)
         .map(PersistedGameState::into_game_state)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {e}")))
+}
+
+/// Bind the engine's interaction authority for the one game this module hosts.
+///
+/// Both `GameState::new` and the persisted decode leave `interaction_session_id`
+/// as `None`, and while it is unset `derive_viewer_interaction` reports
+/// `AuthorityUnbound` and returns no opportunities at all — so every interaction
+/// surface goes dark. `ensure_interaction_authority` cannot repair this: it only
+/// *maintains* an already-bound session, and clears the slots when there is none.
+///
+/// Always a fresh random id, never the one carried in a restored blob. The id is
+/// the namespace of every minted `InteractionId` (`"{session}.{generation}.{serial}"`),
+/// and re-binding the *same* session deliberately preserves the counters — so
+/// reusing a snapshot's id after an undo would re-issue ids already handed out on
+/// the abandoned branch. A new namespace makes that collision impossible, and
+/// matches server-core's rule that a persisted blob must not drive live authority.
+///
+/// Failure needs no log here (unlike server-core, which has `tracing`): the only
+/// way to get one is decimal-serial exhaustion, so this uses the same
+/// `debug_assert` discipline as `ensure_interaction_authority` itself rather than
+/// pulling `web_sys` into a size-optimized WASM artifact for an unreachable arm.
+fn bind_interaction_session(state: &mut GameState) {
+    let session = InteractionSessionId(format!("wasm-{:016x}", rand::rng().random::<u64>()));
+    let bound = bind_interaction_authority(state, session);
+    debug_assert!(
+        bound.is_ok(),
+        "interaction authority bind failed: {bound:?}"
+    );
 }
 
 /// Result of `get_legal_actions_js` — bundles actions with the engine's auto-pass
@@ -914,6 +944,11 @@ pub fn initialize_game(
     };
     REPLAY_LOG.with(|cell| cell.set(Some(ReplayLog::new(replay_header))));
 
+    // After `start_game`, so the slots bound here match the pause the caller is
+    // about to be handed — `bind_all_current_slots` binds for the *current*
+    // `waiting_for`, and nothing re-derives it until the first action boundary.
+    bind_interaction_session(&mut state);
+
     GAME_STATE.with(|cell| cell.set(Some(state)));
     clear_ai_session_cache();
 
@@ -1549,6 +1584,7 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
         }
     });
     finalize_public_state(&mut state);
+    bind_interaction_session(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
     // `initialize_game`) invalidates any in-progress recording — the restored
@@ -1617,6 +1653,7 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
         }
     });
     finalize_public_state(&mut state);
+    bind_interaction_session(&mut state);
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
