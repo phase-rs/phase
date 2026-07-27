@@ -45,8 +45,6 @@
   },
   "manaCurve": {
     "title": "Krzywa many",
-    "allCards": "Wszystkie",
-    "creatures": "Stwory",
     "bucketLabel": "Wartość many {{bucket}}"
   },
   "pickTimer": {

@@ -45,8 +45,6 @@
   },
   "manaCurve": {
     "title": "Curva de maná",
-    "allCards": "Todo",
-    "creatures": "Criaturas",
     "bucketLabel": "Valor de maná {{bucket}}"
   },
   "pickTimer": {

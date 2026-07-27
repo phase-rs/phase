@@ -45,8 +45,6 @@
   },
   "manaCurve": {
     "title": "Curva del mana",
-    "allCards": "Tutte",
-    "creatures": "Creature",
     "bucketLabel": "Valore di mana {{bucket}}"
   },
   "pickTimer": {

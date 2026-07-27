@@ -45,8 +45,6 @@
   },
   "manaCurve": {
     "title": "Manakurve",
-    "allCards": "Alle",
-    "creatures": "Kreaturen",
     "bucketLabel": "Manawert {{bucket}}"
   },
   "pickTimer": {
