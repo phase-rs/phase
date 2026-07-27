@@ -4895,7 +4895,12 @@ pub(crate) fn parse_oracle_ir(
                     .trigger_zones(vec![Zone::Battlefield])
                     .execute(effect_def)
                     .description(line.to_string());
-                emitter.trigger_at(item_line, trigger);
+                // The leading if-gate this arm dispatches on is still DROPPED —
+                // no condition is stamped for "hasn't been exerted this turn".
+                // That gap is pre-existing and deliberately preserved here: the
+                // conversion is behavior-identical, and the fix belongs in a
+                // change that is allowed to move bytes.
+                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
             }
             i += 1;
             continue;
