@@ -282,3 +282,55 @@ fn zero_count_replacement_is_predicted_and_not_delivered() {
     );
     assert_preflight_matches_pipeline("zero-count replacement", runner, false);
 }
+
+// ─── candidate-instruction quantity (CR 121.1 + CR 107.1b) ───────────────────
+//
+// The cases above vary the PLAYER's ability to draw. A draw also fails to fire
+// an engine when the instruction's OWN count resolves to zero — a distinct axis,
+// gated in `DrawPayoffPolicy` by requiring a positive resolved candidate
+// quantity. These pin the live-resolver behavior that gate models: the resolver
+// resolves the effect's quantity and emits `CardDrawn` only per delivered card,
+// so a zero-count draw emits none even with a healthy library.
+
+/// Resolves a controller-targeted `Effect::Draw` of `count` on a fresh board and
+/// reports whether the live resolver emitted any `CardDrawn` event.
+fn live_draw_emits_card_drawn(count: i32) -> bool {
+    let mut runner = scenario(3, None);
+    let source = runner.state().players[P0.0 as usize]
+        .library
+        .iter()
+        .next()
+        .copied()
+        .expect("seeded library");
+    let ability = ResolvedAbility::new(
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: count },
+            target: TargetFilter::Controller,
+        },
+        Vec::new(),
+        source,
+        P0,
+    );
+    let mut events = Vec::new();
+    engine::game::effects::draw::resolve(runner.state_mut(), &ability, &mut events)
+        .expect("draw resolution must succeed");
+    events
+        .iter()
+        .any(|e| matches!(e, engine::types::events::GameEvent::CardDrawn { .. }))
+}
+
+/// CR 107.1b: a zero-count draw instruction delivers no card, so the resolver
+/// emits no `CardDrawn` and a "whenever you draw" engine never triggers — the
+/// live fact behind `DrawPayoffPolicy` requiring a positive candidate quantity.
+/// Paired with a positive control so this cannot pass by the resolver breaking.
+#[test]
+fn zero_count_draw_instruction_emits_no_card_drawn() {
+    assert!(
+        !live_draw_emits_card_drawn(0),
+        "a draw of zero cards must emit no CardDrawn event"
+    );
+    assert!(
+        live_draw_emits_card_drawn(1),
+        "control: a draw of one card must emit CardDrawn"
+    );
+}

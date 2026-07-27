@@ -26,7 +26,7 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
 use crate::features::draw_matters::{
-    is_draw_payoff_trigger, is_draw_source_parts, AbilityScope, DRAW_MATTERS_FLOOR,
+    is_draw_payoff_trigger, is_draw_source_parts, AbilityScope, DrawQuantity, DRAW_MATTERS_FLOOR,
 };
 use crate::features::DeckFeatures;
 
@@ -132,8 +132,24 @@ fn draw_is_deliverable(ctx: &PolicyContext<'_>) -> bool {
     engine::game::effects::draw::can_draw_at_least_one(ctx.state, ctx.ai_player)
 }
 
+/// CR 121.1 + CR 107.1b: the live-candidate quantity requirement — this draw must
+/// resolve to at least one card, or it emits no `CardDrawn` and fires no engine.
+/// `source` is the object whose `cost_x_paid` binds an announced `X`, so an
+/// un-announced X resolves to zero and the candidate stays neutral.
+fn positive_draw_quantity<'a>(
+    ctx: &PolicyContext<'a>,
+    source: engine::types::identifiers::ObjectId,
+) -> DrawQuantity<'a> {
+    DrawQuantity::ResolvesPositive {
+        state: ctx.state,
+        controller: ctx.ai_player,
+        source,
+    }
+}
+
 /// Card-local structural test: does this candidate's own AST draw its controller
-/// a card? Reads only the candidate, never the board.
+/// a card, in a quantity that actually delivers one? Reads the candidate's AST
+/// plus the engine's quantity authority; never scans the board.
 ///
 /// * `CastSpell` → the spell's own resolution chain (`CastFacts::primary_effects`)
 ///   plus its immediate ETB triggers — a cast permanent's *activated* draw
@@ -156,11 +172,16 @@ fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
             is_draw_source_parts(
                 facts.primary_effects.iter().copied().chain(etb_bodies),
                 AbilityScope::Unconditional,
+                &positive_draw_quantity(ctx, facts.object.id),
             )
         }),
-        GameAction::ActivateAbility { .. } => {
+        GameAction::ActivateAbility { source_id, .. } => {
             ctx.effective_activated_ability().is_some_and(|ability| {
-                is_draw_source_parts(std::iter::once(&ability), AbilityScope::Unconditional)
+                is_draw_source_parts(
+                    std::iter::once(&ability),
+                    AbilityScope::Unconditional,
+                    &positive_draw_quantity(ctx, *source_id),
+                )
             })
         }
         // CR 601.2 + CR 702.34a: cast-shaped siblings of the plain `CastSpell`

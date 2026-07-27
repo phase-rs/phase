@@ -10,7 +10,7 @@ use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, Tac
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, CastVariantPaid, DrawReplacementScope, Effect, ModalChoice,
-    QuantityExpr, QuantityModification, ReplacementCondition, ReplacementDefinition,
+    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
     ReplacementMode, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
     TriggerDefinition,
 };
@@ -1173,6 +1173,113 @@ fn draw_cards_stub_prevent_replacement_still_rewards() {
     let (delta, reason) = draw_spell_verdict(&mut st);
     assert_eq!(reason.kind, "draw_payoff_engine_active");
     assert!(delta > 0.0);
+}
+
+// ─── candidate draw quantity (CR 121.1 + CR 107.1b) ──────────────────────────
+//
+// A draw instruction only fires the engine if it actually delivers a card. The
+// resolver resolves the effect's own quantity (`resolve_quantity_with_targets(..)
+// .max(0)`), so a zero count emits no `CardDrawn` no matter how healthy the
+// library is. These pin that the candidate's OWN count is required positive,
+// distinct from the player-level "can this player draw at all" delivery gate.
+
+/// Routes a cast candidate through `PolicyRegistry` and returns its verdict.
+fn registry_cast_verdict(st: &GameState, oid: ObjectId, cid: CardId) -> (f64, PolicyReason) {
+    let config = AiConfig::default();
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    PolicyRegistry::default()
+        .verdicts(&ctx(st, &candidate, &decision, &context, &config))
+        .into_iter()
+        .find(|(id, _)| *id == PolicyId::DrawPayoff)
+        .map(|(_, v)| score_of(v))
+        .expect("the cast must reach the policy through the registry")
+}
+
+/// CR 107.1b: a fixed zero-count draw resolves to no cards, so no `CardDrawn`
+/// fires and the engine never triggers — the payoff must be withheld even with a
+/// live engine and a full library. Registry-routed, so the production seam is
+/// what is asserted.
+#[test]
+fn registry_fixed_zero_count_draw_is_not_rewarded() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    let (oid, cid) = spell(
+        &mut st,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 0 },
+            target: TargetFilter::Controller,
+        },
+    );
+    let (delta, reason) = registry_cast_verdict(&st, oid, cid);
+    assert_eq!(reason.kind, "draw_payoff_na");
+    assert_eq!(delta, 0.0);
+}
+
+/// Discriminating control for the case above: identical shape, positive count.
+/// Without this pair the zero-count assertion is satisfiable by a policy that
+/// stopped rewarding casts altogether.
+#[test]
+fn registry_positive_count_draw_is_rewarded() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    let (oid, cid) = spell(
+        &mut st,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    let (delta, reason) = registry_cast_verdict(&st, oid, cid);
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// Builds a "draw X cards" spell and binds `X` on the source via `cost_x_paid`,
+/// the slot `QuantityRef::Variable { "X" }` reads (CR 601.2b).
+fn draw_x_spell(state: &mut GameState, x: Option<u32>) -> (ObjectId, CardId) {
+    let (oid, cid) = spell(
+        state,
+        Effect::Draw {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            target: TargetFilter::Controller,
+        },
+    );
+    state.objects.get_mut(&oid).unwrap().cost_x_paid = x;
+    (oid, cid)
+}
+
+/// CR 601.2b: a "draw X cards" candidate is scored BEFORE X is announced, so its
+/// count is not knowable at this seam and the policy stays neutral rather than
+/// crediting a draw it cannot confirm — the same conservative direction as the
+/// trigger-eligibility gate.
+///
+/// Asserted for both an unset and a set `cost_x_paid` because the engine's
+/// `resolve_quantity` reads X from the RESOLVING ability's `chosen_x`, which only
+/// `resolve_quantity_with_targets` supplies from a `ResolvedAbility` — a spell
+/// still being announced has none. `cost_x_paid` on the object is therefore not
+/// consulted here, and a stale value from an earlier activation must not be
+/// mistaken for this candidate's X. Both cases resolve to zero, so both are
+/// neutral; this pins that equivalence so a future X-binding change has to come
+/// with a deliberate decision about which value the policy trusts.
+#[test]
+fn registry_x_draw_is_conservatively_neutral_before_announcement() {
+    for cost_x_paid in [None, Some(2)] {
+        let mut st = state();
+        engine_on_battlefield(&mut st);
+        let (oid, cid) = draw_x_spell(&mut st, cost_x_paid);
+        let (delta, reason) = registry_cast_verdict(&st, oid, cid);
+        assert_eq!(
+            reason.kind, "draw_payoff_na",
+            "X is unbound at the candidate seam (cost_x_paid={cost_x_paid:?})"
+        );
+        assert_eq!(delta, 0.0);
+    }
 }
 
 // ─── bounded score (MAX_REWARDED_ENGINES) ────────────────────────────────────

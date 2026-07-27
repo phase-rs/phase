@@ -33,9 +33,15 @@
 //! and the axes stay independent.
 
 use engine::game::ability_utils::ability_definition_supported;
+use engine::game::quantity::resolve_quantity;
 use engine::game::DeckEntry;
-use engine::types::ability::{AbilityDefinition, Effect, TargetFilter, TriggerDefinition};
+use engine::types::ability::{
+    AbilityDefinition, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
+};
 use engine::types::card_type::CoreType;
+use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
+use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -85,7 +91,7 @@ pub fn detect(deck: &[DeckEntry]) -> DrawMattersFeature {
         // draw enabler for the archetype, so scan the full potential tree — plus
         // ETB "cantrip" triggers (Elvish Visionary), which the live policy also
         // credits via `CastFacts::immediate_etb_triggers`.
-        if is_draw_source_parts(&face.abilities, AbilityScope::Potential)
+        if is_draw_source_parts(&face.abilities, AbilityScope::Potential, &DrawQuantity::Any)
             || is_etb_draw_source(&face.triggers)
         {
             source_count = source_count.saturating_add(entry.count);
@@ -104,22 +110,71 @@ pub fn detect(deck: &[DeckEntry]) -> DrawMattersFeature {
     }
 }
 
+/// Whether a draw instruction's COUNT must be established positive.
+///
+/// CR 121.1 + CR 107.1b: "draw N cards" resolves its quantity at resolution
+/// (`effects::draw::resolve` → `resolve_quantity_with_targets(..).max(0)`), so a
+/// count of zero puts no card into hand and emits no `CardDrawn` — it fires no
+/// "whenever you draw" engine. Deck classification and live candidate scoring
+/// want different answers about that, so the requirement is a parameter of the
+/// one classifier rather than a second forked copy of it.
+pub(crate) enum DrawQuantity<'a> {
+    /// Deck-time: any draw instruction marks the card regardless of count. A
+    /// "draw X" or "draw cards equal to …" card is still a draw enabler for
+    /// archetype classification — its count is unknowable at deck-build time.
+    Any,
+    /// Live candidate: the count must resolve to at least one card *now*.
+    ///
+    /// Delegates to the engine's `resolve_quantity` authority rather than
+    /// re-deriving quantity semantics, so this agrees with the resolver by
+    /// construction. That also yields the correct conservative behavior for an
+    /// unbound `X`: `QuantityRef::Variable { "X" }` reads `cost_x_paid` off the
+    /// source and falls back to 0 when X has not been announced yet, so an
+    /// unbound dynamic draw stays neutral until it is known positive.
+    ResolvesPositive {
+        state: &'a GameState,
+        controller: PlayerId,
+        source: ObjectId,
+    },
+}
+
+impl DrawQuantity<'_> {
+    /// CR 121.1: does this draw deliver at least one card under this requirement?
+    fn is_satisfied_by(&self, count: &QuantityExpr) -> bool {
+        match self {
+            DrawQuantity::Any => true,
+            DrawQuantity::ResolvesPositive {
+                state,
+                controller,
+                source,
+            } => resolve_quantity(state, count, *controller, *source) >= 1,
+        }
+    }
+}
+
 /// CR 121.1: the abilities draw YOU one or more cards — a repeatable enabler for
 /// the payoff engine. Parts-based so it classifies both a deck-time
 /// `CardFace.abilities` slice and the action's runtime effect chain
-/// (`CastFacts::primary_effects` / the activated ability). The caller chooses the
-/// `scope`: `Potential` for deck-time (a modal draw mode still marks the card),
-/// `Unconditional` for a live candidate before its mode is selected (CR 700.2 —
-/// a modal "choose one — draw / …" must NOT be credited a draw until the draw
-/// mode is actually chosen).
+/// (`CastFacts::primary_effects` / the activated ability).
+///
+/// The caller chooses the `scope`: `Potential` for deck-time (a modal draw mode
+/// still marks the card), `Unconditional` for a live candidate before its mode is
+/// selected (CR 700.2 — a modal "choose one — draw / …" must NOT be credited a
+/// draw until the draw mode is actually chosen).
+///
+/// The caller also chooses the `quantity` requirement — see [`DrawQuantity`]. A
+/// live candidate must pass `ResolvesPositive`, or a "draw zero" instruction is
+/// scored as though it fired the engine.
 pub(crate) fn is_draw_source_parts<'a>(
     abilities: impl IntoIterator<Item = &'a AbilityDefinition>,
     scope: AbilityScope,
+    quantity: &DrawQuantity<'_>,
 ) -> bool {
     abilities.into_iter().any(|ability| {
-        collect_scoped_effects(ability, scope)
-            .iter()
-            .any(|effect| matches!(effect, Effect::Draw { target, .. } if draws_controller(target)))
+        collect_scoped_effects(ability, scope).iter().any(|effect| {
+            matches!(effect, Effect::Draw { target, count }
+                if draws_controller(target) && quantity.is_satisfied_by(count))
+        })
     })
 }
 
