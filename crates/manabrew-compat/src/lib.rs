@@ -28,7 +28,8 @@ use engine::types::game_state::{
 };
 use engine::types::interaction::{
     InteractionChoice, InteractionOpportunityResponse, InteractionPresentationSurface,
-    InteractionResponse, InteractionSubmission, ViewerInteraction,
+    InteractionResponse, InteractionResponseSpec, InteractionSubmission, SelectionConstraint,
+    ViewerInteraction,
 };
 use engine::types::mana::{ManaColor as EngineManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
@@ -1358,7 +1359,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 81] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 82] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1561,8 +1562,14 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 81] = [
     UnsupportedCapability {
         code: "local.interaction-schema-response-unmapped",
         area: "prompts",
-        reason: "The engine projects a decision either as a finite ExactChoices list or as a schema: a response spec plus candidates, covering sequences, grouped sequences, relations, mana groups, numbers, amount and damage assignments, deck partitions, text and shortcut replies. interaction_prompt() maps the finite class generically, because a materialized candidate list is exactly ChooseFromSelection's shape. The schema class has an unbounded response space that no single family expresses, so each spec needs its own family: Number -> ChooseNumber, Relations -> ChooseAttackers/ChooseBlockers, AssignDamage -> ChooseCombatDamageAssignment, Sequence -> Reorder or ChooseCards, DeckPartition -> ChooseCards. Those mappings are unwritten, so schema-valued decisions with no bespoke arm fail closed here rather than being flattened into a selection that would lose their bounds.",
-        suggested_protocol_extension: "None needed upstream for most specs — the families listed above already exist. GroupedSequence (per-group min/max) and ManaGroups are the two whose bounds no current family carries; resolve whether ChooseFromSelection should gain per-option group constraints before proposing new families.",
+        reason: "The engine projects a decision either as a finite ExactChoices list or as a schema: a response spec plus candidates. interaction_prompt() maps two of those generically — ExactChoices (a one-of list) and Select (a subset choice, whose count bounds ChooseFromSelection's min/max totals express exactly). The rest still fail closed here, because their response space is not a count over a candidate list and flattening it into one would advertise illegal answers as legal. Each needs its own family and none of those mappings are written yet: Number -> ChooseNumber, Relations -> ChooseAttackers/ChooseBlockers, AssignDamage -> ChooseCombatDamageAssignment, AssignAmounts -> ChooseCombatDamageAssignment's shape but for counters, Sequence -> Reorder (ordering is the payload, not membership), DeckPartition -> ChooseCards, Text/Shortcut/ShortcutReply -> no current family at all.",
+        suggested_protocol_extension: "None needed upstream for Number, Relations, AssignDamage, Sequence or DeckPartition — those families already exist and this is adapter work. GroupedSequence (per-group min/max), ManaGroups, and the Text/Shortcut pair are the ones whose payload no current family carries; resolve whether ChooseFromSelection should gain per-option group constraints before proposing new families.",
+    },
+    UnsupportedCapability {
+        code: "local.interaction-aggregate-bound-unmapped",
+        area: "prompts",
+        reason: "A Select schema whose SelectionConstraint is Aggregate rather than Count. The bound is a sum over a chosen attribute of the selected objects — 'keep permanents with total power 4 or less' — not a number of objects, so no min/max count is equivalent to it. ChooseFromSelection carries min_total/max_total as counts only, and rendering an aggregate bound as an unbounded count would advertise illegal selections as legal, which is worse than refusing. Distinct from local.interaction-schema-response-unmapped because the spec IS mapped: only this one constraint variant within it is not.",
+        suggested_protocol_extension: "Give ChooseFromSelection an optional aggregate bound over a named option weight — SelectionOption already carries `weight`, so the wire is one comparator and one amount away from expressing this without a new family.",
     },
     UnsupportedCapability {
         code: "local.target-slot-missing",
@@ -2385,8 +2392,39 @@ fn interaction_prompt(prepared: &PreparedManabrewSnapshot) -> Result<PromptInput
             },
         );
     };
-    let InteractionOpportunityResponse::ExactChoices { choices } = &opportunity.response else {
-        return unsupported_prompt(waiting_for, "local.interaction-schema-response-unmapped");
+    let (choices, min_total, max_total) = match &opportunity.response {
+        // A one-of list: the engine materialized each entry as a complete answer
+        // to the whole decision, so exactly one is chosen.
+        InteractionOpportunityResponse::ExactChoices { choices } => (choices, 1, 1),
+        // A subset choice over the same kind of candidate list, differing only
+        // in how many may be taken — which the constraint carries, so
+        // `ChooseFromSelection`'s min/max totals express it exactly.
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Select { constraint, .. },
+            candidates,
+        } => match constraint {
+            // `EngineValidatedCount` bounds the count identically. The extra
+            // legality the engine reserves to itself is rechecked on submit and
+            // is not expressible to a client either way, so advertising the
+            // count is the whole of what this family can honestly say.
+            SelectionConstraint::Count { min, max }
+            | SelectionConstraint::EngineValidatedCount { min, max } => {
+                (candidates, *min as usize, *max as usize)
+            }
+            // An aggregate bound — "keep permanents with total power 4 or less"
+            // — constrains a sum over a chosen attribute, not a count. No family
+            // carries it, and flattening it to an unbounded count would
+            // advertise illegal answers as legal.
+            SelectionConstraint::Aggregate { .. } => {
+                return unsupported_prompt(
+                    waiting_for,
+                    "local.interaction-aggregate-bound-unmapped",
+                )
+            }
+        },
+        InteractionOpportunityResponse::Schema { .. } => {
+            return unsupported_prompt(waiting_for, "local.interaction-schema-response-unmapped")
+        }
     };
     if choices.is_empty() {
         return unsupported_prompt(waiting_for, "local.prompt-unsupported");
@@ -2397,10 +2435,8 @@ fn interaction_prompt(prepared: &PreparedManabrewSnapshot) -> Result<PromptInput
             .iter()
             .map(|choice| selection_option(choice_label(choice)))
             .collect(),
-        // `ExactChoices` is a one-of list: the engine materialized each entry as
-        // a complete answer to the whole decision, so exactly one is chosen.
-        min_total: 1,
-        max_total: 1,
+        min_total,
+        max_total,
     }))
 }
 
@@ -2424,11 +2460,6 @@ fn interaction_selection_action(
     let illegal = |kind: &'static str| AdapterError::IllegalResponseForPrompt {
         response_kind: kind,
     };
-    let [index] = chosen_indices else {
-        return Err(illegal(
-            "selectionDecision.chosenIndices expects exactly one pick",
-        ));
-    };
     let filtered = filter_state_for_viewer(state, actor);
     let view = derive_viewer_interaction(state, &filtered, actor);
     // Mirrors `interaction_prompt`'s guard: the prompt this answers was only
@@ -2439,22 +2470,49 @@ fn interaction_selection_action(
             "selectionDecision without exactly one open interaction",
         ));
     };
-    let InteractionOpportunityResponse::ExactChoices { choices } = &opportunity.response else {
-        return Err(illegal(
-            "selectionDecision against a schema-valued interaction",
-        ));
+    // The response variant is not interchangeable with the spec: a `Select`
+    // schema submitted as `Choose` is rejected as malformed and vice versa, so
+    // this must mirror whichever shape `interaction_prompt` rendered.
+    let id_at = |index: &usize, list: &[InteractionChoice]| {
+        list.get(*index)
+            .map(|choice| choice.id.clone())
+            .ok_or_else(|| illegal("selectionDecision index outside the offered choices"))
     };
-    let choice = choices
-        .get(*index)
-        .ok_or_else(|| illegal("selectionDecision index outside the offered choices"))?;
+    let response = match &opportunity.response {
+        InteractionOpportunityResponse::ExactChoices { choices } => {
+            let [index] = chosen_indices else {
+                return Err(illegal(
+                    "selectionDecision over a one-of list expects exactly one pick",
+                ));
+            };
+            InteractionResponse::Choose {
+                choice_id: id_at(index, choices)?,
+            }
+        }
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Select { .. },
+            candidates,
+        } => InteractionResponse::Select {
+            // Count bounds are not rechecked here. The engine owns them and
+            // rejects a violating submission; duplicating the check would put a
+            // second, drifting authority on the same constraint.
+            choice_ids: chosen_indices
+                .iter()
+                .map(|index| id_at(index, candidates))
+                .collect::<Result<Vec<_>>>()?,
+        },
+        InteractionOpportunityResponse::Schema { .. } => {
+            return Err(illegal(
+                "selectionDecision against a schema this family cannot express",
+            ))
+        }
+    };
     resolve_interaction_response(
         state,
         actor,
         &InteractionSubmission {
             interaction_id: opportunity.interaction_id.clone(),
-            response: InteractionResponse::Choose {
-                choice_id: choice.id.clone(),
-            },
+            response,
         },
     )
     .map_err(|_| illegal("selectionDecision the engine refused to materialize"))
@@ -5763,6 +5821,65 @@ mod tests {
         assert_eq!(action, GameAction::ChooseTopOrBottom { top: true });
     }
 
+    /// The `Select` half of the generic path: a subset choice, not a one-of.
+    ///
+    /// `DiscardToHandSize` (CR 514.1) is the clearest case — discard exactly
+    /// `count` of the cards in hand — so it pins the two things that distinguish
+    /// this from the `ExactChoices` path: the count bounds reach the prompt as
+    /// `min_total`/`max_total` instead of the hardcoded 1/1, and the answer must
+    /// go back as `InteractionResponse::Select`, since the engine rejects a
+    /// `Choose` against a `Select` schema as malformed.
+    #[test]
+    fn a_select_schema_carries_its_count_bounds_and_answers_as_a_subset() {
+        let mut state = GameState::new_two_player(7);
+        let cards = ["Discard A", "Discard B", "Discard C"]
+            .into_iter()
+            .map(|name| {
+                create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(0),
+                    name.to_string(),
+                    Zone::Hand,
+                )
+            })
+            .collect::<Vec<_>>();
+        state.waiting_for = WaitingFor::DiscardToHandSize {
+            player: PlayerId(0),
+            count: 2,
+            cards: cards.clone(),
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("select-path".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("a Select schema is served by the projection");
+        let PromptInput::ChooseFromSelection(input) = prompt else {
+            panic!("a subset choice over candidates is ChooseFromSelection, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min_total, input.max_total),
+            (2, 2),
+            "the engine's count bounds must survive, not the one-of path's 1/1"
+        );
+        assert_eq!(input.options.len(), 3, "every hand card is a candidate");
+
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices: vec![0, 1],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("a two-card subset resolves back through the engine");
+        assert!(
+            matches!(action, GameAction::SelectCards { .. }),
+            "a discard subset answers with SelectCards, got {action:?}"
+        );
+    }
+
     /// Without a bound interaction authority the projection is empty, so the
     /// generic path cannot serve the prompt and the adapter must say so rather
     /// than emit an option-less selection. This is also the non-vacuity guard
@@ -7439,13 +7556,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 81);
+        assert_eq!(capabilities.len(), 82);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 81, "capability codes must be unique");
+        assert_eq!(codes.len(), 82, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(
