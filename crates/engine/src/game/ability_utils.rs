@@ -1311,6 +1311,42 @@ pub fn simple_legal_target_assignment_exists_for_ability(
     ))
 }
 
+/// CR 603.3d: could `execute` — a trigger's ability, resolving from `source` —
+/// either need no target at all, or find a legal target right now? A
+/// mandatory-target trigger with no legal choice is removed from the stack
+/// rather than producing its effect, so a payoff-eligibility preflight must not
+/// credit it.
+///
+/// Answers only from *confirmed* legality — never from an "unknown" shape. The
+/// cheap single-slot check is tried first as a guard; every shape it cannot
+/// decide (multi-slot, relative-controller, distribution, `PairWith`, …) falls
+/// through to [`has_legal_target_assignment_for_ability`], the same full
+/// legal-assignment authority the interactive target walk uses, so a
+/// two-mandatory-target trigger with no legal assignment is correctly rejected.
+/// A slot-building error leaves legality unproven and is likewise not credited.
+pub fn execute_targets_satisfiable(
+    state: &GameState,
+    source: &crate::game::game_object::GameObject,
+    execute: &AbilityDefinition,
+) -> bool {
+    // CR 113.1a: build the ability exactly as the live trigger pipeline does
+    // (`build_triggered_ability_from_context`), so a sub-ability chain's own
+    // target slots are preflighted too — not just the root effect's.
+    let resolved = build_resolved_from_def(execute, source.id, source.controller);
+    if target_slot_specs(state, &resolved).is_empty() {
+        return true; // the effect requires no target
+    }
+    // Cheap guard: `Some(false)` = a mandatory target with no legal choice;
+    // `Some(true)` = legal or optional; `None` = a shape this cheap check
+    // cannot decide, which the full authority below resolves exactly.
+    if let Some(decided) = simple_legal_target_assignment_exists_for_ability(state, &resolved, &[])
+    {
+        return decided;
+    }
+    build_target_slots(state, &resolved)
+        .is_ok_and(|slots| has_legal_target_assignment_for_ability(state, &resolved, &slots, &[]))
+}
+
 /// CR 115.1 + CR 701.9b: Resolve a `Random`-mode ability's target slots by
 /// uniformly choosing from each slot's legal-target set using the engine's
 /// seeded RNG (`state.rng`). The game (not the controller) makes the selection;

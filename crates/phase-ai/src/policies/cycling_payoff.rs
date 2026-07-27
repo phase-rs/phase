@@ -20,17 +20,19 @@
 //! other activation. Only a confirmed cycling activation pays for the
 //! battlefield engine scan (a structural trigger match over each permanent's
 //! live `trigger_definitions`), and only in a deck whose `activation` floor is
-//! already cleared. Target legality is deliberately NOT checked — that would
-//! mean a per-candidate `find_legal_targets` sweep, and it would wrongly drop
-//! no-target payoffs like Drannith Stinger ("deals damage to each opponent").
+//! already cleared. Each structurally matching engine is then confirmed LIVE by
+//! [`engine::game::triggers::hypothetical_trigger_fireable`] — the engine-owned
+//! authority for "could this trigger still fire AND resolve to an effect?",
+//! reusing the live pipeline's own constraint check plus a CR 603.3d target
+//! preflight (CR 603.2-603.4). The policy holds no eligibility rules of its own.
+//! A no-target payoff like Drannith Stinger ("deals damage to each opponent")
+//! still qualifies: it has no target slot to satisfy.
 
 use engine::types::ability::AbilityTag;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
-use engine::game::game_object::GameObject;
-use engine::types::ability::{TriggerConstraint, TriggerEntry};
-use engine::types::phase::Phase;
+use engine::game::triggers::hypothetical_trigger_fireable;
 
 use crate::features::cycling::{is_cycle_payoff_trigger, CYCLING_PAYOFF_FLOOR};
 use crate::features::DeckFeatures;
@@ -88,7 +90,7 @@ impl TacticalPolicy for CyclingPayoffPolicy {
                     obj.controller == ctx.ai_player
                         && obj.trigger_definitions.iter_unchecked().any(|entry| {
                             is_cycle_payoff_trigger(&entry.definition)
-                                && trigger_still_fireable(ctx.state, obj, entry)
+                                && hypothetical_trigger_fireable(ctx.state, obj, entry)
                         })
                 })
             })
@@ -105,44 +107,5 @@ impl TacticalPolicy for CyclingPayoffPolicy {
             ctx.config.policy_penalties.cycling_payoff_bonus * rewarded,
             PolicyReason::new("cycling_payoff_engine_active").with_fact("engines", engines as i64),
         )
-    }
-}
-
-/// Whether `obj`'s cycling-payoff trigger `entry` could still fire this turn.
-/// Exhaustive over `TriggerConstraint` (no wildcard): the once/timing limits are
-/// evaluated against authoritative state (fired-trigger ledgers, `active_player`,
-/// phase); event/count-dependent constraints the policy can't confirm at decision
-/// time are treated as NOT fireable so the payoff is never over-credited.
-fn trigger_still_fireable(
-    state: &engine::types::game_state::GameState,
-    obj: &GameObject,
-    entry: &TriggerEntry,
-) -> bool {
-    let Some(constraint) = &entry.definition.constraint else {
-        return true; // no constraint — always fireable
-    };
-    match constraint {
-        // CR 603.4 / CR 603.2: already-consumed "once" limits.
-        TriggerConstraint::OncePerTurn => !state
-            .triggers_fired_this_turn
-            .contains(&obj.trigger_definition_ref(entry)),
-        TriggerConstraint::OncePerGame => !state
-            .triggers_fired_this_game
-            .contains(&obj.trigger_definition_ref(entry)),
-        // Turn/phase timing — evaluable from turn state alone.
-        TriggerConstraint::OnlyDuringYourTurn => state.active_player == obj.controller,
-        TriggerConstraint::OnlyDuringOpponentsTurn => state.active_player != obj.controller,
-        TriggerConstraint::OnlyDuringYourMainPhase => {
-            state.active_player == obj.controller
-                && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
-        }
-        // Event- or count-dependent: not confirmable at decision time, so never
-        // over-credit the payoff.
-        TriggerConstraint::MaxTimesPerTurn { .. }
-        | TriggerConstraint::NthSpellThisTurn { .. }
-        | TriggerConstraint::NthDrawThisTurn { .. }
-        | TriggerConstraint::OncePerOpponentPerTurn
-        | TriggerConstraint::AtClassLevel { .. }
-        | TriggerConstraint::EventSourceControlledBy { .. } => false,
     }
 }

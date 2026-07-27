@@ -1450,7 +1450,7 @@ fn collect_matching_triggers_inner(
                 definition_ref.as_ref(),
                 Some(&source_context),
                 controller,
-                event,
+                Some(event),
             ) {
                 continue;
             }
@@ -2629,7 +2629,7 @@ fn collect_latched_batched_zone_triggers(
                     Some(&latched.definition_ref),
                     Some(source_context),
                     source_context.lki.controller,
-                    event,
+                    Some(event),
                 )
                 || !latched
                     .definition
@@ -8006,13 +8006,17 @@ fn delayed_zone_change_filter_matches(
 ///
 /// `event` is the triggering event — needed by `NthSpellThisTurn` to identify
 /// the caster and count their per-player spell total (not the global count).
+/// `event` is `Some` for a real trigger evaluation and `None` for a hypothetical
+/// preflight (e.g. an AI payoff-eligibility query). In the hypothetical case the
+/// event-dependent constraints — which can only be judged against a concrete
+/// triggering event — conservatively report NOT satisfied rather than guess.
 fn check_trigger_constraint_with_ref(
     state: &GameState,
     trig_def: &TriggerDefinition,
     definition_ref: Option<&TriggerDefinitionRef>,
     source_context: Option<&TriggerSourceContext>,
     controller: PlayerId,
-    event: &GameEvent,
+    event: Option<&GameEvent>,
 ) -> bool {
     use crate::types::ability::TriggerConstraint;
 
@@ -8038,7 +8042,7 @@ fn check_trigger_constraint_with_ref(
             // CR 603.2: The trigger event only matches the first life-loss event
             // during that opponent's own turn.
             let opponent_id = match event {
-                GameEvent::LifeChanged { player_id, .. } => *player_id,
+                Some(GameEvent::LifeChanged { player_id, .. }) => *player_id,
                 _ => return false,
             };
             if opponent_id == controller || state.active_player != opponent_id {
@@ -8064,10 +8068,10 @@ fn check_trigger_constraint_with_ref(
             controller: ctrl_ref,
         } => {
             let event_source = match event {
-                GameEvent::Discarded {
+                Some(GameEvent::Discarded {
                     source_id: Some(source_id),
                     ..
-                } => *source_id,
+                }) => *source_id,
                 _ => return false,
             };
             let Some(event_source_controller) = state
@@ -8091,7 +8095,7 @@ fn check_trigger_constraint_with_ref(
         // When `filter` contains `TypeFilter::Non(Creature)`, use the noncreature counter.
         TriggerConstraint::NthSpellThisTurn { n, filter } => {
             let caster = match event {
-                GameEvent::SpellCast { controller: c, .. } => *c,
+                Some(GameEvent::SpellCast { controller: c, .. }) => *c,
                 _ => return false,
             };
             let spells = state.spells_cast_this_turn_by_player.get(&caster);
@@ -8127,7 +8131,7 @@ fn check_trigger_constraint_with_ref(
         // rather than the final per-turn count after a multi-card draw batch.
         TriggerConstraint::NthDrawThisTurn { n } => {
             let nth_in_turn = match event {
-                GameEvent::CardDrawn { nth_in_turn, .. } => *nth_in_turn,
+                Some(GameEvent::CardDrawn { nth_in_turn, .. }) => *nth_in_turn,
                 _ => return false,
             };
             nth_in_turn == *n
@@ -8145,6 +8149,47 @@ fn check_trigger_constraint_with_ref(
                 .unwrap_or(0)
                 < *max
         }),
+    }
+}
+
+/// CR 603.2-603.4 + CR 603.3d: could `entry`'s trigger on `source` still fire
+/// AND resolve to an effect if its triggering event happened right now? The
+/// single authority an AI policy uses to ask "is this on-battlefield payoff
+/// live?" — reusing the same constraint check the live trigger pipeline runs.
+///
+/// Conservative by construction: an intervening-if `condition` (CR 603.4, not
+/// evaluated in this preflight) and any event-dependent constraint whose
+/// triggering event is unknown at this decision point are treated as NOT
+/// established, so a payoff is never credited value it cannot actually produce.
+pub fn hypothetical_trigger_fireable(
+    state: &GameState,
+    source: &GameObject,
+    entry: &TriggerEntry,
+) -> bool {
+    let def = &entry.definition;
+    // CR 603.4 intervening-if: not preflighted here — treat a conditional
+    // trigger as not-live rather than assume it fires.
+    if def.condition.is_some() {
+        return false;
+    }
+    let definition_ref = source.trigger_definition_ref(entry);
+    // CR 603.2-603.4: the trigger's own constraint, in hypothetical (no-event)
+    // mode — the shared authority the live pipeline also uses.
+    if !check_trigger_constraint_with_ref(
+        state,
+        def,
+        Some(&definition_ref),
+        None,
+        source.controller,
+        None,
+    ) {
+        return false;
+    }
+    // CR 603.3d: a mandatory-target execute with no legal target is removed from
+    // the stack rather than producing its effect.
+    match def.execute.as_deref() {
+        Some(execute) => super::ability_utils::execute_targets_satisfiable(state, source, execute),
+        None => true,
     }
 }
 
@@ -9844,7 +9889,7 @@ fn check_trigger_constraint(
             .map(|source| trigger_source_context_for_latch(state, source))
             .as_ref(),
         controller,
-        event,
+        Some(event),
     )
 }
 
