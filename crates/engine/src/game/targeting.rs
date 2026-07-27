@@ -197,7 +197,11 @@ fn find_legal_targets_with_context(
                 if player.is_phased_out() {
                     continue;
                 }
-                // CR 800.4a: Eliminated players are not legal targets.
+                // CR 104.5 + CR 102.1: a player who has lost the game has LEFT the
+                // game and is therefore no longer "one of the people in the game" —
+                // so they are not a player and cannot be a legal target
+                // (CR 115.1 / CR 115.2). (CR 800.4a is a different rule: it governs
+                // the OBJECTS owned by a departing player.)
                 if player.is_eliminated {
                     continue;
                 }
@@ -237,10 +241,27 @@ fn find_legal_targets_with_context(
                     Some(ControllerRef::TriggeringPlayer) => false,
                     // CR 303.4b: Enchanted-player scope is not enumerated as a target candidate. Fail closed.
                     Some(ControllerRef::EnchantedPlayer) => false,
-                    // CR 102.1: the active player is a single, well-defined
-                    // player and is a valid candidate for an active-player-scoped
-                    // target filter (read live).
-                    Some(ControllerRef::ActivePlayer) => player.id == state.active_player,
+                    // CR 102.1 + CR 102.2 / CR 102.3: the active player is the
+                    // player whose turn it is, read LIVE from
+                    // `state.active_player` (never latched at announce —
+                    // CR 608.2b re-checks this on resolution). `relation` narrows
+                    // candidacy relative to the ability's controller through the
+                    // canonical team-aware authority (CR 102.3), so
+                    // `relation: Opponent` yields NO candidate on the controller's
+                    // own turn and the activation is illegal to announce
+                    // (CR 601.2c, imported into activation by CR 602.2b; CR 602.2).
+                    // The candidate must BE the active player, and the narrowing
+                    // itself routes through `active_player_satisfies_relation` —
+                    // the single authority for every
+                    // `ControllerRef::ActivePlayer { relation }` read.
+                    Some(ControllerRef::ActivePlayer { relation }) => {
+                        player.id == state.active_player
+                            && super::players::active_player_satisfies_relation(
+                                state,
+                                Some(source_controller),
+                                *relation,
+                            )
+                    }
                     None => true,
                 };
                 if include {
@@ -2112,10 +2133,11 @@ fn add_players(
         if player.is_phased_out() {
             continue;
         }
-        // CR 800.4a: When a player leaves the game in a multiplayer game, all
-        // objects they own/control leave the game and the player ceases to be
-        // a valid target. Eliminated players cannot be targeted by any spell
-        // or ability (CR 608.2b illegal-target fizzle applies on resolution).
+        // CR 104.5 + CR 102.1: a player who has lost the game has LEFT the game
+        // and is therefore no longer "one of the people in the game" — so they
+        // are not a player and cannot be a legal target (CR 115.1 / CR 115.2).
+        // (CR 800.4a is a different rule: it governs the OBJECTS owned by a
+        // departing player.)
         if player.is_eliminated {
             continue;
         }
@@ -3434,7 +3456,9 @@ mod tests {
 
     // ---- find_legal_targets tests ----
 
-    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter};
+    use crate::types::ability::{
+        ControllerRef, FilterProp, PlayerRelation, TargetFilter, TypeFilter,
+    };
 
     fn setup_with_typed_creatures() -> (GameState, ObjectId, ObjectId, ObjectId) {
         let mut state = GameState::new_two_player(42);
@@ -3662,6 +3686,278 @@ mod tests {
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert_eq!(targets.len(), 1);
         assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
+    }
+
+    // ---- CR 102.1 + CR 102.2 / CR 102.3: `ControllerRef::ActivePlayer`'s
+    //      `relation` legality-scope axis (The Beamtown Bullies class) ----
+
+    fn active_player_filter(relation: PlayerRelation) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::ActivePlayer { relation }),
+        )
+    }
+
+    fn opponent_player_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    }
+
+    /// CR 601.2c + CR 602.2: "target opponent whose turn it is" has NO legal
+    /// target on its controller's own turn, which is what makes the activation
+    /// illegal to announce.
+    ///
+    /// Reach-guard: the very same state, queried with the unnarrowed
+    /// `ControllerRef::Opponent` filter, DOES enumerate the opponent — so the
+    /// emptiness below is the `relation` narrowing, not a degenerate fixture.
+    #[test]
+    fn find_legal_targets_active_player_opponent_empty_on_controllers_own_turn() {
+        let (mut state, _c0, _c1, _land) = setup_with_typed_creatures();
+        state.active_player = PlayerId(0);
+
+        assert_eq!(
+            find_legal_targets(
+                &state,
+                &active_player_filter(PlayerRelation::Opponent),
+                PlayerId(0),
+                ObjectId(99)
+            ),
+            vec![],
+            "no opponent is the active player on the controller's own turn"
+        );
+        assert_eq!(
+            find_legal_targets(&state, &opponent_player_filter(), PlayerId(0), ObjectId(99)),
+            vec![TargetRef::Player(PlayerId(1))],
+            "reach-guard: the unnarrowed opponent filter still enumerates the opponent"
+        );
+    }
+
+    /// CR 102.1: with three players, "the opponent whose turn it is" is EXACTLY
+    /// the active opponent — not every opponent (which a naive "any opponent"
+    /// implementation would return) and never the controller.
+    #[test]
+    fn find_legal_targets_active_player_opponent_is_exactly_the_turn_player() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let filter = active_player_filter(PlayerRelation::Opponent);
+
+        state.active_player = PlayerId(2);
+        assert_eq!(
+            find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99)),
+            vec![TargetRef::Player(PlayerId(2))],
+            "only the active opponent is legal"
+        );
+
+        // CR 608.2b: the reference is read LIVE, never latched — moving the turn
+        // to the OTHER opponent moves the legal target with it.
+        state.active_player = PlayerId(1);
+        assert_eq!(
+            find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99)),
+            vec![TargetRef::Player(PlayerId(1))],
+            "the legal target follows the live active player"
+        );
+
+        // Reach-guard: the unnarrowed opponent filter sees BOTH opponents, so
+        // the singleton answers above are the narrowing at work.
+        assert_eq!(
+            find_legal_targets(&state, &opponent_player_filter(), PlayerId(0), ObjectId(99)),
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2))
+            ],
+            "reach-guard: two opponents exist in this fixture"
+        );
+    }
+
+    /// CR 102.1: `PlayerRelation::All` is the pre-parameterization meaning —
+    /// "the active player", whoever that is, INCLUDING the controller on their
+    /// own turn. Pins the shape every pre-existing construction site relies on.
+    #[test]
+    fn find_legal_targets_active_player_all_matches_controller_on_own_turn() {
+        let (mut state, _c0, _c1, _land) = setup_with_typed_creatures();
+        let filter = active_player_filter(PlayerRelation::All);
+
+        state.active_player = PlayerId(0);
+        assert_eq!(
+            find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99)),
+            vec![TargetRef::Player(PlayerId(0))],
+            "`All` imposes no narrowing: the controller is legal on their own turn"
+        );
+
+        state.active_player = PlayerId(1);
+        assert_eq!(
+            find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99)),
+            vec![TargetRef::Player(PlayerId(1))],
+            "`All` follows the live active player across the turn boundary"
+        );
+    }
+
+    /// CR 102.1: `PlayerRelation::Controller` admits the active player only when
+    /// that player IS the ability's controller.
+    #[test]
+    fn find_legal_targets_active_player_controller_relation() {
+        let (mut state, _c0, _c1, _land) = setup_with_typed_creatures();
+        let filter = active_player_filter(PlayerRelation::Controller);
+
+        state.active_player = PlayerId(0);
+        assert_eq!(
+            find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99)),
+            vec![TargetRef::Player(PlayerId(0))]
+        );
+
+        state.active_player = PlayerId(1);
+        assert_eq!(
+            find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99)),
+            vec![],
+            "the controller is not the active player, so nothing is legal"
+        );
+    }
+
+    /// CR 102.3: in a team game a player's opponents are only players NOT on
+    /// their team, so an active TEAMMATE is not "the opponent whose turn it is".
+    /// This is the only test that distinguishes `players::matches_relation` from
+    /// a bare `player.id != source_controller` inequality.
+    #[test]
+    fn find_legal_targets_active_player_opponent_excludes_2hg_teammate() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let filter = active_player_filter(PlayerRelation::Opponent);
+
+        // Seats: P0+P1 one team, P2+P3 the other.
+        state.active_player = PlayerId(1);
+        assert_eq!(
+            find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99)),
+            vec![],
+            "an active TEAMMATE is not an opponent (CR 102.3)"
+        );
+
+        // Reach-guard: the same fixture with an opposing-team active player DOES
+        // yield a legal target, so the emptiness above is the team rule.
+        state.active_player = PlayerId(2);
+        assert_eq!(
+            find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99)),
+            vec![TargetRef::Player(PlayerId(2))],
+            "an active opposing-team player IS an opponent"
+        );
+    }
+
+    /// CR 702.11c + CR 702.18a + CR 104.5 (plus the engine's player-phasing
+    /// exclusion, which mirrors CR 702.26b for permanents): the narrowed
+    /// active-player filter runs inside the SAME candidate loop as every other
+    /// typed player filter, so the phasing / hexproof / shroud / left-the-game
+    /// guards compose with it. Each sub-case is paired with a reach-guard: the
+    /// identical fixture WITHOUT the guard yields the active opponent.
+    #[test]
+    fn find_legal_targets_active_player_opponent_composes_with_player_guards() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::player::PlayerStatus;
+        use crate::types::statics::StaticMode;
+
+        let filter = active_player_filter(PlayerRelation::Opponent);
+        let legal = vec![TargetRef::Player(PlayerId(1))];
+
+        // Reach-guard baseline: an otherwise-legal active opponent.
+        let mut base = GameState::new_two_player(42);
+        base.active_player = PlayerId(1);
+        assert_eq!(
+            find_legal_targets(&base, &filter, PlayerId(0), ObjectId(99)),
+            legal,
+            "reach-guard: the unguarded active opponent is legal"
+        );
+
+        // (a) Player-phasing exclusion (mirrors CR 702.26b for permanents — the
+        // CR has no player-phasing rule; 702.26a-p are all permanent-scoped).
+        let mut phased = base.clone();
+        phased.players[1].status = PlayerStatus::PhasedOut;
+        assert_eq!(
+            find_legal_targets(&phased, &filter, PlayerId(0), ObjectId(99)),
+            vec![],
+            "phased-out active opponent must not be a legal target"
+        );
+
+        // (b) CR 702.11c: player hexproof blocks opponents' sources.
+        let mut hexproof = base.clone();
+        let grantor = create_object(
+            &mut hexproof,
+            CardId(1),
+            PlayerId(1),
+            "Hexproof Player Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        hexproof
+            .objects
+            .get_mut(&grantor)
+            .unwrap()
+            .static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut hexproof);
+        assert_eq!(
+            find_legal_targets(&hexproof, &filter, PlayerId(0), ObjectId(99)),
+            vec![],
+            "hexproof active opponent must not be a legal target of an opponent's ability"
+        );
+
+        // (c) CR 702.18a: player shroud blocks every source.
+        let mut shroud = base.clone();
+        let grantor = create_object(
+            &mut shroud,
+            CardId(2),
+            PlayerId(1),
+            "Shroud Player Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        shroud.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Shroud).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut shroud);
+        assert_eq!(
+            find_legal_targets(&shroud, &filter, PlayerId(0), ObjectId(99)),
+            vec![],
+            "shrouded active opponent must not be a legal target"
+        );
+
+        // (d) CR 104.5 + CR 102.1: a player who lost has LEFT the game and is no
+        // longer one of the people in the game (CR 115.1 / CR 115.2).
+        let mut eliminated = base.clone();
+        eliminated.players[1].is_eliminated = true;
+        eliminated.eliminated_players.push(PlayerId(1));
+        assert_eq!(
+            find_legal_targets(&eliminated, &filter, PlayerId(0), ObjectId(99)),
+            vec![],
+            "a player who has left the game must not be a legal target"
+        );
+    }
+
+    /// Issue #2004 non-regression: a property-bearing empty-`type_filters`
+    /// typed filter ("target token you control") must still fall through to
+    /// OBJECT enumeration rather than collapsing to the controller player. The
+    /// `relation` parameterization touches the controller `match` inside that
+    /// same branch, so pin the guard that keeps the branch from firing.
+    #[test]
+    fn find_legal_targets_token_property_filter_still_enumerates_objects() {
+        let (mut state, c0, _c1, _land) = setup_with_typed_creatures();
+        state.objects.get_mut(&c0).unwrap().is_token = true;
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::default()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Token]),
+        );
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
+        assert_eq!(
+            targets,
+            vec![TargetRef::Object(c0)],
+            "property-bearing typed filters enumerate tokens, not the controller player"
+        );
     }
 
     #[test]

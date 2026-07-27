@@ -186,6 +186,34 @@ pub fn matches_relation(
     }
 }
 
+/// CR 102.1 + CR 102.2 / CR 102.3: Whether the LIVE active player — "the player
+/// whose turn it is" — satisfies `relation` relative to the reading ability's
+/// controller. Single authority every `ControllerRef::ActivePlayer { relation }`
+/// read routes through, so the legality-scope narrowing cannot be honored at one
+/// site and silently dropped at another.
+///
+/// `PlayerRelation::All` imposes no narrowing at all (`matches_relation` is
+/// unconditionally true for it), so it deliberately does NOT require a
+/// controller — that is the pre-parameterization meaning of `ActivePlayer` and
+/// every existing construction site takes it. A genuinely narrowing relation
+/// with no controller in scope fails CLOSED: a relation cannot be evaluated
+/// without the player it relates to.
+///
+/// Read LIVE off `state.active_player`; never latched at announce
+/// (CR 608.2b re-checks target legality on resolution).
+pub fn active_player_satisfies_relation(
+    state: &GameState,
+    controller: Option<PlayerId>,
+    relation: PlayerRelation,
+) -> bool {
+    match relation {
+        PlayerRelation::All => true,
+        PlayerRelation::Controller | PlayerRelation::Opponent => {
+            controller.is_some_and(|c| matches_relation(state, state.active_player, c, relation))
+        }
+    }
+}
+
 /// CR 608.2c + CR 109.5: Whether `player` performed `action` during the
 /// current top-level resolution.
 pub fn performed_action_this_way(
@@ -256,7 +284,9 @@ pub fn apnap_order_from(
             // CR 303.4b: Enchanted-player scope is not enumerable. Fail closed.
             | ControllerRef::EnchantedPlayer
             // CR 102.1: the active player is exactly this default anchor.
-            | ControllerRef::ActivePlayer,
+            // `relation` is a legality-scope axis on TARGET candidacy, not on
+            // the APNAP start anchor, so it is intentionally not read here.
+            | ControllerRef::ActivePlayer { .. },
         ) => state.active_player,
     };
 

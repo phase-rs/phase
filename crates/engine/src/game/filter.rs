@@ -959,8 +959,20 @@ pub(crate) fn controller_ref_player(
             .get(&source_id)
             .and_then(|source| source.attached_to)
             .and_then(|host| host.as_player()),
-        // CR 102.1: the player whose turn it is — read live.
-        ControllerRef::ActivePlayer => Some(state.active_player),
+        // CR 102.1 + CR 102.2 / CR 102.3: the player whose turn it is — read
+        // LIVE; never latched at announce (CR 608.2b re-checks on resolution).
+        // This returns a SINGLE `PlayerId`, so a relation cannot narrow a result
+        // set — it can only admit or reject the singleton. Fail CLOSED: yield
+        // the active player only when they satisfy `relation` relative to the
+        // ability's controller.
+        ControllerRef::ActivePlayer { relation } => {
+            crate::game::players::active_player_satisfies_relation(
+                state,
+                source_controller,
+                *relation,
+            )
+            .then_some(state.active_player)
+        }
     }
 }
 /// Whether `filter` references the resolution-local `last_zone_changed_ids`
@@ -1209,8 +1221,17 @@ fn stack_entry_controller_matches(
         Some(ControllerRef::EnchantedPlayer) => {
             source_enchanted_player(&source_ctx).is_some_and(|pid| pid == entry_controller)
         }
-        // CR 102.1: the active player, read live.
-        Some(ControllerRef::ActivePlayer) => state.active_player == entry_controller,
+        // CR 102.1 + CR 102.2 / CR 102.3: the active player, read LIVE; never
+        // latched at announce (CR 608.2b re-checks). `relation` narrows
+        // candidacy relative to the ability's controller.
+        Some(ControllerRef::ActivePlayer { relation }) => {
+            state.active_player == entry_controller
+                && crate::game::players::active_player_satisfies_relation(
+                    state,
+                    ctx.source_controller,
+                    *relation,
+                )
+        }
     }
 }
 
@@ -2063,10 +2084,19 @@ fn filter_inner_for_object(
                             _ => return false,
                         }
                     }
-                    // CR 102.1: "the active player controls" — match the object's
-                    // controller against the player whose turn it is (read live).
-                    ControllerRef::ActivePlayer => {
-                        if state.active_player != obj_ctrl {
+                    // CR 102.1 + CR 102.2 / CR 102.3: "the active player controls"
+                    // — match the object's controller against the player whose
+                    // turn it is, read LIVE; never latched at announce
+                    // (CR 608.2b re-checks). `relation` narrows candidacy
+                    // relative to the ability's controller.
+                    ControllerRef::ActivePlayer { relation } => {
+                        if state.active_player != obj_ctrl
+                            || !super::players::active_player_satisfies_relation(
+                                state,
+                                source_controller,
+                                *relation,
+                            )
+                        {
                             return false;
                         }
                     }
@@ -2950,8 +2980,9 @@ pub fn spell_record_matches_filter(
                     ControllerRef::EnchantedPlayer => return false,
                     // CR 102.1: an active-player scope has no meaning for a
                     // spell-history record (a cast snapshot carries no live
-                    // turn context). Fail closed.
-                    ControllerRef::ActivePlayer => return false,
+                    // turn context). Fail closed regardless of `relation` —
+                    // destructured explicitly so a future field forces a re-audit.
+                    ControllerRef::ActivePlayer { relation: _ } => return false,
                 }
             }
 
@@ -4435,8 +4466,13 @@ fn matches_filter_prop(
                     (Some(ControllerRef::TriggeringPlayer), Some(pid)) => perm.controller == pid,
                     // CR 303.4b: Resolve enchanted player via source's attached_to.
                     (Some(ControllerRef::EnchantedPlayer), Some(pid)) => perm.controller == pid,
-                    // CR 102.1: active-player-scoped name match (resolved live).
-                    (Some(ControllerRef::ActivePlayer), Some(pid)) => perm.controller == pid,
+                    // CR 102.1 + CR 102.2 / CR 102.3: active-player-scoped name
+                    // match (resolved live). `relation` is already applied by
+                    // `source_controller_ref_player` -> `controller_ref_player`,
+                    // which fails CLOSED (yields `None`, caught by the
+                    // `(Some(_), None) => false` arm below) when the active
+                    // player does not satisfy it.
+                    (Some(ControllerRef::ActivePlayer { .. }), Some(pid)) => perm.controller == pid,
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
@@ -4494,8 +4530,16 @@ fn matches_filter_prop(
             ControllerRef::EnchantedPlayer => {
                 source_enchanted_player(source).is_some_and(|pid| pid == obj.owner)
             }
-            // CR 102.1: Ownership relative to the active player (read live).
-            ControllerRef::ActivePlayer => state.active_player == obj.owner,
+            // CR 102.1 + CR 102.2 / CR 102.3: Ownership relative to the active
+            // player, read LIVE; never latched at announce (CR 608.2b re-checks).
+            ControllerRef::ActivePlayer { relation } => {
+                state.active_player == obj.owner
+                    && super::players::active_player_satisfies_relation(
+                        state,
+                        source.controller,
+                        *relation,
+                    )
+            }
         },
         // CR 303.4 + CR 301.5f: `EnchantedBy` is source-relative when the
         // source is an Aura ("enchanted creature gets +1/+1"). When the source
@@ -5243,8 +5287,16 @@ fn zone_change_record_matches_property(
             ControllerRef::EnchantedPlayer => {
                 source_enchanted_player(source).is_some_and(|pid| pid == record.owner)
             }
-            // CR 102.1: Ownership relative to the active player (read live).
-            ControllerRef::ActivePlayer => state.active_player == record.owner,
+            // CR 102.1 + CR 102.2 / CR 102.3: Ownership relative to the active
+            // player, read LIVE; never latched at announce (CR 608.2b re-checks).
+            ControllerRef::ActivePlayer { relation } => {
+                state.active_player == record.owner
+                    && super::players::active_player_satisfies_relation(
+                        state,
+                        source.controller,
+                        *relation,
+                    )
+            }
         },
         // CR 205.3e + CR 205.3m + CR 702.73a: Source's chosen creature type
         // applied to the snapshot subtypes, including changeling snapshots.
@@ -5603,8 +5655,16 @@ fn attachment_controller_matches(
         Some(ControllerRef::EnchantedPlayer) => {
             source_enchanted_player(source).is_some_and(|pid| pid == attachment_controller)
         }
-        // CR 102.1: attachment controller relative to the active player (live).
-        Some(ControllerRef::ActivePlayer) => state.active_player == attachment_controller,
+        // CR 102.1 + CR 102.2 / CR 102.3: attachment controller relative to the
+        // active player, read LIVE; never latched at announce (CR 608.2b re-checks).
+        Some(ControllerRef::ActivePlayer { relation }) => {
+            state.active_player == attachment_controller
+                && super::players::active_player_satisfies_relation(
+                    state,
+                    source.controller,
+                    *relation,
+                )
+        }
     }
 }
 
@@ -6202,6 +6262,11 @@ pub fn player_matches_target_filter(
         player_id,
         source_controller,
         &|controller, player| controller != player,
+        // CR 102.1: "the player whose turn it is" cannot be resolved without
+        // `state.active_player`. This state-free entry point fails CLOSED —
+        // callers that need active-player scope must use
+        // `player_matches_target_filter_in_state`.
+        &|_, _| false,
     )
 }
 
@@ -6209,6 +6274,11 @@ pub fn player_matches_target_filter(
 /// opponent semantics from the game state.
 /// CR 102.2 / CR 102.3 / CR 115.9c: Opponent-scoped player targets exclude
 /// teammates in team multiplayer.
+///
+/// CR 102.1 + CR 608.2b: also the only entry point that can honor
+/// `ControllerRef::ActivePlayer { relation }`, read LIVE off
+/// `state.active_player` so a target that was legal at announce stops being
+/// legal once the turn passes.
 pub fn player_matches_target_filter_in_state(
     state: &GameState,
     filter: &TargetFilter,
@@ -6220,14 +6290,32 @@ pub fn player_matches_target_filter_in_state(
         player_id,
         source_controller,
         &|controller, player| crate::game::players::is_opponent(state, controller, player),
+        &|candidate, relation| {
+            // CR 102.1: the candidate must BE the live active player; CR 102.3:
+            // `relation` narrows relative to the source's controller through the
+            // single team-aware authority every `ActivePlayer` read routes
+            // through.
+            candidate == state.active_player
+                && crate::game::players::active_player_satisfies_relation(
+                    state,
+                    source_controller,
+                    relation,
+                )
+        },
     )
 }
 
+/// Shared player-vs-filter matcher, parameterized by the two game-state reads it
+/// needs so both the state-free and the in-state entry points can share one
+/// authority: `is_opponent` (CR 102.2 / CR 102.3 team-aware opponency) and
+/// `active_player_ok` (CR 102.1 "the player whose turn it is", narrowed by
+/// `PlayerRelation`). The state-free entry point passes fail-closed stubs.
 fn player_matches_target_filter_with(
     filter: &TargetFilter,
     player_id: PlayerId,
     source_controller: Option<PlayerId>,
     is_opponent: &impl Fn(PlayerId, PlayerId) -> bool,
+    active_player_ok: &impl Fn(PlayerId, crate::types::ability::PlayerRelation) -> bool,
 ) -> bool {
     match filter {
         TargetFilter::Any | TargetFilter::Player => true,
@@ -6261,21 +6349,45 @@ fn player_matches_target_filter_with(
             Some(ControllerRef::TriggeringPlayer) => false,
             // CR 303.4b: Resolve enchanted player via source's attached_to.
             Some(ControllerRef::EnchantedPlayer) => false,
-            // CR 102.1: the active player requires `state.active_player`, which
-            // is not available in this stateless matcher. Fail closed (mirrors
-            // the `DefendingPlayer` / `TriggeringPlayer` arms above); the
-            // active-player resolution path runs through `controller_ref_player`
-            // where `state` is in scope.
-            Some(ControllerRef::ActivePlayer) => false,
+            // CR 102.1 + CR 102.2 / CR 102.3: the active player is the player
+            // whose turn it is, and `relation` narrows candidacy relative to the
+            // source's controller. Delegated to the `active_player_ok` closure
+            // so the LIVE `state.active_player` read stays in the in-state entry
+            // point (the state-free entry point fails closed here, mirroring the
+            // `DefendingPlayer` / `TriggeringPlayer` arms above).
+            //
+            // CR 608.2b: this arm IS reached — every player-target
+            // revalidation / scope check routes here, including
+            // `targeting::target_ref_matches_resolved_filter` (resolution),
+            // `targeting::stack_spell_entry_matches_filter` (CR 115.9b/c
+            // "that targets [only] X") and `ability_utils`' Aura host
+            // restriction. Failing closed made an announced "target opponent
+            // whose turn it is" fail its own re-check while that opponent was
+            // still perfectly legal.
+            Some(ControllerRef::ActivePlayer { relation }) => {
+                active_player_ok(player_id, *relation)
+            }
             None => true,
         },
         // Typed filters with type_filters don't match players
         TargetFilter::Typed(_) => false,
         TargetFilter::Or { filters } => filters.iter().any(|f| {
-            player_matches_target_filter_with(f, player_id, source_controller, is_opponent)
+            player_matches_target_filter_with(
+                f,
+                player_id,
+                source_controller,
+                is_opponent,
+                active_player_ok,
+            )
         }),
         TargetFilter::And { filters } => filters.iter().all(|f| {
-            player_matches_target_filter_with(f, player_id, source_controller, is_opponent)
+            player_matches_target_filter_with(
+                f,
+                player_id,
+                source_controller,
+                is_opponent,
+                active_player_ok,
+            )
         }),
         // CR 102.1 + CR 103.1: seating-neighbor resolution requires
         // `state.seat_order`, which is not available in this stateless matcher.

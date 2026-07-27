@@ -4135,7 +4135,10 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes {
         },
         ControllerRef::EnchantedPlayer => Axes::NONE,
         // CR 102.1: a live read of `state.active_player` — no event/sibling axis.
-        ControllerRef::ActivePlayer => Axes::NONE,
+        // `relation` (CR 102.2 / CR 102.3) adds only a controller-identity read,
+        // which is likewise off every scanned axis. Destructured explicitly so a
+        // future field forces a re-audit rather than eliding into `{ .. }`.
+        ControllerRef::ActivePlayer { relation: _ } => Axes::NONE,
     }
 }
 

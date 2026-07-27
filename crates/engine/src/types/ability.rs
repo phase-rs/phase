@@ -3581,7 +3581,12 @@ where
 }
 
 /// Controller reference for filter matching.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Serialize` stays DERIVED: the wire shape written out is the canonical
+/// externally-tagged form and nothing here changes it. Only `Deserialize` is
+/// hand-written, to keep reading the legacy bare `"ActivePlayer"` tag — see the
+/// impl below.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ControllerRef {
     You,
     Opponent,
@@ -3600,6 +3605,11 @@ pub enum ControllerRef {
     // targets. A THIRD legality-scoped Target* variant MUST NOT be added as a
     // sibling — at 3 it crosses the /add-engine-variant Stage-2 threshold: refactor
     // to `TargetPlayer { constraint: PlayerRelation }` instead.
+    // The same legality-scope axis is already applied below on
+    // `ActivePlayer { relation: PlayerRelation }` — a legality-scoped narrowing of
+    // an existing runtime read is expressed as a `PlayerRelation` parameter on the
+    // variant, never as a new sibling. Apply that precedent here when a second
+    // legality scope for `TargetPlayer` is needed.
     /// CR 109.4 + CR 102.2 / CR 102.3: filter controller is the single OPPONENT
     /// chosen as a target of the enclosing ability. Runtime read is identical to
     /// `TargetPlayer` (first `TargetRef::Player` in `ability.targets`); the sole
@@ -3655,14 +3665,113 @@ pub enum ControllerRef {
     /// Curse of Clinging Webs, Curse of the Restless Dead) where the trigger
     /// watches objects controlled by the enchanted player.
     EnchantedPlayer,
-    /// CR 102.1: Filter controller is the active player — the player whose turn
-    /// it is. Exactly one player at any time (unlike `Opponent`, which matches
-    /// every opponent in multiplayer). Resolved live from `state.active_player`
-    /// via `controller_ref_player`. Powers "the active player controls" subjects
-    /// and the card-assembly-bound punisher target on cards that coerce the turn
-    /// player (Siren's Call, Maddening Imp), cast/activated only during an
-    /// opponent's turn.
-    ActivePlayer,
+    /// CR 102.1 + CR 102.2 / CR 102.3: The ACTIVE player — "the player whose turn
+    /// it is" — narrowed by `relation` relative to the ability's controller.
+    /// `relation` is the legality-scope axis this enum's LEGALITY-SCOPE PAIR note
+    /// (see `TargetPlayer` / `TargetOpponent` above) designates: it changes WHICH
+    /// players are legal candidates, never how the reference resolves at runtime.
+    /// - `All` -> "the active player" (the pre-parameterization meaning; every
+    ///   existing construction site takes this value)
+    /// - `Opponent` -> "an opponent whose turn it is" (The Beamtown Bullies) —
+    ///   necessarily EMPTY on the controller's own turn, which is what makes the
+    ///   target illegal to announce (CR 601.2c imported into activation by
+    ///   CR 602.2b; CR 602.2 makes the activation illegal when a step cannot be
+    ///   complied with)
+    /// - `Controller` -> reserved; no card yet.
+    ///
+    /// Exactly one player is active at any time (unlike `Opponent`, which matches
+    /// every opponent in multiplayer). Powers "the active player controls"
+    /// subjects and the card-assembly-bound punisher target on cards that coerce
+    /// the turn player (Siren's Call, Maddening Imp), cast/activated only during
+    /// an opponent's turn.
+    ///
+    /// Read LIVE off `state.active_player` at every evaluation, never latched at
+    /// announce (CR 608.2b re-checks legality on resolution).
+    ActivePlayer {
+        relation: PlayerRelation,
+    },
+}
+
+/// The legacy externally-tagged wire form of `ControllerRef::ActivePlayer`, from
+/// when it was a UNIT variant (before `relation` parameterized its legality
+/// scope). Persisted data written by that build encodes it as this bare string.
+const LEGACY_ACTIVE_PLAYER_TAG: &str = "ActivePlayer";
+
+/// CR 102.1: Back-compatible `Deserialize` for [`ControllerRef`]. Accepts BOTH
+/// the canonical externally-tagged form (`{"ActivePlayer":{"relation":{"type":
+/// "All"}}}`) and the LEGACY bare `"ActivePlayer"` string that every build before
+/// `ActivePlayer` gained its `relation` field wrote. The legacy tag decodes to
+/// `ActivePlayer { relation: PlayerRelation::All }`, which is exactly the
+/// pre-parameterization meaning: `players::matches_relation` is unconditionally
+/// true for `All`, so an old value reloads with identical semantics.
+///
+/// This matters beyond the repo. Regenerating in-repo fixtures cannot reach data
+/// persisted OUTSIDE it — saved game states, reconnect snapshots, and external
+/// `card-data.json` consumers — all of which still carry the bare tag and would
+/// otherwise fail to deserialize outright. Mirrors the `QuantityExpr` legacy
+/// bare-integer deserializer and the `ChoiceType` legacy unit-variant
+/// deserializer in this module, the two prior migrations of the same shape.
+///
+/// `Serialize` remains derived and emits ONLY the new form; nothing written out
+/// changes.
+impl<'de> Deserialize<'de> for ControllerRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+
+        // Legacy: the bare unit-variant tag, which carries no `relation`.
+        if value.as_str() == Some(LEGACY_ACTIVE_PLAYER_TAG) {
+            return Ok(ControllerRef::ActivePlayer {
+                relation: PlayerRelation::All,
+            });
+        }
+
+        // Canonical form — delegate to a derived mirror carrying EVERY variant
+        // of `ControllerRef` in declaration order with identical names, fields,
+        // and field types, so the derived externally-tagged representation is
+        // byte-identical to the one this enum used to derive for itself.
+        //
+        // ADDING A VARIANT TO `ControllerRef` REQUIRES ADDING IT HERE. Two test
+        // tripwires enforce that: `controller_ref_variant_name` is an exhaustive
+        // wildcard-free match that fails to compile when a variant is added, and
+        // `controller_ref_deserialize_round_trips_every_variant` round-trips one
+        // sample per variant through this impl.
+        #[derive(Deserialize)]
+        enum Mirror {
+            You,
+            Opponent,
+            ScopedPlayer,
+            TargetPlayer,
+            TargetOpponent,
+            ParentTargetController,
+            ParentTargetOwner,
+            DefendingPlayer,
+            ChosenPlayer { index: u8 },
+            SourceChosenPlayer,
+            TriggeringPlayer,
+            EnchantedPlayer,
+            ActivePlayer { relation: PlayerRelation },
+        }
+
+        let mirror: Mirror = serde_json::from_value(value).map_err(de::Error::custom)?;
+        Ok(match mirror {
+            Mirror::You => ControllerRef::You,
+            Mirror::Opponent => ControllerRef::Opponent,
+            Mirror::ScopedPlayer => ControllerRef::ScopedPlayer,
+            Mirror::TargetPlayer => ControllerRef::TargetPlayer,
+            Mirror::TargetOpponent => ControllerRef::TargetOpponent,
+            Mirror::ParentTargetController => ControllerRef::ParentTargetController,
+            Mirror::ParentTargetOwner => ControllerRef::ParentTargetOwner,
+            Mirror::DefendingPlayer => ControllerRef::DefendingPlayer,
+            Mirror::ChosenPlayer { index } => ControllerRef::ChosenPlayer { index },
+            Mirror::SourceChosenPlayer => ControllerRef::SourceChosenPlayer,
+            Mirror::TriggeringPlayer => ControllerRef::TriggeringPlayer,
+            Mirror::EnchantedPlayer => ControllerRef::EnchantedPlayer,
+            Mirror::ActivePlayer { relation } => ControllerRef::ActivePlayer { relation },
+        })
+    }
 }
 
 /// CR 301 / CR 303: Kinds of attachments to permanents.
@@ -24000,6 +24109,153 @@ mod tests {
         let json = serde_json::to_string(&ChoiceType::Opponent { restriction: None }).unwrap();
 
         assert_eq!(json, "\"Opponent\"");
+    }
+
+    /// Compile-time tripwire for the hand-written `ControllerRef` deserializer:
+    /// an exhaustive, WILDCARD-FREE match over every variant. Adding a variant to
+    /// `ControllerRef` breaks this function, which is the signal to extend the
+    /// `Mirror` enum inside `ControllerRef::deserialize` AND
+    /// `controller_ref_serde_samples` below.
+    fn controller_ref_variant_name(value: &ControllerRef) -> &'static str {
+        match value {
+            ControllerRef::You => "You",
+            ControllerRef::Opponent => "Opponent",
+            ControllerRef::ScopedPlayer => "ScopedPlayer",
+            ControllerRef::TargetPlayer => "TargetPlayer",
+            ControllerRef::TargetOpponent => "TargetOpponent",
+            ControllerRef::ParentTargetController => "ParentTargetController",
+            ControllerRef::ParentTargetOwner => "ParentTargetOwner",
+            ControllerRef::DefendingPlayer => "DefendingPlayer",
+            ControllerRef::ChosenPlayer { .. } => "ChosenPlayer",
+            ControllerRef::SourceChosenPlayer => "SourceChosenPlayer",
+            ControllerRef::TriggeringPlayer => "TriggeringPlayer",
+            ControllerRef::EnchantedPlayer => "EnchantedPlayer",
+            ControllerRef::ActivePlayer { .. } => "ActivePlayer",
+        }
+    }
+
+    /// Exactly one sample per `ControllerRef` variant, in declaration order.
+    fn controller_ref_serde_samples() -> Vec<ControllerRef> {
+        vec![
+            ControllerRef::You,
+            ControllerRef::Opponent,
+            ControllerRef::ScopedPlayer,
+            ControllerRef::TargetPlayer,
+            ControllerRef::TargetOpponent,
+            ControllerRef::ParentTargetController,
+            ControllerRef::ParentTargetOwner,
+            ControllerRef::DefendingPlayer,
+            ControllerRef::ChosenPlayer { index: 1 },
+            ControllerRef::SourceChosenPlayer,
+            ControllerRef::TriggeringPlayer,
+            ControllerRef::EnchantedPlayer,
+            ControllerRef::ActivePlayer {
+                relation: PlayerRelation::Opponent,
+            },
+        ]
+    }
+
+    /// The hand-written `Deserialize` must not drop or rename ANY variant: every
+    /// one round-trips through the derived `Serialize` and back. Paired with the
+    /// wildcard-free `controller_ref_variant_name` match (compile-time coverage)
+    /// and the explicit variant count (sample coverage), a newly added variant
+    /// cannot silently escape the mirror enum.
+    #[test]
+    fn controller_ref_deserialize_round_trips_every_variant() {
+        let samples = controller_ref_serde_samples();
+        let names: std::collections::BTreeSet<&str> =
+            samples.iter().map(controller_ref_variant_name).collect();
+        assert_eq!(
+            names.len(),
+            samples.len(),
+            "each ControllerRef variant needs exactly one sample; duplicates found: {names:?}"
+        );
+        assert_eq!(
+            samples.len(),
+            13,
+            "ControllerRef has 13 variants — a change here means the Mirror enum in \
+             ControllerRef::deserialize must be updated too"
+        );
+
+        for original in samples {
+            let json = serde_json::to_string(&original).expect("Serialize is derived");
+            let back: ControllerRef =
+                serde_json::from_str(&json).unwrap_or_else(|e| panic!("{json} must decode: {e}"));
+            assert_eq!(
+                back, original,
+                "{json}: the hand-written Deserialize must be the exact dual of the \
+                 derived Serialize"
+            );
+        }
+    }
+
+    /// CR 102.1: the LEGACY bare `"ActivePlayer"` tag — the wire shape written by
+    /// every build before `ActivePlayer` gained `relation` — must still decode,
+    /// and must decode to the pre-parameterization meaning
+    /// (`PlayerRelation::All`, for which `matches_relation` is unconditionally
+    /// true). Data persisted outside this repo (saved game states, external
+    /// card-data.json consumers) cannot be regenerated by fixture refresh.
+    #[test]
+    fn controller_ref_active_player_decodes_legacy_bare_tag_as_all() {
+        let legacy: ControllerRef = serde_json::from_str("\"ActivePlayer\"")
+            .expect("the legacy unit-variant wire shape must still decode");
+
+        assert_eq!(
+            legacy,
+            ControllerRef::ActivePlayer {
+                relation: PlayerRelation::All
+            }
+        );
+
+        // The legacy tag decodes; it is never WRITTEN back. Serialization is
+        // derived and emits only the new struct-variant form.
+        assert_eq!(
+            serde_json::to_string(&legacy).unwrap(),
+            r#"{"ActivePlayer":{"relation":{"type":"All"}}}"#
+        );
+    }
+
+    /// The new wire shape decodes to itself for every `PlayerRelation`, so the
+    /// legacy fallback cannot swallow a value that carries an explicit relation.
+    #[test]
+    fn controller_ref_active_player_new_shape_round_trips() {
+        for relation in [
+            PlayerRelation::All,
+            PlayerRelation::Opponent,
+            PlayerRelation::Controller,
+        ] {
+            let original = ControllerRef::ActivePlayer { relation };
+            let json = serde_json::to_string(&original).unwrap();
+            let back: ControllerRef = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, original, "{json} must round-trip");
+        }
+
+        // Explicit new-shape literal, so a change to the emitted representation
+        // is caught here and not only through the round trip.
+        let decoded: ControllerRef =
+            serde_json::from_str(r#"{"ActivePlayer":{"relation":{"type":"Opponent"}}}"#).unwrap();
+        assert_eq!(
+            decoded,
+            ControllerRef::ActivePlayer {
+                relation: PlayerRelation::Opponent
+            }
+        );
+    }
+
+    /// A unit variant and a struct-carrying variant decode from their literal
+    /// legacy-and-current wire forms, proving the hand-written impl did not
+    /// disturb the variants it merely passes through.
+    #[test]
+    fn controller_ref_unit_and_struct_variants_decode_from_literal_json() {
+        let unit: ControllerRef = serde_json::from_str("\"TargetOpponent\"").unwrap();
+        assert_eq!(unit, ControllerRef::TargetOpponent);
+
+        let structured: ControllerRef =
+            serde_json::from_str(r#"{"ChosenPlayer":{"index":2}}"#).unwrap();
+        assert_eq!(structured, ControllerRef::ChosenPlayer { index: 2 });
+
+        // An unknown tag must still be an error, not a silent fallback.
+        assert!(serde_json::from_str::<ControllerRef>("\"NotAControllerRef\"").is_err());
     }
 
     #[test]

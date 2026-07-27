@@ -19308,7 +19308,113 @@ fn lower_subject_predicate_ast(
                     }
                     let mut sub_ability =
                         AbilityDefinition::new(AbilityKind::Spell, clause.effect.clone());
-                    sub_ability.sub_ability = clause.sub_ability;
+                    // CR 110.2a + CR 109.5: when an effect instructs a player to
+                    // put an object onto the battlefield, that object enters under
+                    // THAT PLAYER's control. Here the instructed player is the
+                    // clause SUBJECT — the player target this arm just lifted into
+                    // the `TargetOnly` head — and the printed "under their control"
+                    // restates it ("Target opponent whose turn it is puts target
+                    // nonlegendary creature card from your graveyard onto the
+                    // battlefield under their control" — The Beamtown Bullies).
+                    //
+                    // `Effect::ChangeZone::enters_under` has no carrier for "the
+                    // player bound to this ability's target slot", so the binding
+                    // is dropped and the engine's `enters_under: None` default
+                    // takes over: the permanent enters under the ABILITY
+                    // controller's control. That contradicts CR 110.2a and is the
+                    // exact OPPOSITE of what the card says.
+                    //
+                    // That is a silently-inverted implementation, not a benign
+                    // under-parse, so record it as a strict-failure gap node
+                    // chained onto the move it qualifies. The `ChangeZone` itself
+                    // is preserved (the move is real; only the controller binding
+                    // is missing), and the gap node keeps coverage honest —
+                    // `supported = false`, `gap_count >= 1` — instead of exporting
+                    // the card as fully handled.
+                    //
+                    // A coverage-visible `Effect::Unimplemented` that SURVIVES into
+                    // the runtime chain is an established shape here, verified twice:
+                    //   * it resolves as a logged NO-OP returning `Ok(())` (the
+                    //     `Effect::Unimplemented` arm of `game::effects::resolve`), so
+                    //     an interior gap node does not abort descent — the haste
+                    //     grant / `Goad` / delayed exile chained below it still
+                    //     resolve; and
+                    //   * the shipped export already carries 1,043 ability nodes whose
+                    //     effect is `Unimplemented` AND whose `sub_ability` is
+                    //     non-`None`, across 835 of the 35,516 cards in
+                    //     `data/card-data.json` (563 of them inside activated
+                    //     `abilities`).
+                    // Not to be confused with `ast::placeholder_parsed_clause`
+                    // (`die_exile_rider_placeholder` et al): that is the INVERSE
+                    // construct — builder-internal, consumed by
+                    // `ClauseDisposition::Absorb`, deliberately `description: None`
+                    // so it never surfaces in coverage, and it appears 0 times in the
+                    // export. It is not precedent for this node.
+                    //
+                    // REMOVAL ORDER IS LOAD-BEARING. Delete this node in the SAME
+                    // change that gives `enters_under` a target-slot carrier and
+                    // unblocks activation — never afterwards. Inserting it makes the
+                    // `ChangeZone`'s immediate `sub_link` a `ContinuationStep`
+                    // (`AbilityDefinition::new`'s default) where the printed chain
+                    // would otherwise hand the next instruction a `SequentialSibling`
+                    // hop. No runtime reader is reachable from this `ChangeZone`
+                    // parent today (the ability cannot even be announced), so there
+                    // is no live defect — but a change that unblocks activation while
+                    // leaving this node in place would make the haste grant / `Goad` /
+                    // delayed exile resolve one hop deeper than parsed.
+                    //
+                    // Deliberately narrow: only the third-person-plural subject
+                    // binding. The owner-scoped forms ("under its owner's control",
+                    // "under their owner's control") are a separate gap and are
+                    // untouched — the scan re-tries `tag()` at each word START, so
+                    // only a LEADING word boundary is guaranteed (there is no
+                    // trailing boundary check, so "under their controller…" would
+                    // also match; the corpus currently has zero occurrences of the
+                    // phrase followed by a letter). The owner forms are excluded by
+                    // the tag itself failing at "owner's", not by a trailing boundary.
+                    const THEIR_CONTROL_BINDING: &str = "under their control";
+                    // The gap fragment is the UNBOUND TAIL only — the controller
+                    // binding itself. The move it rides on parsed correctly and
+                    // exports `supported: true`, so handing coverage the whole
+                    // predicate would render already-parsed text as unsupported.
+                    let their_control_binding_fragment = matches!(
+                        &clause.effect,
+                        Effect::ChangeZone {
+                            destination: Zone::Battlefield,
+                            enters_under: None,
+                            ..
+                        } | Effect::ChangeZoneAll {
+                            destination: Zone::Battlefield,
+                            enters_under: None,
+                            ..
+                        }
+                    )
+                    .then(|| {
+                        nom_primitives::scan_last_at_word_boundaries_with_offset(
+                            pred_lower.as_str(),
+                            |i| tag::<_, _, OracleError<'_>>(THEIR_CONTROL_BINDING).parse(i),
+                        )
+                    })
+                    .flatten()
+                    .map(|(offset, _, _)| {
+                        // Original-case span at the lowercase offset. A non-ASCII
+                        // case fold that shifted byte offsets falls back to the whole
+                        // predicate: a wider fragment is acceptable, silently dropping
+                        // the honesty gate is not.
+                        text.get(offset..offset + THEIR_CONTROL_BINDING.len())
+                            .unwrap_or(text.as_str())
+                    });
+                    sub_ability.sub_ability = if let Some(fragment) = their_control_binding_fragment
+                    {
+                        let mut gap = AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::unimplemented("enters_under_their_control", fragment),
+                        );
+                        gap.sub_ability = clause.sub_ability;
+                        Some(Box::new(gap))
+                    } else {
+                        clause.sub_ability
+                    };
                     // CR 115.1d: an "up to N target" count on the moved-object
                     // clause (Memory's Journey — "shuffles up to three target
                     // cards from their graveyard …") belongs to the inner
@@ -31072,6 +31178,16 @@ fn try_parse_put_zone_change_parts(
             // CR 110.2a: "under your control" overrides the entering object's controller.
             let enters_under = scan_contains_phrase(after_put_tp.lower, "under your control")
                 .then_some(ControllerRef::You);
+            // CR 110.2a + CR 109.5: "under **their** control" is a third-person
+            // controller binding whose antecedent is the player the effect
+            // INSTRUCTS to put the object onto the battlefield — the clause
+            // subject ("Target opponent … puts … under their control" — The
+            // Beamtown Bullies). That subject was already consumed by the
+            // subject/predicate split before this predicate-only site runs, so
+            // the binding is handled one layer up in
+            // `lower_subject_predicate_ast`, where the subject's player target is
+            // in scope; see the `enters_under_their_control` gap node there.
+            //
             // CR 122.1 + CR 614.1c: Detect a trailing "with [N] [type] counter(s)
             // on it" clause and stamp it onto `enter_with_counters`. This covers
             // The Darkness Crystal's "with two additional +1/+1 counters on it"

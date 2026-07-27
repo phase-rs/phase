@@ -108,8 +108,21 @@ fn resolve_sacrifice_scope(
         )
         .map(|pid| vec![pid])
         .unwrap_or_default(),
-        // CR 102.1: the active player, read live.
-        Some(ControllerRef::ActivePlayer) => vec![state.active_player],
+        // CR 102.1 + CR 102.2 / CR 102.3: the active player, read LIVE (never
+        // latched — CR 608.2b), narrowed by `relation` relative to the ability's
+        // controller. Fails CLOSED to an empty sacrifice scope when the active
+        // player does not satisfy the relation.
+        Some(ControllerRef::ActivePlayer { relation }) => {
+            if crate::game::players::active_player_satisfies_relation(
+                state,
+                Some(ability.controller),
+                relation,
+            ) {
+                vec![state.active_player]
+            } else {
+                Vec::new()
+            }
+        }
     }
 }
 

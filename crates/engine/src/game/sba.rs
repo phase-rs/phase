@@ -559,7 +559,7 @@ fn static_affects_player(
             Some(ControllerRef::EnchantedPlayer) => false,
             // CR 102.1: this matcher has no `GameState` to read
             // `active_player` from. Fail closed (mirrors the siblings above).
-            Some(ControllerRef::ActivePlayer) => false,
+            Some(ControllerRef::ActivePlayer { .. }) => false,
             None => true,
         },
         Some(TargetFilter::Player) => true,

@@ -15,7 +15,7 @@ use super::error::OracleResult;
 use super::primitives::{parse_article, parse_pt_modifier};
 use super::quantity::{parse_quantity_expr_number, parse_quantity_ref};
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr,
+    Comparator, ControllerRef, FilterProp, PlayerRelation, PtStat, PtValueScope, QuantityExpr,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -137,7 +137,11 @@ pub fn parse_zone_controller(input: &str) -> OracleResult<'_, ControllerRef> {
         // CR 102.1: "the active player controls" — the turn player. Shares no
         // prefix with the arms above, so dispatch order is not load-bearing.
         value(
-            ControllerRef::ActivePlayer,
+            // CR 102.1: unnarrowed "the active player" — no relative clause, so
+            // every player is a legal referent (`PlayerRelation::All`).
+            ControllerRef::ActivePlayer {
+                relation: PlayerRelation::All,
+            },
             tag("the active player controls"),
         ),
     ))

@@ -16,8 +16,8 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::ParsedAbilities;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    ActivationRestriction, ControllerRef, Effect, FilterProp, ParsedCondition, TargetFilter,
-    TypeFilter, TypedFilter,
+    ActivationRestriction, ControllerRef, Effect, FilterProp, ParsedCondition, PlayerRelation,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::game_state::WaitingFor;
 use engine::types::keywords::Keyword;
@@ -111,7 +111,12 @@ fn test1_active_player_coerce_binds_controller() {
     let mut ctrls = Vec::new();
     typed_controllers(&coerce, &mut ctrls);
     // Revert-failing: without Step 3 the controller parses to `You`, not `ActivePlayer`.
-    assert_eq!(ctrls, vec![Some(ControllerRef::ActivePlayer)]);
+    assert_eq!(
+        ctrls,
+        vec![Some(ControllerRef::ActivePlayer {
+            relation: PlayerRelation::All
+        })]
+    );
     // Reach-guard: the coerce clause produced a real effect, no Unimplemented.
     let has_unimpl_coerce = p.abilities.iter().any(
         |a| matches!(a.effect.as_ref(), Effect::Unimplemented { name, .. } if name == "creatures"),
@@ -161,8 +166,11 @@ fn test2_active_player_resolves_live() {
     runner.state_mut().active_player = PlayerId(1);
     let state = runner.state();
 
-    let active_filter =
-        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::ActivePlayer));
+    let active_filter = TargetFilter::Typed(TypedFilter::creature().controller(
+        ControllerRef::ActivePlayer {
+            relation: PlayerRelation::All,
+        },
+    ));
     let ctx = FilterContext::from_source_with_controller(ObjectId(999), PlayerId(0));
     // Revert-failing: without the ActivePlayer resolution arm this is a compile
     // error; with a wrong arm P1's creature would not match.
@@ -212,7 +220,12 @@ fn test5_frame_local_rewrite() {
     let mut ctrls = Vec::new();
     typed_controllers(&target, &mut ctrls);
     // Revert-failing: without Step 5 the DestroyAll controller stays `You`.
-    assert_eq!(ctrls, vec![Some(ControllerRef::ActivePlayer)]);
+    assert_eq!(
+        ctrls,
+        vec![Some(ControllerRef::ActivePlayer {
+            relation: PlayerRelation::All
+        })]
+    );
 
     // Sibling: a standalone punisher with NO coerce clause is untouched.
     let standalone = parse(
@@ -633,7 +646,9 @@ fn test9_exemption_fires() {
             .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
                 "Wall".into(),
             ))))
-            .controller(ControllerRef::ActivePlayer)
+            .controller(ControllerRef::ActivePlayer {
+                relation: PlayerRelation::All,
+            })
             .properties(vec![
                 FilterProp::Not {
                     prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),

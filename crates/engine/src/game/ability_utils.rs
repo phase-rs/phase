@@ -3543,9 +3543,19 @@ pub(crate) fn collect_player_targets(
                         .and_then(|host| host.as_player())
                         == Some(p.id)
                 }
-                // CR 102.1 + CR 109.4: the active player, resolvable directly
-                // (unlike the fail-closed DefendingPlayer arm above).
-                Some(ControllerRef::ActivePlayer) => p.id == state.active_player,
+                // CR 102.1 + CR 102.2 / CR 102.3 + CR 109.4: the active player,
+                // resolvable directly (unlike the fail-closed DefendingPlayer arm
+                // above). Read LIVE; never latched at announce (CR 608.2b
+                // re-checks). `relation` narrows candidacy relative to the
+                // ability's controller through the team-aware authority.
+                Some(ControllerRef::ActivePlayer { relation }) => {
+                    p.id == state.active_player
+                        && crate::game::players::active_player_satisfies_relation(
+                            state,
+                            Some(ability.controller),
+                            *relation,
+                        )
+                }
                 None => true,
             })
             .map(|p| p.id)
@@ -7040,10 +7050,11 @@ mod tests {
         CastManaObjectScope, CastManaSpentMetric, Comparator, ContinuousModification,
         ControllerRef, CountScope, CounterTransferMode, DamageChannel, DamageKindFilter, Duration,
         Effect, FilterProp, GameRestriction, LibraryPosition, ModalChoice,
-        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope, ProhibitedActivity,
-        PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry,
-        RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
-        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
+        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope, PlayerRelation,
+        ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality,
+        SharedQualityRelation, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
@@ -7457,8 +7468,11 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         );
-        let active_filter =
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::ActivePlayer));
+        let active_filter = TargetFilter::Typed(TypedFilter::default().controller(
+            ControllerRef::ActivePlayer {
+                relation: PlayerRelation::All,
+            },
+        ));
         assert_eq!(
             collect_player_targets(&state, &ability, &active_filter),
             vec![PlayerId(2)]
@@ -9876,7 +9890,9 @@ mod tests {
             Effect::TargetOnly {
                 target: TargetFilter::Typed(
                     TypedFilter::creature()
-                        .controller(ControllerRef::ActivePlayer)
+                        .controller(ControllerRef::ActivePlayer {
+                            relation: PlayerRelation::All,
+                        })
                         .properties(vec![FilterProp::ControlledContinuouslySinceTurnBegan]),
                 ),
             },

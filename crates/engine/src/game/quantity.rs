@@ -3929,8 +3929,18 @@ fn resolve_ref(
                             source_enchanted_player_for_context(state, &ctx)
                                 .is_some_and(|pid| pid == snap.controller)
                         }
-                        // CR 102.1: attachment controlled by the active player.
-                        Some(ControllerRef::ActivePlayer) => snap.controller == state.active_player,
+                        // CR 102.1 + CR 102.2 / CR 102.3: attachment controlled
+                        // by the active player, read LIVE; never latched
+                        // (CR 608.2b). `relation` narrows candidacy relative to
+                        // the ability's controller.
+                        Some(ControllerRef::ActivePlayer { relation }) => {
+                            snap.controller == state.active_player
+                                && crate::game::players::active_player_satisfies_relation(
+                                    state,
+                                    Some(controller),
+                                    *relation,
+                                )
+                        }
                     })
                     .count(),
             )
@@ -3995,8 +4005,17 @@ fn damage_source_controller_matches(
         ControllerRef::EnchantedPlayer => {
             source_enchanted_player_for_context(state, &ctx).is_some_and(|player| actual == player)
         }
-        // CR 102.1: damage source controlled by the active player (read live).
-        ControllerRef::ActivePlayer => actual == state.active_player,
+        // CR 102.1 + CR 102.2 / CR 102.3: damage source controlled by the active
+        // player, read LIVE; never latched (CR 608.2b). `relation` narrows
+        // candidacy relative to the ability's controller.
+        ControllerRef::ActivePlayer { relation } => {
+            actual == state.active_player
+                && crate::game::players::active_player_satisfies_relation(
+                    state,
+                    Some(controller),
+                    *relation,
+                )
+        }
     }
 }
 

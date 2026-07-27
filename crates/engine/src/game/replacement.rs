@@ -5415,7 +5415,7 @@ fn replacement_active_player_matches(
         Some(ControllerRef::ChosenPlayer { .. }) => false,
         Some(ControllerRef::TriggeringPlayer) => false,
         Some(ControllerRef::EnchantedPlayer) => false,
-        Some(ControllerRef::ActivePlayer) => false,
+        Some(ControllerRef::ActivePlayer { .. }) => false,
         None => true,
     }
 }
@@ -5553,7 +5553,7 @@ fn evaluate_replacement_condition(
                 // CR 102.1: the `active_player_req` gate expects a
                 // controller-relative role (You/Opponent); `ActivePlayer` is not
                 // one, and the parser does not emit it here. Fail closed.
-                Some(ControllerRef::ActivePlayer) => false,
+                Some(ControllerRef::ActivePlayer { .. }) => false,
                 None => true,
             };
             if !turn_ok {
@@ -5603,7 +5603,7 @@ fn evaluate_replacement_condition(
                 // CR 102.1: the `active_player_req` gate expects a
                 // controller-relative role (You/Opponent); `ActivePlayer` is not
                 // one, and the parser does not emit it here. Fail closed.
-                Some(ControllerRef::ActivePlayer) => false,
+                Some(ControllerRef::ActivePlayer { .. }) => false,
                 None => true,
             };
             if !turn_ok {
@@ -5784,7 +5784,7 @@ fn evaluate_replacement_condition(
                 | ControllerRef::EnchantedPlayer
                 // CR 102.1: no replacement condition scopes its event source to the
                 // active player here. Fail closed (mirrors the siblings above).
-                | ControllerRef::ActivePlayer => false,
+                | ControllerRef::ActivePlayer { .. } => false,
             }
         }
         ReplacementCondition::EffectCausedDiscard => matches!(
@@ -6008,7 +6008,7 @@ fn apply_state_level_gates(
                 | crate::types::ability::ControllerRef::ChosenPlayer { .. }
                 | crate::types::ability::ControllerRef::TriggeringPlayer
                 | crate::types::ability::ControllerRef::EnchantedPlayer
-                | crate::types::ability::ControllerRef::ActivePlayer => false,
+                | crate::types::ability::ControllerRef::ActivePlayer { .. } => false,
             };
             if !matches {
                 return false;
@@ -6422,7 +6422,7 @@ fn object_replacement_candidate_applies(
                 | crate::types::ability::ControllerRef::EnchantedPlayer
                 // CR 102.1: token-owner scope is not scoped to the active player
                 // here; fail closed (mirrors the siblings above).
-                | crate::types::ability::ControllerRef::ActivePlayer => false,
+                | crate::types::ability::ControllerRef::ActivePlayer { .. } => false,
             };
             if !matches {
                 return false;

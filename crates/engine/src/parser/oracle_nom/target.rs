@@ -5,8 +5,8 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::character::complete::space1;
-use nom::combinator::{map, not, opt, value};
+use nom::character::complete::{one_of, space1};
+use nom::combinator::{eof, map, not, opt, peek, recognize, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -14,7 +14,7 @@ use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::parse_color;
 use crate::parser::oracle_util::{parse_subtype, GRANTING_SELF_PLACEHOLDER, OUTLAW_SUBTYPES};
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ControllerRef, FilterProp, PlayerRelation, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::mana::ManaColor;
@@ -792,6 +792,46 @@ fn constrain_typed_to_stack(filter: TargetFilter) -> TargetFilter {
     }
 }
 
+/// CR 115.1 + CR 102.1: postnominal turn-ownership relative clause on a PLAYER
+/// target — "target opponent **whose turn it is**".
+///
+/// `relation` is supplied by the CALL SITE from the head noun ("opponent" ->
+/// `PlayerRelation::Opponent`, "player" -> `PlayerRelation::All`), so the noun
+/// grammar stays in one place and this clause stays relation-agnostic.
+///
+/// The clause sits at the END of the pre-split subject slice
+/// (`find_predicate_start` cuts at "puts"), so the trailing boundary must accept
+/// end of input as well as an explicit separator. The separator set is the
+/// single word-boundary/sentence-punctuation class `" ,;."` — a following word,
+/// a comma or semicolon list break, or a terminal period ("target opponent whose
+/// turn it is."). It is expressed as ONE `one_of` char class rather than a
+/// cartesian expansion of `tag()` arms, mirroring the `you attack` boundary in
+/// `parser/oracle_trigger.rs` (`peek(alt((eof, recognize(one_of(" ,")))))`).
+/// Rejecting anything else is what keeps `" whose turn it isn't"` out.
+///
+/// The separator is matched under `peek`, NOT consumed: the callers in
+/// `parser/oracle_target.rs` recover the untouched original-case remainder with
+/// `&text[lower.len() - rest.len()..]` offset arithmetic, so every separator
+/// byte must survive on `rest` for those offsets to stay aligned. A consuming
+/// guard (e.g. `space1`, the shape `parser/oracle_util.rs`'s standalone-`x`
+/// guard uses) would shift every downstream slice.
+pub fn parse_active_player_turn_clause(
+    input: &str,
+    relation: PlayerRelation,
+) -> OracleResult<'_, ControllerRef> {
+    preceded(
+        tag(" whose "),
+        value(
+            ControllerRef::ActivePlayer { relation },
+            terminated(
+                tag("turn it is"),
+                alt((eof, peek(recognize(one_of(" ,;."))))),
+            ),
+        ),
+    )
+    .parse(input)
+}
+
 /// Build a `TargetFilter` from parsed components.
 fn build_type_filter(
     types: Vec<TypeFilter>,
@@ -1519,6 +1559,96 @@ mod tests {
                 .count(),
             1,
             "both ability spellings must fold to exactly one StackAbility: {filters:?}"
+        );
+    }
+
+    /// CR 115.1 + CR 102.1: the turn-ownership relative clause binds the
+    /// caller-supplied `relation` and consumes exactly `" whose turn it is"`,
+    /// leaving the rest of the subject slice for the outer grammar.
+    #[test]
+    fn active_player_turn_clause_binds_relation_and_boundary() {
+        // EOF boundary: the clause ends the subject slice.
+        let (rest, ctrl) =
+            parse_active_player_turn_clause(" whose turn it is", PlayerRelation::Opponent)
+                .expect("EOF is a legal trailing boundary");
+        assert_eq!(rest, "");
+        assert_eq!(
+            ctrl,
+            ControllerRef::ActivePlayer {
+                relation: PlayerRelation::Opponent
+            }
+        );
+
+        // Word boundary: `peek` leaves the separating space on the remainder.
+        let (rest, ctrl) = parse_active_player_turn_clause(
+            " whose turn it is puts target creature",
+            PlayerRelation::All,
+        )
+        .expect("a following word is a legal trailing boundary");
+        assert_eq!(rest, " puts target creature");
+        assert_eq!(
+            ctrl,
+            ControllerRef::ActivePlayer {
+                relation: PlayerRelation::All
+            }
+        );
+    }
+
+    /// Every member of the `" ,;."` terminal-separator class must close the
+    /// clause, and `peek` must leave each separator byte on the remainder so the
+    /// callers' `&text[lower.len() - rest.len()..]` offset arithmetic in
+    /// `parser/oracle_target.rs` still lands on the untouched original-case tail.
+    #[test]
+    fn active_player_turn_clause_accepts_every_terminal_separator() {
+        for (input, expected_rest) in [
+            // Terminal period — the verbatim sentence-final form.
+            (" whose turn it is.", "."),
+            // Comma list break.
+            (" whose turn it is, then draw a card", ", then draw a card"),
+            // Semicolon clause break.
+            (" whose turn it is; you gain 2 life", "; you gain 2 life"),
+            // Word boundary (space).
+            (" whose turn it is puts a card", " puts a card"),
+            // End of input.
+            (" whose turn it is", ""),
+        ] {
+            let (rest, ctrl) = parse_active_player_turn_clause(input, PlayerRelation::Opponent)
+                .unwrap_or_else(|e| panic!("{input:?} must close the clause: {e:?}"));
+            assert_eq!(
+                rest, expected_rest,
+                "{input:?}: the separator must survive on the remainder for the \
+                 caller's byte-offset arithmetic"
+            );
+            assert_eq!(
+                ctrl,
+                ControllerRef::ActivePlayer {
+                    relation: PlayerRelation::Opponent
+                }
+            );
+        }
+    }
+
+    /// The clause must NOT over-match. `" whose turn it isn't"` shares the whole
+    /// `turn it is` prefix and is rejected only by the word boundary; Oath of
+    /// Ghouls' `" whose graveyard …"` is rejected at the noun.
+    #[test]
+    fn active_player_turn_clause_rejects_non_boundary_and_other_relative_clauses() {
+        assert!(
+            parse_active_player_turn_clause(" whose turn it isn't", PlayerRelation::Opponent)
+                .is_err(),
+            "the trailing word boundary must reject a longer word"
+        );
+        assert!(
+            parse_active_player_turn_clause(
+                " whose graveyard has fewer creature cards in it than their graveyard does",
+                PlayerRelation::All
+            )
+            .is_err(),
+            "an unrelated postnominal relative clause must not bind a turn-ownership scope"
+        );
+        assert!(
+            parse_active_player_turn_clause(" puts target creature", PlayerRelation::All).is_err(),
+            "no relative clause at all must fail so the caller falls through"
         );
     }
 

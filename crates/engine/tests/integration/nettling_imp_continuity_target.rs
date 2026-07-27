@@ -24,7 +24,7 @@
 use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{ControllerRef, FilterProp, TargetFilter, TargetRef};
+use engine::types::ability::{ControllerRef, FilterProp, PlayerRelation, TargetFilter, TargetRef};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::CardId;
@@ -65,7 +65,9 @@ fn nettling_imp_parsed_continuity_filter_restricts_target_slots_end_to_end() {
     };
     assert_eq!(
         typed.controller,
-        Some(ControllerRef::ActivePlayer),
+        Some(ControllerRef::ActivePlayer {
+            relation: PlayerRelation::All,
+        }),
         "continuity clause must pin the ActivePlayer controller scope"
     );
     assert!(

@@ -11,9 +11,9 @@ use nom::Parser;
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, ChoiceType, CombatRelation, CombatRelationSubject,
     Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp, ObjectProperty,
-    ObjectScope, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
-    ThisWayCause, TypeFilter, TypedFilter,
+    ObjectScope, ParitySource, PlayerFilter, PlayerRelation, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -978,6 +978,19 @@ pub fn parse_target_with_syntax<'a>(
         }
         // "target opponent"
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("opponent").parse(after_target) {
+            // CR 115.1 + CR 102.1: a turn-ownership relative clause narrows the
+            // player target's legality scope ("target opponent whose turn it is"
+            // — The Beamtown Bullies). Failure falls straight through, so every
+            // existing "target opponent …" card is byte-identical.
+            if let Ok((rest, ctrl)) =
+                nom_target::parse_active_player_turn_clause(rest, PlayerRelation::Opponent)
+            {
+                return (
+                    TargetFilter::Typed(TypedFilter::default().controller(ctrl)),
+                    &text[lower.len() - rest.len()..],
+                    syntax,
+                );
+            }
             return (
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                 &text[lower.len() - rest.len()..],
@@ -986,6 +999,19 @@ pub fn parse_target_with_syntax<'a>(
         }
         // "target player"
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("player").parse(after_target) {
+            // CR 115.1 + CR 102.1: the same turn-ownership narrowing on the
+            // any-player head noun ("target player whose turn it is"), which
+            // admits every player and so takes `PlayerRelation::All`. Failure
+            // falls through to the unchanged bare `TargetFilter::Player`.
+            if let Ok((rest, ctrl)) =
+                nom_target::parse_active_player_turn_clause(rest, PlayerRelation::All)
+            {
+                return (
+                    TargetFilter::Typed(TypedFilter::default().controller(ctrl)),
+                    &text[lower.len() - rest.len()..],
+                    syntax,
+                );
+            }
             return (
                 TargetFilter::Player,
                 &text[lower.len() - rest.len()..],
@@ -4401,7 +4427,11 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
         // look-back. Longest-match-first preserved (no prefix collision with
         // the arms above).
         value(
-            ControllerRef::ActivePlayer,
+            // CR 102.1: unnarrowed "the active player" — no relative clause, so
+            // every player is a legal referent (`PlayerRelation::All`).
+            ControllerRef::ActivePlayer {
+                relation: PlayerRelation::All,
+            },
             tag::<_, _, OracleError<'_>>("the active player controlled"),
         ),
     ))
@@ -5959,7 +5989,10 @@ fn parse_ownership_or_controller_suffix(
         .map(|_| ())
         .parse(own_ctrl);
     if let Ok((rest, ())) = active_player_continuity {
-        *controller = Some(ControllerRef::ActivePlayer);
+        // CR 102.1: unnarrowed "the active player" (`PlayerRelation::All`).
+        *controller = Some(ControllerRef::ActivePlayer {
+            relation: PlayerRelation::All,
+        });
         properties.push(FilterProp::ControlledContinuouslySinceTurnBegan);
         return own_ctrl_offset + (own_ctrl.len() - rest.len());
     }
@@ -8823,6 +8856,122 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 115.1 + CR 102.1 + CR 102.2: "target opponent whose turn it is"
+    /// (The Beamtown Bullies) narrows the player target's legality scope to the
+    /// active opponent, and the remainder resumes at the predicate.
+    #[test]
+    fn parse_target_opponent_whose_turn_it_is() {
+        let (f, rest) = parse_target(
+            "target opponent whose turn it is puts target nonlegendary creature card from your graveyard onto the battlefield under their control",
+        );
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::ActivePlayer {
+                    relation: PlayerRelation::Opponent,
+                })
+            )
+        );
+        assert_eq!(
+            rest,
+            " puts target nonlegendary creature card from your graveyard onto the battlefield under their control",
+            "the predicate must survive verbatim on the remainder"
+        );
+    }
+
+    /// End-to-end guard for the terminal-separator class on the turn clause: a
+    /// sentence-final `.` (and a `,` / `;` clause break) must close the relative
+    /// clause instead of leaving it unparsed, and the `peek`-only boundary must
+    /// keep the separator on the remainder so `&text[lower.len() - rest.len()..]`
+    /// still slices the ORIGINAL-case tail rather than shifting by a byte.
+    #[test]
+    fn parse_target_opponent_whose_turn_it_is_accepts_sentence_separators() {
+        let expected = TargetFilter::Typed(TypedFilter::default().controller(
+            ControllerRef::ActivePlayer {
+                relation: PlayerRelation::Opponent,
+            },
+        ));
+        for (text, expected_rest) in [
+            ("Target opponent whose turn it is.", "."),
+            (
+                "Target opponent whose turn it is, then YOU draw a card",
+                ", then YOU draw a card",
+            ),
+            (
+                "Target opponent whose turn it is; YOU draw a card",
+                "; YOU draw a card",
+            ),
+        ] {
+            let (f, rest) = parse_target(text);
+            assert_eq!(f, expected, "{text:?} must bind the active-opponent scope");
+            assert_eq!(
+                rest, expected_rest,
+                "{text:?}: the separator and the original casing must both survive"
+            );
+        }
+    }
+
+    /// CR 115.1 + CR 102.1: the same clause on the any-player head noun admits
+    /// every player (`PlayerRelation::All`).
+    #[test]
+    fn parse_target_player_whose_turn_it_is() {
+        let (f, rest) = parse_target("target player whose turn it is draws a card");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::ActivePlayer {
+                    relation: PlayerRelation::All,
+                })
+            )
+        );
+        assert_eq!(rest, " draws a card");
+    }
+
+    /// Byte-identity guard: without the relative clause, both player head nouns
+    /// keep their pre-existing filters exactly. Reach-guard for the two tests
+    /// above — proves the new arm is opt-in, not a blanket rewrite.
+    #[test]
+    fn parse_target_bare_player_nouns_unchanged_by_turn_clause_arm() {
+        let (f, rest) = parse_target("target opponent");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+        assert_eq!(rest, "");
+
+        let (f, rest) = parse_target("target opponent's hand");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+        assert_eq!(rest, "'s hand");
+
+        let (f, rest) = parse_target("target player discards a card");
+        assert_eq!(f, TargetFilter::Player);
+        assert_eq!(rest, " discards a card");
+    }
+
+    /// Over-match negative, Oath of Ghouls' verbatim clause: a DIFFERENT
+    /// postnominal `whose` relative clause on "target player" must not bind a
+    /// turn-ownership scope. Paired with the reach-guard that the output is the
+    /// pre-existing `TargetFilter::Player` with the clause left on the
+    /// remainder — not merely "some other shape".
+    #[test]
+    fn parse_target_player_whose_graveyard_clause_is_not_a_turn_clause() {
+        const OATH_OF_GHOULS_CLAUSE: &str = "target player whose graveyard has fewer creature cards in it than their graveyard does and is their opponent";
+        let (f, rest) = parse_target(OATH_OF_GHOULS_CLAUSE);
+        assert_eq!(
+            f,
+            TargetFilter::Player,
+            "an unrelated `whose` clause must leave the bare player filter intact"
+        );
+        assert_eq!(
+            rest,
+            " whose graveyard has fewer creature cards in it than their graveyard does and is their opponent",
+            "the unmatched clause must be left verbatim on the remainder"
+        );
+    }
+
     // Nettling Imp / Norritt / Arcum's Whistle class: verbatim clause from
     // Nettling Imp's real Oracle text. Building-block test — isolates the new
     // controller+continuity arm from the pre-existing "non-Wall" type-filter
@@ -8836,7 +8985,9 @@ mod tests {
             f,
             TargetFilter::Typed(
                 TypedFilter::creature()
-                    .controller(ControllerRef::ActivePlayer)
+                    .controller(ControllerRef::ActivePlayer {
+                        relation: PlayerRelation::All,
+                    })
                     .properties(vec![FilterProp::ControlledContinuouslySinceTurnBegan])
             )
         );

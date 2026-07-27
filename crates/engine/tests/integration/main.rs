@@ -41,6 +41,7 @@ mod batched_trigger_subject_count;
 mod battle_of_wits;
 mod bbfu10_entered_this_turn_snapshot;
 mod bbfu7_attacks_if_able_not_goad;
+mod beamtown_bullies_active_opponent_target;
 mod belbe_thornbow_life_loss;
 mod betor_lifelink_counters_repro;
 mod birgi;

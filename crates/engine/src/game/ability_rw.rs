@@ -2202,8 +2202,11 @@ fn legacy_controller_ref(x: &ControllerRef) -> bool {
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
         // CR 102.1: the active player is a game-defined role read live, not a
-        // frozen event-context tag.
-        | ControllerRef::ActivePlayer
+        // frozen event-context tag. `relation` (CR 102.2 / CR 102.3) narrows
+        // candidacy against the ability's own controller — also live, also not
+        // one of the legacy-12 event-context tags — so it does not change this
+        // answer.
+        | ControllerRef::ActivePlayer { .. }
         | ControllerRef::EnchantedPlayer => false,
     }
 }
@@ -2551,7 +2554,10 @@ fn member_bound_controller_ref(x: &ControllerRef) -> bool {
         | ControllerRef::TargetOpponent
         // CR 102.1: the active player is a game-defined role read live from
         // `state.active_player`, not per-source member-bound storage.
-        | ControllerRef::ActivePlayer
+        // `relation` (CR 102.2 / CR 102.3) additionally reads the ability's own
+        // controller and the format topology — both uniformity-invariant across
+        // batch members, so the reference stays member-INVARIANT.
+        | ControllerRef::ActivePlayer { .. }
         | ControllerRef::DefendingPlayer => false,
     }
 }
@@ -6508,8 +6514,15 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
         | ControllerRef::TargetOpponent
         | ControllerRef::DefendingPlayer
         // CR 102.1: a live read of `state.active_player` — no sibling-mutable
-        // state, empty RW profile (mirrors `DefendingPlayer`).
-        | ControllerRef::ActivePlayer
+        // state, empty RW profile (mirrors `DefendingPlayer`). AUDITED for the
+        // `relation` parameterization: `state.active_player` is defined by whose
+        // TURN it is (CR 102.1) and a turn is a bounded five-phase sequence
+        // (CR 500.1), so it changes only at a turn boundary — never as a side
+        // effect of a sibling batch member. `relation` (CR 102.2 / CR 102.3) additionally
+        // reads only the ability's controller and the fixed format topology —
+        // neither is sibling-mutable — so the profile stays genuinely empty
+        // rather than fail-open.
+        | ControllerRef::ActivePlayer { .. }
         // resolution-local (ResolvedAbility.chosen_players)
         | ControllerRef::ChosenPlayer { .. } => RwProfile::empty(),
     }

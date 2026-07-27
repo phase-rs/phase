@@ -22,11 +22,12 @@ use crate::types::ability::{
     CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
     EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
-    ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
-    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    ObjectScope, PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition,
+    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -887,12 +888,34 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::TriggeringPlayer => "triggering player's",
                     // CR 303.4b: Display label for enchanted-player controller scope.
                     ControllerRef::EnchantedPlayer => "enchanted player's",
-                    // CR 102.1: Display label for active-player controller scope.
-                    ControllerRef::ActivePlayer => "the active player's",
+                    // CR 102.1 + CR 102.2 / CR 102.3: Display label for the
+                    // active-player controller scope, rendered per legality
+                    // relation so a narrowed scope is never described with the
+                    // unnarrowed label. This slot is a possessive DETERMINER, so
+                    // the `Controller` relation contributes only "your own" here
+                    // — its turn narrowing trails the zone noun below.
+                    ControllerRef::ActivePlayer { relation } => match relation {
+                        PlayerRelation::All => "the active player's",
+                        PlayerRelation::Opponent => "the active opponent's",
+                        PlayerRelation::Controller => "your own",
+                    },
                 };
                 let zone_str = format!("{zone:?}").to_lowercase();
+                // CR 102.1: whose turn it is, is a legality condition rather
+                // than a possession, so it reads as a trailing qualifier instead
+                // of interrupting the possessive determiner.
+                let turn_qualifier = if matches!(
+                    scope,
+                    ControllerRef::ActivePlayer {
+                        relation: PlayerRelation::Controller
+                    }
+                ) {
+                    " on your turn"
+                } else {
+                    ""
+                };
                 parts.push(format!(
-                    "most prevalent creature type in {scope_str} {zone_str}"
+                    "most prevalent creature type in {scope_str} {zone_str}{turn_qualifier}"
                 ));
             }
             FilterProp::IsChosenCardType => parts.push("chosen card type".into()),
@@ -1059,8 +1082,15 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::TriggeringPlayer => "triggering player",
                 // CR 303.4b: Display label for enchanted-player controller scope.
                 ControllerRef::EnchantedPlayer => "enchanted player",
-                // CR 102.1: Display label for active-player controller scope.
-                ControllerRef::ActivePlayer => "the active player",
+                // CR 102.1 + CR 102.2 / CR 102.3: Display label for the
+                // active-player controller scope, rendered per legality relation
+                // so a narrowed scope is never described with the unnarrowed
+                // label.
+                ControllerRef::ActivePlayer { relation } => match relation {
+                    PlayerRelation::All => "the active player",
+                    PlayerRelation::Opponent => "the active opponent",
+                    PlayerRelation::Controller => "you on your turn",
+                },
             };
             parts.push(label.into());
         } else {
@@ -1134,8 +1164,14 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::TriggeringPlayer => "triggering player controls",
         // CR 303.4b: Display label for enchanted-player controller scope.
         ControllerRef::EnchantedPlayer => "enchanted player controls",
-        // CR 102.1: Display label for active-player controller scope.
-        ControllerRef::ActivePlayer => "the active player controls",
+        // CR 102.1 + CR 102.2 / CR 102.3: Display label for the active-player
+        // controller scope, rendered per legality relation so a narrowed scope is
+        // never described with the unnarrowed label.
+        ControllerRef::ActivePlayer { relation } => match relation {
+            PlayerRelation::All => "the active player controls",
+            PlayerRelation::Opponent => "the active opponent controls",
+            PlayerRelation::Controller => "you control on your turn",
+        },
     }
     .into()
 }

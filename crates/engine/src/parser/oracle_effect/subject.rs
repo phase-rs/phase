@@ -6253,6 +6253,31 @@ mod tests {
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
 
+    /// CR 115.1 + CR 102.1: the subject/predicate split for "target opponent
+    /// whose turn it is puts …" (The Beamtown Bullies) must cut at `puts`, so
+    /// the whole turn-ownership relative clause stays in the SUBJECT slice where
+    /// `parse_active_player_turn_clause` can consume it.
+    ///
+    /// This pins the split against `PREDICATE_VERBS` growth: `is` normalizes to
+    /// `be`, and if `be` (or `turn`, or `whose`) were ever added as a predicate
+    /// verb the cut would move left, the clause would be severed, and the
+    /// `ActivePlayer { relation: Opponent }` narrowing would silently vanish.
+    #[test]
+    fn find_predicate_start_cuts_beamtown_clause_at_puts() {
+        const SUBJECT_SLICE: &str = "target opponent whose turn it is ";
+        const SUBJECT: &str = "target opponent whose turn it is puts target nonlegendary creature card from your graveyard onto the battlefield under their control";
+        let idx = find_predicate_start(SUBJECT).expect("the clause has a predicate verb");
+        // The cut must leave the ENTIRE relative clause in the subject slice…
+        assert_eq!(
+            &SUBJECT[..idx],
+            SUBJECT_SLICE,
+            "split moved off `puts`, remainder was {:?}",
+            &SUBJECT[idx..]
+        );
+        // …and land exactly on the predicate verb.
+        assert_eq!(&SUBJECT[idx..idx + 4], "puts");
+    }
+
     /// CR 105.3 + CR 106.1a: "becomes that color" (Foraging Wickermaw) maps to the
     /// same `AddChosenColor` reader as "the chosen color" (Puca's Eye) — only the
     /// upstream writer differs (mana production vs `Effect::Choose`). Regression-

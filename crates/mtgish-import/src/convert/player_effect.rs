@@ -336,7 +336,7 @@ fn controller_to_scope(c: &ControllerRef) -> ConvResult<ProhibitionScope> {
         // game-defined role with no static broadcast equivalent, so mapping it
         // here would silently over-broaden the prohibition — strict-fail
         // (mirrors DefendingPlayer / SourceChosenPlayer above).
-        ControllerRef::ActivePlayer => Err(ConversionGap::EnginePrerequisiteMissing {
+        ControllerRef::ActivePlayer { .. } => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "ProhibitionScope",
             needed_variant: "ActivePlayer".into(),
         }),

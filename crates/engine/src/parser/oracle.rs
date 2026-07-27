@@ -13,9 +13,10 @@ use crate::types::ability::{
     ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CastTimingPermission,
     CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
     CostReduction, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
+    ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, PlayerRelation, QuantityExpr,
+    QuantityRef, ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition,
+    StaticDefinition, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -3035,7 +3036,9 @@ fn ability_is_active_player_coerce(def: &AbilityDefinition) -> bool {
     static_abilities.iter().any(|st| {
         matches!(st.mode, StaticMode::MustAttack)
             && st.affected.as_ref().and_then(target_filter_controller_ref)
-                == Some(ControllerRef::ActivePlayer)
+                == Some(ControllerRef::ActivePlayer {
+                    relation: PlayerRelation::All,
+                })
     })
 }
 
@@ -3096,7 +3099,15 @@ fn apply_active_player_punisher(
         let Effect::DestroyAll { target, .. } = inner.effect.as_mut() else {
             continue;
         };
-        set_target_filter_controller_ref(target, ControllerRef::ActivePlayer);
+        set_target_filter_controller_ref(
+            target,
+            // CR 102.1: the Siren's Call punisher rebinds to the unnarrowed active
+            // player (`PlayerRelation::All`) — the coerce clause it pairs with
+            // carries no opponent-narrowing relative clause.
+            ControllerRef::ActivePlayer {
+                relation: PlayerRelation::All,
+            },
+        );
         // CR 302.6 + CR 508.1a: Siren's Call exemption — "Ignore this effect for
         // each creature the player didn't control continuously since the
         // beginning of the turn." Attach the continuity predicate to the
