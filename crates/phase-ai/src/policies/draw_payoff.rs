@@ -24,8 +24,11 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
+use engine::game::game_object::GameObject;
+use engine::types::ability::{TriggerConstraint, TriggerEntry};
+
 use crate::features::draw_matters::{
-    is_draw_payoff_parts, is_draw_source_parts, DRAW_MATTERS_FLOOR,
+    is_draw_payoff_trigger, is_draw_source_parts, DRAW_MATTERS_FLOOR,
 };
 use crate::features::DeckFeatures;
 
@@ -77,11 +80,10 @@ impl TacticalPolicy for DrawPayoffPolicy {
             .filter(|id| {
                 ctx.state.objects.get(id).is_some_and(|obj| {
                     obj.controller == ctx.ai_player
-                        && is_draw_payoff_parts(
-                            obj.trigger_definitions
-                                .iter_unchecked()
-                                .map(|entry| &entry.definition),
-                        )
+                        && obj.trigger_definitions.iter_unchecked().any(|entry| {
+                            is_draw_payoff_trigger(&entry.definition)
+                                && trigger_still_fireable(ctx.state, obj, entry)
+                        })
                 })
             })
             .count();
@@ -118,5 +120,22 @@ fn candidate_draws_controller(ctx: &PolicyContext<'_>) -> bool {
             .effective_activated_ability()
             .is_some_and(|ability| is_draw_source_parts(std::iter::once(&ability))),
         _ => false,
+    }
+}
+
+/// CR 603.4: a rate-limited engine that has already fired this turn/game cannot
+/// fire again, so drawing into it earns nothing more. Consults the engine's
+/// authoritative fired-trigger ledgers rather than re-deriving eligibility.
+/// Constraints this policy does not model (their eligibility is a value nuance,
+/// not a hard on/off) are treated as live.
+fn trigger_still_fireable(state: &GameState, obj: &GameObject, entry: &TriggerEntry) -> bool {
+    match &entry.definition.constraint {
+        Some(TriggerConstraint::OncePerTurn) => !state
+            .triggers_fired_this_turn
+            .contains(&obj.trigger_definition_ref(entry)),
+        Some(TriggerConstraint::OncePerGame) => !state
+            .triggers_fired_this_game
+            .contains(&obj.trigger_definition_ref(entry)),
+        _ => true,
     }
 }

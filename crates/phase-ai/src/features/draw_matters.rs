@@ -117,10 +117,12 @@ pub(crate) fn is_draw_source_parts<'a>(
 pub(crate) fn is_draw_payoff_parts<'a>(
     triggers: impl IntoIterator<Item = &'a TriggerDefinition>,
 ) -> bool {
-    triggers.into_iter().any(trigger_is_draw_payoff)
+    triggers.into_iter().any(is_draw_payoff_trigger)
 }
 
-fn trigger_is_draw_payoff(t: &TriggerDefinition) -> bool {
+/// Single-trigger structural classifier (mode + scope), exposed so the policy
+/// can pair it with live per-turn firing eligibility per trigger entry.
+pub(crate) fn is_draw_payoff_trigger(t: &TriggerDefinition) -> bool {
     // 1. Mode fires on a draw event (CR 121.1).
     if !matches!(t.mode, TriggerMode::Drawn) {
         return false;
