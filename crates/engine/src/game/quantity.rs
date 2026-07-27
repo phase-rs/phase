@@ -23,8 +23,10 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
+use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DamageRecord, GameState, LinkedExileSnapshot, TriggerSourceContext,
+    BattlefieldDepartureSourceContext, DamageRecord, GameState, LinkedExileSnapshot,
+    TriggerSourceContext,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -4783,6 +4785,53 @@ pub(crate) fn distinct_counter_kinds_among(
     kinds
 }
 
+/// The counter-value authority for a battlefield departure event.
+enum BattlefieldDepartureCounterContext<'a> {
+    NotBattlefieldDeparture,
+    Present { context: &'a TriggerSourceContext },
+    Absent { object_id: ObjectId },
+    Malformed,
+}
+
+/// Returns the event that currently supplies triggered-ability provenance.
+fn current_or_detection_trigger_event(state: &GameState) -> Option<GameEvent> {
+    state
+        .current_trigger_event
+        .as_ref()
+        .cloned()
+        .or_else(detection_trigger_event)
+}
+
+/// CR 400.7 + CR 603.10a: Classify a battlefield departure's counter authority.
+///
+/// The record-owned context is authoritative for a coherent departure; an
+/// absent context preserves the legacy ObjectId-keyed cache fallback, while a
+/// malformed one must never rebind to that cache.
+fn battlefield_departure_counter_context(
+    event: &GameEvent,
+) -> BattlefieldDepartureCounterContext<'_> {
+    let GameEvent::ZoneChanged {
+        object_id,
+        from: Some(Zone::Battlefield),
+        ..
+    } = event
+    else {
+        return BattlefieldDepartureCounterContext::NotBattlefieldDeparture;
+    };
+
+    match crate::types::game_state::battlefield_departure_trigger_source_context(event) {
+        BattlefieldDepartureSourceContext::Present(context) => {
+            BattlefieldDepartureCounterContext::Present { context }
+        }
+        BattlefieldDepartureSourceContext::Absent => BattlefieldDepartureCounterContext::Absent {
+            object_id: *object_id,
+        },
+        BattlefieldDepartureSourceContext::Malformed => {
+            BattlefieldDepartureCounterContext::Malformed
+        }
+    }
+}
+
 /// CR 603.10 + CR 608.2h + CR 122.2: For a battlefield-departure look-back
 /// counter effect ("Whenever a creature you control dies/leaves the battlefield,
 /// if it had one or more <X> counters on it, put that many <X> counters on …" —
@@ -4811,16 +4860,19 @@ fn event_context_counter_count_from_lki(
         ) => counter_type,
         _ => return None,
     };
-    let crate::types::events::GameEvent::ZoneChanged {
-        object_id,
-        from: Some(crate::types::zones::Zone::Battlefield),
-        ..
-    } = state.current_trigger_event.as_ref()?
-    else {
-        return None;
+    let event = current_or_detection_trigger_event(state)?;
+    let count = match battlefield_departure_counter_context(&event) {
+        BattlefieldDepartureCounterContext::Present { context } => {
+            counter_count_from_map(&context.lki.counters, Some(counter_type))
+        }
+        BattlefieldDepartureCounterContext::Absent { object_id } => state
+            .lki_cache
+            .get(&object_id)
+            .map(|lki| counter_count_from_map(&lki.counters, Some(counter_type)))?,
+        // A malformed record must not consume a newer incarnation's cache.
+        BattlefieldDepartureCounterContext::Malformed
+        | BattlefieldDepartureCounterContext::NotBattlefieldDeparture => return None,
     };
-    let lki = state.lki_cache.get(object_id)?;
-    let count = counter_count_from_map(&lki.counters, Some(counter_type));
     (count > 0).then_some(count)
 }
 
@@ -4834,6 +4886,49 @@ pub(crate) fn counter_count_from_map(
     }
 }
 
+/// Resolve an ordinary object scope through its live object or its LKI snapshot.
+///
+/// CR 122.2 + CR 400.7 + CR 603.10a: When a source has changed zones, its
+/// live counter map has been cleared, so its departure snapshot provides the
+/// pre-exit values. A live battlefield object remains authoritative over a
+/// stale ObjectId-keyed cache entry from an earlier incarnation.
+fn resolve_counters_on_live_or_lki_scope(
+    state: &GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    counter_type: Option<&CounterType>,
+) -> i32 {
+    // CR 608.2k: An `Anaphoric` counter read that reached runtime found no
+    // clause subject and no per-recipient static to bind it, so the pronoun
+    // names the ability's own object — "+1/+1 counters on him" on Red Hulk's
+    // Enrage reflex.
+    if matches!(scope, ObjectScope::Source | ObjectScope::Anaphoric) && ctx.trigger_source.is_some()
+    {
+        return source_lki_for_context(state, &ctx)
+            .map(|lki| counter_count_from_map(&lki.counters, counter_type))
+            .unwrap_or(0);
+    }
+    // An unbound anaphor resolves through the `Source` lookup — the generic
+    // scope helpers have no referent for `Anaphoric` itself.
+    let lookup_scope = match scope {
+        ObjectScope::Anaphoric => ObjectScope::Source,
+        other => other,
+    };
+    let Some(object_id) = object_id_for_scope(state, lookup_scope, ctx, targets) else {
+        return 0;
+    };
+    let live = state.objects.get(&object_id);
+    let on_battlefield = live.is_some_and(|obj| obj.zone == Zone::Battlefield);
+    if !on_battlefield {
+        if let Some(lki) = state.lki_cache.get(&object_id) {
+            return counter_count_from_map(&lki.counters, counter_type);
+        }
+    }
+    live.map(|obj| counter_count_from_map(&obj.counters, counter_type))
+        .unwrap_or(0)
+}
+
 fn resolve_counters_on_scope(
     state: &GameState,
     scope: ObjectScope,
@@ -4843,56 +4938,32 @@ fn resolve_counters_on_scope(
     counter_type: Option<&CounterType>,
 ) -> i32 {
     match scope {
-        // CR 122.2 + CR 400.7 + CR 603.10a: When the source or triggering
-        // event source has changed zones (e.g., a dies-trigger reading
-        // "counters on ~"), `obj.counters` has been cleared by
-        // `apply_zone_exit_cleanup`. The LKI snapshot captured there
-        // preserves the pre-exit counter map per CR 400.7's "new object"
-        // semantics.
-        //
-        // The fallback must be zone-keyed, not presence-keyed: an object that
-        // died and was returned earlier this turn keeps both a stale LKI entry
-        // (from the death) and a live counter map (post-return). A live
-        // battlefield object's `obj.counters` is authoritative; only when the
-        // source has changed zones (so it isn't on the battlefield as the
-        // "same" object) does CR 603.10a's look-back apply.
-        //
-        // Mirrors `resolve_object_pt`'s LKI fallback for power/toughness
-        // (where the cleared field becomes `None`); the counter analogue must
-        // be zone-keyed because an empty `HashMap<CounterType, u32>` is
-        // `Some({})`, not `None`.
-        // CR 608.2k: An `Anaphoric` counter read that reached runtime found no
-        // clause subject and no per-recipient static to bind it, so the pronoun
-        // names the ability's own object — "+1/+1 counters on him" on Red Hulk's
-        // Enrage reflex. Grouped with `Source` so the unbound anaphor keeps
-        // exactly the referent it had before the scope carried provenance.
-        ObjectScope::Source | ObjectScope::EventSource | ObjectScope::Anaphoric => {
-            if matches!(scope, ObjectScope::Source | ObjectScope::Anaphoric)
-                && ctx.trigger_source.is_some()
+        // CR 400.7 + CR 603.10a: On a battlefield departure, EventSource is
+        // the event's prior incarnation, not a same-id object that has since
+        // returned. Other event kinds retain the ordinary scope lookup below.
+        ObjectScope::EventSource => {
+            let event = current_or_detection_trigger_event(state);
+            match event
+                .as_ref()
+                .map(battlefield_departure_counter_context)
+                .unwrap_or(BattlefieldDepartureCounterContext::NotBattlefieldDeparture)
             {
-                return source_lki_for_context(state, &ctx)
+                BattlefieldDepartureCounterContext::Present { context } => {
+                    counter_count_from_map(&context.lki.counters, counter_type)
+                }
+                BattlefieldDepartureCounterContext::Absent { object_id } => state
+                    .lki_cache
+                    .get(&object_id)
                     .map(|lki| counter_count_from_map(&lki.counters, counter_type))
-                    .unwrap_or(0);
-            }
-            // An unbound anaphor resolves through the `Source` lookup — the
-            // generic scope helpers have no referent for `Anaphoric` itself.
-            let lookup_scope = match scope {
-                ObjectScope::Anaphoric => ObjectScope::Source,
-                other => other,
-            };
-            let Some(object_id) = object_id_for_scope(state, lookup_scope, ctx, targets) else {
-                return 0;
-            };
-            let live = state.objects.get(&object_id);
-            let on_battlefield =
-                live.is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
-            if !on_battlefield {
-                if let Some(lki) = state.lki_cache.get(&object_id) {
-                    return counter_count_from_map(&lki.counters, counter_type);
+                    .unwrap_or(0),
+                BattlefieldDepartureCounterContext::Malformed => 0,
+                BattlefieldDepartureCounterContext::NotBattlefieldDeparture => {
+                    resolve_counters_on_live_or_lki_scope(state, scope, ctx, targets, counter_type)
                 }
             }
-            live.map(|obj| counter_count_from_map(&obj.counters, counter_type))
-                .unwrap_or(0)
+        }
+        ObjectScope::Source | ObjectScope::Anaphoric => {
+            resolve_counters_on_live_or_lki_scope(state, scope, ctx, targets, counter_type)
         }
         ObjectScope::CostPaidObject => ability
             .and_then(|ability| ability.cost_paid_object.as_ref())
@@ -12159,7 +12230,145 @@ mod tests {
             PlayerId(0),
         );
 
-        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 3);
+        // The live object is now in the graveyard with no counters. Poison the
+        // mutable cache with that post-departure state too: EventSource must
+        // still use the record-owned departure context, not either fallback.
+        state
+            .lki_cache
+            .insert(source, state.objects[&source].snapshot_for_mana_spent());
+
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            3,
+            "the zone-change record's LKI outranks a later cache incarnation"
+        );
+    }
+
+    #[test]
+    fn resolve_quantity_counters_on_event_source_uses_legacy_cache_only_when_context_absent() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Runecarved Obelisk".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("charge".to_string()), 3);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        let mut event = events
+            .into_iter()
+            .find(|event| {
+                matches!(event, crate::types::events::GameEvent::ZoneChanged { object_id, .. } if *object_id == source)
+            })
+            .expect("move_to_zone must emit a ZoneChanged event");
+        let crate::types::events::GameEvent::ZoneChanged { record, .. } = &mut event else {
+            unreachable!("selected ZoneChanged event")
+        };
+        record.trigger_source_context = None;
+        state.current_trigger_event = Some(event);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::EventSource,
+                counter_type: Some(CounterType::Generic("charge".to_string())),
+            },
+        };
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: expr.clone(),
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            3,
+            "only an absent legacy context may use the ObjectId-keyed cache"
+        );
+    }
+
+    #[test]
+    fn resolve_quantity_counters_on_event_source_fails_closed_for_malformed_context() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Runecarved Obelisk".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("charge".to_string()), 3);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        assert_eq!(
+            state
+                .lki_cache
+                .get(&source)
+                .map(|lki| {
+                    counter_count_from_map(
+                        &lki.counters,
+                        Some(&CounterType::Generic("charge".to_string())),
+                    )
+                }),
+            Some(3),
+            "the legacy cache reach-guard proves malformed provenance, rather than an empty cache, causes the zero"
+        );
+
+        let mut event = events
+            .into_iter()
+            .find(|event| {
+                matches!(event, crate::types::events::GameEvent::ZoneChanged { object_id, .. } if *object_id == source)
+            })
+            .expect("move_to_zone must emit a ZoneChanged event");
+        let crate::types::events::GameEvent::ZoneChanged { record, .. } = &mut event else {
+            unreachable!("selected ZoneChanged event")
+        };
+        record
+            .trigger_source_context
+            .as_mut()
+            .expect("production record has owned context")
+            .identity
+            .expected_zone = Zone::Graveyard;
+        state.current_trigger_event = Some(event);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::EventSource,
+                counter_type: Some(CounterType::Generic("charge".to_string())),
+            },
+        };
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: expr.clone(),
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            0,
+            "a malformed record must not silently downgrade to the legacy cache"
+        );
     }
 
     /// CR 122.1: `AnyCountersOnSelf` sums every counter type on the source

@@ -179,6 +179,7 @@ mod exquisite_blood_routing;
 mod eyetwitch_learn_decline_lesson;
 mod fact_or_fiction_pile_separation;
 mod fateful_handoff_target_mana_value_draw;
+mod felisa_fang_of_silverquill;
 mod festival_of_embers_graveyard_additional_cost;
 mod fevered_visions;
 mod fewer_than_existential_threshold;

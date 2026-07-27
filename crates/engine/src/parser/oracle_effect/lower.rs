@@ -8534,6 +8534,14 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     if let Some(expr) = parse_cda_quantity(where_x_expression) {
         return Some(expr);
     }
+    // CR 107.3i: Keep the compositional nom quantity grammar available to
+    // where-X bindings after the more-specific CDA interpreter has declined
+    // them. This supplies a single X value for past-tense event-subject forms
+    // such as "the number of counters it had" without a card-name-specific
+    // token parser.
+    if let Ok((_, qty)) = nom_quantity::parse_quantity_ref_complete(expression_lower.as_str()) {
+        return Some(QuantityExpr::Ref { qty });
+    }
     // CR 107.3i + CR 115.1: Some where-X definitions spell the count as
     // "the number of <for-each clause>" where the clause itself may need a
     // target player ("Islands target opponent controls"). Keep that grammar in

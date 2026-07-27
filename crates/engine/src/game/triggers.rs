@@ -1061,22 +1061,6 @@ impl LogicalZoneTriggerCollection<'_> {
     }
 }
 
-/// Returns the record-owned source for a battlefield departure. An absent or
-/// mismatched context is not recoverable from the current object map: that map
-/// may already hold a different incarnation at the same storage id.
-fn ltb_trigger_source_context(
-    record: &crate::types::game_state::ZoneChangeRecord,
-    moved_id: ObjectId,
-) -> Option<&TriggerSourceContext> {
-    (record.object_id == moved_id && record.from_zone == Some(Zone::Battlefield))
-        .then(|| record.trigger_source_context())
-        .flatten()
-        .filter(|context| {
-            context.identity.reference.object_id == moved_id
-                && context.identity.expected_zone == Zone::Battlefield
-        })
-}
-
 fn batched_zone_change_batch(events: &[GameEvent]) -> bool {
     !events.is_empty()
         && events
@@ -3305,12 +3289,14 @@ fn collect_pending_triggers_with_collection(
         if let GameEvent::ZoneChanged {
             object_id: moved_id,
             from: Some(Zone::Battlefield),
-            record,
             ..
         } = event
         {
             let matched_triggers =
-                if let Some(source_context) = ltb_trigger_source_context(record, *moved_id) {
+                if let crate::types::game_state::BattlefieldDepartureSourceContext::Present(
+                    source_context,
+                ) = crate::types::game_state::battlefield_departure_trigger_source_context(event)
+                {
                     collect_matching_triggers_from_context(
                         state,
                         event,
@@ -9154,12 +9140,37 @@ fn evaluate_trigger_condition_with_source(
                 None => lki.counters.values().any(|&count| count > 0),
             };
             match trigger_event {
-                Some(GameEvent::ZoneChanged {
-                    object_id, record, ..
-                }) => match record.trigger_source_context() {
-                    Some(context) => matches_counter(&context.lki),
-                    None => state.lki_cache.get(object_id).is_some_and(matches_counter),
-                },
+                Some(
+                    event @ GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Battlefield),
+                        ..
+                    },
+                ) => {
+                    match crate::types::game_state::battlefield_departure_trigger_source_context(
+                        event,
+                    ) {
+                        crate::types::game_state::BattlefieldDepartureSourceContext::Present(
+                            context,
+                        ) => matches_counter(&context.lki),
+                        // Compatibility for legacy/defaulted records only. A
+                        // present incoherent context is not absent and must
+                        // never be rebound through the ObjectId-keyed cache.
+                        crate::types::game_state::BattlefieldDepartureSourceContext::Absent => {
+                            state.lki_cache.get(object_id).is_some_and(matches_counter)
+                        }
+                        crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => {
+                            false
+                        }
+                    }
+                }
+                // Non-departure ZoneChanged events never had an owned
+                // battlefield LKI requirement. Preserve their established
+                // event-subject cache lookup rather than classifying them as
+                // malformed departures.
+                Some(GameEvent::ZoneChanged { object_id, .. }) => {
+                    state.lki_cache.get(object_id).is_some_and(matches_counter)
+                }
                 Some(event) => {
                     if let Some(event_object_id) =
                         crate::game::targeting::extract_source_from_event(event)
@@ -10485,7 +10496,7 @@ pub mod tests {
     }
 
     #[test]
-    fn ltb_source_requires_the_record_owned_context_for_the_moved_object() {
+    fn ltb_source_requires_a_coherent_record_owned_context() {
         let object = GameObject::new(
             ObjectId(9),
             CardId(12),
@@ -10495,8 +10506,29 @@ pub mod tests {
         );
         let record =
             object.snapshot_for_zone_change(object.id, Some(Zone::Battlefield), Zone::Graveyard);
-        assert!(ltb_trigger_source_context(&record, object.id).is_some());
-        assert!(ltb_trigger_source_context(&record, ObjectId(10)).is_none());
+        let event = GameEvent::ZoneChanged {
+            object_id: object.id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(record.clone()),
+        };
+        assert!(matches!(
+            crate::types::game_state::battlefield_departure_trigger_source_context(&event),
+            crate::types::game_state::BattlefieldDepartureSourceContext::Present(_)
+        ));
+
+        let mismatched_event = GameEvent::ZoneChanged {
+            object_id: ObjectId(10),
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(record.clone()),
+        };
+        assert!(matches!(
+            crate::types::game_state::battlefield_departure_trigger_source_context(
+                &mismatched_event
+            ),
+            crate::types::game_state::BattlefieldDepartureSourceContext::Malformed
+        ));
 
         let mut post_change_context = record.clone();
         post_change_context
@@ -10505,11 +10537,31 @@ pub mod tests {
             .expect("snapshot context")
             .identity
             .expected_zone = Zone::Graveyard;
-        assert!(ltb_trigger_source_context(&post_change_context, object.id).is_none());
+        let malformed_context_event = GameEvent::ZoneChanged {
+            object_id: object.id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(post_change_context),
+        };
+        assert!(matches!(
+            crate::types::game_state::battlefield_departure_trigger_source_context(
+                &malformed_context_event
+            ),
+            crate::types::game_state::BattlefieldDepartureSourceContext::Malformed
+        ));
 
         let missing_context =
             ZoneChangeRecord::test_minimal(object.id, Some(Zone::Battlefield), Zone::Graveyard);
-        assert!(ltb_trigger_source_context(&missing_context, object.id).is_none());
+        let legacy_event = GameEvent::ZoneChanged {
+            object_id: object.id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(missing_context),
+        };
+        assert!(matches!(
+            crate::types::game_state::battlefield_departure_trigger_source_context(&legacy_event),
+            crate::types::game_state::BattlefieldDepartureSourceContext::Absent
+        ));
     }
 
     #[test]

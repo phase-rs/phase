@@ -1244,6 +1244,33 @@ fn parse_number_of_counters_on_object(input: &str) -> OracleResult<'_, QuantityR
     ))
 }
 
+/// CR 603.10a + CR 122.2: Parse the past-tense event-subject counter count
+/// after "the number of". Unlike "counters on it", "counters it had" names
+/// the creature that just left, so it resolves through the trigger event's
+/// departure snapshot rather than the ability source.
+///
+/// The untyped arm intentionally comes first: the open generic counter parser
+/// otherwise accepts `counters` as a counter type and commits before the
+/// past-tense grammar can recognize it.
+fn parse_number_of_counters_it_had(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, counter_type) = alt((
+        value(None, tag("counters it had")),
+        map(
+            terminated(parse_counter_type_typed, tag(" counters it had")),
+            Some,
+        ),
+    ))
+    .parse(input)?;
+    let (rest, _) = opt(tag(" on it")).parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::CountersOn {
+            scope: ObjectScope::EventSource,
+            counter_type,
+        },
+    ))
+}
+
 /// Parse the object scope for counter references: "it", "that creature", "that permanent", etc.
 ///
 /// CR 122.1 + CR 608.2k: A creature's ability that counts "+1/+1 counters on
@@ -1548,10 +1575,17 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // "[typeword] you control" misread (no `TypeFilter` for counter kinds).
         parse_player_counter_ref_tail,
         parse_lost_game_player_count,
-        // CR 122.1: "[kind] counters on [object]" — counter count on an object.
-        // Must precede generic type-filter arm. Used for patterns like
-        // "equal to the number of charge counters on it".
-        parse_number_of_counters_on_object,
+        // Past-tense event-subject counters must precede the present-tense
+        // parser: its open generic counter-type arm would otherwise consume
+        // the leading `counters` token. Keep the pair nested to remain within
+        // nom's supported top-level `alt` tuple arity.
+        alt((
+            parse_number_of_counters_it_had,
+            // CR 122.1: "[kind] counters on [object]" — counter count on an object.
+            // Must precede generic type-filter arm. Used for patterns like
+            // "equal to the number of charge counters on it".
+            parse_number_of_counters_on_object,
+        )),
         // CR 700.8: "creatures in your party" must precede the generic
         // "<type> you control" arm — the trailing "in your party" is what
         // distinguishes party-size from a controlled-creature count.
@@ -10348,6 +10382,55 @@ mod tests {
             }
             _ => panic!("expected CountersOn"),
         }
+    }
+
+    /// CR 603.10a + CR 122.2: Past-tense "it had" names the zone-change
+    /// event subject rather than the triggered ability's source. Keep both
+    /// optional surface forms and a typed count pinned to the exact AST.
+    #[test]
+    fn parse_quantity_ref_past_tense_counters_it_had_uses_event_source() {
+        for phrase in [
+            "the number of counters it had",
+            "the number of counters it had on it",
+        ] {
+            let (_, qty) = parse_quantity_ref_complete(phrase)
+                .unwrap_or_else(|_| panic!("{phrase:?} should parse completely"));
+            assert_eq!(
+                qty,
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::EventSource,
+                    counter_type: None,
+                },
+                "{phrase:?}"
+            );
+        }
+
+        let (_, typed) = parse_quantity_ref_complete("the number of +1/+1 counters it had on it")
+            .expect("typed past-tense counter count should parse completely");
+        assert_eq!(
+            typed,
+            QuantityRef::CountersOn {
+                scope: ObjectScope::EventSource,
+                counter_type: Some(crate::types::counter::CounterType::Plus1Plus1),
+            }
+        );
+    }
+
+    /// Present-tense quantities remain source-relative; past-tense support
+    /// must not steal the long-standing "counters on it" grammar.
+    #[test]
+    fn parse_quantity_ref_present_tense_counters_on_it_stays_source() {
+        let (_, qty) = parse_quantity_ref_complete("the number of charge counters on it")
+            .expect("present-tense counter count should parse completely");
+        assert_eq!(
+            qty,
+            QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(crate::types::counter::CounterType::Generic(
+                    "charge".to_string(),
+                )),
+            }
+        );
     }
 
     /// Test parse_equal_to_sum for two-way sum expressions.

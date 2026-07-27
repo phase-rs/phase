@@ -1534,6 +1534,59 @@ impl ZoneChangeRecord {
     }
 }
 
+/// The authority state of a record-owned battlefield-departure source context.
+///
+/// `Absent` preserves compatibility with context-free saved/test records;
+/// `Malformed` is a present but incoherent record and must fail closed.
+pub(crate) enum BattlefieldDepartureSourceContext<'a> {
+    Present(&'a TriggerSourceContext),
+    Absent,
+    Malformed,
+}
+
+/// CR 400.7 + CR 603.10a: Returns the authority state for a battlefield
+/// departure's record-owned source context.
+///
+/// A `ZoneChanged` event and its record are one unit of event-time authority. A
+/// later incarnation at the same `ObjectId` (or an overwritten ObjectId-keyed
+/// LKI cache entry) may not answer a question about the object that left the
+/// battlefield. Older saved/test records can lack a source context entirely,
+/// which is distinguishable from a present but malformed context: callers that
+/// retain a documented legacy cache fallback receive `Absent`, while
+/// malformed provenance receives `Malformed` and must fail closed.
+pub(crate) fn battlefield_departure_trigger_source_context(
+    event: &GameEvent,
+) -> BattlefieldDepartureSourceContext<'_> {
+    let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+        record,
+    } = event
+    else {
+        return BattlefieldDepartureSourceContext::Malformed;
+    };
+
+    if *object_id != record.object_id
+        || *from != record.from_zone
+        || *to != record.to_zone
+        || *from != Some(Zone::Battlefield)
+    {
+        return BattlefieldDepartureSourceContext::Malformed;
+    }
+
+    match record.trigger_source_context() {
+        None => BattlefieldDepartureSourceContext::Absent,
+        Some(context)
+            if context.identity.reference.object_id == *object_id
+                && context.identity.expected_zone == Zone::Battlefield =>
+        {
+            BattlefieldDepartureSourceContext::Present(context)
+        }
+        Some(_) => BattlefieldDepartureSourceContext::Malformed,
+    }
+}
+
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
 /// object leaving its current zone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
