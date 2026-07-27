@@ -388,6 +388,33 @@ fn kabira_vindicator() {
     insta::assert_json_snapshot!("kabira_vindicator_lowered", &lowered);
 }
 
+/// Leveler *body* TRIGGER, with a printed intervening-if (Plan 05b, T5a witness).
+///
+/// The two levelers above print only P/T, keyword and static lines inside their
+/// LEVEL blocks, so neither reaches the trigger arm of the LEVEL re-parse loop
+/// (`oracle.rs`, "Triggered abilities within LEVEL blocks get a HasCounters
+/// condition"). Without this fixture T5a's conversion would be
+/// snapshot-invisible.
+///
+/// Lighthouse Chronologist is chosen over the other two pool levelers with a
+/// LEVEL-block trigger (Lord of Shatterskull Pass, The Fearsome Flock) because
+/// its trigger is the only one that prints its own CR 603.4 intervening-if
+/// ("if it's not your turn"). That makes it the witness for the composing arm
+/// of the CR 711.2a/711.2b level graft — `Some(existing) => And { .. }` — and
+/// not merely the `None` arm, which is the half the flat-vs-nested shape
+/// question actually turns on.
+#[test]
+fn lighthouse_chronologist() {
+    let (ir, lowered) = parse_two_layer(
+        "Level up {U} ({U}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 4-6\n2/4\nLEVEL 7+\n3/5\nAt the beginning of each end step, if it's not your turn, take an extra turn after this one.",
+        "Lighthouse Chronologist",
+        &["Creature"],
+        &["Human", "Wizard"],
+    );
+    insta::assert_json_snapshot!("lighthouse_chronologist_ir", &ir);
+    insta::assert_json_snapshot!("lighthouse_chronologist_lowered", &lowered);
+}
+
 // ---------------------------------------------------------------------------
 // Spacecraft threshold lines (Plan 05b, T2 witness)
 // ---------------------------------------------------------------------------
@@ -410,6 +437,29 @@ fn lumen_class_frigate() {
     );
     insta::assert_json_snapshot!("lumen_class_frigate_ir", &ir);
     insta::assert_json_snapshot!("lumen_class_frigate_lowered", &lowered);
+}
+
+/// Spacecraft threshold TRIGGER line (Plan 05b, T5a witness).
+///
+/// `lumen_class_frigate` above prints two static threshold lines and reaches
+/// neither trigger arm. Entropic Battlecruiser prints `1+ | Whenever an
+/// opponent discards a card, …`, which is the threshold-trigger arm
+/// (`oracle_spacecraft.rs`), *and* an ordinary un-gated `Whenever this
+/// Spacecraft attacks` trigger below the threshold block. Carrying both on one
+/// card makes the fixture witness the CR 707.9a per-category trigger slot
+/// ordering across the preprocessor/dispatch-loop boundary as well as the
+/// threshold condition itself.
+#[test]
+fn entropic_battlecruiser() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Station (Tap another creature you control: Put charge counters equal to its power on this Spacecraft. Station only as a sorcery. It's an artifact creature at 8+.)\n1+ | Whenever an opponent discards a card, they lose 3 life.\n8+ | Flying, deathtouch\nWhenever this Spacecraft attacks, each opponent discards a card. Each opponent who can't loses 3 life.",
+        "Entropic Battlecruiser",
+        &["station"],
+        &["Artifact"],
+        &["Spacecraft"],
+    );
+    insta::assert_json_snapshot!("entropic_battlecruiser_ir", &ir);
+    insta::assert_json_snapshot!("entropic_battlecruiser_lowered", &lowered);
 }
 
 // ---------------------------------------------------------------------------
@@ -1422,6 +1472,144 @@ fn wizard_class() {
     );
     insta::assert_json_snapshot!("wizard_class_two_layer_ir", &ir);
     insta::assert_json_snapshot!("wizard_class_two_layer_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Preprocessor-assembled triggers (Plan 05b, T5b witnesses)
+// ---------------------------------------------------------------------------
+
+/// CR 714 Saga chapter triggers, including the CR 714.2c multi-numeral line.
+///
+/// The Saga preprocessor hand-builds one `TriggerDefinition` per numeral and
+/// stamps `description = "Chapter {n}"` — deliberately NOT the printed line, so
+/// this fixture is also the standing regression witness for that stamp. No
+/// other card in the two-layer corpus is a Saga, so without it T5b's Saga
+/// conversion is snapshot-invisible.
+///
+/// `I, II — …` shares one source line between two chapters; the emitted pair
+/// must keep ascending ordinals on that shared line key (CR 714.2c).
+#[test]
+fn history_of_benalia() {
+    let (ir, lowered) = parse_two_layer(
+        "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI, II — Create a 2/2 white Knight creature token with vigilance.\nIII — Knights you control get +2/+1 until end of turn.",
+        "History of Benalia",
+        &["Enchantment"],
+        &["Saga"],
+    );
+    insta::assert_json_snapshot!("history_of_benalia_ir", &ir);
+    insta::assert_json_snapshot!("history_of_benalia_lowered", &lowered);
+}
+
+/// CR 717 Attraction visit trigger.
+///
+/// The Attraction preprocessor hand-builds a `VisitAttraction` trigger and
+/// leaves `description` at `None` — the opposite of the Saga stamp, and the
+/// reason both belong in the corpus: a lowering path that overwrote
+/// `description` from the source line would corrupt Saga's value and invent one
+/// for Attraction, and only one fixture would catch each.
+///
+/// Bumper Cars is the plain `Visit — …` header form. The numbered form
+/// (`"1, 3 — …"`, which stamps `AttractionVisitRoll { min, max }`) has **no
+/// witness here because it has none in the pool**: zero Attractions in
+/// `data/card-data.json` print a numbered visit line.
+#[test]
+fn bumper_cars() {
+    let (ir, lowered) = parse_two_layer(
+        "Visit — Target creature must be blocked this turn if able.",
+        "Bumper Cars",
+        &["Artifact"],
+        &["Attraction"],
+    );
+    insta::assert_json_snapshot!("bumper_cars_ir", &ir);
+    insta::assert_json_snapshot!("bumper_cars_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// CR 701.43d exert-as-attacks, all three printed forms (Plan 05b, T5c witnesses)
+// ---------------------------------------------------------------------------
+//
+// Each of the three dispatch arms hand-builds an `Exerted` trigger whose
+// `description` is the WHOLE printed line while its `execute` is parsed from
+// the text SUFFIX after ". When you do, ". Nothing in the two-layer corpus
+// reached any of them before these fixtures, so all three T5c exert
+// conversions would have been snapshot-invisible.
+
+/// Bare-`~` form: `"You may exert this creature as it attacks."`
+#[test]
+fn ahn_crop_champion() {
+    let (ir, lowered) = parse_two_layer(
+        "You may exert this creature as it attacks. When you do, untap all other creatures you control. (An exerted creature won't untap during your next untap step.)",
+        "Ahn-Crop Champion",
+        &["Creature"],
+        &["Human", "Warrior"],
+    );
+    insta::assert_json_snapshot!("ahn_crop_champion_ir", &ir);
+    insta::assert_json_snapshot!("ahn_crop_champion_lowered", &lowered);
+}
+
+/// Card-name form with a gendered pronoun: `"You may exert Themberchaud as he
+/// attacks."` — the arm the bare-`~` tags above cannot match, because
+/// self-reference normalization rewrites the name but not `"as he attacks"`.
+///
+/// Themberchaud also prints an ordinary ETB trigger ABOVE the exert line, so
+/// this fixture additionally witnesses that converting the exert emission does
+/// not disturb the CR 707.9a printed-trigger slot of a preceding trigger.
+#[test]
+fn themberchaud() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Trample\nWhen Themberchaud enters, he deals X damage to each other creature without flying and each player, where X is the number of Mountains you control.\nYou may exert Themberchaud as he attacks. When you do, he gains flying until end of turn. (An exerted creature won't untap during your next untap step.)",
+        "Themberchaud",
+        &["trample"],
+        &["Creature"],
+        &["Dragon"],
+    );
+    insta::assert_json_snapshot!("themberchaud_ir", &ir);
+    insta::assert_json_snapshot!("themberchaud_lowered", &lowered);
+}
+
+/// Conditional form: `"If this creature hasn't been exerted this turn, …"`.
+/// Combat Celebrant is the ONLY card in the pool that reaches this arm.
+///
+/// Baselines a known pre-existing gap rather than hiding it: the leading
+/// if-gate is parsed for dispatch and then **dropped** — the emitted trigger
+/// carries no condition for it. That is recorded as a census harvest item; this
+/// fixture pins the current (wrong) shape so the conversion is provably
+/// behavior-preserving and the gap stays visible for a separate fix.
+#[test]
+fn combat_celebrant() {
+    let (ir, lowered) = parse_two_layer(
+        "If this creature hasn't been exerted this turn, you may exert it as it attacks. When you do, untap all other creatures you control and after this phase, there is an additional combat phase. (An exerted creature won't untap during your next untap step.)",
+        "Combat Celebrant",
+        &["Creature"],
+        &["Human", "Warrior"],
+    );
+    insta::assert_json_snapshot!("combat_celebrant_ir", &ir);
+    insta::assert_json_snapshot!("combat_celebrant_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Synthesized flash-cleanup-sacrifice trigger (Plan 05b, T5c witness)
+// ---------------------------------------------------------------------------
+
+/// The one recognizer in this tranche whose `execute` is **fully synthesized**:
+/// no part of the printed line is parsed into it. The line grants a casting
+/// option, and the paired trigger's body — `CreateDelayedTrigger { AtNextPhase
+/// (Cleanup) } → Sacrifice { SelfRef }` — is hand-assembled from three
+/// `tag()`s, so its shape is a pure function of the recognizer matching at all.
+///
+/// Armor of Thorns is the alphabetically-first of the pool cards printing this
+/// exact sentence; the other arms of the same class (Grave Servitude, Lightning
+/// Reflexes, Mystic Veil, …) differ only in the Aura body below it.
+#[test]
+fn armor_of_thorns() {
+    let (ir, lowered) = parse_two_layer(
+        "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.\nEnchant nonblack creature\nEnchanted creature gets +2/+2.",
+        "Armor of Thorns",
+        &["Enchantment"],
+        &["Aura"],
+    );
+    insta::assert_json_snapshot!("armor_of_thorns_ir", &ir);
+    insta::assert_json_snapshot!("armor_of_thorns_lowered", &lowered);
 }
 
 // ---------------------------------------------------------------------------
