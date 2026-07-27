@@ -415,7 +415,14 @@ pub enum DraftError {
     CardNotInPack { card_instance_id: String },
     #[error("seat {seat} has no pending pack")]
     NoPendingPack { seat: u8 },
-    #[error("deck validation failed")]
+    #[error(
+        "deck validation failed: {}",
+        errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    )]
     ValidationFailed { errors: Vec<LimitedDeckError> },
     #[error("pairing not found: {match_id}")]
     PairingNotFound { match_id: String },
@@ -715,5 +722,30 @@ mod tests {
         }"#;
         let config: DraftConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.spectator_visibility, SpectatorVisibility::Public);
+    }
+
+    #[test]
+    fn validation_failed_display_includes_per_card_errors() {
+        let err = DraftError::ValidationFailed {
+            errors: vec![
+                LimitedDeckError::ExceedsPoolCount {
+                    name: "Hell's Kitchen".to_string(),
+                    requested: 2,
+                    available: 1,
+                },
+                LimitedDeckError::NotInPool {
+                    name: "Ghost Card".to_string(),
+                },
+            ],
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("Hell's Kitchen") && message.contains("Ghost Card"),
+            "Display must name offending cards, got {message}"
+        );
+        assert!(
+            message.contains("used 2 times") || message.contains("not in the drafted pool"),
+            "Display must include reasons, got {message}"
+        );
     }
 }

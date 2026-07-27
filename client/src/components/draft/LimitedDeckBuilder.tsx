@@ -220,6 +220,8 @@ export function LimitedDeckBuilder({
 
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
 
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
 
   const remainingPool = useMemo(
@@ -361,7 +363,20 @@ export function LimitedDeckBuilder({
 
             <button
               type="button"
-              onClick={submitDeck}
+              onClick={async () => {
+                setSubmitError(null);
+                try {
+                  await submitDeck();
+                } catch (err) {
+                  const message =
+                    err instanceof Error
+                      ? err.message
+                      : typeof err === "string"
+                        ? err
+                        : String(err);
+                  setSubmitError(message);
+                }
+              }}
               disabled={!deckValid}
               className={menuButtonClass({
                 tone: "emerald",
@@ -372,6 +387,14 @@ export function LimitedDeckBuilder({
             >
               {t("limitedDeck.submitDeck")}
             </button>
+            {submitError ? (
+              <p
+                role="alert"
+                className="rounded-md border border-red-500/40 bg-red-950/40 px-2 py-1.5 text-xs text-red-200"
+              >
+                {submitError}
+              </p>
+            ) : null}
           </section>
         </div>
       </div>

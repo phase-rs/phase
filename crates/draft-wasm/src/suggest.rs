@@ -88,10 +88,17 @@ pub fn suggest_deck(
         }
     }
 
-    // `main_deck` holds the non-land spells only; `lands` carries the land
-    // distribution separately. Consumers (the deckbuilder store, `get_bot_deck`)
-    // concatenate the two — appending lands here as well would double-count them
-    // (e.g. 23 spells + 17 lands in `main_deck`, then +17 lands again = 57).
+    // `main_deck` holds drafted cards (spells + nonbasic fixing lands); `lands`
+    // carries only the always-addable basic fill. Consumers (the deckbuilder
+    // store, `get_bot_deck`) concatenate the two — never put basics into
+    // `main_deck` or they'd double-count (e.g. 23 spells + 17 lands in
+    // `main_deck`, then +17 lands again = 57).
+    //
+    // Drafted nonbasics must live in `main_deck`, not `lands`: the limited
+    // deckbuilder UI only exposes `lands` for `addable_cards` (basics), and
+    // `computeRemainingPool` only subtracts `mainDeck`. Putting duals in
+    // `lands` left them visible in the pool so players could add them again,
+    // then submit expanded both maps → ExceedsPoolCount (#6562).
     let spell_names: Vec<String> = spells.iter().map(|c| c.name.clone()).collect();
     let land_total = min_deck_size.saturating_sub(spell_names.len()) as u8;
 
@@ -109,15 +116,16 @@ pub fn suggest_deck(
     };
     let nonbasic_count: u8 = nonbasic_lands.values().copied().sum();
     let basics_total = land_total.saturating_sub(nonbasic_count);
-    let mut lands = suggest_addable_cards(&spell_names, pool, basics_total, addable_cards);
+    let lands = suggest_addable_cards(&spell_names, pool, basics_total, addable_cards);
+
+    let mut main_deck = spell_names;
     for (name, count) in nonbasic_lands {
-        *lands.entry(name).or_insert(0) += count;
+        for _ in 0..count {
+            main_deck.push(name.clone());
+        }
     }
 
-    SuggestedDeck {
-        main_deck: spell_names,
-        lands,
-    }
+    SuggestedDeck { main_deck, lands }
 }
 
 /// On-color drafted nonbasic fixing lands as a `name -> copy-count` map, capped at
@@ -480,9 +488,19 @@ mod tests {
             &DeckAddableCards::standard_basics(),
         );
         assert!(
-            deck.lands.contains_key("On Color Dual"),
-            "on-color (W/U) fixing land should be admitted to the manabase, got {:?}",
+            deck.main_deck.iter().any(|n| n == "On Color Dual"),
+            "on-color (W/U) fixing land should be admitted onto main_deck, got {:?}",
+            deck.main_deck
+        );
+        assert!(
+            !deck.lands.contains_key("On Color Dual"),
+            "drafted nonbasics must not go in lands (basics-only map), got {:?}",
             deck.lands
+        );
+        assert!(
+            !deck.main_deck.iter().any(|n| n == "Off Color Dual"),
+            "off-color (B/R) fixing land must not be admitted, got {:?}",
+            deck.main_deck
         );
         assert!(
             !deck.lands.contains_key("Off Color Dual"),
@@ -506,7 +524,8 @@ mod tests {
         assert_eq!(
             deck.main_deck.len() as u32 + land_count,
             8,
-            "spells + lands must equal min_deck_size; lands = {:?}",
+            "main_deck + basics must equal min_deck_size; main={:?} lands={:?}",
+            deck.main_deck,
             deck.lands
         );
     }
@@ -522,6 +541,7 @@ mod tests {
             8,
             &DeckAddableCards::standard_basics(),
         );
+        assert!(!deck.main_deck.iter().any(|n| n == "On Color Dual"));
         assert!(!deck.lands.contains_key("On Color Dual"));
     }
 }
