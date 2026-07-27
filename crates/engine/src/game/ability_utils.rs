@@ -1329,22 +1329,58 @@ pub fn execute_targets_satisfiable(
     source: &crate::game::game_object::GameObject,
     execute: &AbilityDefinition,
 ) -> bool {
-    // CR 113.1a: build the ability exactly as the live trigger pipeline does
-    // (`build_triggered_ability_from_context`), so a sub-ability chain's own
-    // target slots are preflighted too — not just the root effect's.
+    // CR 603.3d: build the ability the same way the live trigger pipeline does
+    // (`build_resolved_from_def`) so a sub-ability chain's own target slots are
+    // preflighted too — not just the root effect's.
     let resolved = build_resolved_from_def(execute, source.id, source.controller);
     if target_slot_specs(state, &resolved).is_empty() {
         return true; // the effect requires no target
     }
+    // CR 115.1 + CR 601.2c: preflight against the SAME cross-target constraints
+    // the live trigger carries (`PendingTrigger::target_constraints`), so a
+    // constrained multi-target execute is not judged against a broader target
+    // space than it will actually receive.
+    let constraints = execute.target_constraints.as_slice();
     // Cheap guard: `Some(false)` = a mandatory target with no legal choice;
     // `Some(true)` = legal or optional; `None` = a shape this cheap check
-    // cannot decide, which the full authority below resolves exactly.
-    if let Some(decided) = simple_legal_target_assignment_exists_for_ability(state, &resolved, &[])
+    // cannot decide (incl. any constrained set), which the full authority
+    // below resolves exactly.
+    if let Some(decided) =
+        simple_legal_target_assignment_exists_for_ability(state, &resolved, constraints)
     {
         return decided;
     }
-    build_target_slots(state, &resolved)
-        .is_ok_and(|slots| has_legal_target_assignment_for_ability(state, &resolved, &slots, &[]))
+    build_target_slots(state, &resolved).is_ok_and(|slots| {
+        has_legal_target_assignment_for_ability(state, &resolved, &slots, constraints)
+    })
+}
+
+/// True when `def`'s entire ability tree is engine-supported — no
+/// `Effect::Unimplemented` gap node at the root or in any nested sub-ability,
+/// else-branch, or mode. The live trigger builder converts a `None` execute /
+/// unsupported effect into an `Effect::Unimplemented` (`TriggerNoExecute`) no-op
+/// that produces no payoff, so payoff eligibility (both the live fireability
+/// preflight and the deck-feature classifier) must not credit such a trigger.
+/// The single shared support authority both consult.
+pub fn ability_definition_supported(def: &AbilityDefinition) -> bool {
+    if matches!(*def.effect, Effect::Unimplemented { .. }) {
+        return false;
+    }
+    if def
+        .sub_ability
+        .as_deref()
+        .is_some_and(|sub| !ability_definition_supported(sub))
+    {
+        return false;
+    }
+    if def
+        .else_ability
+        .as_deref()
+        .is_some_and(|els| !ability_definition_supported(els))
+    {
+        return false;
+    }
+    def.mode_abilities.iter().all(ability_definition_supported)
 }
 
 /// CR 115.1 + CR 701.9b: Resolve a `Random`-mode ability's target slots by

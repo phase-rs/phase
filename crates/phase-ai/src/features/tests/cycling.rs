@@ -93,6 +93,31 @@ fn detects_engine_payoff() {
     assert_eq!(f.payoff_count, 3);
 }
 
+/// A "whenever you cycle" trigger with NO execute is a `TriggerNoExecute` no-op —
+/// no value — so deck detection must not count it as an engine (else commitment
+/// is inflated for an unsupported payoff).
+#[test]
+fn payoff_without_execute_is_not_counted() {
+    let mut f = face("No-op Engine", CoreType::Enchantment);
+    f.triggers = vec![TriggerDefinition::new(TriggerMode::CycledOrDiscarded)]; // no execute
+    assert_eq!(detect(&[entry(f, 3)]).payoff_count, 0);
+}
+
+/// A "whenever you cycle" trigger whose execute is an unsupported
+/// (`Effect::Unimplemented`) gap node likewise produces no value and is not
+/// counted as an engine.
+#[test]
+fn payoff_with_unsupported_execute_is_not_counted() {
+    let mut f = face("Unsupported Engine", CoreType::Enchantment);
+    f.triggers = vec![
+        TriggerDefinition::new(TriggerMode::CycledOrDiscarded).execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("cycling_payoff_test_gap", "unsupported payoff"),
+        )),
+    ];
+    assert_eq!(detect(&[entry(f, 3)]).payoff_count, 0);
+}
+
 /// A pure "when you cycle THIS card" self-bonus is a cyclable card with upside,
 /// not a battlefield engine — it must not count as a payoff.
 #[test]

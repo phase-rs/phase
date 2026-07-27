@@ -17,7 +17,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{GameState, TargetSelectionConstraint, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::{CyclingCost, Keyword};
 use engine::types::mana::ManaCost;
@@ -697,6 +697,166 @@ fn at_class_level_engine_at_wrong_level_is_neutral() {
     };
     let (delta, reason) =
         score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "cycling_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+// ─── executable-support + constrained-target contract ───────────────────────
+
+fn creature_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::default().with_type(engine::types::ability::TypeFilter::Creature),
+    )
+}
+
+/// Adds an AI-controlled creature to the battlefield.
+fn add_ai_creature(state: &mut GameState) {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(state, card_id, AI, "Bear".to_string(), Zone::Battlefield);
+    state
+        .objects
+        .get_mut(&id)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+}
+
+/// A "whenever you cycle, exchange control of two permanents controlled by
+/// DIFFERENT players" engine — the execute carries a `DifferentObjectControllers`
+/// cross-target constraint (CR 115.1) the preflight must honor.
+fn constrained_two_target_engine(state: &mut GameState) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        AI,
+        ENGINE_NAME.to_string(),
+        Zone::Battlefield,
+    );
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ExchangeControl {
+            target_a: creature_filter(),
+            target_b: creature_filter(),
+        },
+    );
+    execute.target_constraints = vec![TargetSelectionConstraint::DifferentObjectControllers];
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.trigger_definitions
+        .push(TriggerDefinition::new(TriggerMode::CycledOrDiscarded).execute(execute));
+    id
+}
+
+/// CR 115.1 + CR 603.3d: two permanents controlled by the SAME player cannot
+/// satisfy the engine's `DifferentObjectControllers` constraint, so the trigger
+/// has no legal assignment and is not a live payoff.
+#[test]
+fn constrained_two_target_engine_same_controller_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    constrained_two_target_engine(&mut st);
+    add_ai_creature(&mut st);
+    add_ai_creature(&mut st); // both mine → different-controllers can't be met
+    let source = cycler(&mut st);
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) = score_of(CyclingPayoffPolicy.verdict(&ctx(
+        &st,
+        &candidate,
+        &decision,
+        &context(&config, session(0.9)),
+        &config,
+    )));
+    assert_eq!(reason.kind, "cycling_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// Control: one permanent per player satisfies `DifferentObjectControllers`, so
+/// the constrained engine is live and cycling is rewarded.
+#[test]
+fn constrained_two_target_engine_different_controllers_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    constrained_two_target_engine(&mut st);
+    add_ai_creature(&mut st);
+    add_opponent_creature(&mut st); // one each → constraint satisfiable
+    let source = cycler(&mut st);
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) = score_of(CyclingPayoffPolicy.verdict(&ctx(
+        &st,
+        &candidate,
+        &decision,
+        &context(&config, session(0.9)),
+        &config,
+    )));
+    assert_eq!(reason.kind, "cycling_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// A "whenever you cycle" trigger with NO execute resolves to a `TriggerNoExecute`
+/// no-op — no payoff — so it is not a live engine.
+#[test]
+fn no_execute_engine_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    permanent_with_trigger(
+        &mut st,
+        Some(TriggerDefinition::new(TriggerMode::CycledOrDiscarded)),
+    );
+    let source = cycler(&mut st);
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) = score_of(CyclingPayoffPolicy.verdict(&ctx(
+        &st,
+        &candidate,
+        &decision,
+        &context(&config, session(0.9)),
+        &config,
+    )));
+    assert_eq!(reason.kind, "cycling_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// A "whenever you cycle" trigger whose execute is an unsupported
+/// (`Effect::Unimplemented`) gap node produces no payoff, so it is not credited.
+#[test]
+fn unsupported_execute_engine_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    permanent_with_trigger(
+        &mut st,
+        Some(
+            TriggerDefinition::new(TriggerMode::CycledOrDiscarded).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("cycling_payoff_test_gap", "unsupported payoff"),
+            )),
+        ),
+    );
+    let source = cycler(&mut st);
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) = score_of(CyclingPayoffPolicy.verdict(&ctx(
+        &st,
+        &candidate,
+        &decision,
+        &context(&config, session(0.9)),
+        &config,
+    )));
     assert_eq!(reason.kind, "cycling_payoff_no_engine");
     assert_eq!(delta, 0.0);
 }
