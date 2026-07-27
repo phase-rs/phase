@@ -758,11 +758,18 @@ mod cedh_registration_tests {
     /// not asserted*; a real pin belongs in a follow-up unit authorised to touch
     /// `search.rs`.
     ///
-    /// The `"Serum Powder"` fixture name is documentary only: no registered
-    /// policy and no part of `evaluate_hand` reads card names, so apart from that
-    /// name this is structurally
-    /// `default_registry_floor_keeps_ordinary_deck_at_floor`. It is kept as the
-    /// named record of the accepted trade.
+    /// The `"Serum Powder"` fixture name is documentary only, but NOT because
+    /// policies ignore card names — five registered policies do read `obj.name`
+    /// in production (`landfall_keepables.rs:63`, `aristocrats:75`,
+    /// `plus_one_counters:75`, `spellslinger:88`, `tokens_wide:69` and `:79`).
+    /// The name is inert here for a narrower reason: `DeckFeatures` derives
+    /// `Default` and `features/` carries no manual `impl Default`, so every
+    /// `*_names: Vec<String>` is empty under `DeckFeatures::default()` and no
+    /// name comparison can match. That is a guarantee about *this fixture's
+    /// configuration*, not about the policy architecture — a test built on
+    /// non-default `DeckFeatures` would break it. Apart from the name this is
+    /// structurally `default_registry_floor_keeps_ordinary_deck_at_floor`; it is
+    /// kept as the named record of the accepted trade.
     ///
     /// The hand is landless, so on the pre-floor code `KeepablesByLandCount`
     /// returned `hand_lenient_reject` `ForceMulligan`, `keep` was false, and the
