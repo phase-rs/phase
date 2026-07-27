@@ -11,8 +11,8 @@ use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, Tac
 use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerConstraint,
-    TriggerDefinition, TypedFilter,
+    AbilityDefinition, AbilityKind, Effect, ModalChoice, QuantityExpr, TargetFilter,
+    TriggerConstraint, TriggerDefinition, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -577,6 +577,103 @@ fn multi_target_payoff_with_legal_targets_rewards() {
         score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
     assert_eq!(reason.kind, "cycling_payoff_engine_active");
     assert!(delta > 0.0);
+}
+
+/// A required-modal payoff: "whenever you cycle a card, choose one — deal 2
+/// damage to target creature; or deal 2 damage to target creature". A modal
+/// execute keeps a placeholder at its root and its real effects — and therefore
+/// its target slots — in `mode_abilities`, so the root slot walk sees no targets
+/// at all; the modal choice authority is what settles legality.
+fn modal_all_target_required_trigger() -> TriggerDefinition {
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("modal_placeholder", "choose one —"),
+    );
+    execute.modal = Some(ModalChoice {
+        min_choices: 1,
+        max_choices: 1,
+        mode_count: 2,
+        ..Default::default()
+    });
+    execute.mode_abilities = vec![damage_target_creature(), damage_target_creature()];
+    TriggerDefinition::new(TriggerMode::CycledOrDiscarded).execute(execute)
+}
+
+/// CR 603.3c: a required "choose one" payoff whose every mode needs a creature
+/// target earns nothing on a creatureless board — no mode can legally be chosen,
+/// so the live trigger is removed from the stack rather than producing a payoff
+/// (`DroppedNoLegalMode`, proven against the real dispatch in
+/// `triggers::tests::modal_trigger_all_target_required_modes_no_targets_is_dropped`).
+/// The preflight asks the same `resolve_legal_modal_choice` authority the live
+/// dispatch asks, so the two cannot disagree.
+#[test]
+fn modal_payoff_with_no_legal_mode_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    permanent_with_trigger(&mut st, Some(modal_all_target_required_trigger()));
+    let source = cycler(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) =
+        score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "cycling_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// Control for the pair above: one legal creature target makes a mode choosable,
+/// so the identical modal payoff is live and cycling is rewarded. Without this
+/// control, rejecting every modal shape outright would also pass the negative
+/// case.
+#[test]
+fn modal_payoff_with_a_legal_mode_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    permanent_with_trigger(&mut st, Some(modal_all_target_required_trigger()));
+    add_opponent_creature(&mut st);
+    let source = cycler(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) =
+        score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "cycling_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// A modal with no `mode_abilities` has nothing to stand in for its placeholder
+/// root, so the placeholder itself is what would resolve — an unsupported no-op
+/// that is not an engine, even with a legal target on the board.
+#[test]
+fn modal_payoff_without_modes_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    let mut trigger = modal_all_target_required_trigger();
+    trigger
+        .execute
+        .as_deref_mut()
+        .expect("fixture trigger must carry an execute")
+        .mode_abilities
+        .clear();
+    permanent_with_trigger(&mut st, Some(trigger));
+    add_opponent_creature(&mut st); // a legal target exists — choosable modes do not
+    let source = cycler(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) =
+        score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "cycling_payoff_no_engine");
+    assert_eq!(delta, 0.0);
 }
 
 /// A `MaxTimesPerTurn { max }` engine that has fired fewer than `max` times this

@@ -963,6 +963,61 @@ pub fn modal_choice_with_target_assignment_limit(
     Some(effective)
 }
 
+/// CR 603.3c + CR 700.2: the single authority for "can a legal set of modes be
+/// chosen for this modal ability, from this source, right now?".
+///
+/// Runs the whole choice in the order the rules announce it: the dynamic
+/// "choose up to X" cap ([`modal_choice_for_player`], CR 700.2 + CR 107.3m),
+/// the modes unavailable for non-target reasons ([`compute_unavailable_modes`],
+/// e.g. a NoRepeat constraint already spent), the per-mode target-legality
+/// filter ([`filter_modes_by_target_legality`], CR 115.1), and finally the
+/// cross-mode assignment cap ([`modal_choice_with_target_assignment_limit`]).
+///
+/// Returns the resolved [`ModalChoice`] plus the unavailable-mode indices, or
+/// `None` when no legal mode can be chosen — the case in which a triggered
+/// ability is removed from the stack instead of resolving (CR 603.3c). Both the
+/// live trigger dispatch and the hypothetical payoff preflight
+/// ([`execute_targets_satisfiable`]) call it, so an AI eligibility query can
+/// never disagree with what the runtime will actually do.
+pub fn resolve_legal_modal_choice(
+    state: &GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    modal: &ModalChoice,
+    mode_abilities: &[AbilityDefinition],
+) -> Option<(ModalChoice, Vec<usize>)> {
+    let modal_for_player = modal_choice_for_player(
+        state,
+        controller,
+        source_id,
+        modal,
+        &crate::types::ability::SpellContext::default(),
+    );
+    let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal_for_player);
+    filter_modes_by_target_legality(
+        state,
+        source_id,
+        controller,
+        mode_abilities,
+        &modal_for_player,
+        &mut unavailable_modes,
+    );
+    let modal_for_player = modal_choice_with_target_assignment_limit(
+        state,
+        source_id,
+        controller,
+        &modal_for_player,
+        mode_abilities,
+        &unavailable_modes,
+    )?;
+    // CR 603.3c: an illegal mode can't be chosen; with every mode unavailable
+    // there is no choice to announce at all.
+    if unavailable_modes.len() >= modal_for_player.mode_count {
+        return None;
+    }
+    Some((modal_for_player, unavailable_modes))
+}
+
 fn modal_indices_have_legal_target_assignment(
     state: &GameState,
     source_id: ObjectId,
@@ -1329,6 +1384,24 @@ pub fn execute_targets_satisfiable(
     source: &crate::game::game_object::GameObject,
     execute: &AbilityDefinition,
 ) -> bool {
+    // CR 603.3c: a MODAL execute carries a placeholder root and keeps its real
+    // effects — and therefore its target slots — in `mode_abilities`, which the
+    // root slot walk below does not descend. Ask the same modal-choice authority
+    // the live trigger dispatch asks: a required "choose one …" whose every mode
+    // is target-unavailable has no legal choice and is dropped, so it is not a
+    // live payoff.
+    if let Some(modal) = &execute.modal {
+        if !execute.mode_abilities.is_empty() {
+            return resolve_legal_modal_choice(
+                state,
+                source.id,
+                source.controller,
+                modal,
+                &execute.mode_abilities,
+            )
+            .is_some();
+        }
+    }
     // CR 603.3d: build the ability the same way the live trigger pipeline does
     // (`build_resolved_from_def`) so a sub-ability chain's own target slots are
     // preflighted too — not just the root effect's.
@@ -1363,7 +1436,12 @@ pub fn execute_targets_satisfiable(
 /// preflight and the deck-feature classifier) must not credit such a trigger.
 /// The single shared support authority both consult.
 pub fn ability_definition_supported(def: &AbilityDefinition) -> bool {
-    if matches!(*def.effect, Effect::Unimplemented { .. }) {
+    // CR 700.2: a modal ability carries a placeholder `Effect::Unimplemented`
+    // (`modal_placeholder`) root — its real effects live in `mode_abilities`, so
+    // the placeholder is NOT a gap. It is one again when there are no modes to
+    // stand in for it: then the placeholder itself is what would resolve.
+    let modal_placeholder = def.modal.is_some() && !def.mode_abilities.is_empty();
+    if matches!(*def.effect, Effect::Unimplemented { .. }) && !modal_placeholder {
         return false;
     }
     if def

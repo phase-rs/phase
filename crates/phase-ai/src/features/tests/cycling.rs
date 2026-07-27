@@ -3,7 +3,8 @@
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
+    AbilityDefinition, AbilityKind, Effect, ModalChoice, QuantityExpr, TargetFilter,
+    TriggerDefinition,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
@@ -48,13 +49,19 @@ fn cycled_trigger(
     if let Some(vt) = valid_target {
         t = t.valid_target(vt);
     }
-    t.execute(AbilityDefinition::new(
+    t.execute(draw_a_card())
+}
+
+/// A supported, no-target payoff effect — the simplest thing a cycle trigger can
+/// resolve to.
+fn draw_a_card() -> AbilityDefinition {
+    AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
         },
-    ))
+    )
 }
 
 /// Astral Drift shape: "whenever you cycle or discard a card, ..." — a broad,
@@ -115,6 +122,57 @@ fn payoff_with_unsupported_execute_is_not_counted() {
             Effect::unimplemented("cycling_payoff_test_gap", "unsupported payoff"),
         )),
     ];
+    assert_eq!(detect(&[entry(f, 3)]).payoff_count, 0);
+}
+
+/// A modal cycling payoff ("whenever you cycle a card, choose one — …") carries
+/// a placeholder `Effect::Unimplemented` at its execute root by construction
+/// (CR 700.2); its real effects live in `mode_abilities`. That placeholder is
+/// not a parser gap, so the deck classifier must still count the card as an
+/// engine — otherwise the unsupported-execute check would silently erase every
+/// modal payoff from the axis.
+#[test]
+fn modal_payoff_is_counted() {
+    let mut f = face("Modal Engine", CoreType::Enchantment);
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("modal_placeholder", "choose one —"),
+    );
+    execute.modal = Some(ModalChoice {
+        min_choices: 1,
+        max_choices: 1,
+        mode_count: 2,
+        ..Default::default()
+    });
+    execute.mode_abilities = vec![draw_a_card(), draw_a_card()];
+    f.triggers = vec![TriggerDefinition::new(TriggerMode::CycledOrDiscarded).execute(execute)];
+    assert_eq!(detect(&[entry(f, 3)]).payoff_count, 3);
+}
+
+/// Control: the same modal shape whose modes are themselves unsupported produces
+/// no value in any branch, so it is not an engine — the placeholder exemption
+/// covers the modal root only, never the modes underneath it.
+#[test]
+fn modal_payoff_with_unsupported_modes_is_not_counted() {
+    let mut f = face("Modal Gap Engine", CoreType::Enchantment);
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("modal_placeholder", "choose one —"),
+    );
+    execute.modal = Some(ModalChoice {
+        min_choices: 1,
+        max_choices: 1,
+        mode_count: 2,
+        ..Default::default()
+    });
+    let unsupported_mode = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("cycling_payoff_test_gap", "unsupported mode"),
+        )
+    };
+    execute.mode_abilities = vec![unsupported_mode(), unsupported_mode()];
+    f.triggers = vec![TriggerDefinition::new(TriggerMode::CycledOrDiscarded).execute(execute)];
     assert_eq!(detect(&[entry(f, 3)]).payoff_count, 0);
 }
 
