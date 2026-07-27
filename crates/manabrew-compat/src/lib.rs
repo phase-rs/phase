@@ -27,9 +27,9 @@ use engine::types::game_state::{
     ShardChoice, StackEntryKind, WaitingFor,
 };
 use engine::types::interaction::{
-    InteractionChoice, InteractionOpportunityResponse, InteractionPresentationSurface,
-    InteractionResponse, InteractionResponseSpec, InteractionSubmission, SelectionConstraint,
-    ViewerInteraction,
+    InteractionChoice, InteractionOpportunity, InteractionOpportunityResponse,
+    InteractionPresentationSurface, InteractionResponse, InteractionResponseSpec,
+    InteractionSubmission, SelectionConstraint, ViewerInteraction,
 };
 use engine::types::mana::{ManaColor as EngineManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
@@ -1562,8 +1562,8 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 82] = [
     UnsupportedCapability {
         code: "local.interaction-schema-response-unmapped",
         area: "prompts",
-        reason: "The engine projects a decision either as a finite ExactChoices list or as a schema: a response spec plus candidates. interaction_prompt() maps two of those generically — ExactChoices (a one-of list) and Select (a subset choice, whose count bounds ChooseFromSelection's min/max totals express exactly). The rest still fail closed here, because their response space is not a count over a candidate list and flattening it into one would advertise illegal answers as legal. Each needs its own family and none of those mappings are written yet: Number -> ChooseNumber, Relations -> ChooseAttackers/ChooseBlockers, AssignDamage -> ChooseCombatDamageAssignment, AssignAmounts -> ChooseCombatDamageAssignment's shape but for counters, Sequence -> Reorder (ordering is the payload, not membership), DeckPartition -> ChooseCards, Text/Shortcut/ShortcutReply -> no current family at all.",
-        suggested_protocol_extension: "None needed upstream for Number, Relations, AssignDamage, Sequence or DeckPartition — those families already exist and this is adapter work. GroupedSequence (per-group min/max), ManaGroups, and the Text/Shortcut pair are the ones whose payload no current family carries; resolve whether ChooseFromSelection should gain per-option group constraints before proposing new families.",
+        reason: "The engine projects a decision either as a finite ExactChoices list or as a schema: a response spec plus candidates. interaction_prompt() maps three of those generically — ExactChoices (a one-of list), Select (a subset choice, whose count bounds ChooseFromSelection's min/max totals express exactly), and Number (a range, which is ChooseNumber verbatim). The rest still fail closed here, because their payload is not a count over a candidate list nor a scalar, and flattening one into either would advertise illegal answers as legal. Each needs its own family and none of those mappings are written yet: Sequence -> Reorder (ordering is the payload, not membership), Relations -> ChooseAttackers/ChooseBlockers, AssignDamage -> ChooseCombatDamageAssignment, DeckPartition -> ChooseCards. AssignAmounts is a distribution of a total across candidates, which resembles ChooseCombatDamageAssignment but is not damage, so reusing that family would misname it. GroupedSequence, ManaGroups, Text, Shortcut and ShortcutReply have no current family at all.",
+        suggested_protocol_extension: "None needed upstream for Sequence, Relations, AssignDamage or DeckPartition — those families already exist and this is adapter work. GroupedSequence (per-group min/max), ManaGroups, AssignAmounts (a non-damage distribution), and the Text/Shortcut pair are the ones whose payload no current family carries; resolve whether ChooseFromSelection should gain per-option group constraints and a generic distribution shape before proposing new families.",
     },
     UnsupportedCapability {
         code: "local.interaction-aggregate-bound-unmapped",
@@ -2392,6 +2392,24 @@ fn interaction_prompt(prepared: &PreparedManabrewSnapshot) -> Result<PromptInput
             },
         );
     };
+    // A numeric range is not a choice over candidates at all, so it leaves the
+    // selection family entirely: `ChooseNumber` carries exactly this and nothing
+    // else. Handled before the candidate branches because its candidate list is
+    // empty by construction, which the emptiness guard below would reject.
+    if let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Number { min, max, .. },
+        ..
+    } = &opportunity.response
+    {
+        return Ok(PromptInput::ChooseNumber(ChooseNumberInput {
+            presentation: presentation("Choose a number"),
+            // The engine's bounds are unsigned and the wire's are signed. Every
+            // engine bound is representable, and the widening keeps the protocol
+            // free to express a negative range this engine never produces.
+            min: *min as i32,
+            max: *max as i32,
+        }));
+    }
     let (choices, min_total, max_total) = match &opportunity.response {
         // A one-of list: the engine materialized each entry as a complete answer
         // to the whole decision, so exactly one is chosen.
@@ -2460,16 +2478,7 @@ fn interaction_selection_action(
     let illegal = |kind: &'static str| AdapterError::IllegalResponseForPrompt {
         response_kind: kind,
     };
-    let filtered = filter_state_for_viewer(state, actor);
-    let view = derive_viewer_interaction(state, &filtered, actor);
-    // Mirrors `interaction_prompt`'s guard: the prompt this answers was only
-    // ever built for a lone opportunity, so anything else means the projection
-    // moved and the echoed index no longer denotes what the client was shown.
-    let [opportunity] = view.opportunities.as_slice() else {
-        return Err(illegal(
-            "selectionDecision without exactly one open interaction",
-        ));
-    };
+    let opportunity = sole_open_opportunity(state, actor)?;
     // The response variant is not interchangeable with the spec: a `Select`
     // schema submitted as `Choose` is rejected as malformed and vice versa, so
     // this must mirror whichever shape `interaction_prompt` rendered.
@@ -2516,6 +2525,59 @@ fn interaction_selection_action(
         },
     )
     .map_err(|_| illegal("selectionDecision the engine refused to materialize"))
+}
+
+/// The one interaction this viewer may answer right now, re-derived from
+/// authoritative state.
+///
+/// Shared by every generic response path. Each prompt is built for a lone
+/// opportunity — see [`interaction_prompt`] — so anything else means the
+/// projection moved and the client's answer no longer denotes what it was shown.
+fn sole_open_opportunity(state: &GameState, actor: PlayerId) -> Result<InteractionOpportunity> {
+    let filtered = filter_state_for_viewer(state, actor);
+    let mut view = derive_viewer_interaction(state, &filtered, actor);
+    if view.opportunities.len() != 1 {
+        return Err(AdapterError::IllegalResponseForPrompt {
+            response_kind: "a response without exactly one open interaction",
+        });
+    }
+    Ok(view.opportunities.remove(0))
+}
+
+/// Answer a generically-projected numeric prompt.
+///
+/// Split from the selection path because the two share no payload: this one
+/// carries a value, not indices into a candidate list. What they do share —
+/// finding the lone open opportunity, and letting the engine name the answering
+/// action — lives in [`sole_open_opportunity`] and
+/// [`resolve_interaction_response`].
+fn interaction_number_action(state: &GameState, actor: PlayerId, value: u32) -> Result<GameAction> {
+    let illegal = |kind: &'static str| AdapterError::IllegalResponseForPrompt {
+        response_kind: kind,
+    };
+    let opportunity = sole_open_opportunity(state, actor)?;
+    if !matches!(
+        opportunity.response,
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Number { .. },
+            ..
+        }
+    ) {
+        return Err(illegal(
+            "numberDecision against an interaction that is not a numeric range",
+        ));
+    }
+    // The engine range-checks the value; re-checking it here would be a second
+    // authority on the same bound, free to drift from the one that decides.
+    resolve_interaction_response(
+        state,
+        actor,
+        &InteractionSubmission {
+            interaction_id: opportunity.interaction_id,
+            response: InteractionResponse::Number { value },
+        },
+    )
+    .map_err(|_| illegal("numberDecision the engine refused to materialize"))
 }
 
 /// Label one projected choice, from the strings the engine already put on it.
@@ -2800,9 +2862,15 @@ pub fn translate_response(
                 // CR 107.3 + CR 107.1b: X is a value its controller chooses, and
                 // a negative number can never be chosen — so a declined or
                 // negative answer is not a legal X.
-                Some(value) if value >= 0 => Ok(GameAction::ChooseX {
-                    value: value as u32,
-                }),
+                Some(value) if value >= 0 => match &state.waiting_for {
+                    WaitingFor::ChooseXValue { .. } => Ok(GameAction::ChooseX {
+                        value: value as u32,
+                    }),
+                    // Every other numeric pause reaches the client through the
+                    // projection, and its answering action is the engine's to
+                    // name — `ChooseX` is specific to X, not to numbers.
+                    _ => interaction_number_action(state, context.deciding_player, value as u32),
+                },
                 _ => Err(AdapterError::IllegalResponseForPrompt {
                     response_kind: "numberDecision",
                 }),
@@ -4294,7 +4362,12 @@ fn output_family_matches_waiting(
             waiting_for,
             WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
         ),
-        PromptOutput::ChooseNumber(_) => matches!(waiting_for, WaitingFor::ChooseXValue { .. }),
+        // Like `ChooseFromSelection`, reachable both bespoke (X, CR 107.3) and
+        // generically, so the open-prompt check carries it rather than a list.
+        PromptOutput::ChooseNumber(_) => {
+            matches!(waiting_for, WaitingFor::ChooseXValue { .. })
+                || open_prompt_is_generic_number(state, viewer)
+        }
         // The one family with no fixed `WaitingFor` list, because it is now
         // reachable two ways: the two bespoke modal arms, and the generic
         // projection path that serves any state the engine renders as a finite
@@ -4337,26 +4410,38 @@ fn output_family_matches_waiting(
     }
 }
 
-/// The output's family tag, for diagnostics.
-/// Would the prompt currently open for this viewer be a `ChooseFromSelection`?
+/// Rebuild the prompt currently open for this viewer, to ask which family it is.
 ///
-/// Rebuilds it rather than re-deriving the answer, so the gate and the prompt
-/// can never disagree about which family is open. One extra prompt build per
-/// answer is proportionate: this runs once per human decision.
+/// The gate for every family the generic path can emit. Those families have no
+/// fixed `WaitingFor` list — the projection decides — and enumerating one would
+/// reintroduce exactly the per-variant bookkeeping the projection removes.
+/// Rebuilding cannot drift from the builder because it *is* the builder. One
+/// extra prompt build per answer is proportionate: this runs once per decision.
 ///
 /// The lookup yields no card text on purpose. Family selection never depends on
-/// it — the arms that need text belong to other families, and they fail with
-/// `MissingCardText`, which is not `ChooseFromSelection` and so answers `false`
-/// exactly as it should.
-fn open_prompt_is_generic_selection(state: &GameState, viewer: PlayerId) -> bool {
-    prepare_snapshot(state, viewer, "").is_ok_and(|prepared| {
-        matches!(
-            build_prompt_input(&prepared, &(|_: &GameObject| -> Option<String> { None })),
-            Ok(PromptInput::ChooseFromSelection(_))
-        )
-    })
+/// it — the arms that need text belong to other families and fail with
+/// `MissingCardText`, which is no family at all and so gates `false`, exactly as
+/// it should.
+fn open_prompt(state: &GameState, viewer: PlayerId) -> Option<PromptInput> {
+    let prepared = prepare_snapshot(state, viewer, "").ok()?;
+    build_prompt_input(&prepared, &(|_: &GameObject| -> Option<String> { None })).ok()
 }
 
+fn open_prompt_is_generic_selection(state: &GameState, viewer: PlayerId) -> bool {
+    matches!(
+        open_prompt(state, viewer),
+        Some(PromptInput::ChooseFromSelection(_))
+    )
+}
+
+fn open_prompt_is_generic_number(state: &GameState, viewer: PlayerId) -> bool {
+    matches!(
+        open_prompt(state, viewer),
+        Some(PromptInput::ChooseNumber(_))
+    )
+}
+
+/// The output's family tag, for diagnostics.
 fn output_family(output: &PromptOutput) -> &'static str {
     match output {
         PromptOutput::Mulligan(_) => "mulligan",
@@ -4862,8 +4947,8 @@ mod tests {
     use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
     use engine::types::counter::CounterType;
     use engine::types::game_state::{
-        MulliganDecisionEntry, MulliganDecisionPhase, PendingCast, PendingMulliganAction,
-        TargetSelectionProgress, TargetSelectionSlot,
+        MulliganDecisionEntry, MulliganDecisionPhase, PayableResource, PendingCast,
+        PendingMulliganAction, TargetSelectionProgress, TargetSelectionSlot,
     };
     use engine::types::identifiers::CardId;
     use engine::types::interaction::InteractionSessionId;
@@ -5878,6 +5963,60 @@ mod tests {
             matches!(action, GameAction::SelectCards { .. }),
             "a discard subset answers with SelectCards, got {action:?}"
         );
+    }
+
+    /// A `Number` schema leaves the selection family entirely.
+    ///
+    /// `PayAmountChoice` (CR 107.14 — pay any amount of `{E}`) is the only
+    /// unmapped numeric pause. It pins two things: the engine's range reaches
+    /// the client as `ChooseNumber`'s bounds, and the answer resolves to the
+    /// action the *engine* names. That second half is the point —
+    /// `GameAction::ChooseX` is specific to X (CR 107.3), so the bespoke arm
+    /// would have answered this pause with the wrong action entirely.
+    #[test]
+    fn a_number_schema_becomes_choose_number_and_resolves_to_the_engines_action() {
+        let mut state = GameState::new_two_player(7);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Energy Sink".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::PayAmountChoice {
+            player: PlayerId(0),
+            resource: PayableResource::Energy,
+            min: 0,
+            max: 3,
+            accumulated: 0,
+            source_id,
+            pending_mana_ability: None,
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("number-path".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("a Number schema is served by the projection");
+        let PromptInput::ChooseNumber(input) = prompt else {
+            panic!("a numeric range is ChooseNumber, not a selection, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min, input.max),
+            (0, 3),
+            "the engine's range must survive into the prompt"
+        );
+
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseNumber(ChooseNumberOutput::NumberDecision {
+                chosen_number: Some(2),
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("the chosen number resolves back through the engine");
+        assert_eq!(action, GameAction::SubmitPayAmount { amount: 2 });
     }
 
     /// Without a bound interaction authority the projection is empty, so the
