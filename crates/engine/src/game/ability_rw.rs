@@ -2054,6 +2054,8 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::ObjectCount { .. }
         | QuantityRef::ObjectCountDistinct { .. }
@@ -2824,7 +2826,8 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ExileHaunting { target }
         | Effect::HideawayConceal { target }
         | Effect::ChooseCard { target, .. }
-        | Effect::Transform { target }
+        // CR 701.27a: both scopes write ObjectPt on the target/population filter.
+        | Effect::Transform { target, .. }
         // CR 710.4: same single-target-slot shape as `Transform`.
         | Effect::FlipPermanent { target }
         | Effect::Shuffle { target }
@@ -2948,6 +2951,15 @@ fn legacy_effect(x: &Effect) -> bool {
             player: target,
             ..
         } => legacy_quantity_expr(count) || legacy_target_filter(target),
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => {
+            legacy_quantity_expr(count)
+                || legacy_target_filter(object)
+                || legacy_target_filter(player)
+        }
 
         // ---- `count`-only (QuantityExpr) ----
         Effect::Monstrosity { count }
@@ -2997,8 +3009,16 @@ fn legacy_effect(x: &Effect) -> bool {
                 }
         }
         Effect::ChooseCounterKind { target } => legacy_target_filter(target),
-        Effect::PutChosenCounter { target, count } => {
-            legacy_quantity_expr(count) || legacy_target_filter(target)
+        Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => {
+            legacy_quantity_expr(count)
+                || target_condition
+                    .as_ref()
+                    .is_some_and(|condition| legacy_quantity_expr(&condition.rhs))
+                || legacy_target_filter(target)
         }
         Effect::ChooseCounterAdjustment { count, .. } => legacy_quantity_expr(count),
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
@@ -3811,6 +3831,8 @@ fn walk_definition(
         description: _,
         target_prompt: _,
         activation_restrictions: _,
+        // Payment-time only; it cannot create a resolution-time dependency.
+        activation_mana_payment_restriction: _,
         activator_filter: _,
         activation_zone: _,
         ability_tag: _,
@@ -4103,23 +4125,36 @@ fn rw_effect(
             (p, None)
         }
         // CR 122 + CR 603.10a (PR-6.75 c5): inspects the distinct counter kinds on
-        // `target` (an ObjectCounters board read) and persists the pick as
-        // ChosenAttribute::Counter on the SOURCE — a per-source binding a later
-        // PutChosenCounter consumes (member-bound; mirrors Effect::Choose{persist}).
-        // No board WRITE: the placement is the separate PutChosenCounter.
-        Effect::ChooseCounterKind { target: _ } => {
-            let mut p = reads_board_of(StateKind::ObjectCounters);
+        // `target` (an ObjectCounters board read) and retains the pick as a
+        // resolution-local, per-iteration binding consumed by a later
+        // PutChosenCounter. No board WRITE: placement is the separate
+        // PutChosenCounter.
+        Effect::ChooseCounterKind { target } => {
+            let mut p = if target.is_context_ref() {
+                reads_board_of(StateKind::ObjectCounters)
+            } else {
+                board_value_aggregate_read(target, StateKind::ObjectCounters)
+            };
+            p.merge(rw_target_filter(target));
             p.reads_member_bound = true;
             (p, None)
         }
         // CR 122.1 + CR 122.6 + CR 603.10a (PR-6.75 c5): adds `count` counters of the
-        // source's persisted ChosenAttribute::Counter kind to `target`. An
-        // ObjectCounters write (like PutCounter) that CONSUMES the per-source
-        // chosen-kind binding ⇒ member-bound read.
-        Effect::PutChosenCounter { target, count } => {
+        // resolution-local counter kind to `target`. An ObjectCounters write
+        // (like PutCounter) that CONSUMES the per-iteration chosen-kind binding
+        // implies a member-bound read.
+        Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => {
             let (mut p, sc) = obj(StateKind::ObjectCounters, target);
             p.reads_member_bound = true;
             p.merge(rw_quantity_expr(count));
+            if let Some(condition) = target_condition {
+                p.merge(reads_board_of(StateKind::ObjectCounters));
+                p.merge(rw_quantity_expr(&condition.rhs));
+            }
             (p, sc)
         }
         // CR 122.1 + CR 608.2d: slot-less counter adjustment reads/writes the
@@ -4532,6 +4567,7 @@ fn rw_effect(
         Effect::ExileTop {
             player: _,
             count,
+            position: _,
             face_down: _,
         } => {
             let mut p = RwProfile::empty();
@@ -4543,6 +4579,22 @@ fn rw_effect(
                 Zone::Exile,
             );
             p.merge(rw_quantity_expr(count));
+            (p, None)
+        }
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_external.set(StateKind::HandLibrary);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            p.merge(rw_quantity_expr(count));
+            p.merge(rw_target_filter(object));
+            p.merge(rw_target_filter(player));
+            flag_legacy_write_target(&mut p, object);
+            flag_member_bound_write_target(&mut p, object);
             (p, None)
         }
         Effect::ExileFromTopUntil {
@@ -4923,7 +4975,7 @@ fn rw_effect(
             factor: _,
         } => obj(StateKind::ObjectPt, target),
         Effect::SwitchPT { target } => obj(StateKind::ObjectPt, target),
-        Effect::Transform { target } => obj(StateKind::ObjectPt, target),
+        Effect::Transform { target, .. } => obj(StateKind::ObjectPt, target),
         // CR 710.1b: flipping replaces the permanent's power and toughness
         // (along with its name, type line, and text box) — the same
         // `ObjectPt` write axis `Transform` records.
@@ -5711,6 +5763,15 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // discover resolution (never by a sibling trigger) — no ordering-relevant
         // read/write, mirroring StartingLifeTotal.
         QuantityRef::TriggeringDiscoverValue => RwProfile::empty(),
+        // CR 701.22a + CR 603.2c: reads the CURRENT trigger's preserved event
+        // (`state.current_trigger_event`, the scry's own `PlayerPerformedAction`
+        // carrying its effective look count) — a per-event dependency, NOT a
+        // global scalar. Event-live like the EventContextSourceModesChosen /
+        // TimesCostPaidThisResolution twins, and like them NOT a frozen D5
+        // carrier (the legacy-12 set is closed), so no `legacy_batch_prompt`.
+        QuantityRef::TriggeringScryLookCount | QuantityRef::TriggeringScryBottomCount => {
+            reads_event_live()
+        }
         QuantityRef::GraveyardSize { .. } => reads_zone_membership(),
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
@@ -7073,6 +7134,7 @@ mod tests {
         let docent = cond(
             ra(token(&["Creature", "Wizard"], qfix(1))).sub_ability(ra(Effect::Transform {
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             })),
             qcheck(obj_count(sub("Wizard")), 1),
         );
@@ -8133,5 +8195,33 @@ mod tests {
             ability_rw_profile(&ra(bounce(creature()))).writes_player_span,
             PlayerSpan::None
         );
+    }
+    // ---- PR #5872 blocker-2 regression: scry look count is event-live ----
+
+    /// CR 701.22a + CR 603.2c: "the number of cards looked at while scrying
+    /// this way" (Elrond, Master of Healing) resolves from the CURRENT
+    /// trigger's preserved scry event. It must classify as an event-live read
+    /// — mirroring its EventContextSourceModesChosen /
+    /// TimesCostPaidThisResolution twins, NOT the inert empty profile of a
+    /// transient global scalar — while staying OUT of the frozen D5 legacy-12
+    /// set (no `legacy_batch_prompt`, unlike `EventContextAmount`).
+    #[test]
+    fn triggering_scry_look_count_classifies_event_live() {
+        let p = rw_quantity_ref(&QuantityRef::TriggeringScryLookCount);
+        assert!(
+            p.reads_event_live,
+            "TriggeringScryLookCount reads the current trigger's live event"
+        );
+        assert!(
+            !p.legacy_batch_prompt(),
+            "not one of the 12 frozen D5 event-context tags"
+        );
+        // The whole-ability profile carries the read through the effect walk.
+        let a = ra(gain_life(qref(QuantityRef::TriggeringScryLookCount)));
+        assert!(ability_rw_profile(&a).reads_event_live);
+        // Twin parity: identical classification to the event-live group.
+        let twin = rw_quantity_ref(&QuantityRef::EventContextSourceModesChosen);
+        assert_eq!(p.reads_event_live, twin.reads_event_live);
+        assert_eq!(p.legacy_batch_prompt(), twin.legacy_batch_prompt());
     }
 }

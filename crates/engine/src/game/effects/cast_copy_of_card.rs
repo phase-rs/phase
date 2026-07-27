@@ -219,24 +219,28 @@ fn cast_one_copy(
         resolved.context.cast_from_zone = Some(origin_zone);
     }
 
-    state.stack.push_back(StackEntry {
-        id: copy_id,
-        source_id: copy_id,
-        controller: ability.controller,
-        kind: StackEntryKind::Spell {
-            card_id,
-            ability: resolved,
-            casting_variant: CastingVariant::Normal,
-            // CR 118.9 + CR 601.2f: "Without paying its mana cost" is an alternative cost.
-            // DEFERRED: the parsed `Effect::CastCopyOfCard.cost` is intentionally
-            // ignored here. Every card in this class today is a free recast, so
-            // the parser only ever emits `ManaCost::zero()`; the copy is cast for
-            // free (`actual_mana_spent: 0`). A future "cast a copy and pay {cost}"
-            // card must thread that alt-cost into this stack entry at this site.
-            actual_mana_spent: 0,
+    // CR 707.12 + CR 707.10: the copy-onto-stack authority emits `StackPushed`.
+    crate::game::stack::push_copy_to_stack(
+        state,
+        StackEntry {
+            id: copy_id,
+            source_id: copy_id,
+            controller: ability.controller,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: resolved.map(Box::new),
+                casting_variant: CastingVariant::Normal,
+                // CR 118.9 + CR 601.2f: "Without paying its mana cost" is an alternative cost.
+                // DEFERRED: the parsed `Effect::CastCopyOfCard.cost` is intentionally
+                // ignored here. Every card in this class today is a free recast, so
+                // the parser only ever emits `ManaCost::zero()`; the copy is cast for
+                // free (`actual_mana_spent: 0`). A future "cast a copy and pay {cost}"
+                // card must thread that alt-cost into this stack entry at this site.
+                actual_mana_spent: 0,
+            },
         },
-    });
-    events.push(GameEvent::StackPushed { object_id: copy_id });
+        events,
+    );
     events.push(GameEvent::SpellCast {
         card_id,
         controller: ability.controller,

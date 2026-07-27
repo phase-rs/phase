@@ -21,12 +21,12 @@ use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
     evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
     is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
-    load_and_hydrate_decks, rehydrate_game_from_card_db, resolve_deck_list,
+    load_and_hydrate_decks, max_deck_copies, rehydrate_game_from_card_db, resolve_deck_list,
     signature_spell_selection_policy, start_game, start_game_with_starting_player,
     validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
     PlayerDeckList, ReplayPlayer,
 };
-use engine::types::format::{FormatConfig, GameFormat};
+use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
 use engine::types::game_state::{PersistedGameState, TrustedGameStateEnvelope, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
@@ -59,12 +59,14 @@ struct LegalActionsResult {
     /// Engine-grouped subset of `actions` keyed by `GameAction::source_object()`.
     /// Frontend uses this for "what can I do with this card?" lookups so it
     /// doesn't have to introspect `GameAction` variants client-side.
-    legal_actions_by_object: std::collections::HashMap<ObjectId, Vec<GameAction>>,
+    legal_actions_by_object:
+        std::collections::HashMap<ObjectId, Vec<engine::game::interaction::ObjectActionPayload>>,
     /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
     /// decision has no legal action for any authorized submitter (an engine
     /// anomaly, not a rules outcome). `None` normally.
     #[serde(skip_serializing_if = "Option::is_none")]
     stuck_diagnostic: Option<engine::ai_support::StuckDecisionDiagnostic>,
+    viewer_interaction: engine::types::interaction::ViewerInteraction,
 }
 
 /// Serialize a Rust value to a JS object via JSON.
@@ -390,6 +392,30 @@ pub fn deck_copy_limit(name: &str) -> JsValue {
             return JsValue::NULL;
         };
         to_js(&deck_copy_limit_for(db, name))
+    })
+}
+
+/// CR 100.2a / CR 903.5b: How many copies of the named card a `format` deck may
+/// legally contain across main deck, sideboard, and command zone combined
+/// (CR 100.4a). Unlike `deckCopyLimit`, this is the *resolved* ceiling — it
+/// already applies the basic-land exemption, the card's printed override, and
+/// the format default, so the caller compares a count against it directly.
+///
+/// Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or
+/// `{"type":"UpTo","data":N}`); switch on `.type`. Returns `{"type":"Unlimited"}`
+/// when the card database isn't loaded, so a not-yet-hydrated frontend never
+/// blocks a legal add.
+#[wasm_bindgen(js_name = maxDeckCopies)]
+pub fn max_deck_copies_for_format(name: &str, format: JsValue) -> JsValue {
+    let Ok(format) = serde_wasm_bindgen::from_value::<GameFormat>(format) else {
+        return to_js(&DeckCopyLimit::Unlimited);
+    };
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return to_js(&DeckCopyLimit::Unlimited);
+        };
+        to_js(&max_deck_copies(db, name, format))
     })
 }
 
@@ -1187,8 +1213,15 @@ pub fn get_legal_actions_js() -> JsValue {
             auto_pass_recommended: auto_pass,
             mana_payment_shortcut_actions,
             spell_costs,
-            legal_actions_by_object,
+            legal_actions_by_object: engine::game::interaction::object_action_payloads(
+                &legal_actions_by_object,
+            ),
             stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
+            viewer_interaction: engine::game::interaction::derive_viewer_interaction(
+                state,
+                state,
+                state.active_player,
+            ),
         })
     }) {
         Ok(val) => val,
@@ -1268,12 +1301,14 @@ struct ViewerSnapshot {
     auto_pass_recommended: bool,
     mana_payment_shortcut_actions: Vec<GameAction>,
     spell_costs: std::collections::HashMap<ObjectId, ManaCost>,
-    legal_actions_by_object: std::collections::HashMap<ObjectId, Vec<GameAction>>,
+    legal_actions_by_object:
+        std::collections::HashMap<ObjectId, Vec<engine::game::interaction::ObjectActionPayload>>,
     /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
     /// decision has no legal action for any authorized submitter (an engine
     /// anomaly, not a rules outcome). `None` normally.
     #[serde(skip_serializing_if = "Option::is_none")]
     stuck_diagnostic: Option<engine::ai_support::StuckDecisionDiagnostic>,
+    viewer_interaction: engine::types::interaction::ViewerInteraction,
 }
 
 fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsResult {
@@ -1286,8 +1321,13 @@ fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> Legal
         auto_pass_recommended,
         mana_payment_shortcut_actions,
         spell_costs,
-        legal_actions_by_object,
+        legal_actions_by_object: engine::game::interaction::object_action_payloads(
+            &legal_actions_by_object,
+        ),
         stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
+        viewer_interaction: engine::game::interaction::derive_viewer_interaction(
+            state, state, viewer,
+        ),
     }
 }
 
@@ -1341,6 +1381,8 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
         let viewer = PlayerId(player_id as u8);
         let filtered = filter_state_for_viewer(state, viewer);
         let legal = legal_actions_result_for_viewer(state, viewer);
+        let viewer_interaction =
+            engine::game::interaction::derive_viewer_interaction(state, &filtered, viewer);
         to_js(&ViewerSnapshot {
             state: filtered,
             actions: legal.actions,
@@ -1349,6 +1391,7 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
             spell_costs: legal.spell_costs,
             legal_actions_by_object: legal.legal_actions_by_object,
             stuck_diagnostic: legal.stuck_diagnostic,
+            viewer_interaction,
         })
     }) {
         Ok(val) => val,
@@ -2042,7 +2085,12 @@ mod resolve_all_tests {
             controller,
             kind: StackEntryKind::ActivatedAbility {
                 source_id: object_id,
-                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    object_id,
+                    controller,
+                )),
             },
         }
     }

@@ -51,6 +51,17 @@ const p2pMocks = vi.hoisted(() => ({
   dispose: vi.fn(),
 }));
 
+const brokerMocks = vi.hoisted(() => ({
+  openBrokerClient: vi.fn(),
+  registerHost: vi.fn(async () => ({
+    gameCode: "ABCDE",
+    playerToken: "host-token",
+  })),
+  updateMetadata: vi.fn(),
+  unregister: vi.fn(async () => undefined),
+  close: vi.fn(),
+}));
+
 const socketMocks = vi.hoisted(() => ({
   send: vi.fn(),
   close: vi.fn(),
@@ -84,6 +95,10 @@ vi.mock("../../adapter/p2p-adapter", () => ({
       dispose: p2pMocks.dispose,
     };
   }),
+}));
+
+vi.mock("../../services/brokerClient", () => ({
+  openBrokerClient: brokerMocks.openBrokerClient,
 }));
 
 vi.mock("../../services/openPhaseSocket", () => ({
@@ -141,6 +156,13 @@ describe("multiplayerStore", () => {
   beforeEach(() => {
     useMultiplayerStore.getState().cancelHosting();
     vi.clearAllMocks();
+    brokerMocks.openBrokerClient.mockResolvedValue({
+      serverInfo: { mode: "LobbyOnly", protocolVersion: 14 },
+      registerHost: brokerMocks.registerHost,
+      updateMetadata: brokerMocks.updateMetadata,
+      unregister: brokerMocks.unregister,
+      close: brokerMocks.close,
+    });
     socketMocks.currentWs = null;
     localStorageItems.clear();
     clearWsSession();
@@ -438,6 +460,28 @@ describe("multiplayerStore", () => {
     expect(ok).toBe(true);
     expect(p2pMocks.applySeatMutation).not.toHaveBeenCalled();
   });
+
+  it.each([false, true])(
+    "uses the P2P host visibility setting when listing in the broker: %s",
+    async (isPublic) => {
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ public: isPublic }),
+        {
+          main_deck: ["Forest"],
+          sideboard: [],
+          commander: ["Goreclaw, Terror of Qal Sisma"],
+        },
+        { useBroker: true },
+      );
+
+      expect(ok).toBe(true);
+      expect(useMultiplayerStore.getState().hostIsPublic).toBe(isPublic);
+      expect(brokerMocks.registerHost).toHaveBeenCalledOnce();
+      expect(brokerMocks.registerHost).toHaveBeenCalledWith(
+        expect.objectContaining({ public: isPublic }),
+      );
+    },
+  );
 
   it("removes open P2P seats in order before starting with current players", async () => {
     const ok = await useMultiplayerStore.getState().startP2PHostingSession(

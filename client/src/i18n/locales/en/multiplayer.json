@@ -53,16 +53,18 @@
     "matchScore": "Match score {{p0}}-{{p1}}{{draws}}. Move cards between main and sideboard, then submit.",
     "draws_one": " ({{count}} draw)",
     "draws_other": " ({{count}} draws)",
-    "main": "Main ({{count}}/{{total}})",
+    "main": "Main ({{count}}, min {{min}})",
     "sideboard": "Sideboard ({{count}})",
+    "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Move cards from the sideboard.",
     "moveFromMain": "Move cards from the main deck.",
-    "matchesRegistered": "Main deck matches registered size ({{total}}).",
-    "submitDisabled": "Main deck is {{count}} / {{total}} — submit disabled.",
     "resetAria": "Reset to registered deck",
     "reset": "Reset",
     "submitAria": "Submit deck for next game",
-    "submitDeck": "Submit Deck"
+    "submitDeck": "Submit Deck",
+    "readyToSubmit": "Deck is legal — ready to submit.",
+    "belowMinimum": "Main deck needs at least {{min}} cards — {{count}} now.",
+    "overSideboardCap": "Sideboard holds {{count}} cards — maximum {{max}}."
   },
   "brokerOfflinePrompt": {
     "title": "Lobby server unreachable",

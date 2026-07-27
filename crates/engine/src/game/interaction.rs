@@ -6,6 +6,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
 use crate::ai_support::{
     validated_candidate_actions_for_semantic_owner, ActionMetadata, CandidateAction,
     FilterPipeline, TacticalClass,
@@ -34,21 +37,27 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::{
     ActiveInteractionSlot, AggregateComparator, AmountAssignment, ConfirmSemantics,
-    InteractionActionCode, InteractionAggregateFunction, InteractionAvailability,
-    InteractionChoice, InteractionChoiceId, InteractionChoiceStatus,
+    InteractionActionCode, InteractionActionId, InteractionAggregateFunction,
+    InteractionAvailability, InteractionChoice, InteractionChoiceId, InteractionChoiceStatus,
     InteractionDamageAssignmentMode, InteractionGroupConstraint, InteractionId,
-    InteractionIntentCode, InteractionManaColor, InteractionObjectProperty, InteractionOpportunity,
-    InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
-    InteractionPreview, InteractionPreviewRequest, InteractionPreviewStatus, InteractionProgress,
-    InteractionReasonCode, InteractionRelationConstraint, InteractionRelationSourceConstraint,
-    InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
+    InteractionIntentCode, InteractionManaAbilityActivationScope, InteractionManaColor,
+    InteractionManaComparator, InteractionManaRestriction, InteractionManaSpecialAction,
+    InteractionManaSpellCostCriterion, InteractionManaZoneSpendPolarity, InteractionObjectProperty,
+    InteractionOpportunity, InteractionOpportunityResponse, InteractionOutcomeCode,
+    InteractionPresentationSurface, InteractionPreview, InteractionPreviewRequest,
+    InteractionPreviewStatus, InteractionProgress, InteractionReasonCode,
+    InteractionRelationConstraint, InteractionRelationSourceConstraint, InteractionResponse,
+    InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
     InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPoint,
     InteractionShortcutPointKind, InteractionShortcutReply, InteractionShortcutResponseCode,
     InteractionSlotKind, InteractionSubmission, InteractionSummaryCode, InteractionWaitingForCode,
     InteractionWaitingForKind, InteractionZoneCode, SelectionConstraint, SimultaneousDecisionKind,
     ViewerInteraction, MAX_INTERACTION_LIST_LEN,
 };
-use crate::types::mana::{ManaColor, ManaCost, ManaType};
+use crate::types::mana::{
+    AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaType, SpecialAction,
+    SpellCostCriterion, ZoneSpendPolarity,
+};
 use crate::types::match_config::DeckCardCount;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -60,7 +69,7 @@ use super::engine::{
 };
 use super::game_object::RoomDoor;
 use super::merge::MergeSide;
-use super::{turn_control, visibility};
+use super::{mana_sources, turn_control, visibility};
 
 pub const MAX_INTERACTION_STRING_LEN: usize = 256;
 const MAX_INTERACTION_SESSION_ID_LEN: usize = 128;
@@ -1112,7 +1121,11 @@ struct SideboardCardProjection {
 #[derive(Debug, Clone)]
 struct SideboardProjection {
     cards: Vec<SideboardCardProjection>,
-    main_total: u32,
+    /// CR 100.2a / CR 100.4a: inclusive bounds on the main-deck total. The pool
+    /// is invariant across the partition, so the minimum deck size and the
+    /// sideboard cap both reduce to limits on this one number.
+    min_main_total: u32,
+    max_main_total: u32,
 }
 
 fn target_sequence_projection(
@@ -2087,12 +2100,23 @@ fn sideboard_projection(
             .checked_add(entry.count)
             .ok_or(InteractionReasonCode::PayloadTooLarge)?;
     }
-    let main_total = pool
-        .registered_main
-        .iter()
-        .try_fold(0u32, |total, entry| total.checked_add(entry.count));
-    let Some(main_total) = main_total else {
+    // The partition is over the whole registered pool, so the main-deck total
+    // can range up to every card the player owns for this match.
+    let pool_total = totals
+        .values()
+        .try_fold(0u32, |total, count| total.checked_add(*count));
+    let Some(max_main_total) = pool_total else {
         return Err(InteractionReasonCode::PayloadTooLarge);
+    };
+    // CR 100.2a / CR 100.4a: `handle_submit_sideboard` is the authority; take
+    // its bounds verbatim so this projection can never be stricter than what
+    // the engine will actually accept. Because the pool is invariant, the
+    // sideboard cap is equivalent to a floor on the main-deck total.
+    let (min_main_deck_size, max_sideboard_size) =
+        crate::game::match_flow::sideboard_submission_bounds(state, semantic_owner);
+    let min_main_total = match max_sideboard_size {
+        Some(max) => min_main_deck_size.max(max_main_total.saturating_sub(max)),
+        None => min_main_deck_size,
     };
     let cards = totals
         .into_iter()
@@ -2102,7 +2126,11 @@ fn sideboard_projection(
             total,
         })
         .collect();
-    Ok(Some(SideboardProjection { cards, main_total }))
+    Ok(Some(SideboardProjection {
+        cards,
+        min_main_total,
+        max_main_total,
+    }))
 }
 
 fn attack_target_ref(target: &AttackTarget) -> TargetRef {
@@ -3354,6 +3382,47 @@ fn interaction_choice_id(
     InteractionChoiceId(format!("{}.{}{}", interaction_id.0, namespace, index))
 }
 
+/// Stable, opaque identity for an exact serialized action. The interaction
+/// projection and per-object action payload both use this, so consumers never
+/// need to correlate semantic rows by array position.
+pub fn interaction_action_id(action: &GameAction) -> InteractionActionId {
+    let encoded = serde_json::to_vec(action).expect("GameAction serialization must succeed");
+    let digest = Sha256::digest(encoded);
+    InteractionActionId(format!("a{:x}", digest))
+}
+
+/// A per-object legal action with an engine-authored identity that can be
+/// joined to an [`InteractionPresentationSurface::Action`] without depending
+/// on either transport's row ordering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectActionPayload {
+    #[serde(flatten)]
+    pub action: GameAction,
+    pub interaction_action_id: InteractionActionId,
+}
+
+pub fn object_action_payloads(
+    actions: &HashMap<ObjectId, Vec<GameAction>>,
+) -> HashMap<ObjectId, Vec<ObjectActionPayload>> {
+    actions
+        .iter()
+        .map(|(object_id, object_actions)| {
+            (
+                *object_id,
+                object_actions
+                    .iter()
+                    .cloned()
+                    .map(|action| ObjectActionPayload {
+                        interaction_action_id: interaction_action_id(&action),
+                        action,
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 fn zone_code(zone: Zone) -> InteractionZoneCode {
     match zone {
         Zone::Battlefield => InteractionZoneCode::Battlefield,
@@ -3474,6 +3543,151 @@ fn mana_color_symbol(color: ManaColor) -> &'static str {
         ManaColor::Black => "B",
         ManaColor::Red => "R",
         ManaColor::Green => "G",
+    }
+}
+
+fn interaction_mana_comparator(comparator: Comparator) -> InteractionManaComparator {
+    match comparator {
+        Comparator::GT => InteractionManaComparator::GreaterThan,
+        Comparator::LT => InteractionManaComparator::LessThan,
+        Comparator::GE => InteractionManaComparator::AtLeast,
+        Comparator::LE => InteractionManaComparator::AtMost,
+        Comparator::EQ => InteractionManaComparator::Equal,
+        Comparator::NE => InteractionManaComparator::NotEqual,
+    }
+}
+
+fn interaction_mana_ability_activation_scope(
+    scope: AbilityActivationScope,
+) -> InteractionManaAbilityActivationScope {
+    match scope {
+        AbilityActivationScope::OfSpellType => InteractionManaAbilityActivationScope::OfSpellType,
+        AbilityActivationScope::Any => InteractionManaAbilityActivationScope::Any,
+    }
+}
+
+fn interaction_mana_special_action(action: SpecialAction) -> InteractionManaSpecialAction {
+    match action {
+        SpecialAction::CompanionToHand => InteractionManaSpecialAction::CompanionToHand,
+        SpecialAction::UnlockDoor => InteractionManaSpecialAction::UnlockDoor,
+        SpecialAction::Plot => InteractionManaSpecialAction::Plot,
+        SpecialAction::TurnFaceUp => InteractionManaSpecialAction::TurnFaceUp,
+        SpecialAction::RollPlanarDie => InteractionManaSpecialAction::RollPlanarDie,
+    }
+}
+
+fn interaction_mana_spell_cost_criterion(
+    criterion: &SpellCostCriterion,
+) -> InteractionManaSpellCostCriterion {
+    match criterion {
+        SpellCostCriterion::ManaValue { comparator, value } => {
+            InteractionManaSpellCostCriterion::ManaValue {
+                comparator: interaction_mana_comparator(*comparator),
+                value: *value,
+            }
+        }
+        SpellCostCriterion::HasXInCost => InteractionManaSpellCostCriterion::HasXInCost,
+    }
+}
+
+/// Uses the enum's Serde representation, which is the protocol's canonical
+/// keyword vocabulary, instead of its unstable debug representation.
+fn interaction_keyword_kind_code(keyword: crate::types::keywords::KeywordKind) -> String {
+    serde_json::to_value(keyword)
+        .expect("fieldless keyword kinds serialize")
+        .as_str()
+        .expect("fieldless keyword kinds serialize as strings")
+        .to_owned()
+}
+
+fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionManaRestriction {
+    match restriction {
+        ManaRestriction::OnlyForSpell => InteractionManaRestriction::OnlyForSpell,
+        ManaRestriction::OnlyForSpellType(spell_type) => {
+            InteractionManaRestriction::OnlyForSpellType {
+                spell_type: spell_type.clone(),
+            }
+        }
+        ManaRestriction::OnlyForCreatureType(creature_type) => {
+            InteractionManaRestriction::OnlyForCreatureType {
+                creature_type: creature_type.clone(),
+            }
+        }
+        ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type,
+            ability,
+        } => InteractionManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: spell_type.clone(),
+            ability: interaction_mana_ability_activation_scope(*ability),
+        },
+        ManaRestriction::OnlyForActivation => InteractionManaRestriction::OnlyForActivation,
+        ManaRestriction::OnlyForTaggedActivation(tag) => {
+            InteractionManaRestriction::OnlyForTaggedActivation {
+                tag: tag.keyword_str().to_string(),
+            }
+        }
+        ManaRestriction::OnlyForXCosts => InteractionManaRestriction::OnlyForXCosts,
+        ManaRestriction::OnlyForSpellWithKeywordKind(keyword) => {
+            InteractionManaRestriction::OnlyForSpellWithKeywordKind {
+                keyword: interaction_keyword_kind_code(*keyword),
+            }
+        }
+        ManaRestriction::OnlyForSpellWithKeywordKindFromZone(keyword, zone) => {
+            InteractionManaRestriction::OnlyForSpellWithKeywordKindFromZone {
+                keyword: interaction_keyword_kind_code(*keyword),
+                zone: zone_code(*zone),
+            }
+        }
+        ManaRestriction::OnlyForSpellWithManaValue { comparator, value } => {
+            InteractionManaRestriction::OnlyForSpellWithManaValue {
+                comparator: interaction_mana_comparator(*comparator),
+                value: *value,
+            }
+        }
+        ManaRestriction::OnlyForSpellMatchingCostCriteria {
+            spell_type,
+            criteria,
+        } => InteractionManaRestriction::OnlyForSpellMatchingCostCriteria {
+            spell_type: spell_type.clone(),
+            criteria: criteria
+                .iter()
+                .map(interaction_mana_spell_cost_criterion)
+                .collect(),
+        },
+        ManaRestriction::OnlyForSpellWithColorCount { comparator, count } => {
+            InteractionManaRestriction::OnlyForSpellWithColorCount {
+                comparator: interaction_mana_comparator(*comparator),
+                count: *count,
+            }
+        }
+        ManaRestriction::OnlyForSpellColor(color) => {
+            InteractionManaRestriction::OnlyForSpellColor {
+                color: mana_color_dto(*color),
+            }
+        }
+        ManaRestriction::OnlyForSpellFromZone(zone_spend) => {
+            InteractionManaRestriction::OnlyForSpellFromZone {
+                zone: zone_code(zone_spend.zone),
+                polarity: match zone_spend.polarity {
+                    ZoneSpendPolarity::From => InteractionManaZoneSpendPolarity::From,
+                    ZoneSpendPolarity::NotFrom => InteractionManaZoneSpendPolarity::NotFrom,
+                },
+            }
+        }
+        ManaRestriction::OnlyForFaceDownSpell => InteractionManaRestriction::OnlyForFaceDownSpell,
+        ManaRestriction::OnlyForAny(restrictions) => InteractionManaRestriction::OnlyForAny {
+            restrictions: restrictions
+                .iter()
+                .map(interaction_mana_restriction)
+                .collect(),
+        },
+        ManaRestriction::OnlyForSpecialAction(action) => {
+            InteractionManaRestriction::OnlyForSpecialAction {
+                action: interaction_mana_special_action(*action),
+            }
+        }
+        ManaRestriction::Impossible => InteractionManaRestriction::Impossible,
+        ManaRestriction::ConvokePayment => InteractionManaRestriction::ConvokePayment,
     }
 }
 
@@ -3793,9 +4007,37 @@ fn project_action_payload(
         GameAction::ChooseEntryAttackTarget { target } => {
             push_attack_target_surface(surfaces, state, target, InteractionRoleCode::AttackTarget)
         }
+        GameAction::TapLandForMana { selection } => {
+            let Some(player) = state
+                .objects
+                .get(&selection.source.object_id)
+                .map(|object| object.controller)
+            else {
+                return;
+            };
+            let Ok(option) =
+                mana_sources::live_land_mana_option_for_selection(state, player, selection)
+            else {
+                return;
+            };
+            for (index, unit) in mana_sources::live_mana_output_for_option(state, player, &option)
+                .into_iter()
+                .enumerate()
+            {
+                surfaces.push(InteractionPresentationSurface::Mana {
+                    role: InteractionRoleCode::ProducedMana,
+                    index: Some(index as u32),
+                    symbols: vec![mana_type_code(unit.mana_type).to_string()],
+                    restrictions: unit
+                        .restrictions
+                        .iter()
+                        .map(interaction_mana_restriction)
+                        .collect(),
+                });
+            }
+        }
         GameAction::PlayLand { .. }
         | GameAction::Foretell { .. }
-        | GameAction::TapLandForMana { .. }
         | GameAction::UntapLandForMana { .. }
         | GameAction::Transform { .. }
         | GameAction::PlayFaceDown { .. }
@@ -4173,6 +4415,7 @@ fn project_action_payload(
                 role: InteractionRoleCode::ConvokeMana,
                 index: None,
                 symbols: vec![mana_type_code(*mana_type).to_string()],
+                restrictions: Vec::new(),
             });
         }
         GameAction::HarmonizeTap { creature_id } => {
@@ -4405,6 +4648,7 @@ fn project_action_payload(
                 role: InteractionRoleCode::ManaChoice,
                 index: None,
                 symbols,
+                restrictions: Vec::new(),
             });
             push_value_surface(surfaces, InteractionRoleCode::Count, count);
         }
@@ -4416,6 +4660,7 @@ fn project_action_payload(
                     .iter()
                     .map(|mana_type| mana_type_code(*mana_type).to_string())
                     .collect(),
+                restrictions: Vec::new(),
             });
         }
         GameAction::ChooseSpecializeColor { color } => push_value_surface(
@@ -4483,6 +4728,7 @@ fn project_prompt_payload(
                         role: InteractionRoleCode::ModeCost,
                         index: None,
                         symbols: mana_cost_symbols(cost),
+                        restrictions: Vec::new(),
                     });
                 }
             }
@@ -4497,6 +4743,7 @@ fn project_prompt_payload(
                     role: InteractionRoleCode::CastingCost,
                     index: None,
                     symbols: mana_cost_symbols(&option.mana_cost),
+                    restrictions: Vec::new(),
                 });
             }
         }
@@ -4693,6 +4940,7 @@ fn action_surfaces(
         },
         InteractionPresentationSurface::Action {
             code: action_code(action),
+            action_id: Some(interaction_action_id(action)),
         },
     ];
     if let Some(source) = action.source_object() {
@@ -4877,6 +5125,7 @@ fn loop_shortcut_choices(
                             role: InteractionRoleCode::Color,
                             index: None,
                             symbols: vec![mana_color_symbol(*color).to_string()],
+                            restrictions: Vec::new(),
                         },
                     ),
                 }
@@ -5272,6 +5521,7 @@ fn mana_group_choices(
                         role: InteractionRoleCode::ManaChoice,
                         index: Some(candidate.group as u32),
                         symbols: vec![mana_type_code(mana_type).to_string()],
+                        restrictions: Vec::new(),
                     });
                 }
                 ManaGroupCandidateValue::Phyrexian { choice, color } => {
@@ -5279,6 +5529,7 @@ fn mana_group_choices(
                         role: InteractionRoleCode::PhyrexianPayment,
                         index: Some(candidate.group as u32),
                         symbols: vec![mana_color_code(color).to_string()],
+                        restrictions: Vec::new(),
                     });
                     push_value_surface(
                         &mut surfaces,
@@ -5306,6 +5557,7 @@ fn mana_group_choices(
                 },
                 InteractionPresentationSurface::Action {
                     code: InteractionActionCode::CancelCast,
+                    action_id: Some(interaction_action_id(&GameAction::CancelCast)),
                 },
             ],
             status: InteractionChoiceStatus::Available,
@@ -5357,6 +5609,7 @@ fn mode_sequence_choices(
                 },
                 InteractionPresentationSurface::Action {
                     code: InteractionActionCode::CancelCast,
+                    action_id: Some(interaction_action_id(&GameAction::CancelCast)),
                 },
             ],
             status: InteractionChoiceStatus::Available,
@@ -6341,22 +6594,27 @@ fn opportunity_for_slot(
                     interaction_id: slot.interaction_id.clone(),
                     response: InteractionOpportunityResponse::Schema {
                         spec: InteractionResponseSpec::DeckPartition {
-                            main_total: projection.main_total,
+                            min_main_total: projection.min_main_total,
+                            max_main_total: projection.max_main_total,
                             confirm: ConfirmSemantics::Explicit,
                         },
                         candidates: sideboard_choices(&slot.interaction_id, &projection),
                     },
+                    // `total` carries an *exact* required aggregate; CR 100.5
+                    // leaves the main-deck size a range, so there is none to
+                    // assert and `min`/`max` carry the whole constraint. Same
+                    // encoding the range-valued shortcut surface uses.
                     surfaces: vec![InteractionPresentationSurface::Amount {
-                        min: projection.main_total,
-                        max: projection.main_total,
-                        total: Some(projection.main_total),
+                        min: projection.min_main_total,
+                        max: projection.max_main_total,
+                        total: None,
                     }],
                     progress: InteractionProgress {
                         selected: 0,
-                        minimum: projection.main_total,
-                        maximum: Some(projection.main_total),
+                        minimum: projection.min_main_total,
+                        maximum: Some(projection.max_main_total),
                         aggregate: Some(0),
-                        confirmable: projection.main_total == 0,
+                        confirmable: projection.min_main_total == 0,
                     },
                 },
                 InteractionAvailability::InputRequired,
@@ -6940,10 +7198,18 @@ fn bound_outbound_surface(
             counter_type: value,
             ..
         } => budget.string(value)?,
-        InteractionPresentationSurface::Mana { symbols, .. } => {
+        InteractionPresentationSurface::Mana {
+            symbols,
+            restrictions,
+            ..
+        } => {
             budget.list(symbols.len())?;
             for symbol in symbols {
                 budget.string(symbol)?;
+            }
+            budget.list(restrictions.len())?;
+            for restriction in restrictions {
+                bound_outbound_mana_restriction(restriction, budget)?;
             }
         }
         InteractionPresentationSurface::Summary { .. }
@@ -6953,6 +7219,57 @@ fn bound_outbound_surface(
         | InteractionPresentationSurface::Selection { .. }
         | InteractionPresentationSurface::Amount { .. }
         | InteractionPresentationSurface::ShortcutResponse { .. } => {}
+    }
+    Ok(())
+}
+
+fn bound_outbound_mana_restriction(
+    restriction: &InteractionManaRestriction,
+    budget: &mut OutboundBudget,
+) -> Result<(), InteractionReasonCode> {
+    match restriction {
+        InteractionManaRestriction::OnlyForSpell
+        | InteractionManaRestriction::OnlyForActivation
+        | InteractionManaRestriction::OnlyForXCosts
+        | InteractionManaRestriction::OnlyForFaceDownSpell
+        | InteractionManaRestriction::Impossible
+        | InteractionManaRestriction::ConvokePayment => {}
+        InteractionManaRestriction::OnlyForSpellType { spell_type }
+        | InteractionManaRestriction::OnlyForCreatureType {
+            creature_type: spell_type,
+        }
+        | InteractionManaRestriction::OnlyForTaggedActivation { tag: spell_type }
+        | InteractionManaRestriction::OnlyForSpellWithKeywordKind {
+            keyword: spell_type,
+        } => {
+            budget.string(spell_type)?;
+        }
+        InteractionManaRestriction::OnlyForTypeSpellsOrAbilities { spell_type, .. } => {
+            budget.string(spell_type)?;
+        }
+        InteractionManaRestriction::OnlyForSpellWithKeywordKindFromZone { keyword, .. } => {
+            budget.string(keyword)?;
+        }
+        InteractionManaRestriction::OnlyForSpellMatchingCostCriteria {
+            spell_type,
+            criteria,
+        } => {
+            if let Some(spell_type) = spell_type {
+                budget.string(spell_type)?;
+            }
+            budget.list(criteria.len())?;
+        }
+        InteractionManaRestriction::OnlyForSpellWithManaValue { .. }
+        | InteractionManaRestriction::OnlyForSpellWithColorCount { .. }
+        | InteractionManaRestriction::OnlyForSpellColor { .. }
+        | InteractionManaRestriction::OnlyForSpellFromZone { .. }
+        | InteractionManaRestriction::OnlyForSpecialAction { .. } => {}
+        InteractionManaRestriction::OnlyForAny { restrictions } => {
+            budget.list(restrictions.len())?;
+            for restriction in restrictions {
+                bound_outbound_mana_restriction(restriction, budget)?;
+            }
+        }
     }
     Ok(())
 }
@@ -7783,10 +8100,16 @@ fn materialize_sideboard_response(
         }
         main_counts[index] = assignment.amount;
     }
-    let main_total = main_counts
+    // CR 100.2a / CR 100.4a / CR 100.5: the main deck must land inside the
+    // projected interval, not on an exact size — a larger main deck is legal
+    // as long as the sideboard still fits under its cap.
+    let Some(main_total) = main_counts
         .iter()
-        .try_fold(0u32, |total, count| total.checked_add(*count));
-    if main_total != Some(projection.main_total) {
+        .try_fold(0u32, |total, count| total.checked_add(*count))
+    else {
+        return Err(InteractionReasonCode::ConstraintUnsatisfied);
+    };
+    if main_total < projection.min_main_total || main_total > projection.max_main_total {
         return Err(InteractionReasonCode::ConstraintUnsatisfied);
     }
     let main = projection
@@ -7815,9 +8138,9 @@ fn materialize_sideboard_response(
         GameAction::SubmitSideboard { main, sideboard },
         InteractionProgress {
             selected: assignments.len().min(u32::MAX as usize) as u32,
-            minimum: projection.main_total,
-            maximum: Some(projection.main_total),
-            aggregate: i32::try_from(projection.main_total).ok(),
+            minimum: projection.min_main_total,
+            maximum: Some(projection.max_main_total),
+            aggregate: i32::try_from(main_total).ok(),
             confirmable: true,
         },
     ))

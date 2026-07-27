@@ -12,7 +12,7 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, CardPlayMode, CardTypeSetSource, ControllerRef,
     CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
-    PlayerScope, PtValue, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
+    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
     RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
     SharedQualityRelation, SiblingCondition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
     TargetFilter, TargetRef, ThisWayCause,
@@ -115,6 +115,7 @@ pub mod exchange_control;
 pub mod cloak;
 pub mod exchange_life;
 pub mod exchange_life_totals;
+pub mod exile_face_down_pile;
 pub mod exile_from_top_until;
 pub mod exile_top;
 pub mod exploit;
@@ -2173,7 +2174,7 @@ fn try_begin_reflexive_target_selection_inner(
             source_id,
             controller,
             condition: None,
-            ability: reflexive_clone,
+            ability: Box::new(reflexive_clone),
             timestamp: state.turn_number,
             target_constraints: reflexive.target_constraints.clone(),
             distribute: None,
@@ -2197,7 +2198,7 @@ fn try_begin_reflexive_target_selection_inner(
             trigger_events,
             events,
         );
-        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger = Some(Box::new(pending_for_state));
         state.pending_trigger_entry = Some(entry_id);
 
         match crate::game::engine::begin_pending_trigger_target_selection(state)
@@ -2260,7 +2261,7 @@ fn try_begin_reflexive_target_selection_inner(
         source_id,
         controller,
         condition: None,
-        ability: reflexive_clone,
+        ability: Box::new(reflexive_clone),
         timestamp: state.turn_number,
         target_constraints: reflexive.target_constraints.clone(),
         distribute: None,
@@ -2290,7 +2291,7 @@ fn try_begin_reflexive_target_selection_inner(
         trigger_events,
         events,
     );
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
     // CR 115.1d + CR 603.3d: the reflexive triggered ability is on the stack
     // before targets are chosen; finalization mutates this pending entry once
@@ -4049,6 +4050,7 @@ pub fn resolve_effect(
         Effect::Reveal { .. } => reveal::resolve(state, ability, events),
         Effect::RevealTop { .. } => reveal_top::resolve(state, ability, events),
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
+        Effect::ExileFaceDownPile { .. } => exile_face_down_pile::resolve(state, ability, events),
         // CR 608.2c: `TargetOnly` is the "choose <filter>" step — targeting is
         // established at selection time, so there is nothing to mutate here. But
         // inside a `player_scope` fan-out iteration ("starting with you, each
@@ -4384,47 +4386,36 @@ fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
 /// class (GainLife, DealDamage, Token, Mill, Draw, PutCounter, GrantCastingPermission, …)
 /// without enumerating variants.
 fn effect_references_tracked_set(effect: &Effect) -> bool {
-    // Quantity positions — walk every QuantityExpr field on the effect.
-    let quantity_hits_tracked = |qty: &QuantityExpr| quantity_expr_references_tracked_set(qty);
-    let has_quantity_hit = match effect {
-        Effect::DealDamage { amount, .. } => quantity_hits_tracked(amount),
-        Effect::DamageAll { amount, .. } => quantity_hits_tracked(amount),
-        Effect::DamageEachPlayer { amount, .. } => quantity_hits_tracked(amount),
-        Effect::Draw { count, .. } => quantity_hits_tracked(count),
-        Effect::Mill { count, .. } => quantity_hits_tracked(count),
-        Effect::Scry { count, .. } => quantity_hits_tracked(count),
-        Effect::ArrangePlanarDeckTop { count, keep_on_top } => {
-            quantity_hits_tracked(count) || quantity_hits_tracked(keep_on_top)
-        }
-        Effect::Dig { count, .. } => quantity_hits_tracked(count),
-        Effect::Surveil { count, .. } => quantity_hits_tracked(count),
-        Effect::GainLife { amount, .. } => quantity_hits_tracked(amount),
-        Effect::LoseLife { amount, .. } => quantity_hits_tracked(amount),
-        Effect::ChangeSpeed { amount, .. } => quantity_hits_tracked(amount),
-        Effect::PutCounter { count, .. } => quantity_hits_tracked(count),
-        Effect::PutCounterAll { count, .. } => quantity_hits_tracked(count),
-        // CR 608.2c + CR 701.21a: an `ExileTop` whose count reduces the chain
-        // tracked set is a CONSUMER of that set, so the preceding producer must
-        // publish it. Kylox, Visionary Inventor ("sacrifice any number of other
-        // creatures, then exile the top X cards of your library, where X is
-        // their total power") is exactly this shape: without this arm
-        // `next_sub_needs_tracked_set` returned false, the sacrifice never
-        // published its affected ids, and the `TrackedSetAggregate` reduced an
-        // empty set to 0 — a fully-supported-looking card that exiles nothing.
-        Effect::ExileTop { count, .. } => quantity_hits_tracked(count),
-        Effect::Incubate { count } => quantity_hits_tracked(count),
-        Effect::Token {
-            count,
-            power,
-            toughness,
-            ..
-        } => {
-            quantity_hits_tracked(count)
-                || pt_value_references_tracked_set(power)
-                || pt_value_references_tracked_set(toughness)
-        }
-        _ => false,
-    };
+    // Quantity positions — `Effect::for_each_quantity_expr` is the exhaustive
+    // authority over EVERY `QuantityExpr` an effect carries, including the
+    // secondary slots that `count_expr()` (the primary count/amount accessor)
+    // does not expose: `Token::enter_with_counters` entry-counter quantities,
+    // `Dig::keep_count_expr`, dynamic `PtValue::Quantity` power/toughness, etc.
+    //
+    // Any of those slots reducing the chain tracked set makes the effect a
+    // CONSUMER of that set, so the preceding producer must publish it.
+    // Concrete instances of this class:
+    // - CR 608.2c + CR 701.21a: Kylox, Visionary Inventor ("sacrifice any
+    //   number of other creatures, then exile the top X cards of your library,
+    //   where X is their total power") — `ExileTop::count`. Without the
+    //   consumer classification, `next_sub_needs_tracked_set` returned false,
+    //   the sacrifice never published its affected ids, and the
+    //   `TrackedSetAggregate` reduced an empty set to 0 — a fully-supported-
+    //   looking card that exiles nothing.
+    // - CR 608.2c + CR 701.9a (discard) + CR 701.21a (sacrifice): Malfegor
+    //   ("each opponent sacrifices a creature of their choice for each card
+    //   discarded this way", issue #5991) — `Sacrifice::count`. Same failure
+    //   shape: the discard never published, so `FilteredTrackedSetSize
+    //   { caused_by: Discarded }` resolved to 0 and no sacrifice happened.
+    // - CR 608.2c + CR 122.6: a token entering "with a +1/+1 counter for each
+    //   card <verbed> this way" — `Token::enter_with_counters`, a secondary
+    //   quantity slot no primary-count shortcut can see.
+    // (Same class as the `repeat_for` check in
+    // `ability_or_branch_references_tracked_set` — Seasoned Pyromancer, #740.)
+    let mut has_quantity_hit = false;
+    effect.for_each_quantity_expr(&mut |qty| {
+        has_quantity_hit |= quantity_expr_references_tracked_set(qty);
+    });
     if has_quantity_hit {
         return true;
     }
@@ -4526,13 +4517,6 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         }
     }
     false
-}
-
-fn pt_value_references_tracked_set(value: &PtValue) -> bool {
-    match value {
-        PtValue::Fixed(_) | PtValue::Variable(_) => false,
-        PtValue::Quantity(expr) => quantity_expr_references_tracked_set(expr),
-    }
 }
 
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
@@ -5543,9 +5527,19 @@ fn has_member_driven_repeat_after_hydration(state: &GameState, ability: &Resolve
 /// the prompt lets the effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
-        Effect::PutChosenCounter { .. } => {
-            choose_counter_kind::chosen_counter_kind(state).is_none()
-        }
+        Effect::PutChosenCounter {
+            target,
+            target_condition,
+            ..
+        } => choose_counter_kind::chosen_counter_kind(state).is_none_or(|chosen_kind| {
+            !put_chosen_counter::target_condition_is_satisfied(
+                state,
+                ability,
+                target,
+                &chosen_kind,
+                target_condition.as_ref(),
+            )
+        }),
         // CR 122.1: "you may remove a <kind> counter from <object>. If you do, X"
         // with zero matching counters cannot be performed — removing a counter
         // that isn't there does nothing, so the up-front prompt (and its
@@ -6448,8 +6442,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::Fight { target, .. }
         | Effect::Attach { target, .. }
         | Effect::UnattachAll { target, .. }
-        | Effect::Transform { target, .. }
-        // CR 710.4: same single-target-slot shape as `Transform`.
+        // CR 710.4: same single-target-slot shape as `Transform`'s single scope.
         | Effect::FlipPermanent { target, .. }
         | Effect::CopySpell { target, .. }
         | Effect::CastCopyOfCard { target, .. }
@@ -6504,6 +6497,15 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         // auto-resolved here (matching the legacy `TapAll`/`UntapAll`, which had
         // no event-context target at all).
         Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        } => target,
+        // CR 701.27a + CR 603.7c: only the single-scope Transform exposes an
+        // event-context target (e.g. an anaphoric trigger subject). The mass
+        // (`All`) scope's `target` is a population filter, not a per-event ref —
+        // it falls through to `None`, mirroring the SetTapState split above.
+        Effect::Transform {
             scope: EffectScope::Single,
             target,
             ..
@@ -8785,14 +8787,15 @@ fn resolve_chain_body(
     }
 
     // CR 608.2d + CR 115.10a: An untargeted `PutCounter` recipient ("any
-    // creature you control", no literal "target") is chosen while APPLYING
-    // the effect — at THIS instruction's OWN resolution, independently of any
-    // sibling instruction's own choice — not once, when the whole ability
-    // went on the stack. `target_choice_timing_for_clause` (parser) marks
-    // such clauses `Resolution`; the `ReplicatedOrBranch` propagation-skip
-    // above (via `should_propagate_parent_targets`) ensures such a node
-    // reaches here with `ability.targets` still empty rather than inheriting
-    // a parent's already-made choice. Mirrors the existing
+    // creature you control", no literal "target") or the object whose counter
+    // kind is chosen ("a kind of counter on a creature you control") is chosen
+    // while APPLYING the effect — at THIS instruction's OWN resolution,
+    // independently of any sibling instruction's own choice — not once, when
+    // the whole ability went on the stack.
+    // `target_choice_timing_for_clause` (parser) marks such clauses
+    // `Resolution`; the `ReplicatedOrBranch` propagation-skip above (via
+    // `should_propagate_parent_targets`) keeps that choice independent from a
+    // parent's already-made target. Mirrors the existing
     // `filter_chosen_player_index` 0/1/N pattern above (a single legal
     // recipient auto-binds with no prompt; zero legal recipients is a silent
     // no-op — CR 608.2d: "The player can't choose an option that's illegal or
@@ -8818,11 +8821,20 @@ fn resolve_chain_body(
     // `resolve_defined_or_targets`'s existing `resolved_object_ids_for_filter`
     // fallback in `counters.rs`; routing them through an interactive prompt
     // here would be wrong (and untested against that resolver's semantics).
+    let needs_resolution_object_choice = match &ability.effect {
+        Effect::PutCounter { .. } => ability.targets.is_empty(),
+        Effect::ChooseCounterKind { target } => {
+            !matches!(target, TargetFilter::SpecificObject { .. })
+        }
+        _ => false,
+    };
     if ability.target_choice_timing == TargetChoiceTiming::Resolution
-        && ability.targets.is_empty()
+        && needs_resolution_object_choice
         && ability.distribution.is_none()
     {
-        if let Effect::PutCounter { target, .. } = &ability.effect {
+        if let Effect::PutCounter { target, .. } | Effect::ChooseCounterKind { target } =
+            &ability.effect
+        {
             if !target.contains_source_attachment_host() {
                 let effective_filter = resolved_object_filter(ability, target);
                 let filter_ctx = filter::FilterContext::from_ability(ability);
@@ -8832,17 +8844,37 @@ fn resolve_chain_body(
                     .filter(|id| {
                         filter::matches_target_filter(state, *id, &effective_filter, &filter_ctx)
                     })
+                    .filter(|id| {
+                        !matches!(ability.effect, Effect::ChooseCounterKind { .. })
+                            || state.objects.get(id).is_some_and(|object| {
+                                object.counters.values().any(|count| *count > 0)
+                            })
+                    })
                     .collect();
                 match legal.len() {
                     0 => {}
                     1 => {
                         let mut bound = ability.clone();
-                        bound.targets = vec![TargetRef::Object(legal[0])];
+                        if let Effect::ChooseCounterKind { target } = &mut bound.effect {
+                            *target = TargetFilter::SpecificObject { id: legal[0] };
+                            if let Some(object) = state.objects.get(&legal[0]) {
+                                bound.set_effect_context_object_recursive(
+                                    crate::types::ability::CostPaidObjectSnapshot {
+                                        object_id: legal[0],
+                                        lki: object.snapshot_for_mana_spent(),
+                                    },
+                                );
+                            }
+                        } else {
+                            bound.targets = vec![TargetRef::Object(legal[0])];
+                        }
                         return resolve_ability_chain(state, &bound, events, depth);
                     }
                     _ => {
                         let mut cont = ability.clone();
-                        cont.targets.clear();
+                        if matches!(cont.effect, Effect::PutCounter { .. }) {
+                            cont.targets.clear();
+                        }
                         state.park_ability_continuation(PendingContinuation::new(
                             Box::new(cont),
                             state,
@@ -9228,7 +9260,10 @@ fn resolve_chain_body(
     // `last_zone_changed_ids`: "searched this way" keys off the player action
     // even when the search finds no card.
     for event in &events[events_before..] {
-        if let GameEvent::PlayerPerformedAction { player_id, action } = event {
+        if let GameEvent::PlayerPerformedAction {
+            player_id, action, ..
+        } = event
+        {
             state.player_actions_this_way.insert((*player_id, *action));
             state.player_actions_this_turn.push((*player_id, *action));
         }
@@ -11569,11 +11604,11 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
         CardPredicateChoice, CastingPermission, ChoiceType, ChoiceValue, Chooser, ChosenAttribute,
-        Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration,
-        EffectScope, FilterProp, ManaSpendPermission, ObjectProperty, PermissionGrantee,
-        PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, SpellContext,
-        StaticDefinition, TapStateChange, TargetFilter, TargetRef, TargetSelectionMode, TypeFilter,
-        TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+        ChosenCounterCountCondition, Comparator, ContinuousModification, ControllerRef,
+        DelayedTriggerCondition, Duration, EffectScope, FilterProp, ManaSpendPermission,
+        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        QuantityRef, SpellContext, StaticDefinition, TapStateChange, TargetFilter, TargetRef,
+        TargetSelectionMode, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -12323,6 +12358,72 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 122.6: a token with FIXED count and FIXED P/T whose
+    /// `enter_with_counters` quantity is `TrackedSetSize` is still a tracked-set
+    /// CONSUMER — the entry-counter slot is a secondary quantity position that
+    /// the primary `count_expr()` accessor does not expose. This is the exact
+    /// matcher-boundary gap from the #5991 review: with the shortcut
+    /// classification, the preceding producer never published its set and the
+    /// token entered with zero counters.
+    ///
+    /// Revert discriminator: replacing the `for_each_quantity_expr` walk in
+    /// `effect_references_tracked_set` with a `count`/`power`/`toughness`-only
+    /// inspection makes this assertion fail.
+    #[test]
+    fn token_tracked_entry_counter_marks_ability_as_referencing_tracked_set() {
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Zombie".to_string(),
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
+                types: vec!["Creature".to_string(), "Zombie".to_string()],
+                colors: vec![ManaColor::Black],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![(
+                    crate::types::counter::CounterType::Plus1Plus1,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize,
+                    },
+                )],
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        assert!(
+            ability_or_branch_references_tracked_set(&ability),
+            "a TrackedSetSize entry-counter quantity must publish the chain tracked set"
+        );
+    }
+
+    /// CR 608.2c: a continuation that exiles a face-down pile must receive the
+    /// preceding instruction's tracked set when its top-library count is dynamic.
+    /// `ExileFaceDownPile::count` is carried by the exhaustive quantity visitor,
+    /// rather than by a one-off predicate arm.
+    #[test]
+    fn exile_face_down_pile_tracked_count_marks_effect_as_referencing_tracked_set() {
+        let effect = Effect::ExileFaceDownPile {
+            object: TargetFilter::SelfRef,
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+        };
+
+        assert!(
+            effect_references_tracked_set(&effect),
+            "a tracked face-down-pile count must make the continuation consume the chain tracked set"
+        );
+    }
+
     /// CR 118.1 + CR 603.12a: the repeated-optional-payment driver pays each
     /// iteration in line and reads the failure flag immediately, so it must admit
     /// ONLY a pure, static mana `PayCost` (Hawkeye's `{1}`). A PayCost whose cost
@@ -12980,6 +13081,8 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: crate::types::events::PlayerActionKind::SearchedLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         });
         let ability = ResolvedAbility::new(
             Effect::Draw {
@@ -14064,6 +14167,7 @@ mod tests {
             Effect::ExileTop {
                 count: QuantityExpr::Fixed { value: 2 },
                 player: TargetFilter::Controller,
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             },
             vec![],
@@ -19222,6 +19326,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             },
             vec![],
@@ -19306,6 +19411,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             },
             vec![],
@@ -22570,6 +22676,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             },
             vec![],
@@ -25729,6 +25836,84 @@ mod tests {
                 "a valid typed cast from {zone:?} must remain offerable"
             );
         }
+    }
+
+    /// CR 608.2d + CR 122.1: An optional chosen-counter placement is infeasible
+    /// when its typed target predicate is false, and becomes feasible when the
+    /// same target state makes the predicate true. The legacy condition-free
+    /// form remains offerable.
+    #[test]
+    fn optional_put_chosen_counter_respects_target_condition() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Counter Target".to_string(),
+            Zone::Battlefield,
+        );
+        state.chosen_counter_kind_this_resolution = Some(CounterType::Stun);
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::PutChosenCounter {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                target_condition: Some(ChosenCounterCountCondition {
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                }),
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        assert!(
+            optional_effect_is_infeasible(&state, &ability),
+            "an existing chosen-kind counter makes the EQ-zero option impossible"
+        );
+
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .counters
+            .remove(&CounterType::Stun);
+        assert!(
+            !optional_effect_is_infeasible(&state, &ability),
+            "an absent chosen-kind counter satisfies the EQ-zero predicate"
+        );
+
+        let Effect::PutChosenCounter {
+            target_condition, ..
+        } = &mut ability.effect
+        else {
+            unreachable!("test constructs PutChosenCounter");
+        };
+        *target_condition = None;
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+        assert!(
+            !optional_effect_is_infeasible(&state, &ability),
+            "the existing condition-free additional-counter behavior stays offerable"
+        );
     }
 
     /// CR 608.2d: an exact missing parent cannot become actionable through the

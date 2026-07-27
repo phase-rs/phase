@@ -113,6 +113,8 @@ pub fn apply_resolved_library_shuffle(
     events.push(GameEvent::PlayerPerformedAction {
         player_id: command.player,
         action: PlayerActionKind::ShuffledLibrary,
+        look_count: None,
+        scry_bottom_count: None,
     });
     Ok(())
 }
@@ -172,6 +174,8 @@ mod tests {
             vec![GameEvent::PlayerPerformedAction {
                 player_id: PlayerId(0),
                 action: PlayerActionKind::ShuffledLibrary,
+                look_count: None,
+                scry_bottom_count: None,
             }]
         );
     }

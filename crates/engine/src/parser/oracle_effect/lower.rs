@@ -1632,6 +1632,19 @@ pub(super) fn change_zone_selects_battlefield_permanent(
 }
 
 pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
+    if let Effect::ChooseCounterKind { target } = &clause_ir.parsed.effect {
+        let lower = clause_ir
+            .source
+            .fragment()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        // CR 115.1 + CR 608.2d: "choose a counter on a permanent you
+        // control" is an untargeted choice made while the ability resolves.
+        // Context references are already bound and need no selection slot.
+        if !nom_primitives::scan_contains(&lower, "target ") && !target.is_context_ref() {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
     if let Effect::PutCounter { target, .. } = &clause_ir.parsed.effect {
         let lower = clause_ir
             .source
@@ -8612,6 +8625,9 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     if let Some(expr) = parse_where_x_kicker_count(expression) {
         return Some(expr);
     }
+    if let Some(expr) = parse_where_x_scry_look_count(expression) {
+        return Some(expr);
+    }
     if let Some(expr) = parse_where_x_exiled_card_power(expression_lower.as_str()) {
         return Some(expr);
     }
@@ -8836,6 +8852,20 @@ fn parse_where_x_kicker_count(where_x_expression: &str) -> Option<QuantityExpr> 
     rest.is_empty().then_some(QuantityExpr::Ref {
         qty: QuantityRef::KickerCount,
     })
+}
+
+/// CR 701.22a: "where X is the number of cards looked at while scrying this
+/// way" (Elrond, Master of Healing) binds X to the effective (post-clamp)
+/// look count of the scry that fired the enclosing "whenever you scry"
+/// trigger — `QuantityRef::TriggeringScryLookCount`, resolved per-trigger
+/// from that trigger's own preserved scry event. Delegates to the composed
+/// grammar in `oracle_nom::quantity` (shared with the general quantity-ref
+/// channel); the where-X binder additionally requires the phrase to own the
+/// entire expression.
+fn parse_where_x_scry_look_count(where_x_expression: &str) -> Option<QuantityExpr> {
+    let lower = where_x_expression.to_ascii_lowercase();
+    let (rest, qty) = nom_quantity::parse_scry_look_count_ref(lower.as_str()).ok()?;
+    rest.is_empty().then_some(QuantityExpr::Ref { qty })
 }
 
 /// CR 107.3c: A "where X is …" clause DEFINES the value of X in the ability's

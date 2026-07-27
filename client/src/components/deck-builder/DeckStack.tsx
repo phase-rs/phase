@@ -20,6 +20,9 @@ interface DeckStackProps {
   commanders: string[];
   cardDataCache: Map<string, ScryfallCard>;
   onAddCard: (name: string) => void;
+  /** CR 100.2a: engine-resolved copy-limit predicate — disables the `+` on a
+   *  card already at its ceiling for this format. */
+  canAddCard: (name: string) => boolean;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
@@ -427,6 +430,7 @@ export function DeckStack({
   commanders,
   cardDataCache,
   onAddCard,
+  canAddCard,
   onRemoveCard,
   onMoveCard,
   onRemoveCommander,
@@ -446,9 +450,11 @@ export function DeckStack({
     sections.commander.length > 0
     || sections.main.length > 0
     || sections.sideboard.length > 0;
-  const canAddCard = useMemo(
-    () => (item: DeckStackItem) => item.section === "main",
-    [],
+  // CR 100.2a: only main-deck lanes carry a `+`, and only up to the card's
+  // engine-resolved copy ceiling for this format.
+  const canAddStackCard = useCallback(
+    (item: DeckStackItem) => item.section === "main" && canAddCard(item.name),
+    [canAddCard],
   );
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
@@ -529,7 +535,7 @@ export function DeckStack({
                 emptyLabel={t("stack.noCommander")}
                 isMaybeboard={isMaybeboard}
                 onAddCard={onAddCard}
-                canAddCard={canAddCard}
+                canAddCard={canAddStackCard}
                 onRemoveCard={onRemoveCard}
                 onMoveCard={onMoveCard}
                 onRemoveCommander={onRemoveCommander}
@@ -552,7 +558,7 @@ export function DeckStack({
               extraGroups={sideboardGroups}
               isMaybeboard={isMaybeboard}
               onAddCard={onAddCard}
-              canAddCard={canAddCard}
+              canAddCard={canAddStackCard}
               onRemoveCard={onRemoveCard}
               onMoveCard={onMoveCard}
               onRemoveCommander={onRemoveCommander}

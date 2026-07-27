@@ -279,6 +279,24 @@ export async function deckCopyLimit(name: string): Promise<DeckCopyLimit | null>
 }
 
 /**
+ * CR 100.2a / CR 903.5b: How many copies of a card a deck in `format` may hold
+ * across main deck, sideboard, and command zone combined (CR 100.4a).
+ *
+ * Unlike `deckCopyLimit` (which reports only a card's printed override), this
+ * is the resolved ceiling — the engine has already applied the basic-land
+ * exemption, the printed override, and the format default. Compare a combined
+ * count against it directly; never re-derive four-of / singleton client-side.
+ */
+export async function maxDeckCopies(
+  name: string,
+  format: GameFormat,
+): Promise<DeckCopyLimit> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.maxDeckCopies(name, format) as DeckCopyLimit;
+}
+
+/**
  * CR 100.4a: Per-format sideboard policy as a discriminated union.
  *
  * `Forbidden` and `Unlimited` are unit variants and do not carry a `data`

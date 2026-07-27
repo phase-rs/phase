@@ -1253,6 +1253,23 @@ pub enum GameEvent {
     PlayerPerformedAction {
         player_id: PlayerId,
         action: PlayerActionKind,
+        /// CR 701.22a: For `PlayerActionKind::Scry`, the effective number of
+        /// cards looked at — the requested amount clamped to library size.
+        /// This is the PER-EVENT provenance for "the number of cards looked
+        /// at while scrying this way" (Elrond, Master of Healing →
+        /// `QuantityRef::TriggeringScryLookCount`): each queued "whenever you
+        /// scry" trigger preserves its own event through target selection and
+        /// stack resolution (`PendingTriggerContext`), so two scries with
+        /// different look counts in one resolution keep distinct values —
+        /// a global scalar could be overwritten before the queued triggers
+        /// are constructed. `None` for actions without a magnitude.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        look_count: Option<u32>,
+        /// CR 701.22a + CR 701.22d: Number of cards put on the bottom as the
+        /// completed scry's controller chose. `Some(0)` distinguishes a
+        /// completed nonzero scry that left every looked-at card on top.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scry_bottom_count: Option<u32>,
     },
     /// Engine-authored diagnostic for top-card predicate
     /// guesses. This is intentionally a log/debug event rather than rules input:
@@ -1573,6 +1590,29 @@ pub enum GameEvent {
         host: PlayerId,
         player_id: PlayerId,
     },
+}
+
+/// CR 603.2 + CR 702.59a: True when an off-zone trigger source was already
+/// functioning in `zone` when `event` occurred — i.e. it did not co-depart into
+/// that zone as the triggering object moved there. Shared by off-zone trigger
+/// collection and SelfRef co-departure mis-latch gating (CR 400.7e).
+pub(crate) fn source_was_not_co_departed_into_zone(
+    event: &GameEvent,
+    source_id: ObjectId,
+    zone: Zone,
+) -> bool {
+    match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            to,
+            record,
+            ..
+        } if *to == zone => {
+            (*object_id != source_id || record.from_zone != Some(Zone::Battlefield))
+                && !record.co_departed.contains(&source_id)
+        }
+        _ => true,
+    }
 }
 
 #[cfg(test)]

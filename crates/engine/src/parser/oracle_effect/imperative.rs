@@ -3116,6 +3116,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
         } => Effect::ExileTop {
             player,
             count,
+            position: LibraryPosition::Top,
             face_down,
         },
         SearchCreationImperativeAst::CopyTokenOf {
@@ -3737,9 +3738,9 @@ pub(super) fn parse_choose_ast(
 
         // CR 608.2d + CR 122.1: "choose a counter on it / that permanent" —
         // pick one of the distinct counter kinds on the anaphoric object
-        // (The Caves of Androzani II/III). Anaphoric form only; the declared-
-        // target form ("a counter on target permanent", Ichormoon Gauntlet)
-        // is handled by the target parser below.
+        // (The Caves of Androzani II/III), or on an untargeted typed domain
+        // (Aven Courier). Declared-target forms remain owned by the target
+        // parser below.
         if let Some(ast) = try_parse_choose_counter_kind(rest_lower) {
             return Some(ast);
         }
@@ -3841,30 +3842,51 @@ fn try_parse_choose_damage_source(rest: &str) -> Option<ChooseImperativeAst> {
     Some(ChooseImperativeAst::DamageSource { source_filter })
 }
 
-/// CR 608.2d + CR 122.1: "a counter on <anaphor>" — the counter-kind choice
-/// head for the anaphoric form (`it` / `that permanent` / `that creature` →
-/// `ParentTarget`, The Caves of Androzani II/III). Combinator-based: `tag("a
-/// counter on ")` then the anaphor phrase, consuming the entire residual.
+/// CR 608.2d + CR 122.1: "a [kind of] counter on <domain>" — the counter-kind
+/// choice head. An anaphor (`it` / `that permanent` / `that creature`) binds
+/// to `ParentTarget` (The Caves of Androzani); a typed untargeted domain uses
+/// the shared target parser (Aven Courier / Contractual Safeguard).
 ///
 /// The declared-target form ("a counter on target permanent", Ichormoon
-/// Gauntlet) is intentionally excluded: its consumer ("put one more counter of
-/// that kind on that permanent or remove one of those counters from it") is not
-/// yet implemented, so parsing only the head would create a partial and
-/// rules-incorrect parse. Left as an honest Unimplemented gap.
+/// Gauntlet / Clockspinning) is intentionally excluded so the declared target
+/// remains owned by the existing target-designation path rather than being
+/// misclassified as a resolution-time source population.
 fn try_parse_choose_counter_kind(rest_lower: &str) -> Option<ChooseImperativeAst> {
-    let anaphor = |i| -> OracleResult<'_, ()> {
-        let (i, _) = tag("a counter on ").parse(i)?;
-        let (i, _) = alt((tag("it"), tag("that permanent"), tag("that creature"))).parse(i)?;
-        let (i, _) = opt(tag(".")).parse(i)?;
-        let (i, _) = eof.parse(i)?;
-        Ok((i, ()))
-    };
-    if anaphor(rest_lower.trim()).is_ok() {
+    let (domain, _) = alt((
+        tag::<_, _, OracleError<'_>>("a kind of counter on "),
+        tag("a counter on "),
+    ))
+    .parse(rest_lower.trim())
+    .ok()?;
+    if nom_target::parse_declared_target_prefix(domain).is_ok() {
+        return None;
+    }
+
+    if all_consuming(terminated(
+        alt((
+            tag::<_, _, OracleError<'_>>("it"),
+            tag("that permanent"),
+            tag("that creature"),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(domain)
+    .is_ok()
+    {
         return Some(ChooseImperativeAst::CounterKind {
             target: TargetFilter::ParentTarget,
         });
     }
-    None
+
+    let (target, remainder) = parse_target(domain);
+    if matches!(target, TargetFilter::Any)
+        || all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+            .parse(remainder.trim_start())
+            .is_err()
+    {
+        return None;
+    }
+    Some(ChooseImperativeAst::CounterKind { target })
 }
 
 /// CR 108.3 + CR 701.38d: Detect "a <type> owned by the voter" and emit
@@ -5295,6 +5317,7 @@ pub(super) fn parse_utility_imperative_ast(
     ) {
         return Some(UtilityImperativeAst::Transform {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         });
     }
     if matches!(
@@ -5309,7 +5332,53 @@ pub(super) fn parse_utility_imperative_ast(
         // bare object pronoun family per `is_bare_object_pronoun`.
         return Some(UtilityImperativeAst::Transform {
             target: resolve_pronoun_target(ctx, "it"),
+            scope: EffectScope::Single,
         });
+    }
+    // CR 701.27 + CR 115.10 / CR 115.10a: "transform/convert all|each ..." is a
+    // NON-targeting mass instruction (Moonmist: "Transform all Humans"). It must
+    // be matched BEFORE the single "transform <target>" branch below, because
+    // `parse_target_with_ctx("all Humans")` yields the same `Typed` population
+    // filter and the single branch would otherwise mis-emit it as a targeted
+    // (scope Single) transform, forcing a one-target prompt. `peek` leaves the
+    // "all|each ..." text intact so `parse_target_with_ctx` parses the full
+    // population filter.
+    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
+        value(
+            (),
+            preceded(
+                alt((tag("transform "), tag("convert "))),
+                peek(alt((tag("all "), tag("each ")))),
+            ),
+        )
+        .parse(input)
+    }) {
+        let (target, remainder) = parse_target_with_ctx(rest, ctx);
+        if !matches!(target, TargetFilter::Any) {
+            // CR 712.2 (DFC front/back face): the population phrase may carry a
+            // trailing face-state restriction ("... on their front face" — That's
+            // No Moonmist: "Transform all artifacts and Phyrexian creatures on
+            // their front face.") that `parse_target_with_ctx` does NOT model as a
+            // typed predicate, leaving it in `remainder`. Emitting `scope: All`
+            // here would silently drop that restriction and transform matching
+            // back-face permanents that CR 712.2 leaves untouched. Only a
+            // fully-consumed population phrase (remainder empty after trimming
+            // whitespace and a trailing period — Moonmist's "all Humans", where
+            // the Human typing already implies front face) is an honest mass
+            // transform; when a rules-bearing suffix survives, strict-fail by
+            // returning `None` so the caller surfaces `Effect::unimplemented`
+            // (coverage-honest) instead of falling through to the single
+            // "transform <target>" branch below, which would mis-emit a targeted
+            // `scope: Single` transform that also drops the suffix.
+            let suffix = remainder.trim().trim_end_matches('.').trim();
+            if suffix.is_empty() {
+                return Some(UtilityImperativeAst::Transform {
+                    target,
+                    scope: EffectScope::All,
+                });
+            }
+            return None;
+        }
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
         value((), alt((tag("transform "), tag("convert ")))).parse(input)
@@ -5319,7 +5388,10 @@ pub(super) fn parse_utility_imperative_ast(
         // same trigger-subject machinery.
         let (target, _) = parse_target_with_ctx(rest, ctx);
         if !matches!(target, TargetFilter::Any) {
-            return Some(UtilityImperativeAst::Transform { target });
+            return Some(UtilityImperativeAst::Transform {
+                target,
+                scope: EffectScope::Single,
+            });
         }
     }
     // CR 710.4: the Kamigawa flip-card instruction. See
@@ -5748,7 +5820,7 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             additional_modifications: Vec::new(),
             starting_loyalty_from_casualty_sacrifice: false,
         },
-        UtilityImperativeAst::Transform { target } => Effect::Transform { target },
+        UtilityImperativeAst::Transform { target, scope } => Effect::Transform { target, scope },
         // CR 710.4: Kamigawa flip cards.
         UtilityImperativeAst::FlipPermanent { target } => Effect::FlipPermanent { target },
         UtilityImperativeAst::Attach {
@@ -7993,11 +8065,94 @@ fn parse_dynamic_exile_from_top<'a>(
     None
 }
 
+/// Parse the two library edges that a positional exile instruction currently
+/// supports. Keeping the edge separate from its surrounding sentence lets a
+/// caller preserve `LibraryPosition` rather than degrading a bottom instruction
+/// into a library-wide card selection.
+fn parse_exile_library_edge(input: &str) -> OracleResult<'_, LibraryPosition> {
+    alt((
+        value(LibraryPosition::Top, tag::<_, _, OracleError<'_>>("top")),
+        value(LibraryPosition::Bottom, tag("bottom")),
+    ))
+    .parse(input)
+}
+
+/// The owner axis of the completed-scry exile form. It is intentionally a
+/// parser of the possessive library phrase rather than part of a sentence-sized
+/// literal, so other positional library instructions can reuse it.
+fn parse_controller_library_owner(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(
+        TargetFilter::Controller,
+        (tag::<_, _, OracleError<'_>>("your"), space1, tag("library")),
+    )
+    .parse(input)
+}
+
+/// CR 701.13a + CR 401.2: Parse "exile that many cards from the <edge> of
+/// <owner>'s library" as independent quantity, edge, and owner grammar axes.
+/// The caller supplies the quantity provenance because "that many" is only
+/// meaningful within a typed triggering-event context.
+fn parse_exile_that_many_from_library_edge(
+    input: &str,
+) -> OracleResult<'_, (LibraryPosition, TargetFilter)> {
+    let (input, _) = (
+        tag::<_, _, OracleError<'_>>("exile"),
+        space1,
+        tag("that"),
+        space1,
+        tag("many"),
+        space1,
+        tag("cards"),
+        space1,
+        tag("from"),
+        space1,
+        tag("the"),
+        space1,
+    )
+        .parse(input)?;
+    let (input, position) = parse_exile_library_edge(input)?;
+    let (input, _) = (space1, tag("of"), space1).parse(input)?;
+    let (input, player) = parse_controller_library_owner(input)?;
+    Ok((input, (position, player)))
+}
+
 pub(super) fn parse_exile_ast(
     text: &str,
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ZoneCounterImperativeAst> {
+    // CR 701.13a + CR 401.2: A completed-scry trigger provides the only
+    // supported provenance for this "that many" library-edge form. Do not
+    // borrow generic EventContextAmount here: a textually similar clause in an
+    // unrelated trigger has no completed-scry bottom-count to read.
+    let mut positional_that_many = all_consuming(terminated(
+        parse_exile_that_many_from_library_edge,
+        opt(one_of(".;")),
+    ));
+    if let Ok((_, (position, player))) = positional_that_many.parse(lower) {
+        if matches!(
+            &ctx.quantity_ref,
+            Some(QuantityRef::TriggeringScryBottomCount)
+        ) {
+            return Some(ZoneCounterImperativeAst::ExileTop {
+                player,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TriggeringScryBottomCount,
+                },
+                position,
+                face_down: false,
+            });
+        }
+        // Preserve the pre-existing dynamic top-of-library path below, which
+        // supplies `EventContextAmount` for its supported trigger forms. A
+        // bottom-edge form has no such generic provenance, so decline instead
+        // of letting the broad `exile` fallback turn it into a library-wide
+        // `ChangeZone` instruction.
+        if matches!(position, LibraryPosition::Bottom) {
+            return None;
+        }
+    }
+
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exile the top ").parse(lower) {
         let (initial_count, remainder) =
             if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest) {
@@ -8039,6 +8194,7 @@ pub(super) fn parse_exile_ast(
             return Some(ZoneCounterImperativeAst::ExileTop {
                 player,
                 count,
+                position: LibraryPosition::Top,
                 face_down,
             });
         }
@@ -8086,6 +8242,7 @@ pub(super) fn parse_exile_ast(
                 return Some(ZoneCounterImperativeAst::ExileTop {
                     player: TargetFilter::Controller,
                     count,
+                    position: LibraryPosition::Top,
                     face_down,
                 });
             }
@@ -8179,6 +8336,7 @@ pub(super) fn parse_exile_ast(
         return Some(ZoneCounterImperativeAst::ExileTop {
             player: TargetFilter::Controller,
             count,
+            position: LibraryPosition::Top,
             face_down,
         });
     }
@@ -8211,6 +8369,7 @@ pub(super) fn parse_exile_ast(
         return Some(ZoneCounterImperativeAst::ExileTop {
             player,
             count,
+            position: LibraryPosition::Top,
             face_down,
         });
     }
@@ -12331,10 +12490,17 @@ pub(super) fn parse_zone_counter_ast(
         if let Some(after_put) =
             nom_on_lower(text, lower, |i| value((), tag("put ")).parse(i)).map(|((), rest)| rest)
         {
-            if let Some(Effect::PutChosenCounter { target, count }) =
-                super::counter::try_parse_put_chosen_counter(&after_put.to_ascii_lowercase())
+            if let Some(Effect::PutChosenCounter {
+                target,
+                count,
+                target_condition,
+            }) = super::counter::try_parse_put_chosen_counter(&after_put.to_ascii_lowercase())
             {
-                return Some(ZoneCounterImperativeAst::PutChosenCounter { target, count });
+                return Some(ZoneCounterImperativeAst::PutChosenCounter {
+                    target,
+                    count,
+                    target_condition,
+                });
             }
         }
         // Try move-counters first ("put its counters on ...")
@@ -12545,10 +12711,12 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
         ZoneCounterImperativeAst::ExileTop {
             player,
             count,
+            position,
             face_down,
         } => Effect::ExileTop {
             player,
             count,
+            position,
             face_down,
         },
         ZoneCounterImperativeAst::Counter {
@@ -12593,9 +12761,15 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             target,
         },
         // CR 122.1 + CR 122.6: "put an additional counter of that kind on <anaphor>".
-        ZoneCounterImperativeAst::PutChosenCounter { target, count } => {
-            Effect::PutChosenCounter { target, count }
-        }
+        ZoneCounterImperativeAst::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        },
         // CR 122.1: PutCounterList is always intercepted upstream in
         // `lower_imperative_family_ast` because it lowers to a sub_ability
         // chain that a bare Effect can't express. If execution reaches here
@@ -13256,6 +13430,86 @@ mod tests {
                         }
                     ))
         )));
+    }
+
+    /// CR 608.2d + CR 122.1: Aven Courier's untargeted source domain lowers to
+    /// `ChooseCounterKind` over permanents the controller controls.
+    #[test]
+    fn try_parse_choose_counter_kind_accepts_typed_untargeted_domain() {
+        for (input, expected_type) in [
+            (
+                "a counter on a permanent you control.",
+                TypeFilter::Permanent,
+            ),
+            (
+                "a kind of counter on a creature you control.",
+                TypeFilter::Creature,
+            ),
+        ] {
+            let ast = try_parse_choose_counter_kind(input)
+                .expect("typed untargeted counter domain must parse");
+            let ChooseImperativeAst::CounterKind {
+                target: TargetFilter::Typed(filter),
+            } = ast
+            else {
+                panic!("expected typed CounterKind domain, got {ast:?}");
+            };
+            assert_eq!(filter.type_filters, vec![expected_type]);
+            assert_eq!(filter.controller, Some(ControllerRef::You));
+        }
+    }
+
+    /// CR 115.1 + CR 608.2d: Literal-target siblings remain owned by the
+    /// stack-target designation path (Clockspinning / Ichormoon Gauntlet), not
+    /// the untargeted chosen-counter population parser.
+    #[test]
+    fn try_parse_choose_counter_kind_rejects_declared_target_prefixes() {
+        for input in [
+            "a counter on target permanent.",
+            "a counter on another target permanent.",
+            "a counter on other target permanent.",
+            "a kind of counter on target creature.",
+        ] {
+            let (domain, _) = alt((
+                tag::<_, _, OracleError<'_>>("a kind of counter on "),
+                tag("a counter on "),
+            ))
+            .parse(input)
+            .expect("test input has the chooser prefix");
+            let (target, remainder) = parse_target(domain);
+            assert!(
+                !matches!(target, TargetFilter::Any) && remainder == ".",
+                "positive reach guard: declared target syntax must remain parseable: {input}"
+            );
+            assert!(
+                try_parse_choose_counter_kind(input).is_none(),
+                "declared target must not become a resolution population: {input}"
+            );
+        }
+
+        assert!(
+            try_parse_choose_counter_kind("a counter on target permanent or suspended card.")
+                .is_none(),
+            "Clockspinning literal target must stay in TargetOnly parsing"
+        );
+    }
+
+    /// CR 608.2d + CR 122.1: Every supported definite anaphor binds the
+    /// counter-kind choice to the preceding instruction's object.
+    #[test]
+    fn try_parse_choose_counter_kind_preserves_anaphoric_family() {
+        for input in [
+            "a counter on it.",
+            "a counter on that permanent.",
+            "a counter on that creature.",
+        ] {
+            assert!(matches!(
+                try_parse_choose_counter_kind(input),
+                Some(ChooseImperativeAst::CounterKind {
+                    target: TargetFilter::ParentTarget,
+                })
+            ));
+        }
     }
 
     fn has_type(tf: &TypedFilter, ty: TypeFilter) -> bool {
@@ -14011,7 +14265,7 @@ mod tests {
             "convert itself",
         ] {
             let result = parse_utility_imperative_ast(input, input, &mut ParseContext::default());
-            let Some(UtilityImperativeAst::Transform { target }) = result else {
+            let Some(UtilityImperativeAst::Transform { target, .. }) = result else {
                 panic!("{input}: expected Transform, got {result:?}");
             };
             assert!(
@@ -14019,6 +14273,69 @@ mod tests {
                 "{input}: expected ParentTarget, got {target:?}"
             );
         }
+    }
+
+    /// CR 701.27 + CR 115.10 / CR 115.10a (issue #6403, Moonmist): "transform all
+    /// Humans" / "convert each creature" is a NON-targeting mass transform ⇒
+    /// `scope: All` with a `Typed` population filter. This is the parser half of
+    /// the bug fix — reverting the mass branch makes these lower to a single
+    /// targeted `scope: Single` transform (the reported one-target-prompt bug),
+    /// flipping the `scope` assertion.
+    #[test]
+    fn parse_transform_all_is_mass_scope() {
+        for input in ["transform all Humans", "convert each creature"] {
+            let result = parse_utility_imperative_ast(input, input, &mut ParseContext::default());
+            let Some(UtilityImperativeAst::Transform { target, scope }) = result else {
+                panic!("{input}: expected Transform, got {result:?}");
+            };
+            assert_eq!(
+                scope,
+                EffectScope::All,
+                "{input}: 'all/each' must be a mass (non-targeting) transform"
+            );
+            assert!(
+                matches!(target, TargetFilter::Typed(_)),
+                "{input}: mass transform target must be a Typed population filter, got {target:?}"
+            );
+        }
+    }
+
+    /// CR 712.2 (issue #6403, That's No Moonmist): a mass "transform all ..."
+    /// whose population phrase carries a face-state restriction the target parser
+    /// cannot model ("... on their front face") must NOT be silently marked
+    /// supported. `parse_target_with_ctx` consumes "all artifacts and Phyrexian
+    /// creatures" and leaves " on their front face" unparsed; the mass branch
+    /// strict-fails (returns `None`) so the line surfaces as
+    /// `Effect::unimplemented` rather than dropping the suffix. Critically it must
+    /// NOT fall through to the single "transform <target>" branch, which would
+    /// emit a targeted `scope: Single` transform that also loses the restriction.
+    #[test]
+    fn parse_transform_all_with_unparsed_face_suffix_is_unsupported() {
+        let input = "transform all artifacts and Phyrexian creatures on their front face.";
+        let result = parse_utility_imperative_ast(input, input, &mut ParseContext::default());
+        assert!(
+            result.is_none(),
+            "{input}: a mass transform with an unparsed face-state restriction must \
+             strict-fail (None ⇒ Effect::unimplemented), not silently drop the \
+             'on their front face' suffix; got {result:?}"
+        );
+    }
+
+    /// Control (issue #6403): the single targeted transform must NOT regress to
+    /// mass. "transform target creature" stays `scope: Single` with a real
+    /// targetable filter, preserving the single-target path/prompt.
+    #[test]
+    fn parse_transform_target_is_single_scope() {
+        let input = "transform target creature";
+        let result = parse_utility_imperative_ast(input, input, &mut ParseContext::default());
+        let Some(UtilityImperativeAst::Transform { scope, .. }) = result else {
+            panic!("{input}: expected Transform, got {result:?}");
+        };
+        assert_eq!(
+            scope,
+            EffectScope::Single,
+            "{input}: 'target creature' must stay a single targeted transform"
+        );
     }
 
     #[test]
@@ -19788,6 +20105,7 @@ mod tests {
                 ZoneCounterImperativeAst::ExileTop {
                     player: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 1 },
+                    position: LibraryPosition::Top,
                     face_down: false,
                 }
             ),
@@ -19806,6 +20124,7 @@ mod tests {
                 ZoneCounterImperativeAst::ExileTop {
                     player: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 2 },
+                    position: LibraryPosition::Top,
                     face_down: false,
                 }
             ),
@@ -19820,10 +20139,51 @@ mod tests {
                 ZoneCounterImperativeAst::ExileTop {
                     player: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 1 },
+                    position: LibraryPosition::Top,
                     face_down: false,
                 }
             ),
             "expected ExileTop(Controller, 1) at EOF, got {eof:?}"
+        );
+    }
+
+    /// CR 701.22a + CR 701.13a: The completed-scry bottom-count provenance
+    /// binds "that many" to the scry choice, while the grammar retains the
+    /// named bottom edge as `LibraryPosition::Bottom`.
+    #[test]
+    fn completed_scry_bottom_exile_uses_typed_quantity_and_position() {
+        let mut ctx = ParseContext {
+            quantity_ref: Some(QuantityRef::TriggeringScryBottomCount),
+            in_trigger: true,
+            ..Default::default()
+        };
+        let parsed = parse_exile_ast(
+            "exile that many cards from the bottom of your library.",
+            "exile that many cards from the bottom of your library.",
+            &mut ctx,
+        )
+        .expect("completed-scry bottom exile should parse");
+        assert!(matches!(
+            parsed,
+            ZoneCounterImperativeAst::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TriggeringScryBottomCount,
+                },
+                position: LibraryPosition::Bottom,
+                face_down: false,
+            }
+        ));
+
+        let mut unrelated_ctx = ParseContext::default();
+        assert!(
+            parse_exile_ast(
+                "exile that many cards from the bottom of your library.",
+                "exile that many cards from the bottom of your library.",
+                &mut unrelated_ctx,
+            )
+            .is_none(),
+            "an unrelated trigger must decline instead of fabricating a generic library exile"
         );
     }
 

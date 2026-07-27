@@ -590,7 +590,7 @@ fn exile_return_after_destroy_resolution_via_apply() {
         source_id: spell_obj,
         controller: PlayerId(1),
         kind: crate::types::game_state::StackEntryKind::Spell {
-            ability: Some(destroy_ability),
+            ability: Some(Box::new(destroy_ability)),
             card_id: CardId(99),
             casting_variant: crate::types::game_state::CastingVariant::Normal,
             actual_mana_spent: 0,
@@ -1352,12 +1352,12 @@ fn exile_return_combines_normal_and_delayed_triggers_in_one_ordering_prompt() {
         condition: DelayedTriggerCondition::WhenEntersBattlefield {
             filter: TargetFilter::Any,
         },
-        ability: ResolvedAbility::new(
+        ability: Box::new(ResolvedAbility::new(
             *gain_life_definition("Delayed watcher gains 1 life").effect,
             vec![],
             delayed_source,
             PlayerId(0),
-        ),
+        )),
         controller: PlayerId(0),
         source_id: delayed_source,
         one_shot: true,

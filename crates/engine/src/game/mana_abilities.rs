@@ -332,16 +332,12 @@ pub(super) fn resolve_mana_ability_excluding(
     parent: Option<&ManaAbilityCostParent>,
 ) -> Result<(), EngineError> {
     let waiting_before = state.waiting_for.clone();
-    let ability_index = state
-        .objects
-        .get(&source_id)
-        .and_then(|object| {
-            object
-                .abilities
-                .iter()
-                .position(|ability| ability == ability_def)
-        })
-        .unwrap_or(usize::MAX);
+    let ability_index = state.objects.get(&source_id).and_then(|object| {
+        object
+            .abilities
+            .iter()
+            .position(|ability| ability == ability_def)
+    });
     let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
     let pending = PendingManaAbility {
         player,
@@ -549,7 +545,7 @@ fn resolved_mana_ability_for_current_state(
     apply_condition_instead_mana_swap(state, &resolved)
 }
 
-fn apply_condition_instead_mana_swap(
+pub(crate) fn apply_condition_instead_mana_swap(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> ResolvedAbility {
@@ -662,7 +658,7 @@ pub fn activate_mana_ability(
         PendingManaAbility {
             player,
             source_id,
-            ability_index,
+            ability_index: Some(ability_index),
             rules_execution_node,
             ability_snapshot: Some(ability_def.clone()),
             color_override,
@@ -686,10 +682,13 @@ pub fn activate_mana_ability(
 fn complete_mana_ability_activation(
     state: &mut GameState,
     source_id: ObjectId,
-    ability_index: usize,
+    ability_index: Option<usize>,
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
+    let Some(ability_index) = ability_index else {
+        return;
+    };
     super::restrictions::record_ability_activation(state, source_id, ability_index);
     super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,
@@ -924,7 +923,11 @@ pub fn handle_choose_mana_color(
     let ability_def = state
         .objects
         .get(&pending.source_id)
-        .and_then(|obj| obj.abilities.get(pending.ability_index))
+        .and_then(|obj| {
+            pending
+                .ability_index
+                .and_then(|index| obj.abilities.get(index))
+        })
         .cloned()
         .or_else(|| pending.ability_snapshot.clone())
         .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
@@ -990,14 +993,7 @@ pub(crate) fn batch_activate_mana_siblings(
     // The originally-activated source's mana ability is the shape every sibling
     // was selected to match. Re-resolve each sibling's matching ability index
     // (a sibling may carry unrelated abilities too).
-    let reference_def = state
-        .objects
-        .get(&pending.source_id)
-        .and_then(|obj| obj.abilities.get(pending.ability_index))
-        .cloned()
-        .ok_or_else(|| {
-            EngineError::InvalidAction("Mana ability source no longer exists".to_string())
-        })?;
+    let reference_def = mana_ability_definition(state, pending)?;
 
     for &sibling_id in pending.batch_siblings.iter().take(extra) {
         let Some((index, def)) = state.objects.get(&sibling_id).and_then(|obj| {
@@ -1350,7 +1346,7 @@ fn mana_ability_ready_without_simulation_gated(
     // currently payable. is_payable_for_mana_ability's Mana arm uses auto_tap with
     // require_current_payability=false, so it does not recurse here.
     if let Some(cost) = &ability_def.cost {
-        if !cost.is_payable_for_mana_ability(state, player, source_id) {
+        if !cost.is_payable_for_mana_ability(state, player, source_id, ability_index) {
             return false;
         }
     }
@@ -1658,13 +1654,12 @@ pub(super) fn advance_mana_ability_activation(
     // 117.1d / CR 118.2).
     if pending.chosen_mana_payment.is_none() {
         if let Some(sub_cost) = mana_sub_cost_of(&ability_def.cost) {
-            let (source_types, source_subtypes) =
-                super::casting::activation_source_types(state, pending.source_id);
-            let activation_ctx = PaymentContext::Activation {
-                source_types: &source_types,
-                source_subtypes: &source_subtypes,
-                ability_tag: None,
-            };
+            let activation_context = super::casting::activation_payment_context(
+                state,
+                pending.source_id,
+                pending.ability_index,
+            );
+            let activation_ctx = activation_context.as_payment_context();
             let pool = &state.players[pending.player.0 as usize].mana_pool;
             let plans = enumerate_hybrid_payment_plans(pool, sub_cost, &activation_ctx);
             match plans.len() {
@@ -1674,6 +1669,7 @@ pub(super) fn advance_mana_ability_activation(
                         state,
                         pending.player,
                         pending.source_id,
+                        pending.ability_index,
                         sub_cost,
                         &excluded_sources,
                     )
@@ -1733,7 +1729,11 @@ fn mana_ability_definition(
     state
         .objects
         .get(&pending.source_id)
-        .and_then(|obj| obj.abilities.get(pending.ability_index))
+        .and_then(|obj| {
+            pending
+                .ability_index
+                .and_then(|index| obj.abilities.get(index))
+        })
         .cloned()
         .or_else(|| pending.ability_snapshot.clone())
         .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))
@@ -2208,7 +2208,7 @@ fn pay_mana_ability_cost_component(
                 pending.player,
                 pending.source_id,
                 cost,
-                None,
+                pending.ability_index,
                 events,
             )? {
                 super::costs::PaymentOutcome::Paid => Ok(ManaAbilityPaymentProgress::Complete),
@@ -2289,6 +2289,7 @@ fn pay_mana_ability_cost_component(
                 state,
                 pending.source_id,
                 pending.player,
+                pending.ability_index,
                 &Some(cost.clone()),
                 events,
                 &mut tappers,
@@ -2690,6 +2691,7 @@ fn pay_mana_ability_cost_with_choices<I, J, L>(
     state: &mut GameState,
     source_id: ObjectId,
     player: PlayerId,
+    ability_index: Option<usize>,
     cost: &Option<AbilityCost>,
     events: &mut Vec<GameEvent>,
     chosen_tappers: &mut I,
@@ -2722,6 +2724,7 @@ where
                 state,
                 source_id,
                 player,
+                ability_index,
                 cost,
                 chosen_hybrid_payment,
                 events,
@@ -2893,7 +2896,12 @@ where
             };
             if matches!(
                 super::costs::pay_ability_cost_for_activation(
-                    state, player, source_id, &cost, None, events,
+                    state,
+                    player,
+                    source_id,
+                    &cost,
+                    ability_index,
+                    events,
                 )?,
                 super::costs::PaymentOutcome::Paused { .. }
             ) {
@@ -2908,7 +2916,12 @@ where
         Some(c) if is_self_contained_mana_subcost(c) => {
             if matches!(
                 super::costs::pay_ability_cost_for_activation(
-                    state, player, source_id, c, None, events,
+                    state,
+                    player,
+                    source_id,
+                    c,
+                    ability_index,
+                    events,
                 )?,
                 super::costs::PaymentOutcome::Paused { .. }
             ) {
@@ -3332,6 +3345,7 @@ fn pay_mana_sub_cost(
     state: &mut GameState,
     source_id: ObjectId,
     player: PlayerId,
+    ability_index: Option<usize>,
     cost: &ManaCost,
     hybrid_plan: Option<&[ManaType]>,
     events: &mut Vec<GameEvent>,
@@ -3352,15 +3366,12 @@ fn pay_mana_sub_cost(
         // chain, or a self-loop terminate instead of recursing infinitely.
         let mut excluded_sources = excluded_sources.clone();
         excluded_sources.insert(source_id);
-        // CR 605.1a: A mana ability never carries a power-up tag (power-up
-        // abilities can't produce mana), so the tag-scoped activation context is
-        // `None` here — Quinjet's {R}{R} must not pay another mana ability's cost.
         return super::casting::pay_ability_mana_cost_excluding_with_parent(
             state,
             player,
             source_id,
+            ability_index,
             cost,
-            None,
             events,
             &excluded_sources,
             sub_cost_demand,
@@ -3374,14 +3385,9 @@ fn pay_mana_sub_cost(
     // pool's restriction-blind `pay_cost`. Without this, activation-only
     // mana (e.g. Heart of Ramos) would silently pay through for the {R} half
     // of a hypothetical "{R}: Add {G}{G}" mana ability.
-    let (source_types, source_subtypes) = super::casting::activation_source_types(state, source_id);
-    // CR 605.1a: Mana abilities never carry a power-up tag, so `ability_tag` is
-    // `None` for the mana-ability sub-cost activation context.
-    let ctx = PaymentContext::Activation {
-        source_types: &source_types,
-        source_subtypes: &source_subtypes,
-        ability_tag: None,
-    };
+    let activation_context =
+        super::casting::activation_payment_context(state, source_id, ability_index);
+    let ctx = activation_context.as_payment_context();
     state.restamp_pool_pip_ids(player);
     let spent = select_cost_with_plan(
         &state.players[player.0 as usize].mana_pool,
@@ -4625,6 +4631,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4645,6 +4652,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4664,6 +4672,7 @@ mod tests {
             source_types: &non_elemental_types,
             source_subtypes: &non_elemental_subtypes,
             ability_tag: None,
+            mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Unrestricted,
         };
         let mut pool_clone2 = pool.clone();
         assert!(
@@ -4678,6 +4687,7 @@ mod tests {
             source_types: &non_elemental_types,
             source_subtypes: &elemental_subtypes,
             ability_tag: None,
+            mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Unrestricted,
         };
         assert!(
             pool_clone2
@@ -7492,7 +7502,7 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: source,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
@@ -7595,7 +7605,7 @@ mod tests {
             player: PlayerId(0),
             source_id: source,
             ability_snapshot: None,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
@@ -7805,7 +7815,7 @@ mod tests {
             let pending = PendingManaAbility {
                 player: PlayerId(0),
                 source_id: source,
-                ability_index: 0,
+                ability_index: Some(0),
                 rules_execution_node: None,
                 ability_snapshot: None,
                 color_override: None,
@@ -8038,7 +8048,7 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: ruins,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
@@ -8144,7 +8154,7 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: ruins,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
@@ -9158,7 +9168,7 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: ruins,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
@@ -9530,7 +9540,7 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(1),
             source_id: brushland,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
@@ -10095,7 +10105,7 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: source,
-            ability_index: 0,
+            ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
@@ -10168,7 +10178,7 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: altar,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
@@ -10296,7 +10306,7 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: chain,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
@@ -10362,7 +10372,7 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: chain,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
@@ -10519,7 +10529,7 @@ mod tests {
         let pending = PendingManaAbility {
             player: PlayerId(0),
             source_id: chain,
-            ability_index: 0,
+            ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),

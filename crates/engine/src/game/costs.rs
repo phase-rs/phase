@@ -201,11 +201,10 @@ fn find_eligible_tap_creatures_targets(
 pub(crate) enum PaymentScope<'a> {
     Activation {
         excluded_sources: &'a HashSet<ObjectId>,
-        /// CR 106.6: Keyword tag of the activated ability whose cost is being
-        /// paid. Threaded into `PaymentContext::Activation` so tag-scoped mana
-        /// spend restrictions (Quinjet → power-up) gate eligible mana. Resolution
-        /// scope never carries a tag (resolution-time costs aren't activations).
-        ability_tag: Option<crate::types::ability::AbilityTag>,
+        /// CR 106.6: Exact activated ability whose mana cost is being paid.
+        /// This builds the live activation payment context, including any
+        /// source-chosen-color rider and keyword tag.
+        ability_index: Option<usize>,
     },
     /// `ability` is normally the PAYER-ADJUSTED `ResolvedAbility` clone
     /// (controller swapped to the resolved payer, per `effects/pay.rs`). All
@@ -573,7 +572,7 @@ pub fn pay_ability_cost_for_activation(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
+    ability_index: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     pay_ability_cost_for_activation_with_cost_move_replacement(
@@ -581,7 +580,7 @@ pub fn pay_ability_cost_for_activation(
         player,
         source_id,
         cost,
-        ability_tag,
+        ability_index,
         events,
     )
 }
@@ -591,7 +590,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
+    ability_index: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
@@ -603,7 +602,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
         events,
         &PaymentScope::Activation {
             excluded_sources: &excluded_sources,
-            ability_tag,
+            ability_index,
         },
         None,
     )?;
@@ -760,18 +759,18 @@ fn pay_ability_cost_inner(
             // source permanent's types.
             PaymentScope::Activation {
                 excluded_sources,
-                ability_tag,
+                ability_index,
                 ..
             } => {
                 if excluded_sources.is_empty() {
-                    pay_ability_mana_cost(state, player, source_id, cost, *ability_tag, events)?;
+                    pay_ability_mana_cost(state, player, source_id, *ability_index, cost, events)?;
                 } else {
                     pay_ability_mana_cost_excluding(
                         state,
                         player,
                         source_id,
+                        *ability_index,
                         cost,
-                        *ability_tag,
                         events,
                         excluded_sources,
                         // Top-level ability cost payment: no outer cost on the stack.
@@ -1626,8 +1625,8 @@ pub(crate) fn can_pay(
     scope: &PaymentScope,
 ) -> bool {
     match scope {
-        PaymentScope::Activation { .. } => {
-            if !cost.is_payable(state, payer, source_id) {
+        PaymentScope::Activation { ability_index, .. } => {
+            if !cost.is_payable_for_activation(state, payer, source_id, *ability_index) {
                 return false;
             }
             // CR 118.12a: disjunctive activation costs resolve via
@@ -2241,7 +2240,7 @@ mod tests {
             let excluded = ability_mana_payment_excluded_sources(&cost, src);
             let scope = PaymentScope::Activation {
                 excluded_sources: &excluded,
-                ability_tag: None,
+                ability_index: Some(0),
             };
             assert!(
                 can_pay(&scenario.state, P0, src, &cost, &scope),
@@ -2270,7 +2269,7 @@ mod tests {
         let excluded = ability_mana_payment_excluded_sources(&cost, src);
         let scope = PaymentScope::Activation {
             excluded_sources: &excluded,
-            ability_tag: None,
+            ability_index: Some(0),
         };
         let mut events = Vec::new();
         let outcome = pay_ability_cost_inner(
@@ -2323,7 +2322,7 @@ mod tests {
             P0,
             src,
             &graveyard_cost,
-            None,
+            Some(0),
             &mut Vec::new(),
         );
         assert!(matches!(rejected, Err(EngineError::ActionNotAllowed(_))));
@@ -2339,7 +2338,7 @@ mod tests {
             P0,
             src,
             &battlefield_cost,
-            None,
+            Some(0),
             &mut Vec::new(),
         )
         .expect("battlefield self-return cost should be payable");
@@ -2356,7 +2355,7 @@ mod tests {
             cost,
             &PaymentScope::Activation {
                 excluded_sources: &excluded,
-                ability_tag: None,
+                ability_index: Some(0),
             },
         )
     }

@@ -17,6 +17,8 @@ describe("DeckList commander section", () => {
       <DeckList
         deck={emptyDeck}
         onRemoveCard={vi.fn()}
+        onIncrementCard={vi.fn()}
+        canIncrementCard={() => true}
         onMoveCard={vi.fn()}
         onImport={vi.fn()}
         commanders={["Krenko, Mob Boss"]}
@@ -38,6 +40,8 @@ describe("DeckList commander section", () => {
       <DeckList
         deck={emptyDeck}
         onRemoveCard={vi.fn()}
+        onIncrementCard={vi.fn()}
+        canIncrementCard={() => true}
         onMoveCard={vi.fn()}
         onImport={vi.fn()}
         cardDataCache={new Map()}
@@ -55,6 +59,8 @@ describe("DeckList import modal", () => {
       <DeckList
         deck={emptyDeck}
         onRemoveCard={vi.fn()}
+        onIncrementCard={vi.fn()}
+        canIncrementCard={() => true}
         onMoveCard={vi.fn()}
         onImport={onImport}
         cardDataCache={new Map()}

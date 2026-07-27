@@ -2410,7 +2410,13 @@ pub(super) fn match_player_action(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    let GameEvent::PlayerPerformedAction { player_id, action } = event else {
+    let GameEvent::PlayerPerformedAction {
+        player_id,
+        action,
+        scry_bottom_count,
+        ..
+    } = event
+    else {
         return false;
     };
     if !valid_player_matches(trigger, state, *player_id, source_context) {
@@ -2419,7 +2425,19 @@ pub(super) fn match_player_action(
 
     match trigger.mode {
         TriggerMode::SearchedLibrary => *action == PlayerActionKind::SearchedLibrary,
-        TriggerMode::Scry => *action == PlayerActionKind::Scry,
+        TriggerMode::Scry => {
+            // CR 701.22a + CR 701.22d + CR 603.2: a completed scry emits its
+            // own action event with the number actually placed on bottom, and
+            // the trigger predicate compares that preserved event-local value.
+            *action == PlayerActionKind::Scry
+                && trigger
+                    .scry_bottom_count
+                    .is_none_or(|(comparator, threshold)| {
+                        scry_bottom_count.is_some_and(|count| {
+                            comparator.evaluate(count as i32, threshold as i32)
+                        })
+                    })
+        }
         TriggerMode::Surveil => *action == PlayerActionKind::Surveil,
         TriggerMode::CollectEvidence => *action == PlayerActionKind::CollectEvidence,
         TriggerMode::Investigated => *action == PlayerActionKind::Investigate,
@@ -3016,6 +3034,7 @@ pub(super) fn match_shuffled(
     let GameEvent::PlayerPerformedAction {
         player_id,
         action: PlayerActionKind::ShuffledLibrary,
+        ..
     } = event
     else {
         return false;
@@ -7709,6 +7728,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7735,6 +7756,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(!match_player_action(
             &event,
@@ -7761,6 +7784,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7787,6 +7812,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: PlayerActionKind::Surveil,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7813,6 +7840,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(!match_player_action(
             &event,
@@ -7839,6 +7868,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::Proliferate,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -9715,7 +9746,7 @@ mod tests {
             controller,
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -10941,6 +10972,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::ShuffledLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         let trigger = make_trigger(TriggerMode::Shuffled);
         assert!(match_shuffled(
@@ -10971,6 +11004,8 @@ mod tests {
         let opp_event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: PlayerActionKind::ShuffledLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_shuffled(
             &opp_event,
@@ -10983,6 +11018,8 @@ mod tests {
         let self_event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::ShuffledLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(!match_shuffled(
             &self_event,
@@ -11963,7 +12000,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
-                ability: Some(ResolvedAbility::new(
+                ability: Some(Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
@@ -11971,7 +12008,7 @@ mod tests {
                     vec![],
                     spell_id,
                     PlayerId(0),
-                )),
+                ))),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -12043,7 +12080,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(10),
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
@@ -12051,7 +12088,7 @@ mod tests {
                     vec![],
                     ObjectId(10),
                     PlayerId(1),
-                ),
+                )),
             },
         });
         (state, ability_id)
@@ -12955,7 +12992,7 @@ mod tests {
             controller: PlayerId(0), // Different controller
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(10),
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
@@ -12963,7 +13000,7 @@ mod tests {
                     vec![],
                     ObjectId(10),
                     PlayerId(0),
-                ),
+                )),
             },
         });
 
@@ -13019,7 +13056,7 @@ mod tests {
             controller: PlayerId(0), // Same player as trigger owner
             kind: StackEntryKind::ActivatedAbility {
                 source_id: pw_id,
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
@@ -13027,7 +13064,7 @@ mod tests {
                     vec![],
                     pw_id,
                     PlayerId(0),
-                ),
+                )),
             },
         });
 

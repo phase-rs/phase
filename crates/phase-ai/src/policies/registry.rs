@@ -8,9 +8,12 @@ use super::board_development::BoardDevelopmentPolicy;
 use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
 use super::chalice_avoidance::ChaliceAvoidancePolicy;
+use super::combat_withdrawal::CombatWithdrawalPolicy;
 use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
+use super::crew_timing::CrewTimingPolicy;
 use super::cycling_discipline::CyclingDisciplinePolicy;
+use super::devotion::DevotionPolicy;
 use super::effect_timing::EffectTimingPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
@@ -131,10 +134,16 @@ pub enum PolicyId {
     SeparatePilesTiming,
     XCastGate,
     LoopShortcut,
+    /// CR 700.5: mono-color devotion pip density.
+    Devotion,
     /// CR 104.3d: the alternate poison win clock.
     PoisonClock,
     /// CR 207.2c + CR 205.2a: delirium / descend graveyard type-diversity.
     GraveyardTypes,
+    CrewTiming,
+    CombatWithdrawal,
+    /// CR 608.2c: "return a land you control" self-bounce target choice.
+    SelfBounceTarget,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -326,6 +335,7 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&ARTIFACT_SYNERGY)),
             Box::new(BoardDevelopmentPolicy),
             Box::new(EtbValuePolicy),
+            Box::new(DevotionPolicy),
             Box::new(PoisonClockPolicy),
             Box::new(GraveyardTypesPolicy),
             Box::new(PayoffPolicy::new(&ENCHANTMENTS_PAYOFF)),
@@ -382,10 +392,13 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&ENERGY_PAYOFF)),
             Box::new(ChaliceAvoidancePolicy),
             Box::new(PaymentSelectionPolicy),
+            Box::new(CrewTimingPolicy),
+            Box::new(CombatWithdrawalPolicy),
             Box::new(SeparatePilesTimingPolicy),
             Box::new(PayoffPolicy::new(&REANIMATOR_PAYOFF)),
             Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),
             Box::new(LoopShortcutPolicy),
+            Box::new(super::self_bounce_target::SelfBounceTargetPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {

@@ -4240,20 +4240,64 @@ fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<Pa
     })
 }
 
-/// CR 508.1c + CR 514.2 + CR 500.7: "that player can't attack you [or your
-/// permanents/planeswalkers] during their next turn" (Willie Lumpkin) — a
-/// player-scoped, next-turn-expiring attack prohibition. The "that player"
-/// anaphor reuses the parent draw-trigger's targeted player (CR 608.2c), so the
-/// restriction's `affected_players` is `ParentTargetedPlayer`, resolved to a
-/// `SpecificPlayer` at resolution by `add_restriction`. The defended scope rides
-/// the shared `AttackTargetFilter` via `parse_cant_attack_defended_scope_nom`
-/// (the single scope authority), so the declare-attackers gate reuses the same
-/// matcher as static `CantAttack`. The `UntilEndOfNextTurnOf` duration anchors on
-/// the RESTRICTED player (the resolved `SpecificPlayer`), not the controller —
-/// see `add_restriction::fill_runtime_fields`.
+/// CR 508.1c + CR 514.2 + CR 500.7: player-scoped temporary attack
+/// prohibitions. The scoped Advokist form keeps the accepting player as
+/// `ScopedPlayer` and the controller-relative "you" / "your next turn" data for
+/// `add_restriction` to snapshot. The legacy "that player" / "they" form
+/// reuses the parent draw-trigger's targeted player (CR 608.2c), so its
+/// `affected_players` is `ParentTargetedPlayer`, resolved to a `SpecificPlayer`
+/// at resolution. Both forms use `parse_cant_attack_defended_scope_nom` as the
+/// single `AttackTargetFilter` authority, shared with static `CantAttack`.
 fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     use crate::parser::oracle_static::parse_cant_attack_defended_scope_nom;
     use crate::types::triggers::AttackTargetFilter;
+
+    // Orzhov Advokist: this bounded form must precede the legacy anaphor branch.
+    // Unlike the latter, its "creatures that player controls" subject carries
+    // `ScopedPlayer`, and both the explicit defended scope and "until your next
+    // turn" duration are required discriminators. Do not let an incomplete
+    // prefix become a broad blanket attack ban.
+    if let Some((defended, remaining)) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = tag("creatures that player controls ").parse(input)?;
+        let (input, _) =
+            preceded(alt((tag("can't"), tag("cannot"))), tag(" attack")).parse(input)?;
+        let (input, defended) = parse_cant_attack_defended_scope_nom(input)?;
+        let Some(defended) = defended else {
+            return Err(oracle_err(input));
+        };
+        let (input, _) = tag(" until your next turn").parse(input)?;
+        Ok((input, defended))
+    }) {
+        if !remaining
+            .chars()
+            .all(|character| character == '.' || character.is_whitespace())
+        {
+            return None;
+        }
+
+        return Some(ParsedEffectClause {
+            effect: Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::ScopedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::Attack {
+                        defended,
+                        protected_player: None,
+                    },
+                },
+            },
+            duration: Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            }),
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
 
     // Subject: "that player" / "they" (the parent draw-trigger's targeted
     // opponent). Both anaphors bind to `ParentTargetedPlayer` (CR 608.2c). The
@@ -4319,7 +4363,10 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
                 // below re-anchors the expiry to the restricted player's next turn
                 // in `add_restriction`.
                 expiry: RestrictionExpiry::EndOfTurn,
-                activity: ProhibitedActivity::Attack { defended },
+                activity: ProhibitedActivity::Attack {
+                    defended,
+                    protected_player: None,
+                },
             },
         },
         duration,
@@ -6539,6 +6586,22 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         }
     };
     let text = text.as_str();
+
+    // This shared temporary-attack-prohibition recognizer owns the duration,
+    // so dispatch before the clause shell peels it. Normalize the same leading
+    // sequence connector and terminal punctuation that the inner parser does.
+    let prohibition_probe = strip_leading_sequence_connector(text)
+        .trim()
+        .trim_end_matches('.')
+        .trim();
+    let prohibition_probe_lower = prohibition_probe.to_lowercase();
+    if let Some(clause) = try_parse_that_player_cant_attack_prohibition(TextPair::new(
+        prohibition_probe,
+        &prohibition_probe_lower,
+    )) {
+        return attach_unless_slots(clause, unless_condition, unless_pay_deferred);
+    }
+
     // Phase 2: peel structural slots off the head of the clause before
     // body parsing. The recursive shell strips slot-bearing prefixes/suffixes
     // (optional, opponent-may, condition, duration, for-each, player-scope)
@@ -8430,14 +8493,6 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // activated" (Kang). Tag-scoped prohibition for the granted extra turn — try
     // before the generic non-mana-ability prohibition.
     if let Some(clause) = try_parse_during_that_turn_powerup_prohibition(tp) {
-        return clause;
-    }
-
-    // CR 508.1c + CR 514.2: "that player can't attack you [or your permanents]
-    // during their next turn" (Willie Lumpkin) — player-scoped, next-turn-expiring
-    // attack prohibition. Run before the generic restriction-mode path, which
-    // would otherwise drop the defended scope / duration as Unimplemented.
-    if let Some(clause) = try_parse_that_player_cant_attack_prohibition(tp) {
         return clause;
     }
 
@@ -12428,6 +12483,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
     let mut clause = parsed_clause(Effect::ExileTop {
         player: TargetFilter::Controller,
         count: QuantityExpr::Fixed { value: 1 },
+        position: crate::types::ability::LibraryPosition::Top,
         face_down: false,
     });
     clause.sub_ability = Some(Box::new(put_counter));
@@ -19080,6 +19136,7 @@ fn lower_subject_predicate_ast(
                 return parsed_clause(Effect::ExileTop {
                     player: subject.affected,
                     count,
+                    position: crate::types::ability::LibraryPosition::Top,
                     face_down,
                 });
             }
@@ -26427,7 +26484,7 @@ fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
 /// | mode | whole-body recognizers | context |
 /// |---|---|---|
 /// | `Standalone` | U3-complete shared list (empty); cloak is unavailable | a fresh `default()`, discarded |
-/// | `WithContext` | the same shared list, plus `parse_exile_pile_shuffle_cloak_ir` in `parse_ability_ir` | the caller's real `ctx` |
+/// | `WithContext` | the same shared list, plus `parse_face_down_pile_ir` in `parse_ability_ir` | the caller's real `ctx` |
 ///
 /// Callers split cleanly: die-result branch bodies (`oracle_special.rs`) take
 /// `Standalone`; spell/activated dispatch takes `WithContext`.
@@ -26501,7 +26558,7 @@ fn parse_ability_ir(
         };
     }
     if let ChainLoweringMode::WithContext = mode {
-        if let Some(body) = parse_exile_pile_shuffle_cloak_ir(text, kind, ctx) {
+        if let Some(body) = parse_face_down_pile_ir(text, kind, ctx) {
             return AbilityIr {
                 source_text: text.to_string(),
                 body,
@@ -26572,6 +26629,15 @@ pub(crate) fn parse_effect_chain_with_context(
 ///
 /// The recognizer is deliberately narrow (the full pile/shuffle/cloak sentence
 /// is unique to this card) so it cannot swallow clauses on any other card.
+fn parse_face_down_pile_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
+    parse_exile_pile_shuffle_cloak_ir(text, kind, ctx)
+        .or_else(|| parse_exile_object_and_top_face_down_pile_ir(text, kind, ctx))
+}
+
 fn parse_exile_pile_shuffle_cloak_ir(
     text: &str,
     kind: AbilityKind,
@@ -26671,6 +26737,60 @@ fn parse_exile_pile_shuffle_cloak_ir(
                 // controls the returned face-down permanents even for pile
                 // members they don't own.
                 enters_under: Some(ControllerRef::You),
+            }),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
+}
+
+/// CR 406.3 + CR 608.2c + CR 701.24a: "Exile it and the top N cards of your
+/// library in a face-down pile. If you do, shuffle that pile and put it back on
+/// top of your library." The entire sentence is one effect because the latter
+/// sentence is an all-members completion condition, not an independently valid
+/// chain step.
+fn parse_exile_object_and_top_face_down_pile_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
+    let lower = text.to_ascii_lowercase();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("exile it and the top ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (rest, count) = nom_primitives::parse_number(rest).ok()?;
+    let (_, _) = all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>(
+            " cards of your library in a face-down pile. if you do, shuffle that pile and put it back on top of your library",
+        ),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            text,
+            parsed_clause(Effect::ExileFaceDownPile {
+                object: TargetFilter::TriggeringSource,
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed {
+                    value: count as i32,
+                },
             }),
             None,
             ClauseDisposition::Emit {
@@ -29295,6 +29415,11 @@ pub(crate) fn parse_effect_chain_ir(
             // that many tokens" chunk needs it to back-reference the cast spell's
             // colored-pip count instead of the generic EventContextAmount.
             pending_mana_symbol_count_color: ctx.pending_mana_symbol_count_color,
+            // CR 701.22a + CR 603.2: The completed-scry condition stages its
+            // bottom-count provenance on the trigger body. Every chunk must
+            // retain it so a following "exile that many cards from the bottom"
+            // clause reads the completed scry event rather than falling through.
+            quantity_ref: ctx.quantity_ref.clone(),
             token_pt_followup,
             // CR 603.1 + CR 608.2c: trigger-body chunk parsing must preserve
             // trigger context so non-target event anaphors ("that permanent or

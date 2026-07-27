@@ -25,6 +25,7 @@ use engine::ai_support::{
 };
 use engine::database::CardDatabase;
 use engine::game::derived_views::derive_filtered_views;
+use engine::game::interaction::{derive_viewer_interaction, object_action_payloads};
 use engine::game::validate_name_deck_for_format_full;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
@@ -91,12 +92,64 @@ type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
 type SharedDraftState = Arc<Mutex<DraftSessionManager>>;
 const SPECTATOR_PLAYER_ID: PlayerId = PlayerId(u8::MAX);
-#[cfg(windows)]
-// Windows gives the process' primary thread a comparatively small stack. A
-// persisted game is a deeply nested rules snapshot, so restore it on a
-// purpose-sized thread rather than letting one saved session prevent the
-// server from reaching its health endpoint on the next launch.
-const PERSISTED_SESSION_RESTORE_STACK_BYTES: usize = 16 * 1024 * 1024;
+/// Stack size for every thread that can run the engine: the runtime *owner*
+/// thread spawned in `main`, plus Tokio's worker and blocking threads.
+///
+/// Rust's default thread stack is 2 MiB and a single WebSocket action already
+/// spends most of it: `handle_socket`'s async state machine plus the engine
+/// and AI call chain under `run_ai` measured at ~1.35 MiB on a *turn-3*
+/// four-player Commander game. `GameState` is moved by value through that
+/// chain (`AiActionResult::state`, every `state.clone()`), so the budget is
+/// roughly "how many `GameState` values are live on the stack at once" — it is
+/// near-constant in board size, which is why an early game overruns it just as
+/// readily as a late one. Overrunning is not a catchable panic, so
+/// `panic = "unwind"` in `[profile.server-release]` cannot contain it: the
+/// process aborts and every player loses the game.
+///
+/// `GameState`'s inline size has since been cut from 30,112 B to 12,464 B
+/// (see `engine/src/types/game_state_size.rs`, which pins it), and 32 MiB is
+/// retained anyway, deliberately:
+///
+///   * the measured high-water does **not** fall in proportion to the struct.
+///     On the equivalent bisected fixture the struct shrank 2.42x while the
+///     stack high-water fell only ~1.36x. The residual is **unattributed** — it
+///     was not instrumented, so treat what follows as the leading candidate,
+///     not a finding. Boxing covered every `ResolvedAbility` *storage* site but
+///     none of the by-value *parameter* sites (**41 production-reachable**; 48
+///     in `crates/` total, of which 7 are test-only, and 13 of the 48 are in
+///     `engine/src/game/casting_costs.rs`; population and counting method are
+///     stated in `engine/tests/integration/game_state_stack_budget.rs`, and
+///     both figures are lower bounds because grep undercounts this shape). The
+///     production figure is the relevant one here: this is a claim about
+///     production stack frames, and a test-only parameter never appears in
+///     one. Those nest two
+///     deep on the ordinary cast path, so part of the residual plausibly still
+///     scales with `ResolvedAbility`. Either way, no static size fix is proven
+///     to bound it;
+///   * AI search depth is data-driven, so no static size fix bounds
+///     `depth x chain_depth x sizeof`;
+///   * `[profile.server-release]` (`opt-level = 2`, `lto = "thin"`,
+///     `codegen-units = 16`) uses measurably more stack than `ai_commander`'s
+///     profile;
+///   * the cost is reserved *address space*, not committed memory. Note the
+///     multiplier: `thread_stack_size` also sizes Tokio's **blocking** pool,
+///     whose default cap is 512 threads, so the worst-case reservation for that
+///     pool goes from ~1 GiB to ~16 GiB. Blocking threads are spawned on demand
+///     and 512 is a cap rather than a steady state, and on 64-bit this is
+///     address space only — but if this server ever runs somewhere with strict
+///     VA-commit accounting, `max_blocking_threads` is the knob to reach for.
+///
+/// 32 MiB matches what `ai_commander` and `duel_suite` already use for this
+/// same engine recursion.
+///
+/// Side effect worth knowing: a **debug** `phase-server` used to abort on any
+/// WebSocket connect, because a debug frame chain did not fit Tokio's 2 MiB
+/// default worker stack. Sizing the owner and worker threads here fixed that, so
+/// the debug binary is now a usable smoke target — `cargo run -p phase-server`,
+/// connect a client, and the handshake plus lobby path complete without an
+/// abort. Verified once by hand after this constant landed; if you are looking
+/// for a cheap end-to-end check of a server change, that is now available.
+const RUNTIME_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
 type SharedDraftPools = Arc<draft_pools::DraftPools>;
 /// Spectator senders keyed by draft_code. Each spectator has a visibility + sender.
 type SharedDraftSpectators = Arc<
@@ -113,24 +166,15 @@ type SharedDraftSpectators = Arc<
 /// Spectator senders keyed by game code (live games only).
 type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
 
-#[cfg(windows)]
-fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
-    let json = json.to_owned();
-    let restore = std::thread::Builder::new()
-        .name("phase-session-restore".to_owned())
-        .stack_size(PERSISTED_SESSION_RESTORE_STACK_BYTES)
-        .spawn(move || {
-            let persisted = serde_json::from_str::<server_core::PersistedSession>(&json)
-                .map_err(|error| error.to_string())?;
-            Ok(GameSession::from_persisted(persisted, db.as_ref()))
-        })
-        .map_err(|error| format!("could not start restore thread: {error}"))?;
-    restore
-        .join()
-        .map_err(|_| "persisted session restore thread panicked".to_owned())?
-}
-
-#[cfg(not(windows))]
+/// Deserializing a persisted session is deeply nested and stack-hungry — and
+/// boxing a field does not help here, because `Box<T>::deserialize` still
+/// builds `T` on the stack before moving it into the allocation. It needs a
+/// large stack, and it now has one without a platform fork: the sole caller
+/// runs inside `serve()`, which `main` drives on the `phase-server-runtime`
+/// thread at `RUNTIME_THREAD_STACK_BYTES`. The former `#[cfg(windows)]` arm
+/// hopped onto a purpose-sized 16 MiB thread; against a 32 MiB runtime owner
+/// that is a *downgrade* on the one platform that reported the overflow, so
+/// both arms are gone and the restore runs inline.
 fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
     let persisted = serde_json::from_str::<server_core::PersistedSession>(json)
         .map_err(|error| error.to_string())?;
@@ -299,6 +343,7 @@ fn build_game_started_message(
             }
         });
     let derived = derive_transport_views(&session.state, &filtered, Some(player));
+    let viewer_interaction = derive_viewer_interaction(&session.state, &filtered, player);
 
     ServerMessage::GameStarted {
         state_revision: session.state_revision,
@@ -315,11 +360,12 @@ fn build_game_started_message(
             HashMap::new()
         },
         legal_actions_by_object: if is_actor {
-            by_object_all
+            object_action_payloads(&by_object_all)
         } else {
             HashMap::new()
         },
         derived,
+        viewer_interaction,
         player_token,
         events: server_core::filter_events_for_player(&events, &session.state, player),
     }
@@ -368,6 +414,7 @@ fn build_state_update_message(
     let is_actor = server_core::is_acting(raw_state, player);
     let filtered = server_core::filter_state_for_player(raw_state, player);
     let derived = derive_transport_views(raw_state, &filtered, Some(player));
+    let viewer_interaction = derive_viewer_interaction(raw_state, &filtered, player);
     let mana_payment_shortcut_actions = if is_actor {
         engine_mana_payment_shortcut_actions(raw_state, legal_actions_by_object)
     } else {
@@ -393,11 +440,12 @@ fn build_state_update_message(
             HashMap::new()
         },
         legal_actions_by_object: if is_actor {
-            legal_actions_by_object.clone()
+            object_action_payloads(legal_actions_by_object)
         } else {
             HashMap::new()
         },
         derived,
+        viewer_interaction,
     })
 }
 
@@ -409,6 +457,8 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
     guard_game_state_for_broadcast(&session.state)?;
     let filtered = server_core::filter_state_for_player(&session.state, SPECTATOR_PLAYER_ID);
     let derived = derive_transport_views(&session.state, &filtered, None);
+    let viewer_interaction =
+        derive_viewer_interaction(&session.state, &filtered, SPECTATOR_PLAYER_ID);
 
     Ok(ServerMessage::GameStarted {
         state_revision: session.state_revision,
@@ -422,6 +472,7 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
         derived,
+        viewer_interaction,
         player_token: None,
         events: Vec::new(),
     })
@@ -443,6 +494,7 @@ fn build_spectator_state_update_message(
     })?;
     let filtered = server_core::filter_state_for_player(raw_state, SPECTATOR_PLAYER_ID);
     let derived = derive_transport_views(raw_state, &filtered, None);
+    let viewer_interaction = derive_viewer_interaction(raw_state, &filtered, SPECTATOR_PLAYER_ID);
     let eliminated_players = raw_state.eliminated_players.clone();
 
     Ok(ServerMessage::StateUpdate {
@@ -457,6 +509,7 @@ fn build_spectator_state_update_message(
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
         derived,
+        viewer_interaction,
     })
 }
 
@@ -912,8 +965,31 @@ impl SocketIdentity {
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// `thread_stack_size` governs Tokio's worker and blocking threads, but
+/// `block_on` polls the root future on the **calling** thread — so `serve()`'s
+/// own body (including the persisted-session restore) would run on the process
+/// primary thread with whatever stack the OS handed it. `#[tokio::main]`
+/// expands to exactly the same `build().block_on(..)` shape, so this is a
+/// pre-existing gap rather than a regression: close it by owning the runtime
+/// from a thread whose stack we chose.
+fn main() {
+    std::thread::Builder::new()
+        .name("phase-server-runtime".to_owned())
+        .stack_size(RUNTIME_THREAD_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(RUNTIME_THREAD_STACK_BYTES)
+                .build()
+                .expect("failed to build the Tokio runtime")
+                .block_on(serve());
+        })
+        .expect("spawn phase-server runtime thread")
+        .join()
+        .expect("phase-server runtime thread panicked");
+}
+
+async fn serve() {
     let cli = Cli::parse();
 
     let _log_guard = logging::init_logging(cli.log_dir.as_deref(), cli.log_json);
@@ -992,10 +1068,12 @@ async fn main() {
 
     // A single-user instance has no other players whose seats a grace period
     // would free, so reconnects never expire — a game suspended for any length
-    // of time stays resumable. `with_grace_period` sets the reconnect window;
+    // of time stays resumable. `single_user` sets the reconnect window;
     // ten years is effectively unbounded without risking overflow in `now + grace`.
+    // It also stamps `HostingMode::SingleUser` on every session this manager
+    // owns, which is what grants the desktop sidecar its debug capability.
     let state: SharedState = Arc::new(Mutex::new(if cli.single_user {
-        SessionManager::with_grace_period(Duration::from_secs(10 * 365 * 24 * 60 * 60))
+        SessionManager::single_user(Duration::from_secs(10 * 365 * 24 * 60 * 60))
     } else {
         SessionManager::new()
     }));
@@ -3153,8 +3231,9 @@ async fn broadcast_takeback_approved(
                     eliminated_players: raw_state.eliminated_players.clone(),
                     log_entries: vec![],
                     spell_costs: p_spell_costs,
-                    legal_actions_by_object: p_by_object,
+                    legal_actions_by_object: object_action_payloads(&p_by_object),
                     derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
+                    viewer_interaction: derive_viewer_interaction(&raw_state, pstate, *pid),
                 });
             }
         }
@@ -3688,11 +3767,16 @@ async fn handle_client_message(
                                         eliminated_players: eliminated.clone(),
                                         log_entries: log_entries.clone(),
                                         spell_costs: p_spell_costs,
-                                        legal_actions_by_object: p_by_object,
+                                        legal_actions_by_object: object_action_payloads(
+                                            &p_by_object,
+                                        ),
                                         derived: derive_transport_views(
                                             &raw_state,
                                             pstate,
                                             Some(*pid),
+                                        ),
+                                        viewer_interaction: derive_viewer_interaction(
+                                            &raw_state, pstate, *pid,
                                         ),
                                     });
                                 }
@@ -3808,11 +3892,18 @@ async fn handle_client_message(
                                         eliminated_players: eliminated.clone(),
                                         log_entries: ai_log_entries.clone(),
                                         spell_costs: p_spell_costs,
-                                        legal_actions_by_object: p_by_object,
+                                        legal_actions_by_object: object_action_payloads(
+                                            &p_by_object,
+                                        ),
                                         derived: derive_transport_views(
                                             ai_raw_state,
                                             pstate,
                                             Some(*pid),
+                                        ),
+                                        viewer_interaction: derive_viewer_interaction(
+                                            ai_raw_state,
+                                            pstate,
+                                            *pid,
                                         ),
                                     });
                                 }
@@ -5099,6 +5190,8 @@ async fn handle_client_message(
                     }
 
                     let derived = derive_transport_views(&raw_state, &filtered_state, Some(joiner));
+                    let viewer_interaction =
+                        derive_viewer_interaction(&raw_state, &filtered_state, joiner);
                     let msg = ServerMessage::StateUpdate {
                         state_revision,
                         state: filtered_state,
@@ -5111,6 +5204,7 @@ async fn handle_client_message(
                         spell_costs: HashMap::new(),
                         legal_actions_by_object: HashMap::new(),
                         derived,
+                        viewer_interaction,
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -5336,7 +5430,21 @@ async fn handle_client_message(
 
             match outcome {
                 Err(reason) => {
-                    let msg = ServerMessage::error(reason);
+                    // A refused takeback is a benign rejection, not a
+                    // transport error: "there is no previous action of yours
+                    // to take back", "a takeback request is already pending",
+                    // "only human players may request a takeback". Answer on
+                    // the same channel the sibling `ClientMessage::Action`
+                    // handler uses for a rejected action.
+                    //
+                    // `ServerMessage::error` is read by the native client as a
+                    // terminal socket failure: `handleNativeEvent` disposes the
+                    // adapter on ANY `error` event and GamePage then sets
+                    // `reconnectState: "failed"`, leaving the desktop session
+                    // unrecoverable. Reaching for the error channel here was
+                    // this handler's inconsistency with its own sibling ~2,400
+                    // lines above, not a deliberate signal.
+                    let msg = ServerMessage::ActionRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
@@ -5408,7 +5516,13 @@ async fn handle_client_message(
 
             match outcome {
                 Err(reason) => {
-                    let msg = ServerMessage::error(reason);
+                    // Same classification as the `RequestTakeback` arm above:
+                    // "there is no pending takeback request" and "only human
+                    // players may respond" are refusals, not socket failures.
+                    // Fixed here too so the pair stays consistent — a benign
+                    // refusal must never travel the channel the native client
+                    // treats as terminal.
+                    let msg = ServerMessage::ActionRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
@@ -5469,7 +5583,15 @@ async fn handle_client_message(
 
             match result {
                 Err(reason) => {
-                    let msg = ServerMessage::error(reason);
+                    // The third member of the same class as the two arms
+                    // above: `cancel_takeback`'s only failures are benign
+                    // refusals ("only the player who requested the takeback
+                    // may cancel it", "there is no pending takeback
+                    // request"). Answer on the rejection channel, not the
+                    // terminal error channel — `handleNativeEvent` disposes
+                    // the adapter on ANY `error` event, so a mis-clicked
+                    // cancel would end the desktop session.
+                    let msg = ServerMessage::ActionRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }

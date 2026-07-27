@@ -306,9 +306,8 @@ fn counter_move_distribution_candidates(
 /// CR 107.1c: Coarse candidates for a `RemoveCountersChoice` prompt — the two
 /// extremal legal answers: "remove none" (empty selection) and "remove all"
 /// (every available counter of every type). The full legal space (any per-type
-/// subset) is combinatorial; the server bypasses its enumeration gate for human
-/// submissions (`accepts_freeform_counter_removal`), so the AI only needs enough
-/// variety to never wedge.
+/// subset) is combinatorial, so the AI only needs enough variety to never
+/// wedge. The engine validates every submitted selection directly.
 // ponytail: two extremal candidates; add per-type partials if a policy ever
 // wants finer counter-shedding control.
 fn counter_removal_candidates(
@@ -2128,7 +2127,7 @@ pub fn candidate_actions_broad_with_probe(
                     *player,
                     pending_cast.object_id,
                     cost,
-                    pending_cast.ability.context.ability_tag,
+                    pending_cast.activation_ability_index,
                 )
             })
             .map(|(i, _)| {
@@ -4042,6 +4041,7 @@ pub(crate) fn priority_actions_with_probe(
                     state,
                     player,
                     *ninjutsu_object_id,
+                    None,
                     cost,
                 );
                 if !can_afford {
@@ -5205,6 +5205,7 @@ mod tests {
             power: None,
             toughness: None,
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types,
             mana_cost,
@@ -6272,6 +6273,8 @@ mod tests {
             player: PlayerId(0),
             game_number: 2,
             score: Default::default(),
+            min_main_deck_size: 0,
+            max_sideboard_size: None,
         };
 
         let actions = candidate_actions(&state);

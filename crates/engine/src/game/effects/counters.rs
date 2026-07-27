@@ -95,6 +95,90 @@ pub(crate) fn counter_type_affects_layers(counter_type: &CounterType) -> bool {
         )
 }
 
+/// The replacement-aware result of previewing a counter addition.
+///
+/// This is intentionally an engine-internal decision fact rather than wire
+/// state: callers use it while evaluating a currently-bound action, so it must
+/// not be serialized or retained across object-incarnation changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CounterAdditionPreview {
+    /// The proposed count reaches the object unchanged.
+    Applied { count: u32 },
+    /// A replacement effect prevents the counter addition.
+    Prevented,
+    /// Replacement ordering or an optional replacement needs this player's choice.
+    ChoiceRequired { player: PlayerId },
+    /// Replacement effects change the proposed counter count.
+    Transformed { count: u32 },
+    /// A replacement rewrites the counter event into a different event class.
+    ///
+    /// The tactical preview cannot claim that the requested counter was added,
+    /// so consumers must handle this explicitly rather than treating it as an
+    /// absent preview.
+    Unsupported,
+}
+
+/// Preview an object-counter addition through the real replacement pipeline.
+///
+/// Returns `None` when `target` no longer identifies the same object
+/// incarnation. The replacement pipeline operates only on an isolated clone,
+/// so a tactical caller cannot add pending choices, events, or counters to the
+/// live game state.
+///
+/// CR 122.1 + CR 614.1: Counter placement is subject to applicable
+/// replacement effects before the event happens.
+pub fn preview_counter_addition(
+    state: &GameState,
+    actor: PlayerId,
+    target: ObjectIncarnationRef,
+    counter_type: CounterType,
+    count: u32,
+) -> Option<CounterAdditionPreview> {
+    let object = state.objects.get(&target.object_id)?;
+    if ObjectIncarnationRef::from_object(object) != target {
+        return None;
+    }
+    if count == 0 {
+        return Some(CounterAdditionPreview::Applied { count });
+    }
+
+    let proposed = ProposedEvent::AddCounter {
+        placement: CounterPlacement::Object {
+            actor,
+            object_id: target.object_id,
+            counter_type,
+        },
+        count,
+        applied: HashSet::new(),
+    };
+    let mut preview_state = state.clone();
+    let mut events = Vec::new();
+
+    match replacement::replace_event(&mut preview_state, proposed, &mut events) {
+        ReplacementResult::Execute(ProposedEvent::AddCounter {
+            count: resulting_count,
+            ..
+        }) if resulting_count == count => Some(CounterAdditionPreview::Applied {
+            count: resulting_count,
+        }),
+        ReplacementResult::Execute(ProposedEvent::AddCounter {
+            count: resulting_count,
+            ..
+        }) => Some(CounterAdditionPreview::Transformed {
+            count: resulting_count,
+        }),
+        // A replacement may redirect the event into a different event class.
+        // The counter-placement fact is explicitly unsupported rather than
+        // absent, so conservative tactical consumers cannot mistake it for a
+        // non-matching ability shape or stale object reference.
+        ReplacementResult::Execute(_) => Some(CounterAdditionPreview::Unsupported),
+        ReplacementResult::Prevented => Some(CounterAdditionPreview::Prevented),
+        ReplacementResult::NeedsChoice(player) => {
+            Some(CounterAdditionPreview::ChoiceRequired { player })
+        }
+    }
+}
+
 /// CR 614.1: Add a counter to an object through the replacement pipeline.
 ///
 /// Single authority for counter additions. Handles Vorinclex/Doubling-Season
@@ -329,6 +413,8 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
                     events.push(GameEvent::PlayerPerformedAction {
                         player_id: action.player_id,
                         action: action.action,
+                        look_count: None,
+                        scry_bottom_count: None,
                     });
                 }
             }
@@ -385,7 +471,12 @@ fn apply_pending_counter_post_action(
             true
         }
         PendingCounterPostAction::RecordPlayerAction { player_id, action } => {
-            events.push(GameEvent::PlayerPerformedAction { player_id, action });
+            events.push(GameEvent::PlayerPerformedAction {
+                player_id,
+                action,
+                look_count: None,
+                scry_bottom_count: None,
+            });
             true
         }
         PendingCounterPostAction::AddSubtype { object_id, subtype } => {
@@ -478,11 +569,11 @@ fn apply_pending_counter_post_action(
             }
             push_token_entry_events(state, events, object_id, name, source_id);
             if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
-                state.delayed_triggers.push(DelayedTrigger {
+                let sacrifice_token = DelayedTrigger {
                     condition: DelayedTriggerCondition::AtNextPhase {
                         phase: crate::types::phase::Phase::EndCombat,
                     },
-                    ability: ResolvedAbility::new(
+                    ability: Box::new(ResolvedAbility::new(
                         Effect::Sacrifice {
                             target: TargetFilter::Any,
                             count: QuantityExpr::Fixed { value: 1 },
@@ -491,11 +582,12 @@ fn apply_pending_counter_post_action(
                         vec![TargetRef::Object(object_id)],
                         source_id,
                         controller,
-                    ),
+                    )),
                     controller,
                     source_id,
                     one_shot: true,
-                });
+                };
+                crate::game::triggers::install_delayed_trigger(state, sacrifice_token);
             }
             state.last_created_token_ids.push(object_id);
             true
@@ -2567,7 +2659,7 @@ mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::resolution::{ResolutionFrame, ResolutionStateWire};
@@ -2621,7 +2713,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: source,
-                ability: root,
+                ability: Box::new(root),
             },
         });
 
@@ -2725,6 +2817,147 @@ mod tests {
                 ReplacementDefinition::new(ReplacementEvent::AddCounter)
                     .quantity_modification(QuantityModification::Plus { value: 1 }),
             );
+    }
+
+    #[test]
+    fn preview_counter_addition_reports_applied_without_mutating_live_state() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Preview Target".to_string(),
+            Zone::Battlefield,
+        );
+        let target = ObjectIncarnationRef::from_object(&state.objects[&target_id]);
+        let before = state.clone();
+
+        assert_eq!(
+            preview_counter_addition(&state, PlayerId(0), target, CounterType::Plus1Plus1, 2,),
+            Some(CounterAdditionPreview::Applied { count: 2 })
+        );
+        assert_eq!(
+            state, before,
+            "preview must not add counters, events, or replacement-choice state to the live game"
+        );
+    }
+
+    #[test]
+    fn preview_counter_addition_reports_transformed_replacement_without_mutation() {
+        let mut state = GameState::new_two_player(42);
+        let doubler_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Counter Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&doubler_id)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(QuantityModification::DOUBLE),
+            );
+        let target_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Counter Preview Target".to_string(),
+            Zone::Battlefield,
+        );
+        let target = ObjectIncarnationRef::from_object(&state.objects[&target_id]);
+        let before = state.clone();
+
+        assert_eq!(
+            preview_counter_addition(&state, PlayerId(0), target, CounterType::Plus1Plus1, 2,),
+            Some(CounterAdditionPreview::Transformed { count: 4 })
+        );
+        assert_eq!(
+            state, before,
+            "replacement processing must remain clone-confined"
+        );
+    }
+
+    #[test]
+    fn preview_counter_addition_reports_prevented_replacement() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Counter-Proof Target".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .valid_card(TargetFilter::SelfRef)
+                    .quantity_modification(QuantityModification::Prevent),
+            );
+        let target = ObjectIncarnationRef::from_object(&state.objects[&target_id]);
+
+        assert_eq!(
+            preview_counter_addition(&state, PlayerId(0), target, CounterType::Plus1Plus1, 1,),
+            Some(CounterAdditionPreview::Prevented)
+        );
+    }
+
+    #[test]
+    fn preview_counter_addition_reports_replacement_choice_required() {
+        let mut state = GameState::new_two_player(42);
+        install_noncommuting_counter_replacements(&mut state);
+        let target_id = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Counter Preview Target".to_string(),
+            Zone::Battlefield,
+        );
+        let target = ObjectIncarnationRef::from_object(&state.objects[&target_id]);
+
+        assert_eq!(
+            preview_counter_addition(&state, PlayerId(0), target, CounterType::Plus1Plus1, 1,),
+            Some(CounterAdditionPreview::ChoiceRequired {
+                player: PlayerId(0)
+            })
+        );
+    }
+
+    #[test]
+    fn preview_counter_addition_rejects_stale_object_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(0),
+            "Counter Preview Target".to_string(),
+            Zone::Battlefield,
+        );
+        let stale_target = ObjectIncarnationRef::from_object(&state.objects[&target_id]);
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .bump_incarnation();
+
+        assert_eq!(
+            preview_counter_addition(
+                &state,
+                PlayerId(0),
+                stale_target,
+                CounterType::Plus1Plus1,
+                1,
+            ),
+            None,
+            "a tactical fact must not apply to a new object that reused the same id"
+        );
     }
 
     fn install_counter_removal_optional_replacement(state: &mut GameState) {

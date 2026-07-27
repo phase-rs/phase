@@ -6429,7 +6429,8 @@ fn then_if_control_count_conditions_followup_transform() {
     assert!(matches!(
         transform.effect.as_ref(),
         Effect::Transform {
-            target: TargetFilter::SelfRef
+            target: TargetFilter::SelfRef,
+            ..
         }
     ));
     match transform.condition.as_ref() {
@@ -15590,6 +15591,7 @@ fn exile_top_of_your_library_parses_as_exile_top() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -15612,6 +15614,7 @@ fn exile_top_card_of_your_library_face_down_parses_with_face_down_true() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: true,
             }
         ),
@@ -15638,6 +15641,7 @@ fn exile_card_from_top_of_your_library_face_down_for_each_opponent() {
                         filter: crate::types::ability::PlayerFilter::Opponent,
                     },
                 },
+                position: LibraryPosition::Top,
                 face_down: true,
             }
         ),
@@ -15659,6 +15663,7 @@ fn exile_top_target_opponents_library() {
         Effect::ExileTop {
             player,
             count,
+            position: LibraryPosition::Top,
             face_down,
         } => {
             assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
@@ -15686,6 +15691,7 @@ fn exile_top_target_players_library_singular() {
             Effect::ExileTop {
                 player: TargetFilter::Player,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -15713,6 +15719,7 @@ fn gonti_night_minister_look_and_exile_face_down_fuses_to_exile_top() {
             Effect::ExileTop {
                 player: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: true,
             }
         ),
@@ -15755,6 +15762,7 @@ fn look_at_top_then_exile_it_face_down_rewrites_dig_to_exile_top() {
             Effect::ExileTop {
                 player: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: true,
             }
         ),
@@ -15828,6 +15836,7 @@ fn exile_top_then_free_play_that_card_binds_cast_to_tracked_set() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -15872,6 +15881,7 @@ fn abbot_of_keral_keep_paid_impulse_grant_unchanged() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -22456,6 +22466,7 @@ fn parse_impulse_draw_chain_next_turn() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 2 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -22500,6 +22511,7 @@ fn escape_to_the_wilds_play_clause() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 5 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -22822,6 +22834,7 @@ fn parse_impulse_draw_chain() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 2 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -22987,6 +23000,7 @@ fn exile_top_x_cards_of_your_library() {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::Variable { ref name }
                 },
+                position: LibraryPosition::Top,
                 face_down: false,
             } if name == "X"
         ),
@@ -23013,6 +23027,7 @@ fn exile_top_x_cards_with_where_x_card_types_among_other_nonland_permanents() {
                             },
                     },
             },
+        position: LibraryPosition::Top,
         face_down: false,
     } = &*def.effect
     else {
@@ -23058,6 +23073,7 @@ fn jeleva_etb_each_player_exiles_top_x_resolves_to_mana_spent_to_cast() {
                         metric: crate::types::ability::CastManaSpentMetric::Total,
                     },
             },
+        position: LibraryPosition::Top,
         face_down: false,
     } = &*def.effect
     else {
@@ -23093,6 +23109,7 @@ fn exile_top_card_of_that_players_library_uses_parent_target() {
             Effect::ExileTop {
                 player: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -23765,6 +23782,7 @@ fn defending_player_exiles_top_twenty_cards() {
             Effect::ExileTop {
                 player: TargetFilter::DefendingPlayer,
                 count: QuantityExpr::Fixed { value: 20 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -23783,6 +23801,7 @@ fn target_opponent_exiles_top_half_library() {
         Effect::ExileTop {
             player,
             count,
+            position: LibraryPosition::Top,
             face_down: _,
         } => {
             assert!(
@@ -28317,7 +28336,8 @@ fn second_doctor_subject_only_who_does_lowers_cross_scope_restriction() {
             assert_eq!(
                 *activity,
                 ProhibitedActivity::Attack {
-                    defended: AttackTargetFilter::PlayerOrPermanents
+                    defended: AttackTargetFilter::PlayerOrPermanents,
+                    protected_player: None,
                 },
                 "\"you or permanents you control\" defends player + permanents"
             );
@@ -28377,7 +28397,8 @@ fn city_hall_subject_only_who_does_lowers_same_scope_restriction() {
             assert_eq!(
                 *activity,
                 ProhibitedActivity::Attack {
-                    defended: AttackTargetFilter::Player
+                    defended: AttackTargetFilter::Player,
+                    protected_player: None,
                 },
                 "bare \"you\" defends the player only"
             );
@@ -30542,6 +30563,7 @@ fn that_player_cant_attack_branches_on_duration_phrase() {
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::PlayerOrPlaneswalker,
+                        protected_player: None,
                     },
                     ..
                 }
@@ -30566,6 +30588,116 @@ fn that_player_cant_attack_branches_on_duration_phrase() {
         "the 'next turn' branch must carry UntilEndOfNextTurnOf (got {:?})",
         next_turn.duration
     );
+}
+
+#[test]
+fn public_attack_prohibition_parser_preserves_legacy_anaphora_and_connector() {
+    for text in [
+        "that player can't attack you during their next turn.",
+        "they cannot attack you during their next turn.",
+    ] {
+        let parsed = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(matches!(
+            parsed.effect.as_ref(),
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::Attack {
+                        defended: crate::types::triggers::AttackTargetFilter::Player,
+                        protected_player: None,
+                    },
+                    ..
+                }
+            }
+        ));
+        assert!(matches!(
+            parsed.duration,
+            Some(Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            })
+        ));
+    }
+
+    let connector =
+        parse_effect_chain("Then, they can't attack you this turn.", AbilityKind::Spell);
+    assert!(matches!(
+        connector.effect.as_ref(),
+        Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                expiry: RestrictionExpiry::EndOfTurn,
+                activity: ProhibitedActivity::Attack {
+                    defended: crate::types::triggers::AttackTargetFilter::Player,
+                    protected_player: None,
+                },
+                ..
+            }
+        }
+    ));
+    assert!(connector.duration.is_none());
+}
+
+#[test]
+fn scoped_cant_attack_prohibition_supports_both_verbs_and_all_defended_scopes() {
+    use crate::types::triggers::AttackTargetFilter;
+
+    for verb in ["can't", "cannot"] {
+        for (scope, expected_defended) in [
+            ("you", AttackTargetFilter::Player),
+            (
+                "you or planeswalkers you control",
+                AttackTargetFilter::PlayerOrPlaneswalker,
+            ),
+            (
+                "you or permanents you control",
+                AttackTargetFilter::PlayerOrPermanents,
+            ),
+        ] {
+            let text = format!(
+                "creatures that player controls {verb} attack {scope} until your next turn."
+            );
+            let parsed = parse_effect_chain(&text, AbilityKind::Spell);
+            assert!(
+                matches!(
+                    parsed.effect.as_ref(),
+                    Effect::AddRestriction {
+                        restriction: GameRestriction::ProhibitActivity {
+                            affected_players: RestrictionPlayerScope::ScopedPlayer,
+                            expiry: RestrictionExpiry::EndOfTurn,
+                            activity: ProhibitedActivity::Attack {
+                                defended,
+                                protected_player: None,
+                            },
+                            ..
+                        }
+                    } if *defended == expected_defended
+                ),
+                "expected scoped restriction for {text:?}, got {parsed:?}"
+            );
+            assert_eq!(
+                parsed.duration,
+                Some(Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                }),
+                "expected controller-next-turn expiry for {text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn scoped_cant_attack_prohibition_fails_closed_without_its_complete_grammar() {
+    for text in [
+        "creatures that player controls can't attack you",
+        "creatures that player controls can't attack until your next turn",
+        "creatures that player controls can't attack you until your next turn or draw a card",
+    ] {
+        assert!(
+            try_parse_that_player_cant_attack_prohibition(TextPair::new(text, text)).is_none(),
+            "the bounded scoped form must reject {text:?}"
+        );
+    }
 }
 
 #[test]
@@ -40091,6 +40223,7 @@ fn parser_shape_evelyn_exiles_each_library_with_collection_counter_and_permissio
     let Effect::ExileTop {
         player: TargetFilter::Controller,
         count: QuantityExpr::Fixed { value: 1 },
+        position: LibraryPosition::Top,
         face_down: false,
     } = *def.effect
     else {
@@ -43047,6 +43180,7 @@ fn alt_cost_rider_folds_onto_prior_cast_from_zone() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -47120,6 +47254,30 @@ fn exile_pile_shuffle_cloak_remains_with_context_only() {
         ),
         "WithContext must reach the pile recognizer: {with_context:?}"
     );
+}
+
+#[test]
+fn triumph_of_saint_katherine_trigger_body_lowers_to_atomic_face_down_pile() {
+    // The trigger parser owns the "When ... dies" shell; this contextual body
+    // lowering is where the face-down-pile recognizer is selected.
+    let mut ctx = ParseContext {
+        in_trigger: true,
+        ..Default::default()
+    };
+    let effect = parse_effect_chain_with_context(
+        "exile it and the top six cards of your library in a face-down pile. If you do, shuffle that pile and put it back on top of your library.",
+        AbilityKind::Spell,
+        &mut ctx,
+    )
+    .effect;
+    assert!(matches!(
+        &*effect,
+        Effect::ExileFaceDownPile {
+            object: TargetFilter::TriggeringSource,
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 6 },
+        }
+    ));
 }
 
 // ── S25 P3 W1 #2 — self-and-target reanimation (Sandman / Slimefoot) ──

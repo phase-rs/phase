@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-07-25T00:00:00Z",
+  "updated": "2026-07-26T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -719,15 +719,15 @@
       "name": "Orzhov Greasefang",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "W"
+        "W",
+        "B"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 2,
+          "count": 1,
           "name": "Bleachbone Verge"
         },
         {
@@ -735,12 +735,16 @@
           "name": "Brightclimb Pathway"
         },
         {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
           "count": 1,
           "name": "Eiganjo, Seat of the Empire"
         },
         {
-          "count": 4,
-          "name": "Monument to Endurance"
+          "count": 3,
+          "name": "Concealed Courtyard"
         },
         {
           "count": 4,
@@ -749,6 +753,10 @@
         {
           "count": 1,
           "name": "Geier Reach Sanitarium"
+        },
+        {
+          "count": 4,
+          "name": "Godless Shrine"
         },
         {
           "count": 4,
@@ -763,12 +771,12 @@
           "name": "Iron-Shield Elf"
         },
         {
-          "count": 1,
-          "name": "Lively Dirge"
+          "count": 2,
+          "name": "Sheltered by Ghosts"
         },
         {
           "count": 4,
-          "name": "The Mycosynth Gardens"
+          "name": "Monument to Endurance"
         },
         {
           "count": 4,
@@ -776,23 +784,19 @@
         },
         {
           "count": 1,
-          "name": "Swamp"
+          "name": "Plains"
         },
         {
-          "count": 1,
-          "name": "Plains"
+          "count": 2,
+          "name": "Shadowy Backstreet"
         },
         {
           "count": 1,
           "name": "Takenuma, Abandoned Mire"
         },
         {
-          "count": 4,
+          "count": 1,
           "name": "Concealed Courtyard"
-        },
-        {
-          "count": 2,
-          "name": "Duress"
         },
         {
           "count": 1,
@@ -800,61 +804,57 @@
         },
         {
           "count": 1,
-          "name": "Vanishing Verse"
+          "name": "Bleachbone Verge"
         },
         {
           "count": 4,
-          "name": "Godless Shrine"
+          "name": "The Mycosynth Gardens"
+        },
+        {
+          "count": 2,
+          "name": "Vanishing Verse"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 1,
+          "name": "Lively Dirge"
         },
         {
           "count": 4,
           "name": "Thoughtseize"
-        },
-        {
-          "count": 2,
-          "name": "Shadowy Backstreet"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 1,
-          "name": "Sheltered by Ghosts"
         }
       ],
       "sideboard": [
         {
           "count": 2,
+          "name": "Ral Zarek, Guest Lecturer"
+        },
+        {
+          "count": 2,
           "name": "Soul-Guide Lantern"
         },
         {
-          "count": 3,
-          "name": "Doorkeeper Thrull"
-        },
-        {
-          "count": 2,
-          "name": "Damping Sphere"
-        },
-        {
-          "count": 2,
+          "count": 1,
           "name": "Vanishing Verse"
         },
         {
           "count": 2,
-          "name": "Seam Rip"
+          "name": "Loran of the Third Path"
         },
         {
-          "count": 1,
-          "name": "Go Blank"
-        },
-        {
-          "count": 1,
-          "name": "Duress"
+          "count": 2,
+          "name": "Pest Control"
         },
         {
           "count": 2,
           "name": "Bitter Triumph"
+        },
+        {
+          "count": 4,
+          "name": "Doorkeeper Thrull"
         }
       ]
     },
@@ -1128,19 +1128,11 @@
       "sideboard": [
         {
           "count": 1,
-          "name": "Abrade"
+          "name": "Flowstone Infusion"
         },
         {
           "count": 1,
-          "name": "Brotherhood's End"
-        },
-        {
-          "count": 1,
-          "name": "Chandra's Defeat"
-        },
-        {
-          "count": 1,
-          "name": "Into the Flood Maw"
+          "name": "Thassa's Oracle"
         },
         {
           "count": 1,
@@ -1155,16 +1147,8 @@
           "name": "Annul"
         },
         {
-          "count": 1,
-          "name": "Rending Volley"
-        },
-        {
-          "count": 2,
+          "count": 3,
           "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Thassa's Oracle"
         },
         {
           "count": 1,
@@ -1172,7 +1156,15 @@
         },
         {
           "count": 1,
-          "name": "Fiery Impulse"
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 2,
+          "name": "Chandra's Defeat"
+        },
+        {
+          "count": 1,
+          "name": "Negate"
         }
       ]
     },
@@ -1188,24 +1180,16 @@
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Island"
+          "count": 2,
+          "name": "Shivan Reef"
+        },
+        {
+          "count": 2,
+          "name": "Riverpyre Verge"
         },
         {
           "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
+          "name": "Ral, Crackling Wit"
         },
         {
           "count": 4,
@@ -1228,12 +1212,12 @@
           "name": "Stormchaser's Talent"
         },
         {
-          "count": 1,
-          "name": "Ral, Crackling Wit"
+          "count": 4,
+          "name": "Riverglide Pathway"
         },
         {
-          "count": 2,
-          "name": "Riverpyre Verge"
+          "count": 4,
+          "name": "Steam Vents"
         },
         {
           "count": 3,
@@ -1276,8 +1260,8 @@
           "name": "Island"
         },
         {
-          "count": 2,
-          "name": "Shivan Reef"
+          "count": 3,
+          "name": "Island"
         },
         {
           "count": 1,
@@ -1286,12 +1270,12 @@
       ],
       "sideboard": [
         {
-          "count": 3,
-          "name": "Abrade"
+          "count": 1,
+          "name": "Disdainful Stroke"
         },
         {
           "count": 1,
-          "name": "Disdainful Stroke"
+          "name": "Abrade"
         },
         {
           "count": 2,
@@ -1306,8 +1290,8 @@
           "name": "Soul-Guide Lantern"
         },
         {
-          "count": 1,
-          "name": "Ral, Crackling Wit"
+          "count": 2,
+          "name": "Abrade"
         },
         {
           "count": 1,
@@ -1328,6 +1312,10 @@
         {
           "count": 1,
           "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Ral, Crackling Wit"
         }
       ]
     },

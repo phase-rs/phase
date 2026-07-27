@@ -23,8 +23,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
     Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp,
-    ForEachCategoryAction, LibraryPosition, MultiTargetSpec, ObjectScope, PermissionGrantee,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
+    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
     SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TypeFilter, TypedFilter,
 };
@@ -3787,7 +3787,7 @@ pub(super) fn apply_clause_continuation(
             }
         }
         ContinuationAst::ManaRestriction {
-            restriction,
+            restrictions: new_restrictions,
             grants: new_grants,
         } => {
             let Some(previous) = defs.last_mut() else {
@@ -3799,7 +3799,7 @@ pub(super) fn apply_clause_continuation(
                 ..
             } = &mut *previous.effect
             {
-                restrictions.push(restriction);
+                restrictions.extend(new_restrictions);
                 grants.extend(new_grants);
             }
         }
@@ -4862,6 +4862,7 @@ pub(super) fn apply_clause_continuation(
             *defs[bound_index].effect = Effect::ExileTop {
                 player,
                 count,
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down,
             };
         }
@@ -6013,6 +6014,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // `Dig`, and the sacrificed creature feeds the continuation's filter
         // via `ObjectScope::CostPaidObject`.
         Effect::Sacrifice { .. } | Effect::PayCost { .. } => true,
+        // CR 406.3 + CR 608.2c + CR 701.24a: Exiling a face-down pile and
+        // shuffling it for its "If you do" rider is an intervening instruction;
+        // a later continuation may still refer to an earlier Dig.
+        Effect::ExileFaceDownPile { .. } => true,
         // CR 406.3: turning the exiled card face up is its own resolving effect,
         // not a Dig-lookback-transparent clause.
         Effect::TurnFaceUp { .. } => false,
@@ -6503,10 +6508,14 @@ pub(super) fn parse_followup_continuation_ast(
             // (coverage green). A dropped unsupported restriction also drops any
             // paired `grants`; that is intentional (no real card pairs a grant with
             // an unsupported restriction).
-            if let Some((restriction, grants)) = super::mana::parse_mana_spend_restriction(&lower) {
-                if restriction.is_coverage_supported() {
+            if let Some((restrictions, grants)) = super::mana::parse_mana_spend_restriction(&lower) {
+                if !restrictions.is_empty()
+                    && restrictions
+                        .iter()
+                        .all(ManaSpendRestriction::is_coverage_supported)
+                {
                     return Some(ContinuationAst::ManaRestriction {
-                        restriction,
+                        restrictions,
                         grants,
                     });
                 }
@@ -7952,6 +7961,17 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 mod tests {
     use super::*;
     use crate::types::ability::QuantityExpr;
+
+    #[test]
+    fn face_down_pile_is_dig_lookback_transparent() {
+        let effect = Effect::ExileFaceDownPile {
+            object: TargetFilter::TriggeringSource,
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 6 },
+        };
+
+        assert!(clause_is_dig_lookback_transparent(&effect));
+    }
 
     // CR 608.2c + CR 601.2c: "target opponent does the same / does so" replicates
     // the preceding sibling effect for a targeted opponent. The recognizer must

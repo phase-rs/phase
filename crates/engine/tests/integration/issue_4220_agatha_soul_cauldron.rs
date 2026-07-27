@@ -225,7 +225,7 @@ fn agatha_granted_bb_ability_affordable_via_green_auto_tap_sources() {
         generic: 0,
     };
     assert!(
-        can_pay_ability_mana_cost_after_auto_tap(&state, P0, host, &bb_cost),
+        can_pay_ability_mana_cost_after_auto_tap(&state, P0, host, Some(ability_index), &bb_cost),
         "auto-tap planner must treat green sources as paying {{B}}{{B}} under Agatha"
     );
     assert!(

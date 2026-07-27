@@ -811,6 +811,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 3 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             } => {}
             other => panic!("expected ExileTop(controller, 3), got {other:?}"),

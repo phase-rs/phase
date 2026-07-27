@@ -1390,6 +1390,26 @@ fn replacement_may_cost_has_self_zone_move(cost: &AbilityCost) -> bool {
     }
 }
 
+/// Constructs the resolution-scoped payment authority used by replacement
+/// may-costs. These payments are not activations, so this deliberately carries
+/// no activation-only payment context.
+fn replacement_may_cost_payment_ability(
+    cost: &AbilityCost,
+    source_id: ObjectId,
+    player: PlayerId,
+) -> ResolvedAbility {
+    ResolvedAbility::new(
+        crate::types::ability::Effect::PayCost {
+            cost: cost.clone(),
+            scale: None,
+            payer: TargetFilter::Controller,
+        },
+        Vec::new(),
+        source_id,
+        player,
+    )
+}
+
 fn pay_replacement_may_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -1463,16 +1483,7 @@ fn pay_replacement_may_cost(
             // `source_id` and resolves the (here fixed) discard `count` against
             // it. Modeling it as `Effect::PayCost { cost }` keeps the context
             // self-describing without inventing a fake target chain.
-            let ability = ResolvedAbility::new(
-                crate::types::ability::Effect::PayCost {
-                    cost: cost.clone(),
-                    scale: None,
-                    payer: TargetFilter::Controller,
-                },
-                Vec::new(),
-                source_id,
-                player,
-            );
+            let ability = replacement_may_cost_payment_ability(cost, source_id, player);
             // CR 118.12 + CR 701.9b: when the eligible set exceeds the requirement
             // the resolution authority sets `WaitingFor::DiscardChoice` for the
             // player to pick *which* card(s) to discard. The non-composite discard
@@ -1505,16 +1516,7 @@ fn pay_replacement_may_cost(
         // follows the same pattern as Discard: the resolution authority handles
         // the interactive choice via `WaitingFor::EffectZoneChoice` with is_cost_payment: true.
         AbilityCost::Exile { filter, .. } if !matches!(filter, Some(TargetFilter::SelfRef)) => {
-            let ability = ResolvedAbility::new(
-                crate::types::ability::Effect::PayCost {
-                    cost: cost.clone(),
-                    scale: None,
-                    payer: TargetFilter::Controller,
-                },
-                Vec::new(),
-                source_id,
-                player,
-            );
+            let ability = replacement_may_cost_payment_ability(cost, source_id, player);
             let prior_waiting_for = state.waiting_for.clone();
             match crate::game::costs::pay_ability_cost_for_replacement_may_cost(
                 state, player, cost, &ability, events,
@@ -1542,15 +1544,22 @@ fn pay_replacement_may_cost(
                 Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
             }
         }
-        _ => match crate::game::casting::pay_ability_cost_for_activation(
-            state, player, source_id, cost, None, events,
-        ) {
-            Ok(crate::game::costs::PaymentOutcome::Paid) => true,
-            Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
-                return MayCostOutcome::PausedForChoice { remaining_cost };
+        // A replacement's may-cost is paid while applying the replacement; it
+        // is not an activation of `source_id`. Use the dedicated resolution
+        // payment authority so it neither invents an ability index nor applies
+        // an unrelated activation-only mana rider.
+        _ => {
+            let ability = replacement_may_cost_payment_ability(cost, source_id, player);
+            match crate::game::costs::pay_ability_cost_for_replacement_may_cost(
+                state, player, cost, &ability, events,
+            ) {
+                Ok(crate::game::costs::PaymentOutcome::Paid) => true,
+                Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
+                    return MayCostOutcome::PausedForChoice { remaining_cost };
+                }
+                Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
             }
-            Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
-        },
+        }
     };
     if paid {
         MayCostOutcome::Paid
@@ -1957,6 +1966,9 @@ fn damage_done_applier(
 ) -> ApplyResult {
     // Branch 1: Damage modification (Double, Triple, Plus, Minus)
     if let Some(modification) = damage_modification_for_rid(state, rid) {
+        // CR 510.2: identity for the combat-damage-batch prevention tally, taken
+        // before the event is destructured (mirrors the Branch 2 shield path).
+        let applied_key = AppliedReplacementKey::for_event(&event, rid);
         if let ProposedEvent::Damage {
             source_id,
             target,
@@ -1965,6 +1977,15 @@ fn damage_done_applier(
             applied,
         } = event
         {
+            // CR 615.1a: typed prevention provenance, captured before the match
+            // consumes `modification` (the `Plus`/`SetTo` arms move their
+            // non-`Copy` payload out). ONLY `PreventionMinus` — the CR 615
+            // prevention provenance of the shared subtraction — does prevention
+            // bookkeeping below; plain arithmetic `Minus` (Benevolent Unicorn's
+            // "that much damage minus 1") reduces the amount without preventing
+            // anything.
+            let is_minus_prevention =
+                matches!(modification, DamageModification::PreventionMinus { .. });
             let new_amount = match modification {
                 DamageModification::Double => amount.saturating_mul(2),
                 DamageModification::Triple => amount.saturating_mul(3),
@@ -2002,10 +2023,16 @@ fn damage_done_applier(
                     .max(0) as u32;
                     amount.saturating_add(added)
                 }
-                // CR 615.1 + CR 614.1a: Saturating subtract. `Minus { value: u32::MAX }`
-                // is the continuous prevent-all sentinel — yields 0 for any amount and
-                // is not consumed (continuous, not shield-style).
-                DamageModification::Minus { value } => amount.saturating_sub(value),
+                // CR 615.1 + CR 614.1a: Saturating subtract — the ONE shared
+                // subtraction authority for both provenances. `Minus` is plain
+                // arithmetic (CR 614.1a); `PreventionMinus` is CR 615 prevention
+                // provenance over the identical formula
+                // (`PreventionMinus { value: u32::MAX }` is the continuous
+                // prevent-all sentinel — yields 0 for any amount and is not
+                // consumed; continuous, not shield-style). Only the prevention
+                // provenance does the `DamagePrevented` bookkeeping below.
+                DamageModification::Minus { value }
+                | DamageModification::PreventionMinus { value } => amount.saturating_sub(value),
                 // CR 614.1a: Conditional — if amount < source's power, set to power.
                 // References the replacement source's (rid.source) post-layer power.
                 DamageModification::SetToSourcePower => {
@@ -2052,6 +2079,57 @@ fn damage_done_applier(
             // consumed here — they re-apply to every damage event.
             if let Some(ShieldKind::DamageReplacementOneShot) = shield_kind_for_rid(state, rid) {
                 consume_prevention_shield(state, rid, None);
+            }
+            // CR 615.1a + CR 702.64b + CR 510.2: `PreventionMinus` is the typed
+            // prevention provenance of the shared `Minus` subtraction — CR 702.64
+            // Absorb, the bare "prevent N of that damage" statics (Heart-Shaped
+            // Herb #5902, Sphere of Purity, Orbs of Warding, ...), and the
+            // `PreventionMinus { value: u32::MAX }` prevent-all sentinel. When it
+            // actually reduces the event it prevents damage, so it performs the
+            // same bookkeeping the `ShieldKind::Prevention` shields do (Branch 2),
+            // with the same per-event vs post-batch binding semantics:
+            //   * outside a combat-damage batch, emit `DamagePrevented` per event
+            //     and stamp the per-event prevented amount into
+            //     `last_effect_count` so a "damage prevented this way"
+            //     continuation resolves `QuantityRef::EventContextAmount` against
+            //     THIS event's amount (CR 615.5; mirrors Branch 2's stamp);
+            //   * inside a batch, accumulate into the per-replacement tally — the
+            //     single `DamagePrevented` and the aggregate `last_effect_count`
+            //     stamp happen post-batch in `fire_combat_prevention_riders`
+            //     (CR 510.2 + CR 615.13), so nothing is emitted or stamped here;
+            //   * exception (mirrors Branch 2): an `execute`-template follow-up
+            //     drains per-event inside `replace_combat_damage_batch` and needs
+            //     the per-event amount stamped even while the batch tally is
+            //     active; a per-source-reflecting rider (Comeuppance class) must
+            //     never aggregate at all.
+            // Plain arithmetic `Minus` and the increase/no-op modifications
+            // (Double, Triple, Plus, SetTo*, LifeFloor) are not prevention and
+            // record nothing.
+            if is_minus_prevention {
+                let prevented = amount.saturating_sub(new_amount);
+                if prevented > 0 {
+                    let mut accumulated_in_batch = false;
+                    if !shield_rider_reflects_per_event(state, rid) {
+                        if let Some(tally) = state.combat_prevention_tally.as_mut() {
+                            *tally.entry(applied_key).or_insert(0) += prevented as i32;
+                            accumulated_in_batch = true;
+                        }
+                    }
+                    let per_event_execute_followup =
+                        accumulated_in_batch && shield_has_per_event_execute_followup(state, rid);
+                    if !accumulated_in_batch || per_event_execute_followup {
+                        if !accumulated_in_batch {
+                            events.push(GameEvent::DamagePrevented {
+                                source_id,
+                                target: target.clone(),
+                                amount: prevented,
+                            });
+                        }
+                        // CR 615.5: the prevented-amount handoff for follow-up
+                        // continuations — identical to Branch 2's stamp.
+                        state.last_effect_count = Some(prevented as i32);
+                    }
+                }
             }
             return ApplyResult::Modified(ProposedEvent::Damage {
                 source_id,
@@ -3946,7 +4024,9 @@ fn retarget_intrinsic_entry_counters_to_copy(
     });
     enter_with_counters.extend(
         crate::game::printed_cards::intrinsic_entry_counters_for_face(
+            copy_spec.values.printed_loyalty,
             copy_spec.values.loyalty,
+            None,
             None,
             &copy_spec.values.card_types,
         ),
@@ -5124,7 +5204,15 @@ fn is_damage_prevention_replacement(
         return false;
     };
 
-    // CR 614.1a: Damage boost/reduction replacements are definitively not prevention effects
+    // Ordinary damage modifications are not prevention, but `PreventionMinus`
+    // carries explicit prevention provenance and must be suppressed when damage
+    // can't be prevented.
+    if matches!(
+        repl.damage_modification,
+        Some(DamageModification::PreventionMinus { .. })
+    ) {
+        return true;
+    }
     if repl.damage_modification.is_some() {
         return false;
     }
@@ -8313,7 +8401,10 @@ fn damage_commute_class(modification: &DamageModification) -> CommuteClass {
     match modification {
         DamageModification::Double | DamageModification::Triple => CommuteClass::Multiplicative,
         DamageModification::Plus { .. } => CommuteClass::Additive,
-        DamageModification::Minus { .. } => CommuteClass::Subtractive,
+        // CR 616.1: both provenances of the shared subtraction commute alike.
+        DamageModification::Minus { .. } | DamageModification::PreventionMinus { .. } => {
+            CommuteClass::Subtractive
+        }
         DamageModification::SetToSourcePower
         | DamageModification::SetTo { .. }
         | DamageModification::LifeFloor { .. } => CommuteClass::NonCommuting,
@@ -14424,6 +14515,135 @@ mod tests {
             }
             other => panic!("Expected Modified Damage, got {other:?}"),
         }
+    }
+
+    /// CR 614.1a vs CR 615: plain arithmetic `Minus` (Benevolent Unicorn's
+    /// "that much damage minus 1") is NOT prevention provenance — it must
+    /// reduce the amount WITHOUT emitting `DamagePrevented` and WITHOUT
+    /// stamping the CR 615.5 prevented-amount handoff. (Regression for the
+    /// review finding that every `Minus` was classified as prevention.)
+    #[test]
+    fn damage_applier_arithmetic_minus_is_not_prevention() {
+        let repl = damage_repl(DamageModification::Minus { value: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let result = damage_done_applier(damage_event(3), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 2, "arithmetic Minus must still subtract");
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
+            "arithmetic Minus prevents nothing — no DamagePrevented may be emitted"
+        );
+        assert_eq!(
+            state.last_effect_count, None,
+            "arithmetic Minus must not stamp the CR 615.5 prevented-amount handoff"
+        );
+    }
+
+    /// CR 615.1a + CR 615.5: the `PreventionMinus` provenance of the shared
+    /// subtraction must, OUTSIDE a combat batch, emit `DamagePrevented` for the
+    /// per-event prevented amount AND stamp it into `last_effect_count` so a
+    /// "damage prevented this way" continuation resolves
+    /// `QuantityRef::EventContextAmount` against THIS event's amount (mirrors
+    /// the Branch 2 shield stamp). Seeded with a stale count to prove the
+    /// binding overwrites it — without the stamp the continuation would read
+    /// the stale 999.
+    #[test]
+    fn damage_applier_prevention_minus_stamps_per_event_amount_for_continuations() {
+        let repl = damage_repl(DamageModification::PreventionMinus { value: 2 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.last_effect_count = Some(999);
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let result = damage_done_applier(damage_event(5), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 3, "PreventionMinus(2) must subtract from 5");
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::DamagePrevented { amount: 2, .. })),
+            "prevention provenance must emit DamagePrevented for the prevented 2"
+        );
+        assert_eq!(
+            state.last_effect_count,
+            Some(2),
+            "the per-event prevented amount must be stamped for the rider handoff"
+        );
+        // The continuation's view: resolve the prevented amount through the real
+        // quantity resolver, exactly as a "for each 1 damage prevented this way"
+        // rider would (`current_trigger_event` is None here, so the documented
+        // `last_effect_count` fallback is the read path).
+        let observed = crate::game::quantity::resolve_quantity(
+            &state,
+            &QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::EventContextAmount,
+            },
+            PlayerId(0),
+            ObjectId(10),
+        );
+        assert_eq!(
+            observed, 2,
+            "a prevented-amount continuation must observe the per-event amount"
+        );
+    }
+
+    /// CR 510.2 + CR 615.13: inside a combat-damage batch, `PreventionMinus`
+    /// must defer BOTH the `DamagePrevented` emission and the
+    /// `last_effect_count` stamp to the post-batch aggregate — it accumulates
+    /// into the per-replacement tally that `fire_combat_prevention_riders`
+    /// consumes (which emits the single event and stamps the batch total),
+    /// mirroring the `Prevention::All` shield batching.
+    #[test]
+    fn damage_applier_prevention_minus_in_batch_defers_to_post_batch_aggregate() {
+        let repl = damage_repl(DamageModification::PreventionMinus { value: 2 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.combat_prevention_tally = Some(HashMap::new());
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let result = damage_done_applier(damage_event(5), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 3);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
+            "in-batch prevention must not emit per-source DamagePrevented (deferred)"
+        );
+        assert_eq!(
+            state.last_effect_count, None,
+            "in-batch prevention must not stamp per-event — the aggregate stamp \
+             happens post-batch so the rider sees the un-fragmented total"
+        );
+        let tally = state.combat_prevention_tally.as_ref().unwrap();
+        assert_eq!(
+            tally.values().copied().collect::<Vec<_>>(),
+            vec![2],
+            "the prevented amount must accumulate into the per-replacement batch tally"
+        );
     }
 
     #[test]

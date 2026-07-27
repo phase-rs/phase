@@ -435,7 +435,7 @@ pub(super) fn handle_harmonize_tap_choice(
         player,
         pending.object_id,
         pending.card_id,
-        pending.ability,
+        *pending.ability,
         &pending.cost,
         base_cost,
         pending.casting_variant,

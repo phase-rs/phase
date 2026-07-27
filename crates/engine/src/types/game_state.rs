@@ -50,12 +50,13 @@ use super::resolution::{
     ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
 use super::resolved_commands::{
-    ManaPaymentRecipient, ResolvedFrameTransition, ResolvedFrameTransitionCommand,
-    ResolvedFrameTransitionReplayInvariantError, ResolvedInformationAudience,
-    ResolvedInformationCommand, ResolvedInformationEdit, ResolvedInformationLifetime,
-    ResolvedInformationReplayInvariantError, ResolvedManaInsertCommand,
-    ResolvedManaReplayInvariantError, ResolvedManaSpendCommand, ResolvedPlayerEdit,
-    ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
+    ManaPaymentRecipient, ResolvedContinuousEffectCommand,
+    ResolvedContinuousEffectReplayInvariantError, ResolvedFrameTransition,
+    ResolvedFrameTransitionCommand, ResolvedFrameTransitionReplayInvariantError,
+    ResolvedInformationAudience, ResolvedInformationCommand, ResolvedInformationEdit,
+    ResolvedInformationLifetime, ResolvedInformationReplayInvariantError,
+    ResolvedManaInsertCommand, ResolvedManaReplayInvariantError, ResolvedManaSpendCommand,
+    ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
     ResolvedRngReplayInvariantError, ResolvedRulesJournal, RulesExecutionNodeRef,
 };
 use super::zones::EtbTapState;
@@ -3237,6 +3238,11 @@ pub struct PendingZoneChangeDelivery {
     /// as-enters prompt is unresolved.
     pub terminal_completion: Option<ZoneMoveCompletion>,
     pub count: PausedZoneChangeDeliveryCount,
+    /// CR 406.3: A batch delivery requested concealment on an Exile landing.
+    /// It survives the replacement-choice pause so the settled member is hidden
+    /// before the next batch member is attempted.
+    #[serde(default)]
+    pub face_down_in_exile: bool,
 }
 
 impl PendingZoneChangeDelivery {
@@ -3247,6 +3253,7 @@ impl PendingZoneChangeDelivery {
             delivery_events: Vec::new(),
             terminal_completion: None,
             count: PausedZoneChangeDeliveryCount::NeedsCount,
+            face_down_in_exile: false,
         }
     }
 
@@ -4521,6 +4528,8 @@ pub struct PendingBatchZoneMoveRequest {
     pub exile_tracking: ZoneDeliveryExileTracking,
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub replacement_applied: HashSet<AppliedReplacementKey>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub face_down_in_exile: bool,
 }
 
 /// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
@@ -4570,6 +4579,18 @@ pub enum BatchCompletion {
         #[serde(default)]
         enters_under: Option<PlayerId>,
     },
+    /// CR 406.3 + CR 608.2c + CR 701.24a: A face-down pile's proposed exile
+    /// delivery settled. The exact member list is retained so the "If you do"
+    /// completion can return precisely that full pile, and never a partial one.
+    ExileFaceDownPileDeliveryComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+        members: Vec<ObjectId>,
+        required_member_count: usize,
+    },
+    /// CR 406.3 + CR 608.2c: The successful pile's replacement-aware return to
+    /// library settled; emit the original effect's completion exactly once.
+    ExileFaceDownPileReturnComplete { source_id: ObjectId },
     /// CR 614.1 + CR 616.1 + CR 611.2a: A `CastFromZone` current-zone-to-Exile
     /// batch settled. Keep the resolved ability and its two target partitions
     /// so the permission is recorded only after the exile delivery, while
@@ -5237,7 +5258,7 @@ pub struct DelayedTrigger {
     /// When this trigger fires.
     pub condition: DelayedTriggerCondition,
     /// The ability to execute when it fires.
-    pub ability: ResolvedAbility,
+    pub ability: Box<ResolvedAbility>,
     /// CR 603.7d: Controller (the player who created it).
     pub controller: PlayerId,
     /// Source permanent that created this delayed trigger.
@@ -5349,7 +5370,7 @@ pub struct CastingPermissionIndex(pub usize);
 pub struct PendingCast {
     pub object_id: ObjectId,
     pub card_id: CardId,
-    pub ability: ResolvedAbility,
+    pub ability: Box<ResolvedAbility>,
     pub cost: ManaCost,
     /// CR 601.2f: The tax-inclusive base mana cost captured at announcement,
     /// BEFORE any cost reductions/increases or {X} concretization. Lets the
@@ -5801,7 +5822,7 @@ impl PendingCast {
         Self {
             object_id,
             card_id,
-            ability,
+            ability: Box::new(ability),
             cost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -6001,7 +6022,10 @@ pub enum ManaChoiceContext {
 pub struct PendingManaAbility {
     pub player: PlayerId,
     pub source_id: ObjectId,
-    pub ability_index: usize,
+    /// The live definition index when this activation originated from an
+    /// enumerated ability. Runtime-synthesized mana abilities retain their
+    /// snapshot but intentionally have no definition index.
+    pub ability_index: Option<usize>,
     /// The P1 execution scope assigned when this activation begins. It survives
     /// player-choice suspension so exact produced and spent mana keep the same
     /// causal node after resumption.
@@ -6482,7 +6506,7 @@ fn default_one_u32() -> u32 {
 /// CR 103.6: A beginning-of-game ability waiting to resolve after mulligans.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingBeginGameAbility {
-    pub ability: ResolvedAbility,
+    pub ability: Box<ResolvedAbility>,
 }
 
 /// CR 103.5b: Which declare-point action a pending `BottomCards` obligation
@@ -8019,6 +8043,20 @@ pub enum WaitingFor {
         player: PlayerId,
         game_number: u8,
         score: MatchScore,
+        /// CR 100.2a / CR 100.5: fewest cards this player's main deck may hold
+        /// when they submit. `deck_size` is a *minimum* — there is no maximum
+        /// deck size — so sideboarding need not be a one-for-one swap.
+        ///
+        /// Published here (rather than left for the UI to derive) so the
+        /// submit gate is the engine's own acceptance predicate. Computed by
+        /// `match_flow::sideboard_submission_bounds`, the single authority
+        /// `handle_submit_sideboard` also validates against.
+        #[serde(default)]
+        min_main_deck_size: u32,
+        /// CR 100.4a: most cards the sideboard may hold, or `None` when the
+        /// format imposes no cap. `Forbidden`-sideboard formats report `0`.
+        #[serde(default)]
+        max_sideboard_size: Option<u32>,
     },
     BetweenGamesChoosePlayDraw {
         player: PlayerId,
@@ -9880,69 +9918,6 @@ impl WaitingFor {
                 WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. }
             )
     }
-
-    /// Look-at-top-N states whose legal selections cannot be captured by the
-    /// candidate enumerator (it lists only {empty, full-in-original-order,
-    /// singletons}), so the multiplayer legality gate would wrongly reject a
-    /// legal reordered or partial selection. For these, `apply()` is the real
-    /// validation boundary and validates the submitted selection structurally
-    /// (see handle_resolution_choice); the server bypasses its enumeration gate.
-    ///
-    /// - CR 701.22a / CR 701.25a: scry/surveil keep the chosen cards on top
-    ///   "in any order" — any duplicate-free subset, in any order, is legal.
-    /// - Dig (look at N, keep some): the handler enforces the keep_count /
-    ///   up_to constraint, uniqueness, and the selectable-cards filter, and
-    ///   preserves the chosen order for library-destined keeps.
-    pub fn accepts_freeform_card_selection(&self) -> bool {
-        matches!(
-            self,
-            WaitingFor::ScryChoice { .. }
-                | WaitingFor::ArrangePlanarDeckTopChoice { .. }
-                | WaitingFor::SurveilChoice { .. }
-                | WaitingFor::DigChoice { .. }
-        )
-    }
-
-    pub fn accepts_freeform_counter_move_distribution(&self) -> bool {
-        matches!(self, WaitingFor::MoveCountersDistribution { .. })
-    }
-
-    /// CR 107.1c: "Remove any number of counters" has a combinatorial legal
-    /// space (any per-type subset 0..=available, including the empty set) that
-    /// the coarse AI candidate enumerator (`counter_removal_candidates`, which
-    /// offers only "remove all" and "remove none") cannot fully cover. The
-    /// server bypasses its enumeration gate for this state so a human's
-    /// intermediate submission (e.g. "remove 2 of 3") is not wrongly rejected;
-    /// `apply()` (the `RemoveCountersChoice` handler) is the real validation
-    /// boundary via `validate_counter_selection`.
-    pub fn accepts_freeform_counter_removal(&self) -> bool {
-        matches!(self, WaitingFor::RemoveCountersChoice { .. })
-    }
-
-    /// Combat-damage assignment whose legal divisions cannot be captured by the
-    /// candidate enumerator. `candidates.rs` lists exactly one
-    /// `AssignCombatDamage` candidate (the greedy trample-through split), so the
-    /// multiplayer legality gate would wrongly reject every other legal division
-    /// — e.g. keeping excess on the blocker instead of trampling it through
-    /// (CR 702.19b), or any of the freely-chosen splits across multiple blockers
-    /// (CR 510.1c/d). The combinatorial space of legal divisions is too large to
-    /// enumerate, so `apply()` (handle_assign_combat_damage) is the real
-    /// validation boundary: it enforces total conservation, blocker membership,
-    /// and the CR 702.19b lethal-before-excess precondition, and rejects illegal
-    /// submissions. The server bypasses its enumeration gate for these.
-    pub fn accepts_freeform_combat_damage_assignment(&self) -> bool {
-        matches!(self, WaitingFor::AssignCombatDamage { .. })
-    }
-
-    /// CR 510.1d + CR 702.22k: A blocker's free division of its combat damage
-    /// among the attackers it blocks cannot be captured by the candidate
-    /// enumerator (the combinatorial space of legal divisions is too large to
-    /// enumerate), so the server bypasses its enumeration gate for this state
-    /// and `apply()` (handle_assign_blocker_damage) is the real validation
-    /// boundary: it enforces total conservation and blocked-attacker membership.
-    pub fn accepts_freeform_blocker_damage_assignment(&self) -> bool {
-        matches!(self, WaitingFor::AssignBlockerDamage { .. })
-    }
 }
 
 /// CR 102.1 + CR 500.1: which turn boundary ends an auto-pass session.
@@ -10117,7 +10092,7 @@ impl StackEntry {
     /// `ResolvedAbility`.
     pub fn ability(&self) -> Option<&ResolvedAbility> {
         match &self.kind {
-            StackEntryKind::Spell { ability, .. } => ability.as_ref(),
+            StackEntryKind::Spell { ability, .. } => ability.as_deref(),
             StackEntryKind::ActivatedAbility { ability, .. } => Some(ability),
             StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
             StackEntryKind::KeywordAction { .. } => None,
@@ -10130,7 +10105,7 @@ impl StackEntry {
     /// `ResolvedAbility`.
     pub fn ability_mut(&mut self) -> Option<&mut ResolvedAbility> {
         match &mut self.kind {
-            StackEntryKind::Spell { ability, .. } => ability.as_mut(),
+            StackEntryKind::Spell { ability, .. } => ability.as_deref_mut(),
             StackEntryKind::ActivatedAbility { ability, .. } => Some(ability),
             StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
             StackEntryKind::KeywordAction { .. } => None,
@@ -10594,6 +10569,27 @@ impl CastingVariant {
     }
 }
 
+// clippy::large_enum_variant: this fires *because* the stack-budget fix
+// succeeded. Every variant used to carry an inline `ResolvedAbility`, so all of
+// them were ~5,264 B and the spread between them was small; boxing that payload
+// took the enum from 5,312 B to 320 B and left `TriggeredAbility` (320 B) as the
+// outlier against `Spell` (60 B).
+//
+// The residual weight is NOT the ability — that is now 8 B in every variant. It
+// is `condition: Option<TriggerCondition>` at 184 B, plus `trigger_event:
+// Option<GameEvent>` at 56 B (measured with `-Zprint-type-sizes`). Boxing those
+// is a separate design decision on separate types: `TriggerCondition` is
+// inspected on every trigger-condition re-check, and the same field is spelled
+// inline on `PendingTrigger`, so the two would have to move together. That is
+// out of scope here and is recorded as follow-up rather than done by reflex.
+//
+// The size that actually reaches a stack frame is bounded and pinned:
+// `StackEntry` is the only path from this enum into `GameState`
+// (`resolving_stack_entry`), and the `StackEntry` assert in
+// `types/game_state_size.rs` holds it under the ceiling recorded there. Follows
+// the documented allows on `Effect` / `CastingPermission` /
+// `OutsideGameChoiceSource`.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum StackEntryKind {
@@ -10603,7 +10599,7 @@ pub enum StackEntryKind {
         /// spell-level effect (creatures, artifacts, etc.) — they simply enter the
         /// battlefield on resolution.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        ability: Option<ResolvedAbility>,
+        ability: Option<Box<ResolvedAbility>>,
         /// How this spell was cast — determines resolution behavior (zone routing,
         /// exile permissions, delayed triggers).
         #[serde(default)]
@@ -10613,7 +10609,7 @@ pub enum StackEntryKind {
     },
     ActivatedAbility {
         source_id: ObjectId,
-        ability: ResolvedAbility,
+        ability: Box<ResolvedAbility>,
     },
     TriggeredAbility {
         source_id: ObjectId,
@@ -11378,7 +11374,7 @@ pub struct GameState {
 
     // Triggered ability targeting
     #[serde(default)]
-    pub pending_trigger: Option<crate::game::triggers::PendingTrigger>,
+    pub pending_trigger: Option<Box<crate::game::triggers::PendingTrigger>>,
     /// Sidecar for `pending_trigger`: full simultaneous event set for batched
     /// trigger context, consumed when the pending trigger is put on the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -12848,7 +12844,7 @@ pub struct GameState {
     /// CR 601.2h + CR 616.1: Resume a sequential discard cost after a
     /// replacement choice. Cost moves use `pending_cost_move_resume` above.
     #[serde(skip)]
-    pub pending_discard_for_cost: Option<PendingDiscardForCostResume>,
+    pub pending_discard_for_cost: Option<Box<PendingDiscardForCostResume>>,
 
     /// Pending cast info saved when entering ManaPayment state (X-cost or convoke).
     /// Consumed by the (ManaPayment, PassPriority) handler to finalize the cast.
@@ -15178,16 +15174,33 @@ impl GameState {
         delivery_events: &[GameEvent],
         terminal_completion: ZoneMoveCompletion,
     ) -> bool {
+        let settled_in_exile = delivery_events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Exile,
+                    ..
+                } if *object_id == member.object_id
+            )
+        });
         if let Some(paused) = self
             .active_change_zone_frame_mut()
             .and_then(|frame| frame.pending.as_mut())
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
+            let conceal = paused.face_down_in_exile && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
+            if conceal {
+                self.objects
+                    .get_mut(&member.object_id)
+                    .expect("settled paused pile member exists")
+                    .face_down = true;
+            }
             return true;
         }
         if let Some(paused) = self
@@ -15196,10 +15209,17 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
+            let conceal = paused.face_down_in_exile && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
+            if conceal {
+                self.objects
+                    .get_mut(&member.object_id)
+                    .expect("settled paused pile member exists")
+                    .face_down = true;
+            }
             return true;
         }
         false
@@ -15787,6 +15807,16 @@ impl GameState {
                 .begin_proposal()
                 .expect("resolved-rules journal proposal ordinal overflow")
         })
+    }
+
+    /// CR 800.4: Begin the distinct execution node for one player leaving the
+    /// game, so every mutation the leave sweep performs is attributed to the
+    /// leave rather than to whatever rules work was in flight when the
+    /// state-based action fired.
+    pub(crate) fn begin_player_leave_journal_node(&mut self) -> RulesExecutionNodeRef {
+        self.resolved_rules_journal
+            .begin_player_leave()
+            .expect("resolved-rules journal command ordinal overflow")
     }
 
     /// CR 605.3b: Begin the distinct, immediate execution node for one
@@ -16378,6 +16408,24 @@ impl GameState {
         ts
     }
 
+    /// CR 613.7: carry the timestamp allocator past a timestamp that a CR 733
+    /// replay *installed* rather than drew.
+    ///
+    /// Every applier that stamps an object with a recorded timestamp must call
+    /// this. [`GameState::next_timestamp`] is the draw counter, so an applier
+    /// that installs a recorded value without advancing it leaves the counter
+    /// behind a timestamp already in use, and a later draw hands that same
+    /// timestamp to a second object. CR 613.7 orders effects within a layer
+    /// solely by timestamp, so the two are then unordered — a corruption that
+    /// needs no forged journal, only an honest replay.
+    ///
+    /// `max` keeps the counter monotone when commands replay in an order other
+    /// than the one they were drawn in. `saturating_add` is total; its clamp is
+    /// unreachable because no game performs `u64::MAX` draws.
+    pub(crate) fn adopt_replayed_timestamp(&mut self, timestamp: u64) {
+        self.next_timestamp = self.next_timestamp.max(timestamp.saturating_add(1));
+    }
+
     pub fn may_trigger_auto_choice(&self, key: &MayTriggerAutoChoiceKey) -> Option<AutoMayChoice> {
         self.may_trigger_auto_choices
             .iter()
@@ -16583,6 +16631,10 @@ impl GameState {
     }
 
     /// Register a transient continuous effect and mark layers dirty.
+    ///
+    /// SINGLE AUTHORITY for adding to `transient_continuous_effects`. Resolves
+    /// the CR 613.7b timestamp and the effect id, installs the effect, and
+    /// journals the settled CR 611.2a creation through its owning family.
     pub fn add_transient_continuous_effect(
         &mut self,
         source_id: ObjectId,
@@ -16594,6 +16646,8 @@ impl GameState {
     ) -> u64 {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
+        // CR 613.7b: a continuous effect generated by the resolution of a spell
+        // or ability receives a timestamp at the time it is created.
         let timestamp = self.next_timestamp();
         // CR 400.7 + CR 603.10: When a triggered ability creates a transient
         // continuous effect AFTER its source has left a public zone (e.g., a
@@ -16608,8 +16662,8 @@ impl GameState {
             .map(|o| o.name.clone())
             .or_else(|| self.lki_cache.get(&source_id).map(|lki| lki.name.clone()))
             .unwrap_or_default();
-        self.transient_continuous_effects
-            .push_back(TransientContinuousEffect {
+        let command = ResolvedContinuousEffectCommand {
+            effect: TransientContinuousEffect {
                 id,
                 source_id,
                 controller,
@@ -16621,9 +16675,77 @@ impl GameState {
                 condition,
                 duration_subject: None,
                 source_name,
-            });
-        self.layers_dirty.mark_full();
+            },
+            expected_installed_count: self.transient_continuous_effects.len(),
+            resulting_next_continuous_effect_id: self.next_continuous_effect_id,
+            resulting_next_timestamp: self.next_timestamp,
+            cause: self.current_or_begin_rules_execution_node(),
+        };
+        self.apply_resolved_continuous_effect(&command).expect(
+            "the freshly drawn effect id and install position must satisfy their own preconditions",
+        );
+        self.resolved_rules_journal
+            .record_continuous_effect_install(command)
+            .expect("resolved continuous-effect install must have a live journal cause");
         id
+    }
+
+    /// Installs one already-resolved CR 611.2a continuous effect verbatim.
+    ///
+    /// Re-derives nothing. Per CR 611.2c the affected set was fixed when the
+    /// effect began, and per CR 613.7b its timestamp was drawn then, so replay
+    /// installs both rather than recomputing them — recomputing the timestamp
+    /// would silently reorder the effect within its CR 613 layer.
+    pub fn apply_resolved_continuous_effect(
+        &mut self,
+        command: &ResolvedContinuousEffectCommand,
+    ) -> Result<(), ResolvedContinuousEffectReplayInvariantError> {
+        let found = self.transient_continuous_effects.len();
+        if found != command.expected_installed_count {
+            return Err(
+                ResolvedContinuousEffectReplayInvariantError::InstalledCountPreconditionMismatch {
+                    expected: command.expected_installed_count,
+                    found,
+                },
+            );
+        }
+        if command.effect.id >= command.resulting_next_continuous_effect_id {
+            return Err(
+                ResolvedContinuousEffectReplayInvariantError::IdAboveHighWater {
+                    id: command.effect.id,
+                    high_water: command.resulting_next_continuous_effect_id,
+                },
+            );
+        }
+        if command.effect.timestamp >= command.resulting_next_timestamp {
+            return Err(
+                ResolvedContinuousEffectReplayInvariantError::TimestampAboveHighWater {
+                    timestamp: command.effect.timestamp,
+                    high_water: command.resulting_next_timestamp,
+                },
+            );
+        }
+        // Two live effects sharing one id are indistinguishable to every later
+        // id-addressed lookup, so reject before mutating anything.
+        if self
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == command.effect.id)
+        {
+            return Err(
+                ResolvedContinuousEffectReplayInvariantError::DuplicateEffectId(command.effect.id),
+            );
+        }
+
+        self.transient_continuous_effects
+            .push_back(command.effect.clone());
+        // Replay must not hand the same id or timestamp out to a later draw.
+        self.next_continuous_effect_id = self
+            .next_continuous_effect_id
+            .max(command.resulting_next_continuous_effect_id);
+        self.next_timestamp = self.next_timestamp.max(command.resulting_next_timestamp);
+        self.layers_dirty.mark_full();
+        Ok(())
     }
 
     /// Bind a transient effect to the exact recipient resolved by a one-shot
@@ -19033,7 +19155,7 @@ mod tests {
         let mut a = GameState::new_two_player(7);
         a.delayed_triggers.push(DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            ability: draw_ability(1),
+            ability: Box::new(draw_ability(1)),
             controller: PlayerId(0),
             source_id: ObjectId(5),
             one_shot: true,
@@ -19044,7 +19166,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(5),
-                ability: draw_ability(1),
+                ability: Box::new(draw_ability(1)),
             },
         });
 
@@ -19358,6 +19480,7 @@ mod tests {
             power: Some(1),
             toughness: Some(1),
             loyalty: None,
+            printed_loyalty: None,
             keywords: vec![],
             abilities: std::sync::Arc::default(),
             trigger_definitions: std::sync::Arc::default(),
@@ -20188,90 +20311,6 @@ mod tests {
     }
 
     #[test]
-    fn accepts_freeform_card_selection_for_scry_surveil_and_dig() {
-        // CR 701.22a / CR 701.25a: scry and surveil keep-on-top are freeform.
-        assert!(WaitingFor::ScryChoice {
-            player: PlayerId(0),
-            cards: vec![],
-        }
-        .accepts_freeform_card_selection());
-        assert!(WaitingFor::SurveilChoice {
-            player: PlayerId(0),
-            cards: vec![],
-        }
-        .accepts_freeform_card_selection());
-        // Dig: legal selections (count-constrained / reordered) also can't be
-        // enumerated; apply() validates them structurally.
-        assert!(WaitingFor::DigChoice {
-            player: PlayerId(0),
-            library_owner: PlayerId(0),
-            cards: vec![],
-            keep_count: 1,
-            up_to: false,
-            selectable_cards: vec![],
-            kept_destination: None,
-            rest_destination: None,
-            source_id: None,
-            enter_tapped: false,
-        }
-        .accepts_freeform_card_selection());
-
-        // A sampling of other selection/decision states must NOT be freeform —
-        // they remain validated by candidate enumeration.
-        assert!(!WaitingFor::Priority {
-            player: PlayerId(0),
-        }
-        .accepts_freeform_card_selection());
-        assert!(!WaitingFor::RevealChoice {
-            player: PlayerId(0),
-            cards: vec![],
-            filter: TargetFilter::Any,
-            optional: false,
-            decline_runs_continuation: false,
-        }
-        .accepts_freeform_card_selection());
-        assert!(!WaitingFor::ManifestDreadChoice {
-            player: PlayerId(0),
-            cards: vec![],
-            source_id: ObjectId(1),
-        }
-        .accepts_freeform_card_selection());
-    }
-
-    #[test]
-    fn accepts_freeform_combat_damage_assignment_for_assign_combat_damage() {
-        // CR 510.1c/d + CR 702.19b: legal damage divisions (e.g. keeping excess
-        // on the blocker rather than trampling through) cannot be enumerated as
-        // candidate actions, so the multiplayer gate must bypass exact-match and
-        // let apply() validate the submitted division.
-        assert!(WaitingFor::AssignCombatDamage {
-            player: PlayerId(0),
-            attacker_id: ObjectId(1),
-            total_damage: 3,
-            blockers: vec![],
-            assignment_modes: vec![],
-            trample: None,
-            defending_player: PlayerId(1),
-            attack_target: crate::game::combat::AttackTarget::Player(PlayerId(1)),
-            pw_loyalty: None,
-            pw_controller: None,
-        }
-        .accepts_freeform_combat_damage_assignment());
-
-        // Other states must NOT be freeform for combat damage — they remain
-        // validated by candidate enumeration.
-        assert!(!WaitingFor::Priority {
-            player: PlayerId(0),
-        }
-        .accepts_freeform_combat_damage_assignment());
-        assert!(!WaitingFor::ScryChoice {
-            player: PlayerId(0),
-            cards: vec![],
-        }
-        .accepts_freeform_combat_damage_assignment());
-    }
-
-    #[test]
     fn default_starts_at_turn_zero() {
         let state = GameState::default();
         assert_eq!(state.turn_number, 0);
@@ -20675,7 +20714,7 @@ mod tests {
             Box::new(PendingCast {
                 object_id: ObjectId(1),
                 card_id: CardId(1),
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Unimplemented {
                         name: "Dummy".to_string(),
                         description: None,
@@ -20683,7 +20722,7 @@ mod tests {
                     vec![],
                     ObjectId(1),
                     PlayerId(0),
-                ),
+                )),
                 cost: ManaCost::NoCost,
                 base_cost: None,
                 declared_mana_additions: Vec::new(),
@@ -21081,7 +21120,7 @@ mod tests {
         let pending = Box::new(PendingCast {
             object_id: ObjectId(1),
             card_id: CardId(1),
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 crate::types::ability::Effect::Unimplemented {
                     name: "Dummy".to_string(),
                     description: None,
@@ -21089,7 +21128,7 @@ mod tests {
                 vec![],
                 ObjectId(1),
                 PlayerId(0),
-            ),
+            )),
             cost: ManaCost::NoCost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -21182,7 +21221,7 @@ mod tests {
                 mana_ability: Box::new(PendingManaAbility {
                     player: PlayerId(0),
                     source_id: ObjectId(1),
-                    ability_index: 0,
+                    ability_index: None,
                     rules_execution_node: None,
                     ability_snapshot: None,
                     color_override: None,
@@ -21969,7 +22008,7 @@ mod tests {
             source_id: ObjectId(5),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -21977,7 +22016,7 @@ mod tests {
                 vec![],
                 ObjectId(5),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 42,
             target_constraints: Vec::new(),
             distribute: None,
@@ -22031,11 +22070,11 @@ mod tests {
                 return_zone: Zone::Battlefield,
             },
         });
-        state.pending_trigger = Some(PendingTrigger {
+        state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id: ObjectId(5),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -22043,7 +22082,7 @@ mod tests {
                 vec![],
                 ObjectId(5),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -22054,7 +22093,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
 
         let json = serde_json::to_string(&state).unwrap();
         let mut deserialized: GameState = serde_json::from_str(&json).unwrap();
@@ -22640,7 +22679,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(5),
-                ability: act_ability,
+                ability: Box::new(act_ability),
             },
         };
         assert!(!state.is_priority_yielded(PlayerId(0), &spell));

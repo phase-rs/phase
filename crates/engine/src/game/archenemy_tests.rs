@@ -472,7 +472,7 @@ fn deferred_scheme_trigger_blocks_abandon() {
         source_id: scheme_id,
         controller: arch,
         condition: None,
-        ability: ResolvedAbility::new(
+        ability: Box::new(ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
@@ -480,7 +480,7 @@ fn deferred_scheme_trigger_blocks_abandon() {
             vec![],
             scheme_id,
             arch,
-        ),
+        )),
         timestamp: 0,
         target_constraints: vec![],
         distribute: None,

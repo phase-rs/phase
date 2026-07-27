@@ -278,7 +278,12 @@ mod tests {
             controller,
             kind: StackEntryKind::ActivatedAbility {
                 source_id: object_id,
-                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    object_id,
+                    controller,
+                )),
             },
         }
     }
@@ -291,7 +296,7 @@ mod tests {
             controller,
             kind: StackEntryKind::ActivatedAbility {
                 source_id: object_id,
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     Effect::CopySpell {
                         target: TargetFilter::SelfRef,
                         retarget: CopyRetargetPermission::KeepOriginalTargets,
@@ -302,7 +307,7 @@ mod tests {
                     vec![],
                     object_id,
                     controller,
-                ),
+                )),
             },
         }
     }

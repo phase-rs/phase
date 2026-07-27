@@ -34,6 +34,7 @@ describe("mana-source selection wire types", () => {
         },
       },
       { OnlyForSpellWithColorCount: { comparator: "EQ", count: 2 } },
+      { OnlyForSpellColor: "Red" },
       {
         OnlyForSpellFromZone: {
           zone: "Hand",
@@ -48,6 +49,7 @@ describe("mana-source selection wire types", () => {
         ],
       },
       { OnlyForSpecialAction: "UnlockDoor" },
+      "Impossible",
       "ConvokePayment",
     ];
     const action: GameAction = {

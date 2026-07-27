@@ -2200,8 +2200,9 @@ fn unless_pay_success_sub_ability_fires_triggers_from_events() {
 }
 
 /// CR 603.3b + CR 701.22a: if an unless-payment branch pauses on a
-/// resolution choice, triggers produced by that branch wait until the choice
-/// finishes instead of clobbering the choice prompt.
+/// resolution choice, no scry trigger exists until the controller completes
+/// the top/bottom choice; its watchers then resolve without clobbering the
+/// prompt.
 #[test]
 fn unless_pay_resolution_choice_defers_branch_triggers() {
     let mut state = setup_game_at_main_phase();
@@ -2292,10 +2293,9 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
     };
     assert_eq!(player, PlayerId(0));
     assert_eq!(cards.len(), 2);
-    assert_eq!(
-        state.deferred_triggers.len(),
-        2,
-        "the two scry watcher triggers should be parked until ScryChoice resolves"
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "scry watchers must not trigger before the controller completes ScryChoice"
     );
 
     let hand_after_scry_prompt = state.players[0].hand.len();
@@ -2312,7 +2312,11 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
     }
 
     assert_eq!(state.players[0].hand.len(), hand_after_scry_prompt + 1);
-    assert_eq!(state.players[0].life, life_after_scry_prompt + 1);
+    assert_eq!(
+        state.players[0].life,
+        life_after_scry_prompt + 1,
+        "the completed-scry watcher resolves after ScryChoice finishes"
+    );
 }
 
 /// CR 118.12: When the unless cost is declined, the primary effect runs

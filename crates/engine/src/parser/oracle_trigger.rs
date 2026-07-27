@@ -1323,6 +1323,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     if let Some(scope) = relative_player_scope_for_condition(&cond_lower) {
         effect_ctx.relative_player_scope = Some(scope);
     }
+    // CR 701.22a + CR 603.2: The completed-scry predicate establishes the
+    // provenance for its "that many" effect body. Keep this as a pure match on
+    // the condition text: `parse_trigger_condition` below remains the single
+    // authoritative trigger-definition parse and the outer context is untouched
+    // until then.
+    if parse_completed_scry_bottom_condition(&cond_lower).is_some() {
+        effect_ctx.quantity_ref = Some(QuantityRef::TriggeringScryBottomCount);
+    }
     // Snapshot the condition-established scope before body parsing (which may
     // temporarily rebind it via `with_player_scope`) so lowering sees the scope
     // the condition introduced, not a transient nested-clause value.
@@ -12138,6 +12146,64 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
+    // CR 508.3b + CR 102.3: "one or more of your opponents are attacked" /
+    // "one of your opponents is attacked" — fires when any creature attacks a
+    // player who is an opponent of this permanent's controller. Mirrors
+    // "enchanted player is attacked" above but scopes `valid_target` to
+    // `Opponent` (any player other than the controller, CR 102.3) instead of
+    // `AttachedTo`.
+    //
+    // CR 603.2c: the aggregate "one or more ... are attacked" phrasing is a
+    // single trigger event even when it contains multiple occurrences, so a
+    // declaration that simultaneously attacks two or more distinct opponents
+    // (a real shape only reachable through `Opponent`, since `AttachedTo`
+    // above can only ever name one specific player) must still fire exactly
+    // once — `batched: true` routes it through `matching_batched_trigger_events`
+    // / `contextual_batched_trigger_event`, which aggregate every matching
+    // defending player's attackers into one context instead of the ordinary
+    // per-defending-player singleton split `matching_attack_events` performs
+    // for the non-batched path. The singular "one of your opponents is
+    // attacked" counterpart names a single occurrence per the CR 603.2c
+    // "trigger repeatedly if one event contains multiple occurrences" clause,
+    // so it is intentionally left non-batched (unchanged from before).
+    fn parse_your_opponents_are_attacked_plural(input: &str) -> OracleResult<'_, ()> {
+        let (rest, _) =
+            alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))).parse(input)?;
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("one or more of your opponents are attacked"),
+        )
+        .parse(rest)
+    }
+    fn parse_your_opponents_are_attacked_singular(input: &str) -> OracleResult<'_, ()> {
+        let (rest, _) =
+            alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))).parse(input)?;
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("one of your opponents is attacked"),
+        )
+        .parse(rest)
+    }
+    if parse_your_opponents_are_attacked_plural(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::Attacks;
+        def.valid_target = Some(TargetFilter::Opponent);
+        // CR 508.3b: only fires when the opponent player themselves is
+        // attacked, not when a planeswalker they control or battle they
+        // protect is (the ability names "opponents", not the CR's broader
+        // "player, planeswalker, or battle" bracket).
+        def.attack_target_filter = Some(AttackTargetFilter::Player);
+        def.batched = true;
+        return Some((TriggerMode::Attacks, def));
+    }
+    if parse_your_opponents_are_attacked_singular(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::Attacks;
+        def.valid_target = Some(TargetFilter::Opponent);
+        def.attack_target_filter = Some(AttackTargetFilter::Player);
+        return Some((TriggerMode::Attacks, def));
+    }
+
     // CR 601.2a + CR 707.10: all "cast or copy a spell" trigger variants —
     // covers "you", "an opponent", and "a player" actor phrases.
     if let Some(result) = try_parse_casts_or_copies_trigger(lower) {
@@ -14584,6 +14650,17 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
 }
 
 fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    // CR 701.22a + CR 603.2: This is a constrained completed-scry event, not
+    // a free-text card-name dispatch. It must run before the generic action
+    // list, which intentionally recognizes only bare "scry/scries" forms.
+    if let Some(bottom_count) = parse_completed_scry_bottom_condition(lower) {
+        let mut def = make_base();
+        def.mode = TriggerMode::Scry;
+        def.valid_target = Some(TargetFilter::Controller);
+        def.scry_bottom_count = Some(bottom_count);
+        return Some((TriggerMode::Scry, def));
+    }
+
     for (prefix, valid_target) in [
         ("whenever you ", Some(TargetFilter::Controller)),
         (
@@ -14672,6 +14749,56 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
     }
 
     None
+}
+
+/// CR 701.22a + CR 603.2: Parse the completed-scry predicate as independent
+/// trigger-keyword, player-scope, quantity, library-edge, library-owner, and
+/// keyword-action axes. This deliberately recognizes no card name or complete
+/// Oracle sentence, so it can share the condition's quantity provenance with the
+/// effect parser without creating a literal-text dispatch.
+fn parse_completed_scry_bottom_condition(input: &str) -> Option<(Comparator, u32)> {
+    let trigger_prefix = (
+        alt((
+            value((), tag::<_, _, OracleError<'_>>("whenever")),
+            value((), tag("when")),
+        )),
+        space1,
+        tag("you"),
+        space1,
+        tag("choose"),
+        space1,
+        tag("to"),
+        space1,
+        tag("put"),
+        space1,
+    );
+    let completed_scry_suffix = (
+        tag("cards"),
+        space1,
+        tag("on"),
+        space1,
+        tag("the"),
+        space1,
+        tag("bottom"),
+        space1,
+        tag("of"),
+        space1,
+        tag("your"),
+        space1,
+        tag("library"),
+        space1,
+        tag("while"),
+        space1,
+        tag("scrying"),
+    );
+    let mut parser = all_consuming(terminated(
+        preceded(
+            trigger_prefix,
+            terminated(parse_event_amount_quantifier, completed_scry_suffix),
+        ),
+        opt(one_of(".;")),
+    ));
+    parser.parse(input).ok().map(|(_, count)| count)
 }
 
 /// CR 701.57a: True when `text` is a BARE "discover"/"discovers" trigger subject

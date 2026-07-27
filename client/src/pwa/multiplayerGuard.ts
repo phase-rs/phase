@@ -1,4 +1,4 @@
-import { isMultiplayerMode, useGameStore } from "../stores/gameStore";
+import { isAuthorityRemote, useGameStore } from "../stores/gameStore";
 
 /**
  * True when a multiplayer game is live in this tab and reloading would
@@ -14,7 +14,7 @@ import { isMultiplayerMode, useGameStore } from "../stores/gameStore";
  */
 export function isMultiplayerGameLive(): boolean {
   const { gameMode, gameState, adapter } = useGameStore.getState();
-  if (!isMultiplayerMode(gameMode)) return false;
+  if (!isAuthorityRemote(gameMode)) return false;
   if (!adapter) return false;
   if (gameState?.waiting_for?.type === "GameOver") return false;
   return true;
@@ -43,7 +43,7 @@ export function whenMultiplayerGameEnds(callback: () => void): () => void {
   };
   const unsub = useGameStore.subscribe(
     (s) => {
-      if (!isMultiplayerMode(s.gameMode)) return false;
+      if (!isAuthorityRemote(s.gameMode)) return false;
       if (!s.adapter) return false;
       if (s.gameState?.waiting_for?.type === "GameOver") return false;
       return true;

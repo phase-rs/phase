@@ -608,10 +608,17 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::PutChosenCounter { target, count } => {
+        Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc = acc.or(scan_quantity_expr(count, mode));
+            if let Some(condition) = target_condition {
+                acc = acc.or(scan_quantity_expr(&condition.rhs, mode));
+            }
             acc
         }
         Effect::Sacrifice {
@@ -1044,7 +1051,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::Transform { target } => {
+        Effect::Transform { target, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
@@ -1099,6 +1106,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::ExileTop {
             player,
             count,
+            position: _,
             face_down: _,
         } => {
             let mut acc = Axes::NONE;
@@ -1106,6 +1114,13 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(count, mode));
             acc
         }
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => scan_target_filter(object, target_ctx, mode)
+            .or(scan_target_filter(player, target_ctx, mode))
+            .or(scan_quantity_expr(count, mode)),
         Effect::TargetOnly { target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
@@ -1813,6 +1828,15 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // CR 701.57a: reads a transient game-state scalar (the last discover's
         // mana-value limit); no growing resource, sibling, or projected axis.
         QuantityRef::TriggeringDiscoverValue => Axes::NONE,
+        // CR 701.22a + CR 603.2c: reads the current trigger's preserved event
+        // (`state.current_trigger_event` — the scry's own `PlayerPerformedAction`
+        // carrying its effective look count) → event axis true, mirroring
+        // `QuantityRef::EventContextAmount` below.
+        QuantityRef::TriggeringScryLookCount | QuantityRef::TriggeringScryBottomCount => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         QuantityRef::ObjectCount { filter } => {
             let mut acc = Axes {
                 event: false,
@@ -4236,6 +4260,8 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         description: _,
         target_prompt: _,
         activation_restrictions: _,
+        // Payment-time only; it cannot create a resolution-time dependency.
+        activation_mana_payment_restriction: _,
         activator_filter: _,
         activation_zone: _,
         ability_tag: _,
@@ -5182,6 +5208,16 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         // (missed offer, never a false certificate).
         | Effect::Suspect { scope: EffectScope::All, .. }
         | Effect::Unsuspect { scope: EffectScope::All, .. }
+        // CR 701.27a + CR 115.10a: mass Transform ("Transform all Humans", scope:All)
+        // is a non-targeting battlefield-population read (`target_filter()`==None;
+        // `transform_effect::resolve_all` enumerates `state.battlefield`, like
+        // DestroyAll) ⇒ census — its read SCALES with the growing class. Unlike the
+        // state-convergent SetTapState exception below, Transform WRITES ObjectPt and
+        // swaps the object's abilities, so a grown token is NOT inert and the read can
+        // escalate: `LiveBoardCensus`, never the Snapshot exception. scope:Single is a
+        // single announced/anaphoric target (a2), relaxed in the single-object group
+        // below. Exhaustive over EffectScope = {Single, All}.
+        | Effect::Transform { scope: EffectScope::All, .. }
         // ── F1-CLASS DUAL-MODE MASS-BATTLEFIELD RESOLVERS (P3-B round-2): each has a
         // resolver mode that, when the ability carries NO explicit object target,
         // enumerates the battlefield (or all phased-in/-out permanents) and applies the
@@ -5220,6 +5256,10 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         //     `battlefield_phased_in_ids()` for a non-targeted "double the counters on
         //     each matching permanent" when `ability.targets.is_empty()`.
         | Effect::MultiplyCounter { .. }
+        //   CR 608.2d + CR 122.1: a typed counter-kind source domain enumerates
+        //     every matching permanent at resolution and unions the kinds of
+        //     counters on them, so the read scales with battlefield growth.
+        | Effect::ChooseCounterKind { .. }
         //   CR 707.2 + CR 509.1g + CR 506.3e (team-lead override of the combat-scoped
         //     relax): `copy_token_blocking.rs` UNCONDITIONALLY enumerates
         //     `zone_object_ids(Battlefield).filter(matches source_filter)` and creates one
@@ -5267,7 +5307,6 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Counter { .. }
         | Effect::Token { .. }
         | Effect::RemoveCounter { .. }
-        | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
         | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }
@@ -5321,8 +5360,11 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Mana { .. }
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
-        | Effect::Transform { .. }
-        // CR 710.4: same single-target read context as `Transform`.
+        // CR 701.27a: only the scope:Single Transform relaxes — a single announced or
+        // anaphoric target (a2). scope:All is the mass battlefield read, census-tagged
+        // above with the DestroyAll/Suspect{All} group.
+        | Effect::Transform { scope: EffectScope::Single, .. }
+        // CR 710.4: same single-target read context as `Transform` (always self-ref).
         | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
@@ -5331,6 +5373,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::ChooseDamageSource { .. }
@@ -5523,7 +5566,7 @@ enum CensusRole {
 #[cfg(test)]
 fn effect_census_role(e: &Effect) -> CensusRole {
     match e {
-        // -- CENSUS (29): verbatim mirror of `effect_target_ctx`'s LiveBoardCensus
+        // -- CENSUS (31): verbatim mirror of `effect_target_ctx`'s LiveBoardCensus
         // arm - mass battlefield population reads that scale with growth.
         Effect::EachSourceDealsDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
@@ -5571,11 +5614,23 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::TurnFaceUp { .. }
         | Effect::TurnFaceDown { .. }
         | Effect::MultiplyCounter { .. }
+        // CR 608.2d + CR 122.1: a typed counter-kind source domain scans the
+        // matching battlefield population and unions its counter kinds.
+        | Effect::ChooseCounterKind { .. }
         // CR 707.2 + CR 509.1g (team-lead override): `copy_token_blocking.rs` creates one
         // token copy per matching attacker over an UNCONDITIONAL battlefield scan (grows
         // the board); unsound across CR 508.1 multi-combat loops. Mirror of the new
         // effect_target_ctx census member.
-        | Effect::CopyTokenBlockingAttacker { .. } => CensusRole::Census,
+        | Effect::CopyTokenBlockingAttacker { .. }
+        // CR 701.27a + CR 115.10a: mass Transform (scope:All) enumerates
+        // `state.battlefield` (`transform_effect::resolve_all`) — a census read that
+        // GROWS with the class. It WRITES ObjectPt + swaps abilities (NOT state-
+        // convergent like SetTapState), so it is a true `Census`, never the SetTapState
+        // relax exception. Parity with the effect_target_ctx LiveBoardCensus member.
+        | Effect::Transform {
+            scope: EffectScope::All,
+            ..
+        } => CensusRole::Census,
 
         // -- SetTapState (scope-DESTRUCTURED, exhaustive over EffectScope): scope:All is
         // the census-ROLE proven exception (TapAll/UntapAll - state-convergent/idempotent,
@@ -5617,6 +5672,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Scry { .. }
         | Effect::Surveil { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::ExileFromTopUntil { .. }
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::Discover { .. }
@@ -5659,7 +5715,6 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Counter { .. }
         | Effect::Token { .. }
         | Effect::RemoveCounter { .. }
-        | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
         | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }
@@ -5707,9 +5762,14 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Mana { .. }
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
-        | Effect::Transform { .. }
+        // CR 701.27a: scope:Single Transform reads only its single announced/anaphoric
+        // target — not a board census. scope:All is census-tagged above.
+        | Effect::Transform {
+            scope: EffectScope::Single,
+            ..
+        }
         // CR 710.4: a flip reads only its own self-referential target — not a
-        // board census, mirroring `Transform`.
+        // board census, mirroring `Transform`'s single scope.
         | Effect::FlipPermanent { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
@@ -5995,6 +6055,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::ChooseDamageSource { .. }
@@ -6264,6 +6325,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
@@ -6931,7 +6993,7 @@ mod tests {
     }
 
     /// guard#3 (mitigation #3): the `LiveBoardCensus` tag set of `effect_target_ctx`
-    /// == EXACTLY the enumeration-derived MASS-POPULATION set (29). Source-scanned, not
+    /// == EXACTLY the enumeration-derived MASS-POPULATION set (31). Source-scanned, not
     /// hand-counted (the hand-count is what produced the earlier "relax=4" miss). Under
     /// B's SnapshotOrEvent default this is the primary false-certificate gate: only a
     /// census tag vetoes a mass read that ESCALATES over inert token growth (which
@@ -6966,6 +7028,7 @@ mod tests {
             "BounceAll",
             "ChangeZoneAll",
             "ChooseAndSacrificeRest",
+            "ChooseCounterKind",
             "ChooseObjectsIntoTrackedSet",
             "ChoosePermanent",
             "CounterAll",
@@ -6987,6 +7050,11 @@ mod tests {
             // `EffectScope::All`; the scope:Single arms live in the relax group below and
             // are NOT scanned here (they sit past the census terminator).
             "Suspect",
+            // CR 701.27a + CR 115.10a: mass Transform (scope:All) enumerates
+            // `state.battlefield` (`transform_effect::resolve_all`). Scope-gated on
+            // `EffectScope::All` in the census `|`-chain; the scope:Single arm sits past
+            // the census terminator in the relax group and is NOT scanned here.
+            "Transform",
             "UnattachAll",
             "Unsuspect",
             // P3-B round-2: F1-class dual-mode mass-battlefield resolvers (a resolver
@@ -7007,7 +7075,7 @@ mod tests {
             got, want,
             "census tag set drifted from the enumeration-derived mass-population set"
         );
-        assert_eq!(got.len(), 29, "exactly 29 mass-population census tags");
+        assert_eq!(got.len(), 31, "exactly 31 mass-population census tags");
     }
 
     /// A7' (mitigation #4, replaces the void census-default A7): with SnapshotOrEvent the
@@ -7018,7 +7086,7 @@ mod tests {
     /// the SOLE effect with a DEDICATED SnapshotOrEvent arm (the region between the
     /// census arm and the single-object group); giving any OTHER census-role slot a
     /// dedicated Snapshot arm turns this RED. Dual-guard with
-    /// `census_tag_set_is_exactly_enumerated` (guard#3, pins the 28 census tags).
+    /// `census_tag_set_is_exactly_enumerated` (guard#3, pins the 31 census tags).
     #[test]
     fn obligation_ii_census_exception_is_exactly_settapstate() {
         use crate::types::ability::{EffectScope, TapStateChange};
@@ -7118,7 +7186,7 @@ mod tests {
     /// with `effect_target_ctx` on the Census/Relax boundary, closing the F1 gap where a
     /// census-ROLE slot silently in the generic relax `|`-chain (exactly R1's Suspect{All})
     /// is invisible to the census-arm-only guards. Structural: both functions' `Census`
-    /// name-sets are source-scanned and asserted IDENTICAL (== the 29). Behavioral: the
+    /// name-sets are source-scanned and asserted IDENTICAL (== the 31). Behavioral: the
     /// two oracles agree on every discriminator, incl. BOTH Suspect/Unsuspect scopes.
     ///
     /// REVERT-PROBE (discrimination proof): moving `Suspect{All}` out of the census arm of
@@ -7133,7 +7201,7 @@ mod tests {
         use crate::types::ability::{EffectScope, TapStateChange};
         use ScanMode::LoopFirewall;
 
-        // -- Structural: the two census name-sets are byte-identical (and == 29).
+        // -- Structural: the two census name-sets are byte-identical (and == 31).
         fn census_names(fnsrc: &str, terminator: &str) -> Vec<String> {
             let end = fnsrc.find(terminator).expect("census terminator");
             let block = &fnsrc[..end];
@@ -7162,7 +7230,7 @@ mod tests {
             etc_census, ecr_census,
             "effect_census_role Census set diverged from effect_target_ctx"
         );
-        assert_eq!(ecr_census.len(), 29, "exactly 29 census members");
+        assert_eq!(ecr_census.len(), 31, "exactly 31 census members");
 
         // -- Behavioral: the two oracles agree on the Census/Relax boundary for every
         // discriminator. `census(e, true)` requires BOTH `effect_census_role == Census`
@@ -7217,6 +7285,32 @@ mod tests {
         census(&settap, false);
         census(&Effect::HeistExile, false);
         census(&Effect::NoOp, false);
+        census(&Effect::ChooseCounterKind { target: f() }, true);
+        // CR 701.27a + CR 115.10a: mass Transform is a battlefield census in BOTH oracles
+        // (scope:All), and a bounded single-target read (scope:Single) that relaxes. It is
+        // a true Census, NOT the SetTapState relax exception (ObjectPt/ability write).
+        census(
+            &Effect::Transform {
+                target: f(),
+                scope: EffectScope::All,
+            },
+            true,
+        );
+        census(
+            &Effect::Transform {
+                target: f(),
+                scope: EffectScope::Single,
+            },
+            false,
+        );
+        assert_eq!(
+            effect_census_role(&Effect::Transform {
+                target: f(),
+                scope: EffectScope::All,
+            }),
+            CensusRole::Census,
+            "mass Transform must be a true Census, not the SetTapState relax exception"
+        );
 
         // -- Reason sub-tags reachable and correct (documentation-grade, unenforced by the
         // Census/Relax boundary but proving each `RelaxReason` arm is live).
@@ -8168,5 +8262,32 @@ mod tests {
         let mut a = base.clone();
         a.modal = Some(ModalChoice::default());
         assert_eq!(ability_resolution_choice_freedom(&a), MayPrompt);
+    }
+    // ---- PR #5872 blocker-2 regression: scry look count is event-context ----
+
+    /// CR 701.22a + CR 603.2c: "the number of cards looked at while scrying
+    /// this way" (Elrond, Master of Healing) reads the CURRENT trigger's
+    /// preserved scry event — axis 1 (event-context), mirroring
+    /// `QuantityRef::EventContextAmount` — not an inert transient scalar.
+    #[test]
+    fn triggering_scry_look_count_reads_event_context() {
+        assert!(ability_uses_event_context(&ability_with_amount(
+            QuantityRef::TriggeringScryLookCount
+        )));
+    }
+
+    /// CR 701.22a + CR 701.22d + CR 603.2c: the completed-scry bottom count is
+    /// carried by the current trigger event, never a sibling or projected
+    /// resource. Assert the scanner axes directly so the shared match arm cannot
+    /// accidentally classify it more broadly.
+    #[test]
+    fn triggering_scry_bottom_count_has_only_the_event_axis() {
+        let axes = scan_quantity_ref(
+            &QuantityRef::TriggeringScryBottomCount,
+            ScanMode::Conservative,
+        );
+        assert!(axes.event);
+        assert!(!axes.sibling);
+        assert!(!axes.projected);
     }
 }

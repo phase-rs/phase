@@ -11,12 +11,14 @@ import type {
   LegalActionsResult,
   ManaCost,
   MatchConfig,
+  ObjectAction,
   ObjectId,
   PlayerId,
   PersistedGameState,
   StuckDecisionDiagnostic,
   WaitingFor,
 } from "../adapter/types";
+import type { ViewerInteraction } from "../adapter/generated/interaction";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { applySpellPaymentPreference } from "../game/castPaymentMode";
 import { getPlayerId } from "../hooks/usePlayerId";
@@ -24,7 +26,7 @@ import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersiste
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
-export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic"> {
+export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic" | "viewerInteraction"> {
   return {
     legalActions: result.actions,
     autoPassRecommended: result.autoPassRecommended,
@@ -32,6 +34,7 @@ export function legalResultState(result: LegalActionsResult): Pick<GameStoreStat
     spellCosts: result.spellCosts ?? {},
     legalActionsByObject: result.legalActionsByObject ?? {},
     stuckDiagnostic: result.stuckDiagnostic ?? null,
+    viewerInteraction: result.viewerInteraction ?? null,
   };
 }
 
@@ -62,18 +65,80 @@ export type GameMode =
   | "draft-match"
   | "spectate";
 
-/** True for modes where the engine state is shared across the wire —
- * undo/rewind would desync from the authoritative game, so the client
- * must not build a stateHistory or expose an Undo affordance. */
-export function isMultiplayerMode(mode: GameMode | null): boolean {
-  return (
-    mode === "native-ai"
-    || mode === "online"
-    || mode === "p2p-host"
-    || mode === "p2p-join"
-    || mode === "draft-match"
-    || mode === "spectate"
-  );
+/** Where the authoritative engine state lives. `"wire"` means some process
+ *  other than this client owns it, so this client must never rewind: a local
+ *  rewind desyncs from the authority on the next exchange. */
+export type EngineAuthority = "client" | "wire";
+
+/** Whether humans on OTHER clients share this game. `"solo"` covers hot-seat
+ *  `local` too: two humans at one screen share one client and one state, so
+ *  nothing they do can desync a peer or leak hidden info across a wire. */
+export type TableCompany = "solo" | "remote-humans";
+
+interface GameModeTraits {
+  readonly authority: EngineAuthority;
+  readonly company: TableCompany;
+}
+
+/**
+ * The two questions the old `isMultiplayerMode` answered with one bit, split
+ * and answered separately for every mode. Exhaustive by construction: a new
+ * `GameMode` fails to compile until it declares both axes.
+ *
+ * This table is the census. Never widen a predicate with an `|| mode === "..."`
+ * at a call site — that is how the conflation this file exists to undo comes
+ * back, one call site at a time.
+ *
+ * `spectate` is `remote-humans` by the *game* it observes, not by the observer.
+ */
+const GAME_MODE_TRAITS: Record<GameMode, GameModeTraits> = {
+  "ai": { authority: "client", company: "solo" },
+  "local": { authority: "client", company: "solo" },
+  "native-ai": { authority: "wire", company: "solo" },
+  "online": { authority: "wire", company: "remote-humans" },
+  "p2p-host": { authority: "wire", company: "remote-humans" },
+  "p2p-join": { authority: "wire", company: "remote-humans" },
+  "draft-match": { authority: "wire", company: "remote-humans" },
+  "spectate": { authority: "wire", company: "remote-humans" },
+};
+
+/** True when the authoritative engine state lives off this client — i.e. the
+ *  authority is REMOTE. Such a client must not rewind its own view
+ *  (`stateHistory`/`undo`); see `WebSocketAdapter.restoreState`, which rejects
+ *  it at the transport. This is deliberately NOT "is this multiplayer":
+ *  desktop solo-vs-AI (`native-ai`) is a wire-authoritative game with no other
+ *  humans in it, and every one of this predicate's seven call sites wants the
+ *  authority question, not the company one. */
+export function isAuthorityRemote(mode: GameMode | null): boolean {
+  return mode !== null && GAME_MODE_TRAITS[mode].authority === "wire";
+}
+
+/**
+ * True when humans on other clients share this game. Local-only affordances
+ * are safe when false — there is nobody else's game to disturb and no hidden
+ * info to leak across a wire.
+ *
+ * **This predicate has no production caller today, deliberately.** Every gate
+ * that reads `gameMode` asks the authority question above; the company
+ * question is what the merged predicate silently got *wrong* for `native-ai`,
+ * and naming it is the fix. It is exported rather than left implicit so that
+ * the next gate needing "are other humans watching?" has an answer to call
+ * instead of an `||` to append — and so the classification is observable, which
+ * is what lets a test prove the two axes actually disagree for `native-ai`.
+ * Without it a test could still tabulate `isAuthorityRemote` across all eight
+ * modes and go red on any classification change; that test would not be
+ * vacuous, it would just be a no-op restatement of the behaviour before the
+ * split, unable to say anything about the axis this change exists to name.
+ * No lint flags unused exports here (`client/eslint.config.js` configures only
+ * `@typescript-eslint/no-unused-vars`, and there is no knip), so this comment,
+ * not a suppression, is the honest handling.
+ *
+ * Do not repurpose it for transport questions: `canRestoreCheckpoints`
+ * (`DebugPanel.tsx`) looks like a company gate but is really "does this
+ * adapter implement `restoreState`", and `native-ai`'s does not.
+ */
+export function hasRemoteHumans(mode: GameMode | null): boolean {
+  return mode !== null && GAME_MODE_TRAITS[mode].company === "remote-humans";
 }
 
 interface GameStoreState {
@@ -106,7 +171,7 @@ interface GameStoreState {
    * `legalActions`; frontend "what can I do with this card?" lookups go
    * through this map instead of inferring action availability from objects.
    */
-  legalActionsByObject: Record<string, GameAction[]>;
+  legalActionsByObject: Record<string, ObjectAction[]>;
   /**
    * Engine-owned non-fatal progress-wedge diagnostic (an engine anomaly, not a
    * rules outcome) — present only when the current decision is wedged (no legal
@@ -114,6 +179,8 @@ interface GameStoreState {
    * (drives `StuckDecisionToast`).
    */
   stuckDiagnostic: StuckDecisionDiagnostic | null;
+  /** Viewer-scoped interaction projection from the same engine snapshot. */
+  viewerInteraction: ViewerInteraction | null;
   stateHistory: GameState[];
   turnCheckpoints: GameState[];
   /**
@@ -341,6 +408,7 @@ const initialState: GameStoreState = {
   spellCosts: {},
   legalActionsByObject: {},
   stuckDiagnostic: null,
+  viewerInteraction: null,
   stateHistory: [],
   turnCheckpoints: [],
   lobbyProgress: null,
@@ -530,7 +598,7 @@ export const useGameStore = create<GameStore>()(
       //    activation/trigger sequence, never mid-resolution.
       const shouldSaveHistory =
         UNDOABLE_ACTIONS.has(submittedAction.type) &&
-        !isMultiplayerMode(gameMode) &&
+        !isAuthorityRemote(gameMode) &&
         gameState.stack.length === 0;
 
       // `getPlayerId()` returns the local human's authenticated seat ID.
@@ -558,7 +626,7 @@ export const useGameStore = create<GameStore>()(
 
     undo: async () => {
       const { stateHistory, adapter, gameMode } = get();
-      if (isMultiplayerMode(gameMode)) return;
+      if (isAuthorityRemote(gameMode)) return;
       if (stateHistory.length === 0 || !adapter) return;
 
       const previous = stateHistory[stateHistory.length - 1];

@@ -81,6 +81,60 @@ fn zone_change_command_round_trips_and_replays_the_exact_transition_core() {
         replay.zone_changes_this_turn[command.turn_zone_change_index], command.zone_change_record,
         "replay appends the exact recorded per-turn zone-change entry"
     );
+
+    // CR 613.7: installing the recorded entry timestamp is only half the
+    // contract — the allocator must also be carried past it. `next_timestamp`
+    // is the draw counter, so an applier that installs a value while leaving
+    // the counter behind hands that same timestamp to a second object later in
+    // the replay, and CR 613.7 orders effects within a layer by timestamp
+    // alone. Asserted by DRAWING, so this pins the consequence, not the field.
+    let installed = command.entry_timestamp.expect("a battlefield entry draws");
+    let next_drawn = replay.next_timestamp();
+    assert!(
+        next_drawn > installed,
+        "CR 613.7d: replay installed entry timestamp {installed} but the next draw handed \
+         out {next_drawn}; two objects sharing a timestamp are unordered within their layer"
+    );
+}
+
+/// The other side of the CR 613.7d allocator contract: a move to a zone that
+/// grants no timestamp records none, so replaying it must advance no allocator.
+/// This is what keeps the advance bound to a recorded draw rather than applied
+/// blanket to every zone change, which would silently inflate the counter.
+#[test]
+fn a_zone_change_that_drew_no_timestamp_advances_no_allocator_on_replay() {
+    let mut scenario = GameScenario::new_n_player(2, 0x733);
+    let creature = scenario
+        .add_creature_from_oracle(P0, "Journal Entrant", 2, 2, "")
+        .id();
+    let runner = scenario.build();
+
+    // The predecessor is the state the graveyard move was recorded FROM, so the
+    // command's own incarnation and occurrence guards are satisfied on replay.
+    let pre_state = runner.state().clone();
+    let mut state = pre_state.clone();
+    let mut events = Vec::new();
+    move_to_zone(&mut state, creature, Zone::Graveyard, &mut events);
+
+    let to_graveyard = recorded_zone_change(&state, Zone::Battlefield, Zone::Graveyard);
+    assert_eq!(
+        to_graveyard.entry_timestamp, None,
+        "CR 613.7d grants a timestamp on entering the battlefield; a graveyard move draws none"
+    );
+
+    let mut replay = pre_state;
+    let before = replay.next_timestamp;
+    apply_resolved_zone_change(&mut replay, &to_graveyard)
+        .expect("the recorded graveyard move replays against the state it was recorded from");
+    assert_eq!(
+        replay.objects[&creature].zone,
+        Zone::Graveyard,
+        "reach guard: the replay actually performed the move being asserted about"
+    );
+    assert_eq!(
+        replay.next_timestamp, before,
+        "a zone change that drew no timestamp must advance no allocator on replay"
+    );
 }
 
 #[test]

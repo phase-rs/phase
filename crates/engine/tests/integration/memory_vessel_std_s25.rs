@@ -87,6 +87,7 @@ fn exile_and_grant_ability(count: i32) -> AbilityDefinition {
         Effect::ExileTop {
             player: TargetFilter::ScopedPlayer,
             count: QuantityExpr::Fixed { value: count },
+            position: engine::types::ability::LibraryPosition::Top,
             face_down: false,
         },
     )

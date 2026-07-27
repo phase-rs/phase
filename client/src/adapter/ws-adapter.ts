@@ -100,6 +100,7 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 22 — Viewer interaction projections and semantic object-action identities.
  * 21 — Native P2P host bridge identity and server-authored state revisions.
  * 20 — Actor-scoped priority-passing settings and filtered per-player state.
  * 19 — Connive exact subject snapshots and resident paused post-replacement
@@ -113,7 +114,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 21;
+export const PROTOCOL_VERSION = 22;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -173,7 +174,11 @@ export type WsAdapterEvent =
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number }
   | { type: "takebackRequested"; requester: PlayerId; requesterName: string }
-  | { type: "takebackResolved"; approved: boolean; resolvedBy: PlayerId | null };
+  | { type: "takebackResolved"; approved: boolean; resolvedBy: PlayerId | null }
+  /** The server refused a fire-and-forget request (e.g. `RequestTakeback`).
+   *  Distinct from `error`, which the native session treats as terminal:
+   *  this one is survivable and carries a server-authored reason to show. */
+  | { type: "requestRejected"; reason: string };
 
 type WsAdapterEventListener = (event: WsAdapterEvent) => void;
 
@@ -270,7 +275,42 @@ export class WebSocketAdapter implements EngineAdapter {
     private readonly displayName = "Player",
     private readonly options: WebSocketAdapterOptions = {},
   ) {
-    this.maxReconnectAttempts = options.nativeAi || options.nativePregame ? 0 : 8;
+    // 0 is terminal, not "retry once": `attemptReconnect` compares
+    // `reconnectAttempt >= maxReconnectAttempts`, so 0 >= 0 is true on the
+    // very first attempt — it emits `reconnectFailed` and returns without
+    // ever emitting `reconnecting`, incrementing, or scheduling a timer. Any
+    // socket drop is instantly fatal.
+    //
+    // `nativeAi` no longer takes that. The sidecar runs `--single-user`, so
+    // its reconnect grace period is effectively unbounded and sessions are
+    // never stale-purged; a transient drop against a live sidecar is exactly
+    // the recoverable case, and 8 attempts is the same budget `online` gets.
+    //
+    // Not purely additive: a genuinely DEAD sidecar now spends **32s** of
+    // `reconnecting` UI before `reconnectFailed`, where today it fails
+    // instantly. `attemptReconnect`'s
+    // `Math.min(Math.pow(2, attempt - 1) * 1000, 5000)` over attempts 1-8 is
+    // 1+2+4+5+5+5+5+5 = 32, not the 27 first claimed here — the series was
+    // right and the sum was wrong.
+    //
+    // That is a floor, not a ceiling. It assumes each connect is *refused*
+    // immediately. If they hang instead, `attachSocket` calls
+    // `openPhaseSocket` without a `timeoutMs`, taking its 5000ms default, so
+    // the worst case is 32 + 8x5 = 72s.
+    //
+    // Still the right trade — the common case goes from fatal to recovered —
+    // but it is a user-visible latency regression on the most likely desktop
+    // failure, and for a LOOPBACK socket that failure is a crash or a
+    // sleep/resume rather than a spurious drop. 8 attempts buys little over
+    // 3-4 there, and nothing respawns the sidecar: `ensureNativeEngine` is
+    // never called from a close or error handler. Worth revisiting; the
+    // budget is deliberately left matching `online` rather than tuned here.
+    //
+    // `nativePregame` keeps 0, and that is out of scope rather than endorsed:
+    // a pregame drop is recoverable by re-entering the lobby (no game has
+    // been invested yet), and that path has adapter-level special-casing of
+    // `options.nativePregame` that has NOT been analysed here.
+    this.maxReconnectAttempts = options.nativePregame ? 0 : 8;
   }
 
   get gameCode(): string | null {
@@ -1050,7 +1090,7 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "GameStarted": {
-        const data = msg.data as { state_revision: number; state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; derived?: GameState["derived"]; player_token?: string; events?: GameEvent[] };
+        const data = msg.data as { state_revision: number; state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; derived?: GameState["derived"]; player_token?: string; events?: GameEvent[] };
         if (this.reconnectInFlight) {
           this.reconnectInFlight = false;
           this.reconnectAttempt = 0;
@@ -1070,6 +1110,7 @@ export class WebSocketAdapter implements EngineAdapter {
             manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            viewerInteraction: data.viewer_interaction,
           },
         );
         this._playerId = data.your_player;
@@ -1149,7 +1190,7 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "StateUpdate": {
-        const data = msg.data as { state_revision: number; state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; log_entries?: GameLogEntry[]; derived?: GameState["derived"] };
+        const data = msg.data as { state_revision: number; state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; log_entries?: GameLogEntry[]; derived?: GameState["derived"] };
         // Attach the engine-authored derived views to the state snapshot so
         // components (e.g. CommanderDamage) can read them via gameState.derived
         // without a separate subscription path. See
@@ -1162,6 +1203,7 @@ export class WebSocketAdapter implements EngineAdapter {
             manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            viewerInteraction: data.viewer_interaction,
           },
         );
         const resolvedAction = this.pendingResolve !== null;
@@ -1192,6 +1234,19 @@ export class WebSocketAdapter implements EngineAdapter {
           );
           this.pendingResolve = null;
           this.pendingReject = null;
+        } else {
+          // No in-flight action owns this rejection, so it answers a
+          // fire-and-forget request — `sendRequestTakeback` is the only one
+          // today. Surface it instead of dropping it on the floor.
+          //
+          // These two branches cannot race: `handle_client_message` is
+          // awaited to completion before the socket reads the next frame, so
+          // a takeback refusal is not even parsed until any preceding action
+          // has been fully answered. That is what rules out the sharper
+          // hazard here — rejecting an in-flight ACTION's promise with a
+          // TAKEBACK's reason string, which would be a misattribution rather
+          // than merely a stale spinner.
+          this.emit({ type: "requestRejected", reason: data.reason });
         }
         break;
       }

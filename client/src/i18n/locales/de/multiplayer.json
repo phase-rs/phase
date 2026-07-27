@@ -53,16 +53,18 @@
     "matchScore": "Partiestand {{p0}}-{{p1}}{{draws}}. Verschiebe Karten zwischen Haupt und Sideboard und reiche dann ein.",
     "draws_one": " ({{count}} Unentschieden)",
     "draws_other": " ({{count}} Unentschieden)",
-    "main": "Haupt ({{count}}/{{total}})",
+    "main": "Haupt ({{count}}, min. {{min}})",
     "sideboard": "Sideboard ({{count}})",
+    "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Karten aus dem Sideboard verschieben.",
     "moveFromMain": "Karten aus dem Hauptdeck verschieben.",
-    "matchesRegistered": "Hauptdeck entspricht der registrierten Größe ({{total}}).",
-    "submitDisabled": "Hauptdeck hat {{count}} / {{total}} — Einreichen deaktiviert.",
     "resetAria": "Auf registriertes Deck zurücksetzen",
     "reset": "Zurücksetzen",
     "submitAria": "Deck für das nächste Spiel einreichen",
-    "submitDeck": "Deck einreichen"
+    "submitDeck": "Deck einreichen",
+    "readyToSubmit": "Deck ist legal — bereit zum Einreichen.",
+    "belowMinimum": "Hauptdeck benötigt mindestens {{min}} Karten — aktuell {{count}}.",
+    "overSideboardCap": "Sideboard hat {{count}} Karten — maximal {{max}}."
   },
   "brokerOfflinePrompt": {
     "title": "Lobby-Server nicht erreichbar",
