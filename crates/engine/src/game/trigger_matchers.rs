@@ -982,6 +982,9 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::ObjectConjured { .. }
         | GameEvent::EffectResolved { .. }
         | GameEvent::Unattached { .. }
+        // CR 116.2c: carries a group key and a player, no object subject to
+        // count for a "one or more <FILTER> …" trigger filter.
+        | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::BlockersDeclared { .. }
         // Mirrors BlockersDeclared: the "becomes blocked" trigger uses the
         // dedicated matcher, not this generic per-object count helper.

@@ -173,6 +173,7 @@ mod tests {
             }],
             target,
             duration: None,
+            end_cost: None,
         }
     }
 
@@ -280,6 +281,7 @@ mod tests {
             }],
             target: None,
             duration: None,
+            end_cost: None,
         }
     }
 
@@ -431,6 +433,7 @@ mod tests {
             }],
             target: None,
             duration: None,
+            end_cost: None,
         };
         assert!(!is_self_protection_effect(&effect));
     }
@@ -517,6 +520,7 @@ mod tests {
             }],
             target: None,
             duration: None,
+            end_cost: None,
         };
         assert!(is_self_protection_effect(&effect));
     }

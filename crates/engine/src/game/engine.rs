@@ -7657,6 +7657,32 @@ fn apply_action(
         (WaitingFor::Priority { player }, GameAction::CompanionToHand) => {
             super::companion::handle_companion_to_hand(state, *player, &mut events)?
         }
+        // CR 116.2c: Special action — pay a continuous effect's printed
+        // termination cost to end it ("You may pay {W} to end this effect").
+        // CR 116.1: special actions don't use the stack, so nothing is put on
+        // the stack and no player gets a chance to respond.
+        //
+        // NO timing gate: CR 116.2c grants the action "any time they have
+        // priority, unless that effect specifies another timing restriction",
+        // and no card in the shipped class states one. This deliberately
+        // diverges from `CompanionToHand` above, whose CR 116.2g DOES carry a
+        // sorcery-speed restriction.
+        (
+            WaitingFor::Priority { player },
+            GameAction::EndContinuousEffect { group, .. },
+        ) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            super::end_continuous_effect::handle_end_continuous_effect(
+                state,
+                *player,
+                group,
+                &mut events,
+            )?
+        }
         // CR 722.3c / CR 601.2: Prepare (Strixhaven) — cast a copy of the
         // prepared face through the normal spell-casting pipeline (costs,
         // targeting, and mode choices all run through casting.rs single

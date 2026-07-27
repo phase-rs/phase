@@ -2815,6 +2815,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     }])],
                 duration: Some(Duration::UntilHostLeavesPlay),
                 target: Some(TargetFilter::ParentTarget),
+                end_cost: None,
             };
 
             let mut return_ability = AbilityDefinition::new(
@@ -3862,6 +3863,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 static_abilities: vec![static_def],
                 duration: Some(static_effect::expiration_to_duration(expiration)?),
                 target: Some(affected),
+                end_cost: None,
             }
         }
 
@@ -3893,6 +3895,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 static_abilities: vec![static_def],
                 duration: Some(Duration::Permanent),
                 target: Some(affected),
+                end_cost: None,
             }
         }
 
@@ -3911,6 +3914,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 static_abilities: statics,
                 duration: Some(static_effect::expiration_to_duration(expiration)?),
                 target: None,
+                end_cost: None,
             }
         }
 
@@ -4225,6 +4229,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                     player: PlayerScope::Controller,
                 }),
                 target: Some(affected),
+                end_cost: None,
             }
         }
 
@@ -4246,6 +4251,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                     player: PlayerScope::Controller,
                 }),
                 target: Some(affected),
+                end_cost: None,
             }
         }
 
@@ -5402,6 +5408,7 @@ fn build_layer_effect_until(
         static_abilities: vec![static_def],
         duration: Some(static_effect::expiration_to_duration(expiration)?),
         target: Some(affected),
+        end_cost: None,
     })
 }
 
@@ -5483,6 +5490,7 @@ fn build_rule_effect_until(
         static_abilities: statics,
         duration: Some(static_effect::expiration_to_duration(expiration)?),
         target: Some(affected),
+        end_cost: None,
     })
 }
 

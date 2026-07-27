@@ -14,6 +14,7 @@ import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets, getValid
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { AttackTargetPicker } from "../controls/AttackTargetPicker.tsx";
+import { ManaCostSymbols } from "../mana/ManaCostSymbols.tsx";
 
 type ActionButtonMode =
   | "combat-attackers"
@@ -77,6 +78,19 @@ export function ActionButton() {
 
   const canCompanionToHand = useGameStore((s) =>
     s.legalActions.some((a) => a.type === "CompanionToHand"),
+  );
+
+  // CR 116.2c: the engine offers one `EndContinuousEffect` per live pay-to-end
+  // permission the local player controls and can afford. `legalActions` is the
+  // sole authority; each action already carries its engine-authored display name
+  // and cost, so the frontend performs no state join or rules derivation.
+  // `legalActions` is selected by reference (stable across renders) and the
+  // filter runs in `useMemo`, so the selector never mints a fresh array under
+  // zustand's reference equality.
+  const legalActions = useGameStore((s) => s.legalActions);
+  const endContinuousEffectOffers = useMemo(
+    () => legalActions.filter((action) => action.type === "EndContinuousEffect"),
+    [legalActions],
   );
 
   const { advanceLabel } = usePhaseInfo();
@@ -358,6 +372,27 @@ export function ActionButton() {
                 {t("actionButton.companionToHand")}
               </button>
             )}
+            {/* CR 116.2c: pay a continuous effect's printed termination cost.
+                No timing gate — the engine offers this at any priority window
+                for as long as the effect lives and the cost is payable. */}
+            {endContinuousEffectOffers.map((offer) => (
+              <button
+                key={offer.data.group}
+                disabled={actionBlocked}
+                onClick={() => dispatchAction(offer)}
+                className={gameButtonClass({
+                  tone: "amber",
+                  size: "md",
+                  disabled: actionBlocked,
+                  className: secondaryButtonClass,
+                })}
+              >
+                <span className="inline-flex items-center gap-1">
+                  {t("actionButton.endContinuousEffect", { source: offer.data.source_name })}
+                  <ManaCostSymbols cost={offer.data.cost} size="xs" />
+                </span>
+              </button>
+            ))}
             <button
               disabled={actionBlocked}
               onClick={() => dispatchAction({ type: "PassPriority" })}
@@ -421,6 +456,30 @@ export function ActionButton() {
                 {t("actionButton.companionToHand")}
               </button>
             )}
+            {/* CR 116.2c: pay a continuous effect's printed termination cost.
+                No timing gate — the engine offers this at any priority window
+                for as long as the effect lives and the cost is payable. */}
+            {!idle &&
+              endContinuousEffectOffers.map((offer) => (
+                <button
+                  key={offer.data.group}
+                  disabled={actionBlocked}
+                  onClick={() => dispatchAction(offer)}
+                  className={gameButtonClass({
+                    tone: "amber",
+                    size: "md",
+                    disabled: actionBlocked,
+                    className: secondaryButtonClass,
+                  })}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    {t("actionButton.endContinuousEffect", {
+                      source: offer.data.source_name,
+                    })}
+                    <ManaCostSymbols cost={offer.data.cost} size="xs" />
+                  </span>
+                </button>
+              ))}
             {/* In idle (no priority), the "who/why" narration lives in
                 TurnStatusLine — rendering a disabled "Waiting" button here too
                 would duplicate it (and an empty/relabeled disabled control is

@@ -589,6 +589,14 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::ChooseOption { choice, .. } => {
             bound_string("ChooseOption.choice", choice)?;
         }
+        GameAction::EndContinuousEffect {
+            source_name, cost, ..
+        } => {
+            bound_string("EndContinuousEffect.source_name", source_name)?;
+            if let engine::types::mana::ManaCost::Cost { shards, .. } = cost {
+                bound_list("EndContinuousEffect.cost.shards", shards.len())?;
+            }
+        }
         GameAction::SubmitSpellbookDraft { card } => {
             bound_string("SubmitSpellbookDraft.card", card)?;
         }
@@ -705,6 +713,7 @@ mod tests {
     use super::*;
     use engine::game::combat::AttackTarget;
     use engine::types::identifiers::ObjectId;
+    use engine::types::mana::{ManaCost, ManaCostShard};
 
     #[test]
     fn bounded_meld_actions_are_accepted() {
@@ -719,5 +728,35 @@ mod tests {
         ] {
             assert_eq!(guard_game_action_payload(&action), Ok(()));
         }
+    }
+
+    #[test]
+    fn end_continuous_effect_presentation_payload_is_bounded() {
+        let action = GameAction::EndContinuousEffect {
+            group: engine::types::game_state::EndEffectGroupId(1),
+            source_name: "Calming Licid".to_string(),
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            },
+        };
+        assert_eq!(guard_game_action_payload(&action), Ok(()));
+
+        let oversized_name = GameAction::EndContinuousEffect {
+            group: engine::types::game_state::EndEffectGroupId(1),
+            source_name: "x".repeat(MAX_CHOICE_LEN + 1),
+            cost: ManaCost::zero(),
+        };
+        assert!(guard_game_action_payload(&oversized_name).is_err());
+
+        let oversized_cost = GameAction::EndContinuousEffect {
+            group: engine::types::game_state::EndEffectGroupId(1),
+            source_name: "Calming Licid".to_string(),
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::White; MAX_ACTION_LIST_LEN + 1],
+                generic: 0,
+            },
+        };
+        assert!(guard_game_action_payload(&oversized_cost).is_err());
     }
 }

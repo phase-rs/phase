@@ -423,6 +423,14 @@ pub enum SpecialAction {
     /// CR 901.9 / CR 116.2i: Paying the escalating generic cost to roll the
     /// planar die as a Planechase special action.
     RollPlanarDie,
+    /// CR 116.2c: Paying a continuous effect's printed termination cost to end
+    /// it ("You may pay {W} to end this effect" — the Licid cycle).
+    ///
+    /// The payment is neither a cast nor an activation, so mana restricted to
+    /// spells or to activated abilities MUST be rejected here — that rejection
+    /// is the correctness win this variant buys over charging the cost through
+    /// an unlabelled payment context.
+    EndContinuousEffect,
 }
 
 /// CR 106.6: The ability-activation half of a "spend only to cast [X] spell or
@@ -962,6 +970,7 @@ fn special_action_rank(value: SpecialAction) -> u8 {
         SpecialAction::Plot => 2,
         SpecialAction::TurnFaceUp => 3,
         SpecialAction::RollPlanarDie => 4,
+        SpecialAction::EndContinuousEffect => 5,
     }
 }
 
@@ -1416,7 +1425,7 @@ impl ManaUnit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ManaCostShard {
     // Basic colored
     White,
@@ -1700,7 +1709,7 @@ impl FromStr for ManaCostShard {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ManaCost {
     NoCost,

@@ -11112,6 +11112,7 @@ fn transient_activation_cost_reduction_hits_only_controlled_artifact_tokens() {
             }])],
         duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
         target: None,
+        end_cost: None,
     };
     let ability =
         crate::types::ability::ResolvedAbility::new(effect, vec![], dining_car, PlayerId(0));

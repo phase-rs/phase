@@ -1213,6 +1213,7 @@ mod tests {
                 .modifications(vec![ContinuousModification::AddKeyword { keyword }])],
             target,
             duration: None,
+            end_cost: None,
         }
     }
 
@@ -1238,6 +1239,7 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::You),
             )),
             duration: None,
+            end_cost: None,
         };
         assert!(is_self_protection_effect(&effect));
     }
@@ -1255,6 +1257,7 @@ mod tests {
                 ])],
                 target: None,
                 duration: None,
+                end_cost: None,
             },
         );
         let effect = Effect::GenericEffect {
@@ -1267,6 +1270,7 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::You),
             )),
             duration: None,
+            end_cost: None,
         };
         assert!(is_self_protection_effect(&effect));
     }

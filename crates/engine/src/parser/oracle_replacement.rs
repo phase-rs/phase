@@ -2478,6 +2478,7 @@ fn parse_as_enters_becomes(text: &str) -> Option<ReplacementDefinition> {
                 .modifications(modifications)],
             duration: Some(Duration::Permanent),
             target: None,
+            end_cost: None,
         },
     )
     .duration(Duration::Permanent);
@@ -20315,6 +20316,7 @@ mod tests {
                 static_abilities,
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: _,
             } => {
                 assert!(static_abilities.iter().any(|static_ability| {
                     static_ability.affected == Some(TargetFilter::ParentTarget)

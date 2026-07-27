@@ -1020,6 +1020,25 @@ fn flat_actions_have_meaningful_priority(state: &GameState, actions: &[GameActio
             source_id,
             ability_index,
         } => activate_ability_is_meaningful_priority(state, *source_id, *ability_index),
+        // CR 116.2c: `GameAction::EndContinuousEffect` intentionally falls
+        // through to `_ => true` — there is deliberately NO arm for it here.
+        // Three consumers read this primitive: the loop firewall
+        // (`has_meaningful_priority_action`), the final `holds` rung of
+        // `auto_pass_recommended`, and this module's tests.
+        //   - Firewall: `true` is REQUIRED. CR 732.4 + CR 104.4b — "If a loop
+        //     contains only mandatory actions, the game is a draw", and "Loops
+        //     that contain an optional action don't result in a draw." Paying
+        //     to end a continuous effect is exactly such an optional action, so
+        //     answering `false` could declare a draw on a loop the player could
+        //     actually break.
+        //   - Auto-pass: `true` means a live pay-to-end permission holds
+        //     priority at every window OTHER than the player's own upkeep/draw,
+        //     which the G2 rung short-circuits through the noncast sibling
+        //     below. That matches the shipped treatment of `TurnFaceUp`
+        //     (CR 116.2b), the other standing special action, which falls
+        //     through the same `_ => true` mechanism and is tested at own
+        //     upkeep/draw/end by `meaningful_priority_actions()` in this
+        //     module's tests.
         _ => true,
     })
 }
@@ -1044,6 +1063,15 @@ fn flat_actions_have_meaningful_noncast_priority(
     actions.iter().any(|action| match action {
         GameAction::PassPriority => false,
         GameAction::CastSpell { .. } => false,
+        // CR 116.2c: a pay-to-end permission is a STANDING one — legal at every
+        // priority window for as long as the effect lives, potentially the whole
+        // game — unlike `CompanionToHand` (once per game, sorcery-speed gated).
+        // Letting it fall through to `_ => true` would permanently disable the
+        // own-upkeep/draw auto-pass fast path for any player controlling an
+        // animated Licid. It is not a new opportunity arising this turn, so it
+        // does not hold the initial upkeep/draw window open. The firewall
+        // primitive above deliberately keeps `_ => true` — see its comment.
+        GameAction::EndContinuousEffect { .. } => false,
         GameAction::ActivateAbility {
             source_id,
             ability_index,

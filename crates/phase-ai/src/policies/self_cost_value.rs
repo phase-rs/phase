@@ -272,6 +272,7 @@ mod tests {
                 }])],
             target: Some(TargetFilter::SelfRef),
             duration: None,
+            end_cost: None,
         }
     }
 

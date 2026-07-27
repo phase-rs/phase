@@ -442,6 +442,7 @@ mod tests {
                 static_abilities: vec![static_def],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
             x_only_cost(),
         )
@@ -462,6 +463,7 @@ mod tests {
             static_abilities: vec![static_def],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
+            end_cost: None,
         });
         ability.sub_ability = Some(Box::new(spell(Effect::Destroy {
             target: TargetFilter::TrackedSet {
@@ -803,6 +805,7 @@ mod tests {
                 static_abilities: vec![static_def],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
             x_only_cost(),
         );

@@ -1844,6 +1844,10 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::DeclareCompanion { .. } | GameAction::CompanionToHand => {
             AvailableActionConversion::Unsupported("local.companion-unsupported")
         }
+        // CR 116.2c: the pay-to-end special action has no Manabrew counterpart.
+        GameAction::EndContinuousEffect { .. } => {
+            AvailableActionConversion::Unsupported("local.end-continuous-effect-unsupported")
+        }
         GameAction::DiscoverChoice { .. }
         | GameAction::GraveyardPaidCastChoice { .. }
         | GameAction::CascadeChoice { .. }

@@ -21384,6 +21384,7 @@ pub mod tests {
             )],
             duration: Some(Duration::UntilEndOfTurn),
             target: Some(TargetFilter::Any),
+            end_cost: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -21444,6 +21445,7 @@ pub mod tests {
             )],
             duration: Some(Duration::UntilEndOfTurn),
             target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            end_cost: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
@@ -27127,6 +27129,7 @@ pub mod tests {
                     .modifications(vec![ContinuousModification::AddKeyword {
                         keyword: Keyword::Trample,
                     }])],
+                end_cost: None,
             },
             Vec::new(),
             source,
@@ -28111,6 +28114,7 @@ pub mod tests {
             }],
             condition: None,
             duration_subject: None,
+            end_permission: None,
             source_name: "Jhoira".to_string(),
         };
         state.transient_continuous_effects.push_back(grant.clone());
@@ -28204,6 +28208,7 @@ pub mod tests {
                 }],
                 condition: None,
                 duration_subject: None,
+                end_permission: None,
                 source_name: "Grant source".to_string(),
             });
 
@@ -28348,6 +28353,7 @@ pub mod tests {
                     }],
                     condition: None,
                     duration_subject: None,
+                    end_permission: None,
                     source_name: "Jhoira of the Ghitu".to_string(),
                 },
             );

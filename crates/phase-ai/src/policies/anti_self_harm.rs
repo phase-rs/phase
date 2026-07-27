@@ -1399,6 +1399,7 @@ mod tests {
                 }])],
             target: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
             duration: None,
+            end_cost: None,
         };
 
         let (decision, candidate) = make_target_selection_ctx(
@@ -2001,6 +2002,7 @@ mod tests {
             static_abilities: Vec::new(),
             target: None,
             duration: None,
+            end_cost: None,
         };
         assert_eq!(effect_polarity(&effect), EffectPolarity::Contextual);
     }
@@ -2974,6 +2976,7 @@ mod tests {
                 static_abilities: Vec::new(),
                 target: None,
                 duration: None,
+                end_cost: None,
             },
             Vec::new(),
             aura_id,
@@ -3609,6 +3612,7 @@ mod tests {
                 .affected(TargetFilter::Typed(TypedFilter::creature()))],
             duration: Some(engine::types::ability::Duration::UntilEndOfTurn),
             target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            end_cost: None,
         };
 
         // Score targeting own creature

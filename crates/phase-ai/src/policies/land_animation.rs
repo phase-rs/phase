@@ -418,6 +418,7 @@ mod tests {
             )],
             duration: None,
             target: Some(TargetFilter::SelfRef),
+            end_cost: None,
         }
     }
 

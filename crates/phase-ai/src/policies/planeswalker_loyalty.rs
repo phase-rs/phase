@@ -210,6 +210,7 @@ mod tests {
             }],
             target: None,
             duration: None,
+            end_cost: None,
         }
     }
 

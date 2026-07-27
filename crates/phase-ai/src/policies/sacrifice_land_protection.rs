@@ -156,6 +156,7 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::You),
                 )),
                 duration: None,
+                end_cost: None,
             },
         );
         ability.cost = Some(AbilityCost::Sacrifice(SacrificeCost {
@@ -281,6 +282,7 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::You),
                 )),
                 duration: None,
+                end_cost: None,
             },
         );
         ability.cost = Some(AbilityCost::Tap);

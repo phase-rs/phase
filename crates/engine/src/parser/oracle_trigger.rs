@@ -17388,6 +17388,7 @@ mod ood_sphere_tests {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } = &*sub.effect
         else {
             panic!(

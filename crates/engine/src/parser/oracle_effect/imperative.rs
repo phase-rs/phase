@@ -125,6 +125,7 @@ pub(crate) fn try_parse_activated_ability_cost_reduction_effect(
             }])],
         duration: Some(Duration::UntilEndOfTurn),
         target: None,
+        end_cost: None,
     })
 }
 
@@ -5739,9 +5740,11 @@ fn parse_neuter_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
 ///   Rebinding it here would be behaviorally inert for those cards and an active
 ///   REGRESSION for the cards whose SOURCE IS NOT ATTACHABLE (Adaptive Armorer,
 ///   Stonehewer Giant, Quest for the Holy Relic, Armored Skyhunter, …): they
-///   would attach a creature/artifact/instant source to a permanent, an illegal
-///   state that neither `attachment_illegality` nor the SBA sweep cleans up
-///   today (CR 704.5p is unimplemented).
+///   would attach a creature/artifact/instant source to a permanent. CR 704.5p
+///   is now implemented (`sba::check_illegal_attachment_unattach`), so that
+///   illegal state is swept on the next SBA check instead of persisting — but
+///   the attachment the card asked for would simply evaporate, which is still a
+///   regression, not a fix.
 ///
 /// The recipient-side sibling `parse_attach_recipient` gates its own delegation
 /// on the wider `attach_neuter_recipient_resolves_via_subject` predicate. That
@@ -6166,6 +6169,7 @@ fn try_parse_gain_quoted_ability(text: &str) -> Option<Effect> {
             .description(text.to_string())],
         duration,
         target: None,
+        end_cost: None,
     })
 }
 
@@ -6203,6 +6207,7 @@ fn coalesce_pump_with_modifications(body_text: &str) -> Option<Effect> {
             .description(body_text.to_string())],
         duration,
         target: None,
+        end_cost: None,
     })
 }
 
@@ -6238,6 +6243,7 @@ fn try_parse_gain_keyword(text: &str) -> Option<Effect> {
             .description(text.to_string())],
         duration,
         target: None,
+        end_cost: None,
     })
 }
 
@@ -9562,6 +9568,7 @@ pub(super) fn parse_imperative_family_ast(
                 }])],
             duration: None,
             target: None,
+            end_cost: None,
         }));
     }
 
@@ -12075,6 +12082,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             ],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
+            end_cost: None,
         },
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::Learn => Effect::Learn,
@@ -12871,6 +12879,7 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
             static_abilities: vec![must_attack_static_definition()],
             duration: Some(duration),
             target: None,
+            end_cost: None,
         }));
     }
 
@@ -13004,6 +13013,7 @@ pub(super) fn try_parse_attack_or_block_if_able(lower: &str) -> Option<Imperativ
                 static_abilities: must_attack_or_block_static_definitions(),
                 duration: Some(duration),
                 target: None,
+                end_cost: None,
             }));
         }
     }
@@ -13159,6 +13169,7 @@ fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
                 .modifications(vec![ContinuousModification::AddKeyword { keyword }])],
             duration: Some(duration),
             target: None,
+            end_cost: None,
         }));
     }
 
@@ -13185,6 +13196,7 @@ fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
         static_abilities: statics,
         duration: Some(duration),
         target: None,
+        end_cost: None,
     }))
 }
 
@@ -19425,6 +19437,7 @@ mod tests {
                 static_abilities,
                 duration,
                 target,
+                end_cost: _,
             } => {
                 assert_eq!(*target, None, "non-distributed body must not broadcast");
                 assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
