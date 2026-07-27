@@ -22,73 +22,78 @@ expression: "&ir"
         "fragment": "I, II — Create a 2/2 white Knight creature token with vigilance."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "CounterAdded",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Token",
-              "name": "Knight",
-              "power": {
-                "type": "Fixed",
-                "value": 2
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "CounterAdded",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "Token",
+                  "name": "Knight",
+                  "power": {
+                    "type": "Fixed",
+                    "value": 2
+                  },
+                  "toughness": {
+                    "type": "Fixed",
+                    "value": 2
+                  },
+                  "types": [
+                    "Creature",
+                    "Knight"
+                  ],
+                  "colors": [
+                    "White"
+                  ],
+                  "keywords": [
+                    "Vigilance"
+                  ],
+                  "tapped": false,
+                  "count": {
+                    "type": "Fixed",
+                    "value": 1
+                  },
+                  "owner": {
+                    "type": "Controller"
+                  },
+                  "enters_attacking": false
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
               },
-              "toughness": {
-                "type": "Fixed",
-                "value": 2
+              "valid_card": {
+                "type": "SelfRef"
               },
-              "types": [
-                "Creature",
-                "Knight"
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
               ],
-              "colors": [
-                "White"
-              ],
-              "keywords": [
-                "Vigilance"
-              ],
-              "tapped": false,
-              "count": {
-                "type": "Fixed",
-                "value": 1
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "Chapter 1",
+              "constraint": null,
+              "condition": null,
+              "counter_filter": {
+                "counter_type": "lore",
+                "threshold": 1
               },
-              "owner": {
-                "type": "Controller"
-              },
-              "enters_attacking": false
+              "batched": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "Chapter 1",
-          "constraint": null,
-          "condition": null,
-          "counter_filter": {
-            "counter_type": "lore",
-            "threshold": 1
-          },
-          "batched": false
+            "source_text": "I, II — Create a 2/2 white Knight creature token with vigilance."
+          }
         }
       }
     },
@@ -110,73 +115,78 @@ expression: "&ir"
         "fragment": "I, II — Create a 2/2 white Knight creature token with vigilance."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "CounterAdded",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Token",
-              "name": "Knight",
-              "power": {
-                "type": "Fixed",
-                "value": 2
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "CounterAdded",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "Token",
+                  "name": "Knight",
+                  "power": {
+                    "type": "Fixed",
+                    "value": 2
+                  },
+                  "toughness": {
+                    "type": "Fixed",
+                    "value": 2
+                  },
+                  "types": [
+                    "Creature",
+                    "Knight"
+                  ],
+                  "colors": [
+                    "White"
+                  ],
+                  "keywords": [
+                    "Vigilance"
+                  ],
+                  "tapped": false,
+                  "count": {
+                    "type": "Fixed",
+                    "value": 1
+                  },
+                  "owner": {
+                    "type": "Controller"
+                  },
+                  "enters_attacking": false
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
               },
-              "toughness": {
-                "type": "Fixed",
-                "value": 2
+              "valid_card": {
+                "type": "SelfRef"
               },
-              "types": [
-                "Creature",
-                "Knight"
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
               ],
-              "colors": [
-                "White"
-              ],
-              "keywords": [
-                "Vigilance"
-              ],
-              "tapped": false,
-              "count": {
-                "type": "Fixed",
-                "value": 1
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "Chapter 2",
+              "constraint": null,
+              "condition": null,
+              "counter_filter": {
+                "counter_type": "lore",
+                "threshold": 2
               },
-              "owner": {
-                "type": "Controller"
-              },
-              "enters_attacking": false
+              "batched": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "Chapter 2",
-          "constraint": null,
-          "condition": null,
-          "counter_filter": {
-            "counter_type": "lore",
-            "threshold": 2
-          },
-          "batched": false
+            "source_text": "I, II — Create a 2/2 white Knight creature token with vigilance."
+          }
         }
       }
     },
@@ -257,63 +267,68 @@ expression: "&ir"
         "fragment": "III — Knights you control get +2/+1 until end of turn."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "CounterAdded",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "PumpAll",
-              "power": {
-                "type": "Fixed",
-                "value": 2
-              },
-              "toughness": {
-                "type": "Fixed",
-                "value": 1
-              },
-              "target": {
-                "type": "Typed",
-                "type_filters": [
-                  {
-                    "Subtype": "Knight"
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "CounterAdded",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "PumpAll",
+                  "power": {
+                    "type": "Fixed",
+                    "value": 2
+                  },
+                  "toughness": {
+                    "type": "Fixed",
+                    "value": 1
+                  },
+                  "target": {
+                    "type": "Typed",
+                    "type_filters": [
+                      {
+                        "Subtype": "Knight"
+                      }
+                    ],
+                    "controller": "You",
+                    "properties": []
                   }
-                ],
-                "controller": "You",
-                "properties": []
-              }
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": "UntilEndOfTurn",
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "Chapter 3",
+              "constraint": null,
+              "condition": null,
+              "counter_filter": {
+                "counter_type": "lore",
+                "threshold": 3
+              },
+              "batched": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": "UntilEndOfTurn",
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "Chapter 3",
-          "constraint": null,
-          "condition": null,
-          "counter_filter": {
-            "counter_type": "lore",
-            "threshold": 3
-          },
-          "batched": false
+            "source_text": "III — Knights you control get +2/+1 until end of turn."
+          }
         }
       }
     }
