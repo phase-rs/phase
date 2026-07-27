@@ -26,10 +26,11 @@ import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersiste
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
-export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic" | "viewerInteraction"> {
+export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "endContinuousEffectOffers" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic" | "viewerInteraction"> {
   return {
     legalActions: result.actions,
     autoPassRecommended: result.autoPassRecommended,
+    endContinuousEffectOffers: result.endContinuousEffectOffers ?? [],
     manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     spellCosts: result.spellCosts ?? {},
     legalActionsByObject: result.legalActionsByObject ?? {},
@@ -161,6 +162,8 @@ interface GameStoreState {
   waitingFor: WaitingFor | null;
   legalActions: GameAction[];
   autoPassRecommended: boolean;
+  /** Ordered engine-authored CR 116.2c offers, rendered unchanged. */
+  endContinuousEffectOffers: NonNullable<LegalActionsResult["endContinuousEffectOffers"]>;
   /** Exact engine-authored actions dispatched by the tap-all-mana shortcut. */
   manaPaymentShortcutActions: GameAction[];
   /** Effective mana costs for castable spells, keyed by object_id string. */
@@ -251,6 +254,7 @@ type CommitExtraState = Partial<Omit<GameStoreState,
   | "waitingFor"
   | "legalActions"
   | "autoPassRecommended"
+  | "endContinuousEffectOffers"
   | "manaPaymentShortcutActions"
   | "spellCosts"
   | "legalActionsByObject"
@@ -404,6 +408,7 @@ const initialState: GameStoreState = {
   waitingFor: null,
   legalActions: [],
   autoPassRecommended: false,
+  endContinuousEffectOffers: [],
   manaPaymentShortcutActions: [],
   spellCosts: {},
   legalActionsByObject: {},

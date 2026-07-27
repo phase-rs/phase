@@ -5222,6 +5222,7 @@ mod tests {
                 static_abilities: vec![],
                 duration: None,
                 target: None,
+                end_cost: None,
             }
         ));
     }

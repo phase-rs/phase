@@ -3573,6 +3573,7 @@ fn interaction_mana_special_action(action: SpecialAction) -> InteractionManaSpec
         SpecialAction::Plot => InteractionManaSpecialAction::Plot,
         SpecialAction::TurnFaceUp => InteractionManaSpecialAction::TurnFaceUp,
         SpecialAction::RollPlanarDie => InteractionManaSpecialAction::RollPlanarDie,
+        SpecialAction::EndContinuousEffect => InteractionManaSpecialAction::EndContinuousEffect,
     }
 }
 
@@ -4708,6 +4709,23 @@ fn project_action_payload(
             };
             surfaces.push(InteractionPresentationSurface::ShortcutResponse { response });
         }
+        // CR 116.2c: two live pay-to-end permissions are two distinct
+        // candidates, so the group key must reach the surface list or they
+        // project identically. The permanent whose resolution installed the
+        // effect is the player-meaningful discriminator and is derived HERE, in
+        // the engine, rather than being widened into the action payload.
+        GameAction::EndContinuousEffect { group, .. } => {
+            if let Some(source) = crate::game::end_continuous_effect::source_of_group(state, *group)
+            {
+                push_object_surface(
+                    surfaces,
+                    state,
+                    source,
+                    InteractionRoleCode::PermissionSource,
+                );
+            }
+            push_value_surface(surfaces, InteractionRoleCode::Selected, group.0);
+        }
     }
 }
 
@@ -4873,6 +4891,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::HarmonizeTap { .. } => InteractionActionCode::HarmonizeTap,
         GameAction::DeclareCompanion { .. } => InteractionActionCode::DeclareCompanion,
         GameAction::CompanionToHand => InteractionActionCode::CompanionToHand,
+        GameAction::EndContinuousEffect { .. } => InteractionActionCode::EndContinuousEffect,
         GameAction::DiscoverChoice { .. } => InteractionActionCode::DiscoverChoice,
         GameAction::GraveyardPaidCastChoice { .. } => {
             InteractionActionCode::GraveyardPaidCastChoice

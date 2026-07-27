@@ -125,6 +125,7 @@ fn grant_haste_step() -> AbilityDefinition {
                 }])],
             duration: Some(Duration::Permanent),
             target: None,
+            end_cost: None,
         },
     )
     .duration(Duration::Permanent)

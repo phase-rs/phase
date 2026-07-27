@@ -754,6 +754,7 @@ fn build_self_keyword_grant(
             // CR 611.2b's "for as long as …" case).
             duration: Some(explicit_duration.unwrap_or(Duration::Permanent)),
             target: None,
+            end_cost: None,
         },
     )
 }

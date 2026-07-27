@@ -3584,6 +3584,7 @@ mod tests {
             ])],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
+            end_cost: None,
         }
     }
 

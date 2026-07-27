@@ -122,6 +122,7 @@
     "blockWithNoneConfirm": "Tap Again: Block with None",
     "selectAttackerForBlocker": "Select the attacker this blocker should defend against",
     "companionToHand": "Companion to Hand",
+    "endContinuousEffect": "End {{source}}'s effect —",
     "resolve": "Resolve",
     "resolveTooltip": "Pass priority so the top stack item can resolve if every player also passes. Shortcut: Space.",
     "resolveAll": "Resolve All",

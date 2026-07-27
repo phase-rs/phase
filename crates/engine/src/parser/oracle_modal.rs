@@ -1349,6 +1349,7 @@ fn modal_marker_effect(_header: &ModalHeaderAst) -> Effect {
         static_abilities: vec![],
         duration: None,
         target: None,
+        end_cost: None,
     }
 }
 

@@ -13825,6 +13825,7 @@ mod tests {
                 }],
                 condition: None,
                 duration_subject: None,
+                end_permission: None,
                 source_name: String::new(),
             });
         let mut effects = vec![];
@@ -13858,6 +13859,7 @@ mod tests {
                 }],
                 condition: None,
                 duration_subject: None,
+                end_permission: None,
                 source_name: String::new(),
             });
         let mut effects = vec![];

@@ -87,6 +87,7 @@ fn najeela_chain(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
+            end_cost: None,
         },
         vec![],
         source,

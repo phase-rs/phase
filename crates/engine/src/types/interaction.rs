@@ -263,6 +263,8 @@ pub enum InteractionManaSpecialAction {
     Plot,
     TurnFaceUp,
     RollPlanarDie,
+    /// CR 116.2c: pay a continuous effect's printed termination cost to end it.
+    EndContinuousEffect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -548,6 +550,8 @@ pub enum InteractionActionCode {
     RespondToShortcut,
     DeclineShortcut,
     PrecastCopyShortcut,
+    /// CR 116.2c: pay a continuous effect's printed termination cost to end it.
+    EndContinuousEffect,
     Debug,
 }
 
