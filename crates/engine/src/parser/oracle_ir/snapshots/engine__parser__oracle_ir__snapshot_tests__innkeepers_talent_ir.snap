@@ -1,6 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1312
+assertion_line: 1321
 expression: "&ir"
 ---
 {
@@ -148,52 +148,56 @@ expression: "&ir"
         "fragment": "Permanents you control with counters on them have ward {1}."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "Continuous",
-          "affected": {
-            "type": "Typed",
-            "type_filters": [
-              "Permanent"
-            ],
-            "controller": "You",
-            "properties": [
-              {
-                "type": "Counters",
-                "counters": {
-                  "type": "Any"
-                },
-                "comparator": "GE",
-                "count": {
-                  "type": "Fixed",
-                  "value": 1
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Permanent"
+              ],
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Counters",
+                  "counters": {
+                    "type": "Any"
+                  },
+                  "comparator": "GE",
+                  "count": {
+                    "type": "Fixed",
+                    "value": 1
+                  }
                 }
-              }
-            ]
-          },
-          "modifications": [
-            {
-              "type": "AddKeyword",
-              "keyword": {
-                "Ward": {
-                  "type": "Mana",
-                  "data": {
-                    "type": "Cost",
-                    "shards": [],
-                    "generic": 1
+              ]
+            },
+            "modifications": [
+              {
+                "type": "AddKeyword",
+                "keyword": {
+                  "Ward": {
+                    "type": "Mana",
+                    "data": {
+                      "type": "Cost",
+                      "shards": [],
+                      "generic": 1
+                    }
                   }
                 }
               }
-            }
-          ],
-          "condition": {
-            "type": "ClassLevelGE",
-            "level": 2
+            ],
+            "condition": {
+              "type": "ClassLevelGE",
+              "level": 2
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Permanents you control with counters on them have ward {1}."
           },
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "Permanents you control with counters on them have ward {1}."
+          "source_text": "Permanents you control with counters on them have ward {1}.",
+          "body_ir": null
         }
       }
     },
@@ -271,24 +275,28 @@ expression: "&ir"
         "fragment": "If you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead."
       },
       "node": {
-        "PreLoweredReplacement": {
-          "event": "AddCounter",
-          "execute": null,
-          "mode": {
-            "type": "Mandatory"
+        "Replacement": {
+          "definition": {
+            "event": "AddCounter",
+            "execute": null,
+            "mode": {
+              "type": "Mandatory"
+            },
+            "valid_card": null,
+            "description": "If you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.",
+            "condition": {
+              "type": "ClassLevelGE",
+              "level": 3
+            },
+            "quantity_modification": {
+              "type": "Times",
+              "factor": 2
+            },
+            "valid_player": "You",
+            "counter_replacement_subject": "Actor"
           },
-          "valid_card": null,
-          "description": "If you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.",
-          "condition": {
-            "type": "ClassLevelGE",
-            "level": 3
-          },
-          "quantity_modification": {
-            "type": "Times",
-            "factor": 2
-          },
-          "valid_player": "You",
-          "counter_replacement_subject": "Actor"
+          "source_text": "If you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.",
+          "execute_ir": null
         }
       }
     }

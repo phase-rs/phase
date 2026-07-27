@@ -23,21 +23,25 @@ expression: "&ir"
         "fragment": "You have no maximum hand size."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "NoMaximumHandSize",
-          "affected": {
-            "type": "Typed",
-            "type_filters": [],
-            "controller": "You",
-            "properties": []
+        "Static": {
+          "definition": {
+            "mode": "NoMaximumHandSize",
+            "affected": {
+              "type": "Typed",
+              "type_filters": [],
+              "controller": "You",
+              "properties": []
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "You have no maximum hand size."
           },
-          "modifications": [],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "You have no maximum hand size."
+          "source_text": "You have no maximum hand size.",
+          "body_ir": null
         }
       }
     },

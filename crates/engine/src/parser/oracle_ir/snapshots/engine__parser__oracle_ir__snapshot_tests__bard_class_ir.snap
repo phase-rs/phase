@@ -1,6 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1324
+assertion_line: 1333
 expression: "&ir"
 ---
 {
@@ -23,40 +23,44 @@ expression: "&ir"
         "fragment": "Legendary creatures you control enter with an additional +1/+1 counter on them."
       },
       "node": {
-        "PreLoweredReplacement": {
-          "event": "Moved",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "PutCounter",
-              "counter_type": "P1P1",
-              "count": {
-                "type": "Fixed",
-                "value": 1
+        "Replacement": {
+          "definition": {
+            "event": "Moved",
+            "execute": {
+              "kind": "Spell",
+              "effect": {
+                "type": "PutCounter",
+                "counter_type": "P1P1",
+                "count": {
+                  "type": "Fixed",
+                  "value": 1
+                },
+                "target": {
+                  "type": "SelfRef"
+                }
               },
-              "target": {
-                "type": "SelfRef"
-              }
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
+            "mode": {
+              "type": "Mandatory"
+            },
+            "valid_card": {
+              "type": "SelfRef"
+            },
+            "description": "Legendary creatures you control enter with an additional +1/+1 counter on them.",
             "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+            "destination_zone": "Battlefield"
           },
-          "mode": {
-            "type": "Mandatory"
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "description": "Legendary creatures you control enter with an additional +1/+1 counter on them.",
-          "condition": null,
-          "destination_zone": "Battlefield"
+          "source_text": "Legendary creatures you control enter with an additional +1/+1 counter on them.",
+          "execute_ir": null
         }
       }
     },
@@ -135,51 +139,55 @@ expression: "&ir"
         "fragment": "Legendary spells you cast cost {R}{G} less to cast. This effect reduces only the amount of colored mana you pay."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": {
-            "ModifyCost": {
-              "mode": "Reduce",
-              "amount": {
-                "type": "Cost",
-                "shards": [
-                  "Red",
-                  "Green"
-                ],
-                "generic": 0
-              },
-              "spell_filter": {
-                "type": "Typed",
-                "type_filters": [
-                  "Card"
-                ],
-                "controller": null,
-                "properties": [
-                  {
-                    "type": "HasSupertype",
-                    "value": "Legendary"
-                  }
-                ]
+        "Static": {
+          "definition": {
+            "mode": {
+              "ModifyCost": {
+                "mode": "Reduce",
+                "amount": {
+                  "type": "Cost",
+                  "shards": [
+                    "Red",
+                    "Green"
+                  ],
+                  "generic": 0
+                },
+                "spell_filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Card"
+                  ],
+                  "controller": null,
+                  "properties": [
+                    {
+                      "type": "HasSupertype",
+                      "value": "Legendary"
+                    }
+                  ]
+                }
               }
-            }
+            },
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Card"
+              ],
+              "controller": "You",
+              "properties": []
+            },
+            "modifications": [],
+            "condition": {
+              "type": "ClassLevelGE",
+              "level": 2
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Legendary spells you cast cost {R}{G} less to cast. This effect reduces only the amount of colored mana you pay."
           },
-          "affected": {
-            "type": "Typed",
-            "type_filters": [
-              "Card"
-            ],
-            "controller": "You",
-            "properties": []
-          },
-          "modifications": [],
-          "condition": {
-            "type": "ClassLevelGE",
-            "level": 2
-          },
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "Legendary spells you cast cost {R}{G} less to cast. This effect reduces only the amount of colored mana you pay."
+          "source_text": "Legendary spells you cast cost {R}{G} less to cast. This effect reduces only the amount of colored mana you pay.",
+          "body_ir": null
         }
       }
     },

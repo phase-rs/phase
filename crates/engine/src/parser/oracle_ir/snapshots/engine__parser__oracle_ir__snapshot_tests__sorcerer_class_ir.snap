@@ -1,6 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1288
+assertion_line: 1297
 expression: "&ir"
 ---
 {
@@ -164,76 +164,80 @@ expression: "&ir"
         "fragment": "Creatures you control have \"{T}: Add {U} or {R}. Spend this mana only to cast an instant or sorcery spell or to gain a Class level.\""
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "Continuous",
-          "affected": {
-            "type": "Typed",
-            "type_filters": [
-              "Creature"
-            ],
-            "controller": "You",
-            "properties": []
-          },
-          "modifications": [
-            {
-              "type": "GrantAbility",
-              "definition": {
-                "kind": "Activated",
-                "effect": {
-                  "type": "Mana",
-                  "produced": {
-                    "type": "AnyOneColor",
-                    "count": {
-                      "type": "Fixed",
-                      "value": 1
-                    },
-                    "color_options": [
-                      "Blue",
-                      "Red"
-                    ]
-                  }
-                },
-                "cost": {
-                  "type": "Tap"
-                },
-                "sub_ability": {
-                  "kind": "Spell",
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "You",
+              "properties": []
+            },
+            "modifications": [
+              {
+                "type": "GrantAbility",
+                "definition": {
+                  "kind": "Activated",
                   "effect": {
-                    "type": "Unimplemented",
-                    "name": "spend",
-                    "description": "Spend this mana only to cast an instant or sorcery spell or to gain a Class level"
+                    "type": "Mana",
+                    "produced": {
+                      "type": "AnyOneColor",
+                      "count": {
+                        "type": "Fixed",
+                        "value": 1
+                      },
+                      "color_options": [
+                        "Blue",
+                        "Red"
+                      ]
+                    }
                   },
-                  "cost": null,
-                  "sub_ability": null,
+                  "cost": {
+                    "type": "Tap"
+                  },
+                  "sub_ability": {
+                    "kind": "Spell",
+                    "effect": {
+                      "type": "Unimplemented",
+                      "name": "spend",
+                      "description": "Spend this mana only to cast an instant or sorcery spell or to gain a Class level"
+                    },
+                    "cost": null,
+                    "sub_ability": null,
+                    "duration": null,
+                    "description": null,
+                    "target_prompt": null,
+                    "condition": null,
+                    "optional_targeting": false,
+                    "optional": false,
+                    "forward_result": false,
+                    "sub_link": "SequentialSibling"
+                  },
                   "duration": null,
-                  "description": null,
+                  "description": "{T}: Add {U} or {R}. Spend this mana only to cast an instant or sorcery spell or to gain a Class level.",
                   "target_prompt": null,
                   "condition": null,
                   "optional_targeting": false,
                   "optional": false,
                   "forward_result": false,
-                  "sub_link": "SequentialSibling"
-                },
-                "duration": null,
-                "description": "{T}: Add {U} or {R}. Spend this mana only to cast an instant or sorcery spell or to gain a Class level.",
-                "target_prompt": null,
-                "condition": null,
-                "optional_targeting": false,
-                "optional": false,
-                "forward_result": false,
-                "is_mana_ability": true
+                  "is_mana_ability": true
+                }
               }
-            }
-          ],
-          "condition": {
-            "type": "ClassLevelGE",
-            "level": 2
+            ],
+            "condition": {
+              "type": "ClassLevelGE",
+              "level": 2
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Creatures you control have \"{T}: Add {U} or {R}. Spend this mana only to cast an instant or sorcery spell or to gain a Class level.\""
           },
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "Creatures you control have \"{T}: Add {U} or {R}. Spend this mana only to cast an instant or sorcery spell or to gain a Class level.\""
+          "source_text": "Creatures you control have \"{T}: Add {U} or {R}. Spend this mana only to cast an instant or sorcery spell or to gain a Class level.\"",
+          "body_ir": null
         }
       }
     },

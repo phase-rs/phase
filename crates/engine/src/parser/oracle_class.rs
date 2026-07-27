@@ -18,6 +18,8 @@ use super::oracle_classifier::{
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::replacement::ReplacementIr;
+use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_keyword::extract_granted_keyword_list;
 use super::oracle_modal::strip_ability_word;
 use super::oracle_nom::primitives as nom_primitives;
@@ -190,7 +192,10 @@ pub(crate) fn parse_class_oracle_text(
                     if section.level > 1 {
                         static_def = wrap_static_with_class_level(static_def, section.level);
                     }
-                    items.push((line_index, OracleNodeIr::PreLoweredStatic(static_def)));
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Static(StaticIr::from_definition(&static_line, static_def)),
+                    ));
                     continue;
                 }
             }
@@ -201,7 +206,10 @@ pub(crate) fn parse_class_oracle_text(
                     if section.level > 1 {
                         static_def = wrap_static_with_class_level(static_def, section.level);
                     }
-                    items.push((line_index, OracleNodeIr::PreLoweredStatic(static_def)));
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Static(StaticIr::from_definition(&static_line, static_def)),
+                    ));
                     continue;
                 }
             }
@@ -218,7 +226,10 @@ pub(crate) fn parse_class_oracle_text(
                     if section.level > 1 {
                         rep_def = wrap_replacement_with_class_level(rep_def, section.level);
                     }
-                    items.push((line_index, OracleNodeIr::PreLoweredReplacement(rep_def)));
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Replacement(ReplacementIr::from_definition(line, rep_def)),
+                    ));
                     continue;
                 }
             }
@@ -257,7 +268,13 @@ pub(crate) fn parse_class_oracle_text(
                         if section.level > 1 {
                             static_def = wrap_static_with_class_level(static_def, section.level);
                         }
-                        items.push((line_index, OracleNodeIr::PreLoweredStatic(static_def)));
+                        items.push((
+                            line_index,
+                            OracleNodeIr::Static(StaticIr::from_definition(
+                                &effect_static,
+                                static_def,
+                            )),
+                        ));
                         continue;
                     }
                 }

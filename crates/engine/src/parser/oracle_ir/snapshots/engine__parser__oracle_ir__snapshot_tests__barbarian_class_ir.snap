@@ -1,6 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1300
+assertion_line: 1309
 expression: "&ir"
 ---
 {
@@ -268,31 +268,35 @@ expression: "&ir"
         "fragment": "Creatures you control have haste."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "Continuous",
-          "affected": {
-            "type": "Typed",
-            "type_filters": [
-              "Creature"
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "You",
+              "properties": []
+            },
+            "modifications": [
+              {
+                "type": "AddKeyword",
+                "keyword": "Haste"
+              }
             ],
-            "controller": "You",
-            "properties": []
+            "condition": {
+              "type": "ClassLevelGE",
+              "level": 3
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Creatures you control have haste."
           },
-          "modifications": [
-            {
-              "type": "AddKeyword",
-              "keyword": "Haste"
-            }
-          ],
-          "condition": {
-            "type": "ClassLevelGE",
-            "level": 3
-          },
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "Creatures you control have haste."
+          "source_text": "Creatures you control have haste.",
+          "body_ir": null
         }
       }
     }

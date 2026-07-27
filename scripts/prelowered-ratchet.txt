@@ -13,7 +13,7 @@
 # in the same commit, which is what makes the burn-down visible in `git log`
 # on this one file.
 crates/engine/src/parser/oracle.rs         21
-crates/engine/src/parser/oracle_class.rs   10
+crates/engine/src/parser/oracle_class.rs    6
 
 # --- infrastructure: NOT burn-down targets ----------------------------------
 # The variant declarations and their consumers. These legitimately survive
