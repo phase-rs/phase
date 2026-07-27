@@ -5025,7 +5025,12 @@ pub(crate) fn parse_oracle_ir(
 
         if let Some((option, trigger)) = parse_flash_cleanup_sacrifice_casting_option(&line) {
             emitter.casting_option_at(item_line, option);
-            emitter.trigger_at(item_line, trigger);
+            // The one trigger in this tranche whose `execute` is FULLY
+            // synthesized — `CreateDelayedTrigger{AtNextPhase(Cleanup)} ->
+            // Sacrifice{SelfRef}`, hand-assembled from three `tag()`s with no
+            // parsed source text. `&line` is therefore pure provenance: it is
+            // the sentence that licensed the synthesis, not its input.
+            emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
             i += 1;
             continue;
         }

@@ -45,27 +45,41 @@ expression: "&ir"
         "fragment": "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "ChangesZone",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "CreateDelayedTrigger",
-              "condition": {
-                "type": "AtNextPhase",
-                "phase": "Cleanup"
-              },
-              "effect": {
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "ChangesZone",
+              "execute": {
                 "kind": "Spell",
                 "effect": {
-                  "type": "Sacrifice",
-                  "target": {
-                    "type": "SelfRef"
+                  "type": "CreateDelayedTrigger",
+                  "condition": {
+                    "type": "AtNextPhase",
+                    "phase": "Cleanup"
                   },
-                  "count": {
-                    "type": "Fixed",
-                    "value": 1
-                  }
+                  "effect": {
+                    "kind": "Spell",
+                    "effect": {
+                      "type": "Sacrifice",
+                      "target": {
+                        "type": "SelfRef"
+                      },
+                      "count": {
+                        "type": "Fixed",
+                        "value": 1
+                      }
+                    },
+                    "cost": null,
+                    "sub_ability": null,
+                    "duration": null,
+                    "description": null,
+                    "target_prompt": null,
+                    "condition": null,
+                    "optional_targeting": false,
+                    "optional": false,
+                    "forward_result": false
+                  },
+                  "uses_tracked_set": false
                 },
                 "cost": null,
                 "sub_ability": null,
@@ -77,37 +91,28 @@ expression: "&ir"
                 "optional": false,
                 "forward_result": false
               },
-              "uses_tracked_set": false
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": "Battlefield",
+              "trigger_zones": [],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.",
+              "constraint": null,
+              "condition": {
+                "type": "CastTimingPermission",
+                "permission": "AsThoughHadFlash"
+              },
+              "batched": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "origin": null,
-          "destination": "Battlefield",
-          "trigger_zones": [],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.",
-          "constraint": null,
-          "condition": {
-            "type": "CastTimingPermission",
-            "permission": "AsThoughHadFlash"
-          },
-          "batched": false
+            "source_text": "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step."
+          }
         }
       }
     },
