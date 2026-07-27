@@ -3981,7 +3981,17 @@ pub(crate) fn parse_oracle_ir(
             });
         }
         for trigger in triggers {
-            emitter.trigger_at(*level_line, trigger);
+            // The CR 711.2a/711.2b level graft above stays exactly where it is,
+            // operating on the LOWERED definition. That is deliberate: moving it
+            // pre-lowering would compose `And[gate, ..]` against an already-
+            // composed intervening-if and yield `And[And[gate, x], y]` where the
+            // post-lowering graft yields the flat `And[gate, x, y]`, and
+            // `trigger_condition_source_zones` would additionally start deriving
+            // `trigger_zones` from the level gate. Identity lowering keeps both.
+            emitter.trigger_ir_at(
+                *level_line,
+                TriggerNodeIr::from_definition(ability_text, trigger),
+            );
         }
     }
 

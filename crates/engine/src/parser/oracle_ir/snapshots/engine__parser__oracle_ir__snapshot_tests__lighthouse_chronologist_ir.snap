@@ -158,63 +158,68 @@ expression: "&ir"
         "fragment": "At the beginning of each end step, if it's not your turn, take an extra turn after this one."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "Phase",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "ExtraTurn",
-              "target": {
-                "type": "Controller"
-              }
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": null,
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": "End",
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "At the beginning of each end step, if it's not your turn, take an extra turn after this one.",
-          "constraint": null,
-          "condition": {
-            "type": "And",
-            "conditions": [
-              {
-                "type": "Not",
-                "condition": {
-                  "type": "DuringPlayersTurn",
-                  "player": {
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "Phase",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "ExtraTurn",
+                  "target": {
                     "type": "Controller"
                   }
-                }
-              },
-              {
-                "type": "HasCounters",
-                "counters": {
-                  "type": "OfType",
-                  "data": "level"
                 },
-                "minimum": 7
-              }
-            ]
-          },
-          "batched": false
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "valid_card": null,
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": "End",
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "At the beginning of each end step, if it's not your turn, take an extra turn after this one.",
+              "constraint": null,
+              "condition": {
+                "type": "And",
+                "conditions": [
+                  {
+                    "type": "Not",
+                    "condition": {
+                      "type": "DuringPlayersTurn",
+                      "player": {
+                        "type": "Controller"
+                      }
+                    }
+                  },
+                  {
+                    "type": "HasCounters",
+                    "counters": {
+                      "type": "OfType",
+                      "data": "level"
+                    },
+                    "minimum": 7
+                  }
+                ]
+              },
+              "batched": false
+            },
+            "source_text": "At the beginning of each end step, if it's not your turn, take an extra turn after this one."
+          }
         }
       }
     }
