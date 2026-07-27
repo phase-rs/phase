@@ -1335,7 +1335,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 78] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 79] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1744,6 +1744,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 78] = [
         area: "actions",
         reason: "CR 702.139: Phase models both halves (GameAction::DeclareCompanion at the start of the game, GameAction::CompanionToHand for the {3} special action). CompanionToHand is a priority-window special action and hits the same hole as the planar die: no special-action kind exists in AvailableActionKind's three variants. DeclareCompanion is a pre-game declaration and has no prompt family either.",
         suggested_protocol_extension: "Covered by the special-action kind proposed on local.planar-die-unsupported; the pre-game declaration additionally needs a prompt point before the first turn.",
+    },
+    UnsupportedCapability {
+        code: "local.end-continuous-effect-unsupported",
+        area: "actions",
+        reason: "Phase exposes GameAction::EndContinuousEffect with the exact effect group and cost, but AvailableActionKind has no special-action kind, so the adapter cannot advertise that choice without misclassifying it as a cast or activated ability.",
+        suggested_protocol_extension: "Add a special-action available-action kind carrying the effect-group identity and displayed cost, or a generic labelled special action with equivalent typed payload.",
     },
     UnsupportedCapability {
         code: "local.cast-offer-unsupported",
@@ -7126,13 +7132,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 78);
+        assert_eq!(capabilities.len(), 79);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 78, "capability codes must be unique");
+        assert_eq!(codes.len(), 79, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(
