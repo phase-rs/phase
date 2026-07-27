@@ -422,7 +422,6 @@ export function LimitedDeckBuilder({
               className={menuButtonClass({
                 tone: "neutral",
                 size: "sm",
-                disabled: mainDeck.length === 0,
                 className: "w-full",
               })}
             >
