@@ -2367,6 +2367,28 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     advance_phase(state, events);
                     continue;
                 }
+                // CR 500.4 + CR 503.1: "As a step or phase begins, if there are
+                // effects that last until that step or phase, those effects
+                // expire." Mirrors `prune_until_next_end_step_effects` one step
+                // axis over, for `UntilNextStepOf { step: Upkeep }` durations
+                // ("until your next upkeep").
+                //
+                // CR 614.10a: placed AFTER the skip check on purpose — an effect
+                // scheduled for the "next" occurrence of a step waits for the
+                // first occurrence that isn't skipped, so an Eon-Hub-skipped
+                // upkeep must NOT expire the effect.
+                //
+                // CR 500.6: also ahead of the upkeep triggers below, so an
+                // expiring grant is already gone when a trigger sharing its
+                // deadline resolves (Cycle of Life).
+                super::layers::prune_until_next_upkeep_effects(state, state.active_player);
+                // CR 500.4 + CR 503.1: same deadline, casting-permission half —
+                // Elkin Bottle / Grinning Totem lower "Until the beginning of
+                // your next upkeep, you may play that card" to a durational
+                // `CastingPermission::PlayFromExile`, not a transient continuous
+                // effect. Mirrors the `prune_end_step_casting_permissions` +
+                // `prune_until_next_end_step_effects` pairing at Phase::End.
+                super::layers::prune_upkeep_step_casting_permissions(state, state.active_player);
                 // CR 704.3: Check SBAs before beginning-of-upkeep triggers so that
                 // city blessing (CR 702.131b) and other SBA-granted designations are
                 // applied before trigger conditions like "if you have the city's blessing"
