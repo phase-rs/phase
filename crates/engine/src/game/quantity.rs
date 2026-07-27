@@ -2059,12 +2059,22 @@ fn tracked_set_object_ids(
 /// Return the positive population explicitly supplied by a normalized branch
 /// term. A surrounding conjunction uses this population as the universe for
 /// predicate-valued negations nested below an `Or`.
-fn filter_population_anchor_ids(state: &GameState, filter: &TargetFilter) -> Option<Vec<ObjectId>> {
+fn filter_population_anchor_ids(
+    state: &GameState,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+) -> Option<Vec<ObjectId>> {
     let ids = match filter {
         TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
-        TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => {
-            tracked_set_object_ids(state, *id)
-        }
+        TargetFilter::TrackedSet { id } => tracked_set_object_ids(state, *id),
+        // CR 608.2c: The population of a filtered tracked set is the set
+        // membership intersected with its full nested predicate and producer
+        // provenance. Reducing it to raw membership makes an enclosing `Not`
+        // manufacture results outside the domain the effect actually named.
+        TargetFilter::TrackedSetFiltered { id, .. } => tracked_set_object_ids(state, *id)
+            .into_iter()
+            .filter(|id| matches_target_filter(state, *id, filter, filter_ctx))
+            .collect(),
         TargetFilter::Not { .. } | TargetFilter::Or { .. } | TargetFilter::And { .. } => {
             return None;
         }
@@ -2092,6 +2102,7 @@ fn filter_population_anchor_ids(state: &GameState, filter: &TargetFilter) -> Opt
 fn disjunctive_filter_population_ids(
     state: &GameState,
     filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
 ) -> Option<Vec<ObjectId>> {
     let TargetFilter::Or { filters } = filter else {
         return None;
@@ -2102,9 +2113,9 @@ fn disjunctive_filter_population_ids(
 
     let mut ids = Vec::new();
     for branch in filters {
-        let population = conjunctive_filter_population_ids(state, branch)
-            .or_else(|| disjunctive_filter_population_ids(state, branch))
-            .or_else(|| filter_population_anchor_ids(state, branch))
+        let population = conjunctive_filter_population_ids(state, branch, filter_ctx)
+            .or_else(|| disjunctive_filter_population_ids(state, branch, filter_ctx))
+            .or_else(|| filter_population_anchor_ids(state, branch, filter_ctx))
             .unwrap_or_else(|| filter_candidate_universe(state, branch));
         ids.extend(population);
     }
@@ -2124,14 +2135,15 @@ fn disjunctive_filter_population_ids(
 fn conjunctive_filter_population_ids(
     state: &GameState,
     filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
 ) -> Option<Vec<ObjectId>> {
     let TargetFilter::And { filters } = filter else {
         return None;
     };
     let mut populations = filters.iter().filter_map(|filter| {
-        conjunctive_filter_population_ids(state, filter)
-            .or_else(|| disjunctive_filter_population_ids(state, filter))
-            .or_else(|| filter_population_anchor_ids(state, filter))
+        conjunctive_filter_population_ids(state, filter, filter_ctx)
+            .or_else(|| disjunctive_filter_population_ids(state, filter, filter_ctx))
+            .or_else(|| filter_population_anchor_ids(state, filter, filter_ctx))
     });
     let mut ids = populations.next()?;
     for population in populations {
@@ -2177,7 +2189,7 @@ fn matching_object_ids_in_filter_universe(
     for branch in filter_disjunctive_branches(filter, FilterTermRole::Predicate) {
         let mut anchor_populations = branch
             .iter()
-            .filter_map(|term| filter_population_anchor_ids(state, &term.filter));
+            .filter_map(|term| filter_population_anchor_ids(state, &term.filter, filter_ctx));
         let mut anchored_branch_ids = anchor_populations.next();
         if let Some(branch_ids) = &mut anchored_branch_ids {
             for population in anchor_populations {
@@ -4744,7 +4756,7 @@ pub(crate) fn distinct_counter_kinds_among(
         // `Not(And(TrackedSet, predicate))` means the nonmatching members of
         // that tracked set, not every unrelated object on the battlefield.
         TargetFilter::Not { filter: inner } => {
-            if let Some(population) = conjunctive_filter_population_ids(state, inner) {
+            if let Some(population) = conjunctive_filter_population_ids(state, inner, filter_ctx) {
                 let excluded: HashSet<ObjectId> =
                     matching_object_ids_in_filter_universe(state, inner, filter_ctx)
                         .into_iter()
@@ -7503,6 +7515,129 @@ mod tests {
             distinct_counter_kinds_among(&state, &disjunctive_population, &ctx),
             vec![CounterType::Lore],
             "the union of tracked-set disjuncts excludes an unrelated battlefield nonmember"
+        );
+    }
+
+    /// CR 608.2c + CR 122.1: A complemented `TrackedSetFiltered` keeps both
+    /// its nested object predicate and its producer-action provenance as part
+    /// of the population. Raw tracked members outside either constraint cannot
+    /// contribute counter kinds to the complement.
+    #[test]
+    fn distinct_counter_kinds_among_preserves_filtered_tracked_set_domain() {
+        use crate::types::ability::ThisWayCause;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let add_member =
+            |state: &mut GameState, card_id, controller, name: &str, color, counter_type| {
+                let id = create_object(
+                    state,
+                    CardId(card_id),
+                    controller,
+                    name.to_string(),
+                    Zone::Exile,
+                );
+                let object = state.objects.get_mut(&id).unwrap();
+                object.card_types.core_types.push(CoreType::Creature);
+                object.base_card_types = object.card_types.clone();
+                object.color = vec![color];
+                object.counters.insert(counter_type, 1);
+                id
+            };
+        let excluded_red = add_member(
+            &mut state,
+            2,
+            PlayerId(0),
+            "Red Sacrificed",
+            ManaColor::Red,
+            CounterType::Plus1Plus1,
+        );
+        let included_green = add_member(
+            &mut state,
+            3,
+            PlayerId(0),
+            "Green Sacrificed",
+            ManaColor::Green,
+            CounterType::Lore,
+        );
+        let wrong_cause = add_member(
+            &mut state,
+            4,
+            PlayerId(0),
+            "Green Exiled",
+            ManaColor::Green,
+            CounterType::Stun,
+        );
+        let wrong_controller = add_member(
+            &mut state,
+            5,
+            PlayerId(1),
+            "Opponent Sacrificed",
+            ManaColor::Green,
+            CounterType::Loyalty,
+        );
+        let outsider = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(0),
+            "Battlefield Outsider".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&outsider)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+
+        let tracked = TrackedSetId(11);
+        state.tracked_object_sets.insert(
+            tracked,
+            vec![excluded_red, included_green, wrong_cause, wrong_controller],
+        );
+        state.tracked_set_member_causes.insert(
+            tracked,
+            [
+                (excluded_red, ThisWayCause::Sacrificed),
+                (included_green, ThisWayCause::Sacrificed),
+                (wrong_cause, ThisWayCause::Exiled),
+                (wrong_controller, ThisWayCause::Sacrificed),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let filtered_domain = TargetFilter::TrackedSetFiltered {
+            id: tracked,
+            filter: Box::new(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            caused_by: Some(ThisWayCause::Sacrificed),
+        };
+        let complement = TargetFilter::Not {
+            filter: Box::new(TargetFilter::And {
+                filters: vec![
+                    filtered_domain,
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Red,
+                        },
+                    ])),
+                ],
+            }),
+        };
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &complement, &ctx),
+            vec![CounterType::Lore],
+            "only the non-red member inside the nested controlled-creature and sacrificed domain contributes"
         );
     }
 

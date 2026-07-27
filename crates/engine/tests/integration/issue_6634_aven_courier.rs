@@ -1,9 +1,9 @@
 //! Issue #6634 — Aven Courier's attack trigger.
 //!
 //! Claim-to-test matrix:
-//! - source population authority → controlled-permanent union excludes opponent;
-//! - stack vs. resolution timing → trigger target selection precedes NamedChoice;
-//! - interactive continuation → ChooseOption resumes into PutChosenCounter;
+//! - source authority → controlled counter-bearing permanent excludes opponent;
+//! - stack vs. resolution timing → trigger target selection precedes source choice;
+//! - interactive continuation → source selection then ChooseOption resume placement;
 //! - chosen-kind absence gate → add exactly once when absent, no-op when present;
 //! - CR 608.2b all-targets-illegal path → no resolution choice or placement.
 
@@ -24,7 +24,7 @@ const AVEN_COURIER: &str = "Flying\n\
 Whenever this creature attacks, choose a counter on a permanent you control. \
 Put a counter of that kind on target permanent you control if it doesn't have a counter of that kind on it.";
 
-fn setup(target_starts_with_stun: bool) -> (GameRunner, ObjectId, ObjectId) {
+fn setup(target_starts_with_stun: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let aven = {
@@ -34,6 +34,7 @@ fn setup(target_starts_with_stun: bool) -> (GameRunner, ObjectId, ObjectId) {
     };
     let stun_source = scenario.add_creature(P0, "Stun Source", 2, 2).id();
     scenario.with_counter(stun_source, CounterType::Stun, 1);
+    scenario.with_counter(stun_source, CounterType::Plus1Plus1, 1);
     let plus_source = scenario.add_creature(P0, "Plus Source", 2, 2).id();
     scenario.with_counter(plus_source, CounterType::Plus1Plus1, 1);
     let hostile = scenario.add_creature(P1, "Hostile Counter", 2, 2).id();
@@ -42,7 +43,7 @@ fn setup(target_starts_with_stun: bool) -> (GameRunner, ObjectId, ObjectId) {
     if target_starts_with_stun {
         scenario.with_counter(target, CounterType::Stun, 1);
     }
-    (scenario.build(), aven, target)
+    (scenario.build(), aven, target, stun_source)
 }
 
 fn advance_to_declare_attackers(runner: &mut GameRunner, attacker: PlayerId) {
@@ -122,9 +123,30 @@ fn put_attack_trigger_on_stack(runner: &mut GameRunner, aven: ObjectId, target: 
     panic!("expected TriggerTargetSelection");
 }
 
-fn resolve_to_counter_kind_choice(runner: &mut GameRunner) -> Vec<String> {
+fn resolve_to_counter_kind_choice(
+    runner: &mut GameRunner,
+    counter_source: ObjectId,
+) -> Vec<String> {
     for _ in 0..20 {
         match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseFromZoneChoice { cards, count, .. } => {
+                assert_eq!(count, 1);
+                assert!(
+                    cards.contains(&counter_source),
+                    "the declared controlled counter-bearing permanent must be offered"
+                );
+                assert!(
+                    cards
+                        .iter()
+                        .all(|id| runner.state().objects[id].controller == P0),
+                    "opponent-controlled permanents must not be offered as counter sources"
+                );
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![counter_source],
+                    })
+                    .expect("selecting Aven's counter-source permanent should succeed");
+            }
             WaitingFor::NamedChoice {
                 choice_type,
                 options,
@@ -149,25 +171,21 @@ fn stun_count(runner: &GameRunner, target: ObjectId) -> u32 {
 }
 
 /// CR 608.2c + CR 608.2d + CR 122.1: the target is announced first, the
-/// controller then chooses among kinds on controlled permanents, and the
-/// chosen kind is placed because the target lacks it.
+/// controller then selects a controlled permanent and a kind on that
+/// permanent, and the chosen kind is placed because the target lacks it.
 #[test]
 fn attack_trigger_chooses_kind_at_resolution_and_adds_when_absent() {
-    let (mut runner, aven, target) = setup(false);
+    let (mut runner, aven, target, counter_source) = setup(false);
     put_attack_trigger_on_stack(&mut runner, aven, target);
 
-    let options = resolve_to_counter_kind_choice(&mut runner);
+    let options = resolve_to_counter_kind_choice(&mut runner, counter_source);
     assert_eq!(
         options,
         vec![
             CounterType::Plus1Plus1.as_str().into_owned(),
             CounterType::Stun.as_str().into_owned(),
         ],
-        "choice domain is the union on controlled permanents"
-    );
-    assert!(
-        !options.contains(&CounterType::Loyalty.as_str().into_owned()),
-        "opponent-controlled counter kinds are not legal choices"
+        "only kinds on the selected controlled permanent are legal"
     );
 
     runner
@@ -197,9 +215,9 @@ fn attack_trigger_chooses_kind_at_resolution_and_adds_when_absent() {
 /// already has that kind, so the placement instruction is a no-op.
 #[test]
 fn attack_trigger_does_not_add_when_chosen_kind_is_present() {
-    let (mut runner, aven, target) = setup(true);
+    let (mut runner, aven, target, counter_source) = setup(true);
     put_attack_trigger_on_stack(&mut runner, aven, target);
-    let options = resolve_to_counter_kind_choice(&mut runner);
+    let options = resolve_to_counter_kind_choice(&mut runner, counter_source);
     assert!(options.contains(&CounterType::Stun.as_str().into_owned()));
 
     runner
@@ -219,7 +237,7 @@ fn attack_trigger_does_not_add_when_chosen_kind_is_present() {
 /// ability fails to resolve. No counter-kind choice is offered.
 #[test]
 fn all_targets_illegal_skips_counter_kind_choice_and_placement() {
-    let (mut runner, aven, target) = setup(false);
+    let (mut runner, aven, target, _) = setup(false);
     put_attack_trigger_on_stack(&mut runner, aven, target);
     assert!(runner.state().stack.iter().any(|entry| {
         entry.source_id == aven && matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })
@@ -231,6 +249,9 @@ fn all_targets_illegal_skips_counter_kind_choice_and_placement() {
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => runner.pass_both_players(),
             WaitingFor::NamedChoice { .. } => {
+                panic!("an all-targets-illegal trigger must not resolve or prompt")
+            }
+            WaitingFor::ChooseFromZoneChoice { .. } => {
                 panic!("an all-targets-illegal trigger must not resolve or prompt")
             }
             other => panic!("unexpected state after target became illegal: {other:?}"),

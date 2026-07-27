@@ -13,7 +13,9 @@
 //! `bind_named_choice` authority) so a following `Effect::PutChosenCounter` can
 //! read it without leaking a persistent attribute onto the source.
 
-use crate::types::ability::{ChoiceType, Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    ChoiceType, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -50,8 +52,26 @@ pub fn resolve(
     // Aven Courier's untargeted population therefore ignores its downstream
     // stack target, while an `InZone` domain scans that declared zone exactly.
     let filter_ctx = crate::game::filter::FilterContext::from_ability(ability);
+    // CR 608.2d: For an untargeted resolution-time instruction, the object was
+    // selected immediately before this resolver ran. Its concrete target slot,
+    // not the whole grammatical eligibility domain, defines the legal counter
+    // kinds. Context references (The Caves of Androzani) retain their ordinary
+    // parent-target resolution.
+    let selected_object_filter =
+        ability
+            .effect_context_object
+            .as_ref()
+            .map(|selected| TargetFilter::SpecificObject {
+                id: selected.object_id,
+            });
+    let kind_domain =
+        if ability.target_choice_timing == crate::types::ability::TargetChoiceTiming::Resolution {
+            selected_object_filter.as_ref().unwrap_or(target_filter)
+        } else {
+            target_filter
+        };
     let kinds =
-        crate::game::quantity::distinct_counter_kinds_among(state, target_filter, &filter_ctx);
+        crate::game::quantity::distinct_counter_kinds_among(state, kind_domain, &filter_ctx);
 
     let resolved = || GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -431,6 +451,104 @@ mod tests {
         assert!(
             state.chosen_counter_kind_this_resolution.is_none(),
             "zero legal kinds clears the current-resolution counter result"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2d + CR 115.10a + CR 122.1: Contractual
+    /// Safeguard selects the creature whose counter defines the kind during
+    /// resolution, then excludes that exact creature from "each other
+    /// creature you control." This drives the live parser, cast pipeline,
+    /// `ChooseFromZoneChoice` answer, auto-selected kind, continuation, and
+    /// counter-placement resolver.
+    #[test]
+    fn contractual_safeguard_excludes_the_counter_kind_source_creature() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::actions::GameAction;
+        use crate::types::mana::ManaCost;
+        use crate::types::phase::Phase;
+
+        const P0: PlayerId = PlayerId(0);
+        const P1: PlayerId = PlayerId(1);
+        const ORACLE: &str = "Addendum — If you cast this spell during your main phase, put a \
+            shield counter on a creature you control. (If it would be dealt damage or destroyed, \
+            remove a shield counter from it instead.)\nChoose a kind of counter on a creature you \
+            control. Put a counter of that kind on each other creature you control.";
+
+        let mut scenario = GameScenario::new();
+        // Outside a main phase, the Addendum instruction is skipped while its
+        // independent counter-kind continuation still resolves.
+        scenario.at_phase(Phase::BeginCombat);
+        let chosen = scenario.add_creature(P0, "Chosen Creature", 2, 2).id();
+        scenario.with_counter(chosen, CounterType::Stun, 1);
+        scenario.with_counter(chosen, CounterType::Plus1Plus1, 1);
+        let other_countered = scenario.add_creature(P0, "Other Countered", 2, 2).id();
+        scenario.with_counter(other_countered, CounterType::Plus1Plus1, 1);
+        let other_plain = scenario.add_creature(P0, "Other Plain", 2, 2).id();
+        let opponent = scenario.add_creature(P1, "Opponent Creature", 2, 2).id();
+        let safeguard = scenario
+            .add_spell_to_hand_from_oracle(P0, "Contractual Safeguard", true, ORACLE)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+
+        let mut runner = scenario.build();
+        runner.state_mut().debug_mode = true;
+        let _paused = runner.cast(safeguard).resolve();
+
+        let offered = match &runner.state().waiting_for {
+            WaitingFor::ChooseFromZoneChoice { cards, count, .. } => {
+                assert_eq!(*count, 1);
+                cards.clone()
+            }
+            other => panic!("expected counter-source creature choice, got {other:?}"),
+        };
+        assert!(offered.contains(&chosen));
+        assert!(offered.contains(&other_countered));
+        assert!(
+            !offered.contains(&other_plain),
+            "a creature with no counters cannot define a counter kind"
+        );
+
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![chosen],
+            })
+            .expect("select the creature whose Stun counter defines the kind");
+        match &runner.state().waiting_for {
+            WaitingFor::NamedChoice {
+                choice_type,
+                options,
+                ..
+            } => {
+                assert!(matches!(choice_type, ChoiceType::CounterKind { .. }));
+                assert!(options.contains(&CounterType::Stun.as_str().into_owned()));
+            }
+            other => panic!("expected kind choice on the selected creature, got {other:?}"),
+        }
+        runner
+            .act(GameAction::ChooseOption {
+                choice: CounterType::Stun.as_str().into_owned(),
+            })
+            .expect("choose Stun from the selected creature");
+        runner.advance_until_stack_empty();
+
+        let counter_count = |id| {
+            runner.state().objects[&id]
+                .counters
+                .get(&CounterType::Stun)
+                .copied()
+                .unwrap_or(0)
+        };
+        assert_eq!(
+            counter_count(chosen),
+            1,
+            "the selected creature is the authority for 'other' and is excluded"
+        );
+        assert_eq!(counter_count(other_countered), 1);
+        assert_eq!(counter_count(other_plain), 1);
+        assert_eq!(
+            counter_count(opponent),
+            0,
+            "only creatures controlled by the spell's controller receive the kind"
         );
     }
 

@@ -25,12 +25,13 @@ use crate::types::game_state::GameState;
 fn targets_satisfying_condition(
     state: &GameState,
     ability: &ResolvedAbility,
-    target: &TargetFilter,
+    targets: &[crate::types::identifiers::ObjectId],
     chosen_kind: &CounterType,
     condition: &ChosenCounterCountCondition,
 ) -> Vec<crate::types::identifiers::ObjectId> {
-    crate::game::targeting::resolved_object_ids_for_filter(state, ability, target)
-        .into_iter()
+    targets
+        .iter()
+        .copied()
         .filter(|target_id| {
             let count = state
                 .objects
@@ -51,6 +52,28 @@ fn targets_satisfying_condition(
         .collect()
 }
 
+/// CR 608.2c: Resolve the downstream placement relative to the object selected
+/// by `ChooseCounterKind` when one exists. This makes `FilterProp::Another`
+/// exclude that selected object while preserving independently declared target
+/// slots (Aven Courier) and context references (The Caves of Androzani).
+fn resolved_counter_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Vec<crate::types::identifiers::ObjectId> {
+    if let Some(selected) = ability.effect_context_object.as_ref() {
+        let ctx = crate::game::filter::FilterContext::from_ability_with_recipient(
+            ability,
+            selected.object_id,
+        );
+        crate::game::targeting::resolved_object_ids_for_filter_with_context(
+            state, ability, target, &ctx,
+        )
+    } else {
+        crate::game::targeting::resolved_object_ids_for_filter(state, ability, target)
+    }
+}
+
 /// CR 608.2c + CR 122.1: Evaluate whether an optional chosen-counter
 /// instruction has at least one resolved object that satisfies its predicate.
 ///
@@ -67,7 +90,8 @@ pub(crate) fn target_condition_is_satisfied(
     let Some(condition) = condition else {
         return true;
     };
-    !targets_satisfying_condition(state, ability, target, chosen_kind, condition).is_empty()
+    let targets = resolved_counter_targets(state, ability, target);
+    !targets_satisfying_condition(state, ability, &targets, chosen_kind, condition).is_empty()
 }
 
 /// CR 122.1 + CR 122.6: Resolve `Effect::PutChosenCounter`.
@@ -105,13 +129,11 @@ pub fn resolve(
     // object's current count of the kind chosen by the preceding instruction
     // (Aven Courier). Evaluate after the kind is known and retain only the
     // objects for which the condition is true.
-    let conditioned_targets = target_condition.map(|condition| {
-        targets_satisfying_condition(state, ability, &target, &counter_type, condition)
+    let resolved_targets = resolved_counter_targets(state, ability, &target);
+    let targets = target_condition.map_or(resolved_targets.clone(), |condition| {
+        targets_satisfying_condition(state, ability, &resolved_targets, &counter_type, condition)
     });
-    if conditioned_targets
-        .as_ref()
-        .is_some_and(|targets| targets.is_empty())
-    {
+    if targets.is_empty() {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -121,24 +143,17 @@ pub fn resolve(
     }
 
     // CR 122.1 + CR 122.6: Delegate to the single counter-placement authority.
-    // Without a predicate, the synthetic `PutCounter` preserves the original
-    // filter and targets. With a predicate, replace its target set with the
-    // independently passing objects and use `Any` so special anaphor/slot
-    // resolution cannot re-expand that filtered set.
+    // Replace the synthetic effect's target set with the objects resolved above
+    // and use `Any` so neither anaphor/slot logic nor the chosen-object target
+    // used to drive the counter-kind prompt can re-expand or narrow that set.
     let mut synthetic = ability.clone();
     synthetic.sub_ability = None;
-    if let Some(targets) = conditioned_targets {
-        synthetic.targets = targets.into_iter().map(TargetRef::Object).collect();
-        synthetic.distribution = None;
-    }
+    synthetic.targets = targets.into_iter().map(TargetRef::Object).collect();
+    synthetic.distribution = None;
     synthetic.effect = Effect::PutCounter {
         counter_type,
         count,
-        target: if target_condition.is_some() {
-            TargetFilter::Any
-        } else {
-            target
-        },
+        target: TargetFilter::Any,
     };
     crate::game::effects::counters::resolve_add(state, &synthetic, events)
 }

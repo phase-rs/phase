@@ -958,12 +958,21 @@ fn target_ref_matches_resolved_filter(
     target: &TargetRef,
 ) -> bool {
     let ctx = super::filter::FilterContext::from_ability(ability);
+    target_ref_matches_resolved_filter_with_context(state, target_filter, target, &ctx)
+}
+
+fn target_ref_matches_resolved_filter_with_context(
+    state: &GameState,
+    target_filter: &TargetFilter,
+    target: &TargetRef,
+    ctx: &super::filter::FilterContext<'_>,
+) -> bool {
     match target {
         TargetRef::Object(id) if state.stack.iter().any(|entry| entry.id == *id) => {
-            super::filter::matches_stack_target_filter(state, *id, target_filter, &ctx)
+            super::filter::matches_stack_target_filter(state, *id, target_filter, ctx)
         }
         TargetRef::Object(id) => {
-            super::filter::matches_target_filter(state, *id, target_filter, &ctx)
+            super::filter::matches_target_filter(state, *id, target_filter, ctx)
         }
         TargetRef::Player(player) => super::filter::player_matches_target_filter_in_state(
             state,
@@ -980,6 +989,19 @@ pub(crate) fn resolved_object_ids_for_filter(
     state: &GameState,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let ctx = super::filter::FilterContext::from_ability(ability);
+    resolved_object_ids_for_filter_with_context(state, ability, filter, &ctx)
+}
+
+/// Resolve a filter with a caller-supplied semantic context. This preserves the
+/// usual explicit-target-first behavior while allowing effects whose later text
+/// is relative to an earlier chosen object to bind `recipient_id`.
+pub(crate) fn resolved_object_ids_for_filter_with_context(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    ctx: &super::filter::FilterContext<'_>,
 ) -> Vec<ObjectId> {
     match filter {
         // CR 400.7: self-reference resolves only to the exact source or its own
@@ -1016,13 +1038,12 @@ pub(crate) fn resolved_object_ids_for_filter(
         }
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
             let effective_filter = resolve_tracked_set_sentinel(state, filter.clone());
-            let ctx = super::filter::FilterContext::from_ability(ability);
             state
                 .battlefield
                 .iter()
                 .copied()
                 .filter(|id| {
-                    super::filter::matches_target_filter(state, *id, &effective_filter, &ctx)
+                    super::filter::matches_target_filter(state, *id, &effective_filter, ctx)
                 })
                 .collect()
         }
@@ -1030,9 +1051,15 @@ pub(crate) fn resolved_object_ids_for_filter(
             object_targets(&ability.targets).collect()
         }
         _ => {
-            let ctx = super::filter::FilterContext::from_ability(ability);
             let explicit_targets: Vec<ObjectId> = object_targets(&ability.targets)
-                .filter(|id| super::filter::matches_target_filter(state, *id, filter, &ctx))
+                .filter(|id| {
+                    target_ref_matches_resolved_filter_with_context(
+                        state,
+                        filter,
+                        &TargetRef::Object(*id),
+                        ctx,
+                    )
+                })
                 .collect();
             if !explicit_targets.is_empty() {
                 return explicit_targets;
@@ -1042,7 +1069,7 @@ pub(crate) fn resolved_object_ids_for_filter(
                 .battlefield
                 .iter()
                 .copied()
-                .filter(|id| super::filter::matches_target_filter(state, *id, filter, &ctx))
+                .filter(|id| super::filter::matches_target_filter(state, *id, filter, ctx))
                 .collect()
         }
     }
