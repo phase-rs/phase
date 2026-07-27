@@ -5527,9 +5527,19 @@ fn has_member_driven_repeat_after_hydration(state: &GameState, ability: &Resolve
 /// the prompt lets the effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
-        Effect::PutChosenCounter { .. } => {
-            choose_counter_kind::chosen_counter_kind(state).is_none()
-        }
+        Effect::PutChosenCounter {
+            target,
+            target_condition,
+            ..
+        } => choose_counter_kind::chosen_counter_kind(state).is_none_or(|chosen_kind| {
+            !put_chosen_counter::target_condition_is_satisfied(
+                state,
+                ability,
+                target,
+                &chosen_kind,
+                target_condition.as_ref(),
+            )
+        }),
         // CR 122.1: "you may remove a <kind> counter from <object>. If you do, X"
         // with zero matching counters cannot be performed — removing a counter
         // that isn't there does nothing, so the up-front prompt (and its
@@ -8777,14 +8787,15 @@ fn resolve_chain_body(
     }
 
     // CR 608.2d + CR 115.10a: An untargeted `PutCounter` recipient ("any
-    // creature you control", no literal "target") is chosen while APPLYING
-    // the effect — at THIS instruction's OWN resolution, independently of any
-    // sibling instruction's own choice — not once, when the whole ability
-    // went on the stack. `target_choice_timing_for_clause` (parser) marks
-    // such clauses `Resolution`; the `ReplicatedOrBranch` propagation-skip
-    // above (via `should_propagate_parent_targets`) ensures such a node
-    // reaches here with `ability.targets` still empty rather than inheriting
-    // a parent's already-made choice. Mirrors the existing
+    // creature you control", no literal "target") or the object whose counter
+    // kind is chosen ("a kind of counter on a creature you control") is chosen
+    // while APPLYING the effect — at THIS instruction's OWN resolution,
+    // independently of any sibling instruction's own choice — not once, when
+    // the whole ability went on the stack.
+    // `target_choice_timing_for_clause` (parser) marks such clauses
+    // `Resolution`; the `ReplicatedOrBranch` propagation-skip above (via
+    // `should_propagate_parent_targets`) keeps that choice independent from a
+    // parent's already-made target. Mirrors the existing
     // `filter_chosen_player_index` 0/1/N pattern above (a single legal
     // recipient auto-binds with no prompt; zero legal recipients is a silent
     // no-op — CR 608.2d: "The player can't choose an option that's illegal or
@@ -8810,11 +8821,20 @@ fn resolve_chain_body(
     // `resolve_defined_or_targets`'s existing `resolved_object_ids_for_filter`
     // fallback in `counters.rs`; routing them through an interactive prompt
     // here would be wrong (and untested against that resolver's semantics).
+    let needs_resolution_object_choice = match &ability.effect {
+        Effect::PutCounter { .. } => ability.targets.is_empty(),
+        Effect::ChooseCounterKind { target } => {
+            !matches!(target, TargetFilter::SpecificObject { .. })
+        }
+        _ => false,
+    };
     if ability.target_choice_timing == TargetChoiceTiming::Resolution
-        && ability.targets.is_empty()
+        && needs_resolution_object_choice
         && ability.distribution.is_none()
     {
-        if let Effect::PutCounter { target, .. } = &ability.effect {
+        if let Effect::PutCounter { target, .. } | Effect::ChooseCounterKind { target } =
+            &ability.effect
+        {
             if !target.contains_source_attachment_host() {
                 let effective_filter = resolved_object_filter(ability, target);
                 let filter_ctx = filter::FilterContext::from_ability(ability);
@@ -8824,17 +8844,37 @@ fn resolve_chain_body(
                     .filter(|id| {
                         filter::matches_target_filter(state, *id, &effective_filter, &filter_ctx)
                     })
+                    .filter(|id| {
+                        !matches!(ability.effect, Effect::ChooseCounterKind { .. })
+                            || state.objects.get(id).is_some_and(|object| {
+                                object.counters.values().any(|count| *count > 0)
+                            })
+                    })
                     .collect();
                 match legal.len() {
                     0 => {}
                     1 => {
                         let mut bound = ability.clone();
-                        bound.targets = vec![TargetRef::Object(legal[0])];
+                        if let Effect::ChooseCounterKind { target } = &mut bound.effect {
+                            *target = TargetFilter::SpecificObject { id: legal[0] };
+                            if let Some(object) = state.objects.get(&legal[0]) {
+                                bound.set_effect_context_object_recursive(
+                                    crate::types::ability::CostPaidObjectSnapshot {
+                                        object_id: legal[0],
+                                        lki: object.snapshot_for_mana_spent(),
+                                    },
+                                );
+                            }
+                        } else {
+                            bound.targets = vec![TargetRef::Object(legal[0])];
+                        }
                         return resolve_ability_chain(state, &bound, events, depth);
                     }
                     _ => {
                         let mut cont = ability.clone();
-                        cont.targets.clear();
+                        if matches!(cont.effect, Effect::PutCounter { .. }) {
+                            cont.targets.clear();
+                        }
                         state.park_ability_continuation(PendingContinuation::new(
                             Box::new(cont),
                             state,
@@ -11564,11 +11604,11 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
         CardPredicateChoice, CastingPermission, ChoiceType, ChoiceValue, Chooser, ChosenAttribute,
-        Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration,
-        EffectScope, FilterProp, ManaSpendPermission, ObjectProperty, PermissionGrantee,
-        PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, SpellContext,
-        StaticDefinition, TapStateChange, TargetFilter, TargetRef, TargetSelectionMode, TypeFilter,
-        TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+        ChosenCounterCountCondition, Comparator, ContinuousModification, ControllerRef,
+        DelayedTriggerCondition, Duration, EffectScope, FilterProp, ManaSpendPermission,
+        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        QuantityRef, SpellContext, StaticDefinition, TapStateChange, TargetFilter, TargetRef,
+        TargetSelectionMode, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -25796,6 +25836,84 @@ mod tests {
                 "a valid typed cast from {zone:?} must remain offerable"
             );
         }
+    }
+
+    /// CR 608.2d + CR 122.1: An optional chosen-counter placement is infeasible
+    /// when its typed target predicate is false, and becomes feasible when the
+    /// same target state makes the predicate true. The legacy condition-free
+    /// form remains offerable.
+    #[test]
+    fn optional_put_chosen_counter_respects_target_condition() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Counter Target".to_string(),
+            Zone::Battlefield,
+        );
+        state.chosen_counter_kind_this_resolution = Some(CounterType::Stun);
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::PutChosenCounter {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                target_condition: Some(ChosenCounterCountCondition {
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                }),
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        assert!(
+            optional_effect_is_infeasible(&state, &ability),
+            "an existing chosen-kind counter makes the EQ-zero option impossible"
+        );
+
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .counters
+            .remove(&CounterType::Stun);
+        assert!(
+            !optional_effect_is_infeasible(&state, &ability),
+            "an absent chosen-kind counter satisfies the EQ-zero predicate"
+        );
+
+        let Effect::PutChosenCounter {
+            target_condition, ..
+        } = &mut ability.effect
+        else {
+            unreachable!("test constructs PutChosenCounter");
+        };
+        *target_condition = None;
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+        assert!(
+            !optional_effect_is_infeasible(&state, &ability),
+            "the existing condition-free additional-counter behavior stays offerable"
+        );
     }
 
     /// CR 608.2d: an exact missing parent cannot become actionable through the

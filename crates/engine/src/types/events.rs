@@ -1592,6 +1592,29 @@ pub enum GameEvent {
     },
 }
 
+/// CR 603.2 + CR 702.59a: True when an off-zone trigger source was already
+/// functioning in `zone` when `event` occurred — i.e. it did not co-depart into
+/// that zone as the triggering object moved there. Shared by off-zone trigger
+/// collection and SelfRef co-departure mis-latch gating (CR 400.7e).
+pub(crate) fn source_was_not_co_departed_into_zone(
+    event: &GameEvent,
+    source_id: ObjectId,
+    zone: Zone,
+) -> bool {
+    match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            to,
+            record,
+            ..
+        } if *to == zone => {
+            (*object_id != source_id || record.from_zone != Some(Zone::Battlefield))
+                && !record.co_departed.contains(&source_id)
+        }
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

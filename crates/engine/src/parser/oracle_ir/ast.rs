@@ -3,12 +3,13 @@ use serde::Serialize;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment,
-    CounterSourceRider, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile,
-    ForceBlockAttackerRef, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
-    SearchDestinationSplit, SearchSelectionConstraint, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter,
+    CastingPermission, ChosenCounterCountCondition, ControlWindow, ControllerRef,
+    CopyRetargetPermission, CounterAdjustment, CounterSourceRider, DoorLockOp, Duration, Effect,
+    EffectScope, FaceDownProfile, ForceBlockAttackerRef, LibraryPosition, ManaProduction,
+    ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat,
+    PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -1606,6 +1607,7 @@ pub(crate) enum ZoneCounterImperativeAst {
     PutChosenCounter {
         target: TargetFilter,
         count: QuantityExpr,
+        target_condition: Option<ChosenCounterCountCondition>,
     },
     /// CR 122.1: "Put a X counter, a Y counter[, and a Z counter] on TARGET" —
     /// a list of typed counters placed on one shared target. Lowered to a
