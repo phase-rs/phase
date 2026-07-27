@@ -22,65 +22,70 @@ expression: "&ir"
         "fragment": "1+ | Whenever an opponent discards a card, they lose 3 life."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "Discarded",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "LoseLife",
-              "amount": {
-                "type": "Fixed",
-                "value": 3
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "Discarded",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "LoseLife",
+                  "amount": {
+                    "type": "Fixed",
+                    "value": 3
+                  },
+                  "target": {
+                    "type": "TriggeringPlayer"
+                  }
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
               },
-              "target": {
-                "type": "TriggeringPlayer"
-              }
+              "valid_card": {
+                "type": "Typed",
+                "type_filters": [
+                  "Card"
+                ],
+                "controller": null,
+                "properties": []
+              },
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": {
+                "type": "Typed",
+                "type_filters": [],
+                "controller": "Opponent",
+                "properties": []
+              },
+              "valid_source": null,
+              "description": "Whenever an opponent discards a card, they lose 3 life.",
+              "constraint": null,
+              "condition": {
+                "type": "HasCounters",
+                "counters": {
+                  "type": "OfType",
+                  "data": "charge"
+                },
+                "minimum": 1
+              },
+              "batched": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "Typed",
-            "type_filters": [
-              "Card"
-            ],
-            "controller": null,
-            "properties": []
-          },
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": {
-            "type": "Typed",
-            "type_filters": [],
-            "controller": "Opponent",
-            "properties": []
-          },
-          "valid_source": null,
-          "description": "Whenever an opponent discards a card, they lose 3 life.",
-          "constraint": null,
-          "condition": {
-            "type": "HasCounters",
-            "counters": {
-              "type": "OfType",
-              "data": "charge"
-            },
-            "minimum": 1
-          },
-          "batched": false
+            "source_text": "1+ | Whenever an opponent discards a card, they lose 3 life."
+          }
         }
       }
     },
@@ -155,96 +160,101 @@ expression: "&ir"
         "fragment": "Whenever ~ attacks, each opponent discards a card. Each opponent who can't loses 3 life."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "Attacks",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Discard",
-              "count": {
-                "type": "Fixed",
-                "value": 1
-              },
-              "target": {
-                "type": "Controller"
-              }
-            },
-            "cost": null,
-            "sub_ability": {
-              "kind": "Spell",
-              "effect": {
-                "type": "LoseLife",
-                "amount": {
-                  "type": "Fixed",
-                  "value": 3
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "Attacks",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "Discard",
+                  "count": {
+                    "type": "Fixed",
+                    "value": 1
+                  },
+                  "target": {
+                    "type": "Controller"
+                  }
                 },
-                "target": {
-                  "type": "ScopedPlayer"
-                }
-              },
-              "cost": null,
-              "sub_ability": null,
-              "duration": null,
-              "description": null,
-              "target_prompt": null,
-              "condition": {
-                "type": "And",
-                "conditions": [
-                  {
-                    "type": "Not",
-                    "condition": {
-                      "type": "EffectOutcome",
-                      "signal": "CurrentScopeSucceeded"
+                "cost": null,
+                "sub_ability": {
+                  "kind": "Spell",
+                  "effect": {
+                    "type": "LoseLife",
+                    "amount": {
+                      "type": "Fixed",
+                      "value": 3
+                    },
+                    "target": {
+                      "type": "ScopedPlayer"
                     }
                   },
-                  {
-                    "type": "ScopedPlayerMatches",
-                    "filter": {
-                      "type": "Opponent"
-                    }
-                  }
-                ]
+                  "cost": null,
+                  "sub_ability": null,
+                  "duration": null,
+                  "description": null,
+                  "target_prompt": null,
+                  "condition": {
+                    "type": "And",
+                    "conditions": [
+                      {
+                        "type": "Not",
+                        "condition": {
+                          "type": "EffectOutcome",
+                          "signal": "CurrentScopeSucceeded"
+                        }
+                      },
+                      {
+                        "type": "ScopedPlayerMatches",
+                        "filter": {
+                          "type": "Opponent"
+                        }
+                      }
+                    ]
+                  },
+                  "optional_targeting": false,
+                  "optional": false,
+                  "forward_result": false
+                },
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false,
+                "player_scope": {
+                  "type": "Opponent"
+                }
               },
-              "optional_targeting": false,
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
               "optional": false,
-              "forward_result": false
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "Whenever ~ attacks, each opponent discards a card. Each opponent who can't loses 3 life.",
+              "constraint": null,
+              "condition": {
+                "type": "HasCounters",
+                "counters": {
+                  "type": "OfType",
+                  "data": "charge"
+                },
+                "minimum": 8
+              },
+              "batched": false
             },
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false,
-            "player_scope": {
-              "type": "Opponent"
-            }
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "Whenever ~ attacks, each opponent discards a card. Each opponent who can't loses 3 life.",
-          "constraint": null,
-          "condition": {
-            "type": "HasCounters",
-            "counters": {
-              "type": "OfType",
-              "data": "charge"
-            },
-            "minimum": 8
-          },
-          "batched": false
+            "source_text": "Whenever ~ attacks, each opponent discards a card. Each opponent who can't loses 3 life."
+          }
         }
       }
     }
