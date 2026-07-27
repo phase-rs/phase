@@ -3679,11 +3679,17 @@ pub enum ControllerRef {
     ///   complied with)
     /// - `Controller` -> reserved; no card yet.
     ///
-    /// Exactly one player is active at any time (unlike `Opponent`, which matches
-    /// every opponent in multiplayer). Powers "the active player controls"
-    /// subjects and the card-assembly-bound punisher target on cards that coerce
-    /// the turn player (Siren's Call, Maddening Imp), cast/activated only during
-    /// an opponent's turn.
+    /// Exactly one player is active at any time in ordinary games (unlike
+    /// `Opponent`, which matches every opponent in multiplayer) — but under the
+    /// shared team turns option EVERY member of the active team is an active
+    /// player (CR 805.4a; CR 805.9 speaks of "all of the active players"), so
+    /// candidate reads route through `players::active_player_candidate_matches`
+    /// (membership, not scalar equality) and scalar reads through
+    /// `players::choose_active_player` (the CR 805.9 one-specific-player
+    /// stand-in). Powers "the active player controls" subjects and the
+    /// card-assembly-bound punisher target on cards that coerce the turn player
+    /// (Siren's Call, Maddening Imp), cast/activated only during an opponent's
+    /// turn.
     ///
     /// Read LIVE off `state.active_player` at every evaluation, never latched at
     /// announce (CR 608.2b re-checks legality on resolution).

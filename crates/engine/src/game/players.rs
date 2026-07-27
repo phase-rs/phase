@@ -186,11 +186,48 @@ pub fn matches_relation(
     }
 }
 
-/// CR 102.1 + CR 102.2 / CR 102.3: Whether the LIVE active player — "the player
-/// whose turn it is" — satisfies `relation` relative to the reading ability's
-/// controller. Single authority every `ControllerRef::ActivePlayer { relation }`
-/// read routes through, so the legality-scope narrowing cannot be honored at one
-/// site and silently dropped at another.
+/// CR 102.1: the active player is "the player whose turn it is".
+/// CR 805.4a: under the shared team turns option the whole team whose turn it
+/// is is the active team — it is every member's turn, so EVERY member of that
+/// team is an active player (CR 805.9 speaks of "all of the active players").
+/// `GameState::active_player` stores only the team's turn REPRESENTATIVE
+/// (`topology::normalize_shared_turn_recipient`), so membership — not equality
+/// with that scalar — is the correct active-player test. Team membership uses
+/// the same alive-filtered set as `topology::team_members`.
+///
+/// Read LIVE off `state.active_player`; never latched at announce
+/// (CR 608.2b re-checks target legality on resolution).
+pub fn is_active_player(state: &GameState, candidate: PlayerId) -> bool {
+    if candidate == state.active_player {
+        return true;
+    }
+    state.format_config.topology().has_shared_team_turns()
+        && is_alive(state, candidate)
+        && super::topology::team_id(state, candidate)
+            == super::topology::team_id(state, state.active_player)
+}
+
+/// CR 102.1 + CR 805.4a: every LIVE active player, turn representative first.
+/// A single entry outside shared-team-turn games; the whole active team under
+/// them (`team_members` is seat-ordered, and the representative is the team's
+/// first seat — the same member `normalize_shared_turn_recipient` picks).
+pub fn active_players(state: &GameState) -> Vec<PlayerId> {
+    if state.format_config.topology().has_shared_team_turns() {
+        super::topology::team_members(state, state.active_player)
+    } else {
+        vec![state.active_player]
+    }
+}
+
+/// CR 102.1 + CR 102.2 / CR 102.3: Whether `candidate` is a LIVE active player
+/// — "a player whose turn it is" — who satisfies `relation` relative to the
+/// reading ability's controller. Single authority every
+/// `ControllerRef::ActivePlayer { relation }` candidate read routes through, so
+/// the legality-scope narrowing cannot be honored at one site and silently
+/// dropped at another. CR 805.4a: in shared-team-turn games every member of the
+/// active team is a candidate, and `relation` is evaluated against the CANDIDATE
+/// (each specific active player — CR 805.9), never against the stored
+/// representative.
 ///
 /// `PlayerRelation::All` imposes no narrowing at all (`matches_relation` is
 /// unconditionally true for it), so it deliberately does NOT require a
@@ -201,17 +238,40 @@ pub fn matches_relation(
 ///
 /// Read LIVE off `state.active_player`; never latched at announce
 /// (CR 608.2b re-checks target legality on resolution).
-pub fn active_player_satisfies_relation(
+pub fn active_player_candidate_matches(
     state: &GameState,
+    candidate: PlayerId,
     controller: Option<PlayerId>,
     relation: PlayerRelation,
 ) -> bool {
-    match relation {
-        PlayerRelation::All => true,
-        PlayerRelation::Controller | PlayerRelation::Opponent => {
-            controller.is_some_and(|c| matches_relation(state, state.active_player, c, relation))
+    is_active_player(state, candidate)
+        && match relation {
+            PlayerRelation::All => true,
+            PlayerRelation::Controller | PlayerRelation::Opponent => {
+                controller.is_some_and(|c| matches_relation(state, candidate, c, relation))
+            }
         }
-    }
+}
+
+/// CR 805.9: an ability that refers to "the active player" refers to ONE
+/// specific active player, chosen by the ability's controller when the effect
+/// is applied. Scalar read sites (a `ControllerRef` resolving to a single
+/// `PlayerId`) call this as the engine's deterministic stand-in for that
+/// choice: the first satisfying active player in seat order, representative
+/// first. Outside shared-team-turn games there is exactly one active player
+/// (CR 102.1), so no choice exists and this is exact. Under shared team turns
+/// the stand-in is choice-shaped only for `All` (any member qualifies);
+/// `Controller` has at most one satisfying member, and `Opponent`'s verdict is
+/// team-uniform (CR 102.3 opponency is decided at the team level), so only
+/// WHICH member is named — not whether one is — depends on the stand-in.
+pub fn choose_active_player(
+    state: &GameState,
+    controller: Option<PlayerId>,
+    relation: PlayerRelation,
+) -> Option<PlayerId> {
+    active_players(state)
+        .into_iter()
+        .find(|&candidate| active_player_candidate_matches(state, candidate, controller, relation))
 }
 
 /// CR 608.2c + CR 109.5: Whether `player` performed `action` during the

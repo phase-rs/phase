@@ -3544,18 +3544,20 @@ pub(crate) fn collect_player_targets(
                         .and_then(|host| host.as_player())
                         == Some(p.id)
                 }
-                // CR 102.1 + CR 102.2 / CR 102.3 + CR 109.4: the active player,
-                // resolvable directly (unlike the fail-closed DefendingPlayer arm
-                // above). Read LIVE; never latched at announce (CR 608.2b
-                // re-checks). `relation` narrows candidacy relative to the
-                // ability's controller through the team-aware authority.
+                // CR 102.1 + CR 102.2 / CR 102.3 + CR 109.4 + CR 805.4a: an
+                // active player (every active-team member under shared team
+                // turns), resolvable directly (unlike the fail-closed
+                // DefendingPlayer arm above). Read LIVE; never latched at
+                // announce (CR 608.2b re-checks). `relation` narrows candidacy
+                // relative to the ability's controller through the team-aware
+                // authority.
                 Some(ControllerRef::ActivePlayer { relation }) => {
-                    p.id == state.active_player
-                        && crate::game::players::active_player_satisfies_relation(
-                            state,
-                            Some(ability.controller),
-                            *relation,
-                        )
+                    crate::game::players::active_player_candidate_matches(
+                        state,
+                        p.id,
+                        Some(ability.controller),
+                        *relation,
+                    )
                 }
                 None => true,
             })

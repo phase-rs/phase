@@ -69,13 +69,16 @@ use engine::game::scenario::GameScenario;
 use engine::game::targeting::find_legal_targets;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, ControllerRef, Effect, PlayerRelation, TargetFilter, TargetRef, TypedFilter,
+    AbilityDefinition, ControllerRef, Effect, FilterProp, PlayerRelation, StaticDefinition,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::CardId;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
+use engine::types::statics::{CostModifyMode, StaticMode};
 use engine::types::zones::Zone;
 use engine::types::{GameAction, PlayerId};
 
@@ -648,6 +651,98 @@ fn active_opponent_class_activation_excludes_two_headed_giant_teammate() {
         .expect("reach-guard: an opposing-team active player is a legal target");
 }
 
+/// CR 805.4a + CR 805.9: full announcement-and-resolution 2HG coverage through
+/// the production pipeline. Under shared team turns EVERY member of the active
+/// team is an active player (CR 805.4a), so "target opponent whose turn it is"
+/// must offer BOTH members of the active opposing team — not just the single
+/// representative `state.active_player` stores — and the activation halts on a
+/// `TargetSelection` prompt whose choice IS the controller's CR 805.9 "which
+/// active player" decision. Each opposing teammate is chosen in turn and the
+/// life loss must land on exactly the chosen member on resolution.
+#[test]
+fn active_opponent_activation_offers_both_active_team_members_in_two_headed_giant() {
+    const P3: PlayerId = PlayerId(3);
+
+    // Seats: P0+P1 one team, P2+P3 the other. P2 is the stored turn
+    // representative; P3 is the active-team member the singleton read misses.
+    let build = || {
+        let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = {
+            let mut b = scenario.add_creature(P0, "Active Opponent Punisher", 1, 1);
+            b.from_oracle_text(ACTIVE_OPPONENT_CLASS_ORACLE);
+            b.id()
+        };
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = P2;
+        (runner, source)
+    };
+
+    for chosen in [P2, P3] {
+        let (mut runner, source) = build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .expect("activation must be legal while the opposing team is active");
+
+        // Two legal candidates -> the controller is prompted (CR 805.9: the
+        // ability's controller chooses which active player it refers to).
+        let engine::types::game_state::WaitingFor::TargetSelection { target_slots, .. } =
+            &runner.state().waiting_for
+        else {
+            panic!(
+                "two active-team candidates must raise a TargetSelection prompt, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(
+            target_slots
+                .first()
+                .map(|slot| slot.legal_targets.clone())
+                .unwrap_or_default(),
+            vec![TargetRef::Player(P2), TargetRef::Player(P3)],
+            "BOTH members of the active opposing team are legal targets (CR 805.4a)"
+        );
+
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(chosen)],
+            })
+            .expect("each active opposing-team member is individually choosable");
+
+        // CR 810.4 + CR 810.9: 2HG teams share a 30-life total, but loss of
+        // life happens to each player INDIVIDUALLY and is applied to the shared
+        // total (the engine keeps a per-player split summed by
+        // `players::team_life_total`). Assert per-player DELTAS against the
+        // pre-resolution baseline rather than absolute totals, so the
+        // shared-life bookkeeping shape cannot invalidate the pin.
+        let life_of = |runner: &engine::game::scenario::GameRunner, p: PlayerId| {
+            runner
+                .state()
+                .players
+                .iter()
+                .find(|x| x.id == p)
+                .expect("player exists")
+                .life
+        };
+        let baseline: Vec<(PlayerId, i32)> = [P0, P1, P2, P3]
+            .into_iter()
+            .map(|p| (p, life_of(&runner, p)))
+            .collect();
+        runner.advance_until_stack_empty();
+        for (player, before) in baseline {
+            let expected = if player == chosen { before - 1 } else { before };
+            assert_eq!(
+                life_of(&runner, player),
+                expected,
+                "only the CHOSEN active opponent ({chosen:?}) loses life; {player:?} checked"
+            );
+        }
+    }
+}
+
 /// CR 608.2b: the announced player target is re-checked on RESOLUTION against
 /// the LIVE `state.active_player`, never against a value latched at announce.
 ///
@@ -818,10 +913,102 @@ fn active_opponent_filter_matches_only_the_live_active_opponent_in_state() {
     );
 }
 
+/// REGRESSION PIN for the `ActivePlayer` arm of
+/// `filter::player_matches_target_filter_in_state`, driven through a PRODUCTION
+/// caller in the real cast pipeline: the selected-target cost-modifier branch
+/// (`casting.rs`'s `target_ref_matches_cost_filter`) delegates its
+/// `TargetsOnly` PLAYER target to `player_matches_target_filter_in_state`
+/// (CR 601.2f — costs are determined after targets are chosen). A spell that
+/// costs {1} less "if it targets only [the active opponent]" therefore taps no
+/// land exactly when the matcher recognises the chosen active opponent.
+///
+/// Discrimination verified by revert: with the in-state `active_player_ok`
+/// closure replaced by fail-closed `false`, this test FAILS (the reduction is
+/// skipped and the land is tapped to pay {1}) — unlike the CR 608.2b fizzle
+/// scenario above, whose verdict `targeting::find_legal_targets` decides
+/// independently.
+///
+/// The sole legal candidate is auto-bound at announcement (CR 601.2c), so the
+/// cast completes without a `TargetSelection` prompt; the stack entry's target
+/// is asserted instead.
+#[test]
+fn active_opponent_target_reducer_applies_in_cast_pipeline() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_basic_land(P0, ManaColor::Red);
+    let active_opponent = TargetFilter::Typed(TypedFilter::default().controller(
+        ControllerRef::ActivePlayer {
+            relation: PlayerRelation::Opponent,
+        },
+    ));
+    let reduction = StaticDefinition::new(StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount: ManaCost::generic(1),
+        spell_filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+            FilterProp::TargetsOnly {
+                filter: Box::new(active_opponent.clone()),
+            },
+        ]))),
+        dynamic_count: None,
+    })
+    .affected(TargetFilter::SelfRef)
+    .active_zones(vec![Zone::Hand, Zone::Stack]);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Active Opponent Discount", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .with_ability(Effect::DealDamage {
+            amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+            target: active_opponent,
+            damage_source: None,
+            excess: None,
+        })
+        .with_static_definition(reduction)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    let card_id = runner.state().objects[&spell].card_id;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting must be legal while P1 is the active opponent");
+    // Reach-guard: the sole legal candidate (the active opponent) was chosen
+    // during the announcement (CR 601.2c) — the spell is on the stack targeting
+    // P1 before costs were determined and paid (CR 601.2f then CR 601.2g-h).
+    let entry = runner
+        .state()
+        .stack
+        .back()
+        .expect("the spell is on the stack");
+    let targets = entry
+        .ability()
+        .map(|a| a.targets.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        targets,
+        vec![TargetRef::Player(P1)],
+        "reach-guard: the announced target is the active opponent"
+    );
+
+    assert!(
+        !runner.state().objects[&land].tapped,
+        "the selected-target reducer must see the active opponent and reduce {{1}} to {{0}}"
+    );
+}
+
 /// CR 102.3: the in-state matcher's `relation` narrowing is team-aware — an
 /// active TEAMMATE is not "the opponent whose turn it is". Same authority
-/// (`players::active_player_satisfies_relation`) the announce-time enumeration
+/// (`players::active_player_candidate_matches`) the announce-time enumeration
 /// uses, asserted directly so the two seams cannot drift apart.
+///
+/// CR 805.4a: under shared team turns the whole team whose turn it is is
+/// active, so BOTH members of the active opposing team match — including the
+/// one `state.active_player` does not name (the engine stores only the team's
+/// turn representative).
 #[test]
 fn active_opponent_filter_in_state_excludes_two_headed_giant_teammate() {
     use engine::game::filter::player_matches_target_filter_in_state;
@@ -840,11 +1027,33 @@ fn active_opponent_filter_in_state_excludes_two_headed_giant_teammate() {
         !player_matches_target_filter_in_state(&state, &filter, P1, Some(P0)),
         "an active TEAMMATE is not an opponent (CR 102.3)"
     );
-    // Reach-guard: an active opposing-team player IS.
+    assert!(
+        !player_matches_target_filter_in_state(&state, &filter, P0, Some(P0)),
+        "the controller is never their own opponent, active team or not (CR 102.2)"
+    );
+    // Reach-guard: an active opposing-team player IS...
     state.active_player = P2;
     assert!(
         player_matches_target_filter_in_state(&state, &filter, P2, Some(P0)),
         "reach-guard: an opposing-team active player matches"
+    );
+    // ...and so is their TEAMMATE: CR 805.4a makes every member of the active
+    // team an active player, not just the stored representative.
+    assert!(
+        player_matches_target_filter_in_state(&state, &filter, PlayerId(3), Some(P0)),
+        "the active team's other member is equally 'an opponent whose turn it is' (CR 805.4a)"
+    );
+    // Negative on the same fixture: with the CONTROLLER's team active, neither
+    // opposing-team member matches — active-team membership, not opponency
+    // alone, is what admits a candidate.
+    state.active_player = P0;
+    assert!(
+        !player_matches_target_filter_in_state(&state, &filter, P2, Some(P0)),
+        "a nonactive opponent never matches, even in a team game (CR 805.4a)"
+    );
+    assert!(
+        !player_matches_target_filter_in_state(&state, &filter, PlayerId(3), Some(P0)),
+        "the nonactive team's other member does not match either (CR 805.4a)"
     );
 }
 

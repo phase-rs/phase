@@ -975,19 +975,17 @@ pub(crate) fn controller_ref_player(
             .get(&source_id)
             .and_then(|source| source.attached_to)
             .and_then(|host| host.as_player()),
-        // CR 102.1 + CR 102.2 / CR 102.3: the player whose turn it is — read
+        // CR 102.1 + CR 102.2 / CR 102.3: a player whose turn it is — read
         // LIVE; never latched at announce (CR 608.2b re-checks on resolution).
-        // This returns a SINGLE `PlayerId`, so a relation cannot narrow a result
-        // set — it can only admit or reject the singleton. Fail CLOSED: yield
-        // the active player only when they satisfy `relation` relative to the
+        // This is a SCALAR read (a single `PlayerId`), so under shared team
+        // turns — where CR 805.4a makes every active-team member an active
+        // player — `choose_active_player` supplies the engine's deterministic
+        // CR 805.9 stand-in for "the ability's controller chooses which one":
+        // the first satisfying member, representative first. Fails CLOSED
+        // (`None`) when no active player satisfies `relation` relative to the
         // ability's controller.
         ControllerRef::ActivePlayer { relation } => {
-            crate::game::players::active_player_satisfies_relation(
-                state,
-                source_controller,
-                *relation,
-            )
-            .then_some(state.active_player)
+            crate::game::players::choose_active_player(state, source_controller, *relation)
         }
     }
 }
@@ -1237,16 +1235,17 @@ fn stack_entry_controller_matches(
         Some(ControllerRef::EnchantedPlayer) => {
             source_enchanted_player(&source_ctx).is_some_and(|pid| pid == entry_controller)
         }
-        // CR 102.1 + CR 102.2 / CR 102.3: the active player, read LIVE; never
-        // latched at announce (CR 608.2b re-checks). `relation` narrows
-        // candidacy relative to the ability's controller.
+        // CR 102.1 + CR 102.2 / CR 102.3 + CR 805.4a: an active player (every
+        // active-team member under shared team turns), read LIVE; never latched
+        // at announce (CR 608.2b re-checks). `relation` narrows candidacy
+        // relative to the ability's controller.
         Some(ControllerRef::ActivePlayer { relation }) => {
-            state.active_player == entry_controller
-                && crate::game::players::active_player_satisfies_relation(
-                    state,
-                    ctx.source_controller,
-                    *relation,
-                )
+            crate::game::players::active_player_candidate_matches(
+                state,
+                entry_controller,
+                ctx.source_controller,
+                *relation,
+            )
         }
     }
 }
@@ -2100,19 +2099,19 @@ fn filter_inner_for_object(
                             _ => return false,
                         }
                     }
-                    // CR 102.1 + CR 102.2 / CR 102.3: "the active player controls"
-                    // — match the object's controller against the player whose
-                    // turn it is, read LIVE; never latched at announce
+                    // CR 102.1 + CR 102.2 / CR 102.3 + CR 805.4a: "the active
+                    // player controls" — match the object's controller against
+                    // a player whose turn it is (every active-team member under
+                    // shared team turns), read LIVE; never latched at announce
                     // (CR 608.2b re-checks). `relation` narrows candidacy
                     // relative to the ability's controller.
                     ControllerRef::ActivePlayer { relation } => {
-                        if state.active_player != obj_ctrl
-                            || !super::players::active_player_satisfies_relation(
-                                state,
-                                source_controller,
-                                *relation,
-                            )
-                        {
+                        if !super::players::active_player_candidate_matches(
+                            state,
+                            obj_ctrl,
+                            source_controller,
+                            *relation,
+                        ) {
                             return false;
                         }
                     }
@@ -4546,15 +4545,16 @@ fn matches_filter_prop(
             ControllerRef::EnchantedPlayer => {
                 source_enchanted_player(source).is_some_and(|pid| pid == obj.owner)
             }
-            // CR 102.1 + CR 102.2 / CR 102.3: Ownership relative to the active
-            // player, read LIVE; never latched at announce (CR 608.2b re-checks).
+            // CR 102.1 + CR 102.2 / CR 102.3 + CR 805.4a: Ownership relative to
+            // an active player (every active-team member under shared team
+            // turns), read LIVE; never latched at announce (CR 608.2b re-checks).
             ControllerRef::ActivePlayer { relation } => {
-                state.active_player == obj.owner
-                    && super::players::active_player_satisfies_relation(
-                        state,
-                        source.controller,
-                        *relation,
-                    )
+                super::players::active_player_candidate_matches(
+                    state,
+                    obj.owner,
+                    source.controller,
+                    *relation,
+                )
             }
         },
         // CR 303.4 + CR 301.5f: `EnchantedBy` is source-relative when the
@@ -5303,15 +5303,16 @@ fn zone_change_record_matches_property(
             ControllerRef::EnchantedPlayer => {
                 source_enchanted_player(source).is_some_and(|pid| pid == record.owner)
             }
-            // CR 102.1 + CR 102.2 / CR 102.3: Ownership relative to the active
-            // player, read LIVE; never latched at announce (CR 608.2b re-checks).
+            // CR 102.1 + CR 102.2 / CR 102.3 + CR 805.4a: Ownership relative to
+            // an active player (every active-team member under shared team
+            // turns), read LIVE; never latched at announce (CR 608.2b re-checks).
             ControllerRef::ActivePlayer { relation } => {
-                state.active_player == record.owner
-                    && super::players::active_player_satisfies_relation(
-                        state,
-                        source.controller,
-                        *relation,
-                    )
+                super::players::active_player_candidate_matches(
+                    state,
+                    record.owner,
+                    source.controller,
+                    *relation,
+                )
             }
         },
         // CR 205.3e + CR 205.3m + CR 702.73a: Source's chosen creature type
@@ -5671,15 +5672,16 @@ fn attachment_controller_matches(
         Some(ControllerRef::EnchantedPlayer) => {
             source_enchanted_player(source).is_some_and(|pid| pid == attachment_controller)
         }
-        // CR 102.1 + CR 102.2 / CR 102.3: attachment controller relative to the
-        // active player, read LIVE; never latched at announce (CR 608.2b re-checks).
+        // CR 102.1 + CR 102.2 / CR 102.3 + CR 805.4a: attachment controller
+        // relative to an active player (every active-team member under shared
+        // team turns), read LIVE; never latched at announce (CR 608.2b re-checks).
         Some(ControllerRef::ActivePlayer { relation }) => {
-            state.active_player == attachment_controller
-                && super::players::active_player_satisfies_relation(
-                    state,
-                    source.controller,
-                    *relation,
-                )
+            super::players::active_player_candidate_matches(
+                state,
+                attachment_controller,
+                source.controller,
+                *relation,
+            )
         }
     }
 }
@@ -6307,16 +6309,17 @@ pub fn player_matches_target_filter_in_state(
         source_controller,
         &|controller, player| crate::game::players::is_opponent(state, controller, player),
         &|candidate, relation| {
-            // CR 102.1: the candidate must BE the live active player; CR 102.3:
+            // CR 102.1 + CR 805.4a: the candidate must BE a live active player
+            // (every active-team member under shared team turns); CR 102.3:
             // `relation` narrows relative to the source's controller through the
-            // single team-aware authority every `ActivePlayer` read routes
-            // through.
-            candidate == state.active_player
-                && crate::game::players::active_player_satisfies_relation(
-                    state,
-                    source_controller,
-                    relation,
-                )
+            // single team-aware authority every `ActivePlayer` candidate read
+            // routes through.
+            crate::game::players::active_player_candidate_matches(
+                state,
+                candidate,
+                source_controller,
+                relation,
+            )
         },
     )
 }

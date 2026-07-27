@@ -4214,17 +4214,18 @@ fn resolve_ref(
                             source_enchanted_player_for_context(state, &ctx)
                                 .is_some_and(|pid| pid == snap.controller)
                         }
-                        // CR 102.1 + CR 102.2 / CR 102.3: attachment controlled
-                        // by the active player, read LIVE; never latched
-                        // (CR 608.2b). `relation` narrows candidacy relative to
-                        // the ability's controller.
+                        // CR 102.1 + CR 102.2 / CR 102.3 + CR 805.4a: attachment
+                        // controlled by an active player (every active-team
+                        // member under shared team turns), read LIVE; never
+                        // latched (CR 608.2b). `relation` narrows candidacy
+                        // relative to the ability's controller.
                         Some(ControllerRef::ActivePlayer { relation }) => {
-                            snap.controller == state.active_player
-                                && crate::game::players::active_player_satisfies_relation(
-                                    state,
-                                    Some(controller),
-                                    *relation,
-                                )
+                            crate::game::players::active_player_candidate_matches(
+                                state,
+                                snap.controller,
+                                Some(controller),
+                                *relation,
+                            )
                         }
                     })
                     .count(),
@@ -4290,16 +4291,17 @@ fn damage_source_controller_matches(
         ControllerRef::EnchantedPlayer => {
             source_enchanted_player_for_context(state, &ctx).is_some_and(|player| actual == player)
         }
-        // CR 102.1 + CR 102.2 / CR 102.3: damage source controlled by the active
-        // player, read LIVE; never latched (CR 608.2b). `relation` narrows
+        // CR 102.1 + CR 102.2 / CR 102.3 + CR 805.4a: damage source controlled
+        // by an active player (every active-team member under shared team
+        // turns), read LIVE; never latched (CR 608.2b). `relation` narrows
         // candidacy relative to the ability's controller.
         ControllerRef::ActivePlayer { relation } => {
-            actual == state.active_player
-                && crate::game::players::active_player_satisfies_relation(
-                    state,
-                    Some(controller),
-                    *relation,
-                )
+            crate::game::players::active_player_candidate_matches(
+                state,
+                actual,
+                Some(controller),
+                *relation,
+            )
         }
     }
 }

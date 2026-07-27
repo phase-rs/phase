@@ -1980,17 +1980,18 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::TriggeringPlayer => false,
                         // CR 303.4b: Enchanted-player scope has no static context. Fail closed.
                         crate::types::ability::ControllerRef::EnchantedPlayer => false,
-                        // CR 102.1 + CR 102.2 / CR 102.3: the active player,
-                        // resolvable directly from `state.active_player` (read
-                        // LIVE). `relation` narrows candidacy relative to the
-                        // source's controller through the team-aware authority.
+                        // CR 102.1 + CR 102.2 / CR 102.3 + CR 805.4a: an active
+                        // player (every active-team member under shared team
+                        // turns), read LIVE. `relation` narrows candidacy
+                        // relative to the source's controller through the
+                        // team-aware authority.
                         crate::types::ability::ControllerRef::ActivePlayer { relation } => {
-                            state.active_player == player_id
-                                && crate::game::players::active_player_satisfies_relation(
-                                    state,
-                                    source_controller,
-                                    *relation,
-                                )
+                            crate::game::players::active_player_candidate_matches(
+                                state,
+                                player_id,
+                                source_controller,
+                                *relation,
+                            )
                         }
                     };
                 }

@@ -108,20 +108,17 @@ fn resolve_sacrifice_scope(
         )
         .map(|pid| vec![pid])
         .unwrap_or_default(),
-        // CR 102.1 + CR 102.2 / CR 102.3: the active player, read LIVE (never
+        // CR 102.1 + CR 102.2 / CR 102.3: an active player, read LIVE (never
         // latched — CR 608.2b), narrowed by `relation` relative to the ability's
-        // controller. Fails CLOSED to an empty sacrifice scope when the active
-        // player does not satisfy the relation.
+        // controller. CR 805.9: "the active player" refers to ONE specific
+        // active player, so under shared team turns (CR 805.4a) this stays a
+        // single-player scope via `choose_active_player` — the engine's
+        // deterministic stand-in for the controller's choice. Fails CLOSED to an
+        // empty sacrifice scope when no active player satisfies the relation.
         Some(ControllerRef::ActivePlayer { relation }) => {
-            if crate::game::players::active_player_satisfies_relation(
-                state,
-                Some(ability.controller),
-                relation,
-            ) {
-                vec![state.active_player]
-            } else {
-                Vec::new()
-            }
+            crate::game::players::choose_active_player(state, Some(ability.controller), relation)
+                .map(|pid| vec![pid])
+                .unwrap_or_default()
         }
     }
 }

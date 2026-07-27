@@ -241,26 +241,29 @@ fn find_legal_targets_with_context(
                     Some(ControllerRef::TriggeringPlayer) => false,
                     // CR 303.4b: Enchanted-player scope is not enumerated as a target candidate. Fail closed.
                     Some(ControllerRef::EnchantedPlayer) => false,
-                    // CR 102.1 + CR 102.2 / CR 102.3: the active player is the
-                    // player whose turn it is, read LIVE from
-                    // `state.active_player` (never latched at announce —
-                    // CR 608.2b re-checks this on resolution). `relation` narrows
-                    // candidacy relative to the ability's controller through the
-                    // canonical team-aware authority (CR 102.3), so
-                    // `relation: Opponent` yields NO candidate on the controller's
-                    // own turn and the activation is illegal to announce
-                    // (CR 601.2c, imported into activation by CR 602.2b; CR 602.2).
-                    // The candidate must BE the active player, and the narrowing
-                    // itself routes through `active_player_satisfies_relation` —
-                    // the single authority for every
-                    // `ControllerRef::ActivePlayer { relation }` read.
+                    // CR 102.1 + CR 102.2 / CR 102.3: an active player is a
+                    // player whose turn it is, read LIVE (never latched at
+                    // announce — CR 608.2b re-checks this on resolution).
+                    // CR 805.4a: under shared team turns EVERY member of the
+                    // active team is an active player, so each is enumerated
+                    // here — the target choice itself is the controller's
+                    // CR 805.9 "which active player" choice. `relation` narrows
+                    // candidacy relative to the ability's controller through
+                    // the canonical team-aware authority (CR 102.3), so
+                    // `relation: Opponent` yields NO candidate on the
+                    // controller's own turn and the activation is illegal to
+                    // announce (CR 601.2c, imported into activation by
+                    // CR 602.2b; CR 602.2). The narrowing routes through
+                    // `active_player_candidate_matches` — the single authority
+                    // for every `ControllerRef::ActivePlayer { relation }`
+                    // candidate read.
                     Some(ControllerRef::ActivePlayer { relation }) => {
-                        player.id == state.active_player
-                            && super::players::active_player_satisfies_relation(
-                                state,
-                                Some(source_controller),
-                                *relation,
-                            )
+                        super::players::active_player_candidate_matches(
+                            state,
+                            player.id,
+                            Some(source_controller),
+                            *relation,
+                        )
                     }
                     None => true,
                 };
@@ -3859,12 +3862,19 @@ mod tests {
         );
 
         // Reach-guard: the same fixture with an opposing-team active player DOES
-        // yield a legal target, so the emptiness above is the team rule.
+        // yield legal targets, so the emptiness above is the team rule.
+        // CR 805.4a: under shared team turns the whole opposing team is active,
+        // so BOTH members are offered — not just the stored representative
+        // (CR 805.9: which one the ability refers to is the controller's
+        // choice, made by choosing the target).
         state.active_player = PlayerId(2);
         assert_eq!(
             find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99)),
-            vec![TargetRef::Player(PlayerId(2))],
-            "an active opposing-team player IS an opponent"
+            vec![
+                TargetRef::Player(PlayerId(2)),
+                TargetRef::Player(PlayerId(3))
+            ],
+            "every active opposing-team member IS an opponent whose turn it is (CR 805.4a)"
         );
     }
 
