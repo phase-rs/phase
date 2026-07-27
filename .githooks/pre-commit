@@ -6,4 +6,7 @@ echo "Running pre-commit checks..."
 echo "  [rust] parser combinator gate"
 ./scripts/check-parser-combinators.sh
 
+echo "  [rust] PreLowered ratchet"
+./scripts/check-prelowered-ratchet.sh
+
 echo "All pre-commit checks passed."

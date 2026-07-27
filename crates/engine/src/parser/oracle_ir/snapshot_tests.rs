@@ -366,6 +366,52 @@ fn student_of_warfare() {
     insta::assert_json_snapshot!("student_of_warfare_lowered", &lowered);
 }
 
+/// Leveler *body* static (Plan 05b, T2 witness).
+///
+/// `student_of_warfare` above reaches only the block-SUMMARY static
+/// (`oracle_level.rs:194`), synthesized from P/T and keyword lines. Kabira
+/// Vindicator prints a full sentence inside each LEVEL block, so it is the
+/// witness for the body arm (`oracle_level.rs:154`, via `parse_static_line`)
+/// — twice, once per block — while still carrying two block summaries.
+///
+/// The sibling multi arm (`:146`, `parse_static_line_multi`) has no pool
+/// witness: no printed LEVEL body line lowers to more than one static.
+#[test]
+fn kabira_vindicator() {
+    let (ir, lowered) = parse_two_layer(
+        "Level up {2}{W} ({2}{W}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 2-4\n3/6\nOther creatures you control get +1/+1.\nLEVEL 5+\n4/8\nOther creatures you control get +2/+2.",
+        "Kabira Vindicator",
+        &["Creature"],
+        &["Human", "Knight"],
+    );
+    insta::assert_json_snapshot!("kabira_vindicator_ir", &ir);
+    insta::assert_json_snapshot!("kabira_vindicator_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Spacecraft threshold lines (Plan 05b, T2 witness)
+// ---------------------------------------------------------------------------
+
+/// Both Spacecraft static arms on one card (CR 702.184a / CR 721.2).
+///
+/// `2+ | Other creatures you control get +1/+1.` takes the
+/// `parse_static_line` arm (`oracle_spacecraft.rs:256`); `12+ | Flying,
+/// lifelink` takes the keyword-only arm (`:178`). Nothing else in the two-layer
+/// corpus reaches either — Chalice of the Void carries `charge` counters but
+/// prints no threshold line — so without this fixture T2's Spacecraft
+/// conversion would be snapshot-invisible.
+#[test]
+fn lumen_class_frigate() {
+    let (ir, lowered) = parse_two_layer(
+        "Station (Tap another creature you control: Put charge counters equal to its power on this Spacecraft. Station only as a sorcery. It's an artifact creature at 12+.)\n2+ | Other creatures you control get +1/+1.\n12+ | Flying, lifelink",
+        "Lumen-Class Frigate",
+        &["Artifact"],
+        &["Spacecraft"],
+    );
+    insta::assert_json_snapshot!("lumen_class_frigate_ir", &ir);
+    insta::assert_json_snapshot!("lumen_class_frigate_lowered", &lowered);
+}
+
 // ---------------------------------------------------------------------------
 // Adventure
 // ---------------------------------------------------------------------------
@@ -1239,6 +1285,114 @@ fn aerial_formation() {
     );
     insta::assert_json_snapshot!("aerial_formation_ir", &ir);
     insta::assert_json_snapshot!("aerial_formation_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Class level sections (Plan 05b, T1 witness corpus)
+//
+// No Class card was in the two-layer corpus, which made T1's byte-identity gate
+// vacuous: the `oracle_class.rs` level-section arms could be converted from
+// `PreLowered*` to IR nodes with zero snapshot churn and zero proof the conversion
+// was reached. All five cards below are pool-verified (Oracle text and `card_type`
+// read from `data/card-data.json`, never written from memory).
+//
+// The arm each line actually reaches was read off the generated baseline
+// (node variant + source fragment per item), not predicted — an earlier version of
+// this comment guessed three of them wrong. Arm attribution follows from the
+// dispatch order in `parse_class_sections` and the predicates in
+// `oracle_classifier.rs`; `is_granted_static_line` is checked first and requires a
+// prefix from `GRANTED_STATIC_PREFIXES` *and* a verb from `GRANTED_STATIC_VERBS`
+// (`has "` / `have "` / `gains "` / `gain "` — the quote is part of the match), so
+// only a granted *quoted ability* reaches it. An unquoted grant falls through to
+// `is_static_pattern`.
+//
+//   arm                          unwrapped (level 1)   wrapped (level > 1)
+//   ---------------------------  --------------------  ----------------------------
+//   granted quoted static (193)  (none)                Sorcerer Class L2
+//   plain static (204)           Wizard Class L1       Barbarian L3, Innkeeper L2,
+//                                                      Bard L2
+//   replacement (221)            Bard Class L1         Innkeeper's Talent L3
+//   ability-word static (260)    (none)                (none)
+//
+// Two coverage gaps are recorded rather than papered over:
+//
+//   * Row 260 has NO witness in the pool. All three ability-word-prefixed Class
+//     level bodies (Druid Class, A-Druid Class, Advanced Floral Invocations) are
+//     `Landfall — Whenever ...` and take the trigger arm instead. Its conversion
+//     rests on the class argument alone, not on corpus evidence.
+//   * Row 193 is witnessed only in its wrapped form. The wrap is applied to
+//     `static_def` *before* the push in both branches, so the conversion site is
+//     identical either way; the unwrapped half is covered by row 204's Wizard L1.
+//
+// Non-witness worth knowing about: Barbarian Class L1 ("If you would roll one or
+// more dice, instead roll that many dice plus one and ignore the lowest roll")
+// does NOT reach the replacement arm — it falls through to the generic path and
+// lands as `PreLoweredSpell` with an `Unimplemented` effect. That is a pre-existing
+// parser gap, not something T1 introduces; it is baselined here so that if T1
+// changes it, the churn is visible and must be explained.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sorcerer_class() {
+    let (ir, lowered) = parse_two_layer(
+        "(Gain the next level as a sorcery to add its ability.)\nWhen this Class enters, draw two cards, then discard two cards.\n{U}{R}: Level 2\nCreatures you control have \"{T}: Add {U} or {R}. Spend this mana only to cast an instant or sorcery spell or to gain a Class level.\"\n{3}{U}{R}: Level 3\nWhenever you cast an instant or sorcery spell, that spell deals damage to each opponent equal to the number of instant and sorcery spells you've cast this turn.",
+        "Sorcerer Class",
+        &["Enchantment"],
+        &["Class"],
+    );
+    insta::assert_json_snapshot!("sorcerer_class_ir", &ir);
+    insta::assert_json_snapshot!("sorcerer_class_lowered", &lowered);
+}
+
+#[test]
+fn barbarian_class() {
+    let (ir, lowered) = parse_two_layer(
+        "(Gain the next level as a sorcery to add its ability.)\nIf you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.\n{1}{R}: Level 2\nWhenever you roll one or more dice, target creature you control gets +2/+0 and gains menace until end of turn.\n{2}{R}: Level 3\nCreatures you control have haste.",
+        "Barbarian Class",
+        &["Enchantment"],
+        &["Class"],
+    );
+    insta::assert_json_snapshot!("barbarian_class_ir", &ir);
+    insta::assert_json_snapshot!("barbarian_class_lowered", &lowered);
+}
+
+#[test]
+fn innkeepers_talent() {
+    let (ir, lowered) = parse_two_layer(
+        "(Gain the next level as a sorcery to add its ability.)\nAt the beginning of combat on your turn, put a +1/+1 counter on target creature you control.\n{G}: Level 2\nPermanents you control with counters on them have ward {1}.\n{3}{G}: Level 3\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.",
+        "Innkeeper's Talent",
+        &["Enchantment"],
+        &["Class"],
+    );
+    insta::assert_json_snapshot!("innkeepers_talent_ir", &ir);
+    insta::assert_json_snapshot!("innkeepers_talent_lowered", &lowered);
+}
+
+#[test]
+fn bard_class() {
+    let (ir, lowered) = parse_two_layer(
+        "(Gain the next level as a sorcery to add its ability.)\nLegendary creatures you control enter with an additional +1/+1 counter on them.\n{R}{G}: Level 2\nLegendary spells you cast cost {R}{G} less to cast. This effect reduces only the amount of colored mana you pay.\n{3}{R}{G}: Level 3\nWhenever you cast a legendary spell, exile the top two cards of your library. You may play them this turn.",
+        "Bard Class",
+        &["Enchantment"],
+        &["Class"],
+    );
+    insta::assert_json_snapshot!("bard_class_ir", &ir);
+    insta::assert_json_snapshot!("bard_class_lowered", &lowered);
+}
+
+/// Level-1 plain static — the unwrapped half of the `is_static_pattern` arm.
+/// `"You have no maximum hand size."` matches `GRANTED_STATIC_PREFIXES` on `"you "`
+/// but carries no quoted ability, so it falls past `is_granted_static_line`.
+#[test]
+fn wizard_class() {
+    let (ir, lowered) = parse_two_layer(
+        "(Gain the next level as a sorcery to add its ability.)\nYou have no maximum hand size.\n{2}{U}: Level 2\nWhen this Class becomes level 2, draw two cards.\n{4}{U}: Level 3\nWhenever you draw a card, put a +1/+1 counter on target creature you control.",
+        "Wizard Class",
+        &["Enchantment"],
+        &["Class"],
+    );
+    insta::assert_json_snapshot!("wizard_class_two_layer_ir", &ir);
+    insta::assert_json_snapshot!("wizard_class_two_layer_lowered", &lowered);
 }
 
 // ---------------------------------------------------------------------------

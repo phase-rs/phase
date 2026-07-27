@@ -1,6 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 365
+assertion_line: 411
 expression: "&ir"
 ---
 {
@@ -16,21 +16,29 @@ expression: "&ir"
           "first_line": 0,
           "last_line": 0,
           "start_byte": 0,
-          "end_byte": 76,
+          "end_byte": 149,
           "precision": "Exact",
           "ordinal_within_span": 0
         },
-        "fragment": "Level up {W} ({W}: Put a level counter on this. Level up only as a sorcery.)"
+        "fragment": "Station (Tap another creature you control: Put charge counters equal to its power on ~. Station only as a sorcery. It's an artifact creature at 12+.)"
       },
       "node": {
-        "Keyword": {
-          "LevelUp": {
-            "type": "Cost",
-            "shards": [
-              "White"
-            ],
-            "generic": 0
-          }
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "unknown",
+            "description": "Station"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": "Station",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
         }
       }
     },
@@ -44,50 +52,54 @@ expression: "&ir"
         "span": {
           "first_line": 1,
           "last_line": 1,
-          "start_byte": 77,
-          "end_byte": 86,
+          "start_byte": 150,
+          "end_byte": 193,
           "precision": "Exact",
           "ordinal_within_span": 0
         },
-        "fragment": "LEVEL 2-6"
+        "fragment": "2+ | Other creatures you control get +1/+1."
       },
       "node": {
         "Static": {
           "definition": {
             "mode": "Continuous",
             "affected": {
-              "type": "SelfRef"
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Another"
+                }
+              ]
             },
             "modifications": [
               {
-                "type": "SetPower",
-                "value": 3
+                "type": "AddPower",
+                "value": 1
               },
               {
-                "type": "SetToughness",
-                "value": 3
-              },
-              {
-                "type": "AddKeyword",
-                "keyword": "FirstStrike"
+                "type": "AddToughness",
+                "value": 1
               }
             ],
             "condition": {
               "type": "HasCounters",
               "counters": {
                 "type": "OfType",
-                "data": "level"
+                "data": "charge"
               },
-              "minimum": 2,
-              "maximum": 6
+              "minimum": 2
             },
             "affected_zone": null,
             "effect_zone": null,
             "active_zones": [],
             "characteristic_defining": false,
-            "description": "LEVEL 2-6 / 3/3 / First strike"
+            "description": "Other creatures you control get +1/+1."
           },
-          "source_text": "LEVEL 2-6 / 3/3 / First strike",
+          "source_text": "Other creatures you control get +1/+1.",
           "body_ir": null
         }
       }
@@ -100,14 +112,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 4,
-          "last_line": 4,
-          "start_byte": 104,
-          "end_byte": 112,
+          "first_line": 2,
+          "last_line": 2,
+          "start_byte": 194,
+          "end_byte": 216,
           "precision": "Exact",
           "ordinal_within_span": 0
         },
-        "fragment": "LEVEL 7+"
+        "fragment": "12+ | Flying, lifelink"
       },
       "node": {
         "Static": {
@@ -118,38 +130,34 @@ expression: "&ir"
             },
             "modifications": [
               {
-                "type": "SetPower",
-                "value": 4
-              },
-              {
-                "type": "SetToughness",
-                "value": 4
+                "type": "AddKeyword",
+                "keyword": "Flying"
               },
               {
                 "type": "AddKeyword",
-                "keyword": "DoubleStrike"
+                "keyword": "Lifelink"
               }
             ],
             "condition": {
               "type": "HasCounters",
               "counters": {
                 "type": "OfType",
-                "data": "level"
+                "data": "charge"
               },
-              "minimum": 7
+              "minimum": 12
             },
             "affected_zone": null,
             "effect_zone": null,
             "active_zones": [],
             "characteristic_defining": false,
-            "description": "LEVEL 7+ / 4/4 / Double strike"
+            "description": "12+ | Flying, lifelink"
           },
-          "source_text": "LEVEL 7+ / 4/4 / Double strike",
+          "source_text": "Flying, lifelink",
           "body_ir": null
         }
       }
     }
   ],
-  "source_text": "Level up {W} ({W}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 2-6\n3/3\nFirst strike\nLEVEL 7+\n4/4\nDouble strike",
-  "card_name": "Student of Warfare"
+  "source_text": "Station (Tap another creature you control: Put charge counters equal to its power on this Spacecraft. Station only as a sorcery. It's an artifact creature at 12+.)\n2+ | Other creatures you control get +1/+1.\n12+ | Flying, lifelink",
+  "card_name": "Lumen-Class Frigate"
 }

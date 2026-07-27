@@ -5,7 +5,8 @@ use engine::analysis::decision_template::{
 };
 use engine::game::engine::apply;
 use engine::game::interaction::{
-    bind_interaction_authority, derive_viewer_interaction, preview_interaction, submit_interaction,
+    bind_interaction_authority, derive_viewer_interaction, preview_interaction,
+    resolve_interaction_response, submit_interaction,
 };
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -289,6 +290,35 @@ fn bottom_card_opportunities_use_and_only_materialize_select_responses() {
         &mulligan_view,
         "mulligan-bottom",
     );
+}
+
+#[test]
+fn resolving_a_response_materializes_the_advertised_action_under_the_same_authorization() {
+    let mut state = GameState::new_two_player(42);
+    bind(&mut state, "resolve-seam");
+    let witness = progress_witness(&state, P0);
+
+    // Authorization parity with `submit_interaction` is the entire risk of a
+    // non-mutating sibling: without the actor check it would become a way to
+    // materialize — and therefore to read — a decision belonging to another
+    // seat. Nothing here asserts that the state is unchanged, because
+    // `resolve_interaction_response` takes `&GameState`: non-mutation is a
+    // borrow-checker guarantee, and a test of it would pass for reasons that
+    // have nothing to do with this function.
+    let unauthorized = resolve_interaction_response(&state, P1, &witness)
+        .expect_err("resolving authorizes against the actor, not merely the interaction id");
+    assert_eq!(unauthorized.code, InteractionReasonCode::NotAuthorized);
+
+    let action = resolve_interaction_response(&state, P0, &witness)
+        .expect("the advertised progress witness resolves to the action it denotes");
+    assert_eq!(action, GameAction::PassPriority);
+
+    // The same witness really is submittable, so the resolution above concerns a
+    // live decision rather than one the engine would have refused anyway.
+    // Equivalence between the two paths needs no assertion: `submit_interaction`
+    // delegates here, so they cannot disagree.
+    submit_interaction(&mut state, P0, witness)
+        .expect("the witness the projection advertised is submittable");
 }
 
 #[test]

@@ -317,8 +317,6 @@ pub(crate) enum OracleNodeIr {
     #[allow(dead_code)]
     Trigger(TriggerIr),
     /// Static ability.
-    // PLAN-05 DEBT (2026-07-17, post-U2): constructed only by the Class-B bring-up (unit 3); retire this allow there.
-    #[allow(dead_code)]
     Static(StaticIr),
     /// Replacement effect.
     Replacement(ReplacementIr),
