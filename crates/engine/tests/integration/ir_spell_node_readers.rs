@@ -12,7 +12,9 @@
 
 use engine::parser::oracle::ParsedAbilities;
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{AbilityDefinition, ContinuousModification, Effect};
+use engine::types::ability::{
+    AbilityDefinition, ContinuousModification, ControllerRef, Effect, FilterProp, TargetFilter,
+};
 
 /// Every CR 707.9a printed-ability slot a card's copy-except clauses resolve to.
 fn retained_ability_slots(parsed: &ParsedAbilities) -> Vec<usize> {
@@ -107,5 +109,147 @@ fn an_ir_native_spell_consumes_the_printed_ability_slot_it_occupies() {
         vec![1],
         "the copy-except clause must resolve to printed slot 1 — the IR-native \
          prevention spell consumed slot 0 despite carrying no definition to stamp"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 607.2d document relations and the `item_ability` reader.
+//
+// `item_ability` is the ability side of cross-item relation discovery. It used
+// to return `Option<&AbilityDefinition>` and recognize exactly one spell node
+// shape; it now returns `Option<Cow<'_, AbilityDefinition>>` and recognizes
+// both, lowering the IR-native shape on demand because that shape owns no
+// definition to borrow.
+//
+// A relation that stops being discovered fails SILENTLY — no error, no panic,
+// just a card that parses to its unrelated line-local shape, with the symptom
+// surfacing on a different card from the one that was edited. The borrowed path
+// therefore needs an explicit non-regression witness across the signature
+// change.
+//
+// SCOPE, stated honestly: this witnesses the BORROWED arm. The new IR-native
+// arm has no witness, because no text can currently reach it — the single live
+// `Spell` producer is a prevent-damage spell line, and no relation predicate
+// matches a prevention chain. Verified by construction (removing the new arm
+// leaves these tests green) and by attempting to synthesize a card that pairs
+// the two, which the line splitter refuses to produce. The arm is forward
+// hardening for T8, when `Spell` producers rise from 1 to ~14.
+// ---------------------------------------------------------------------------
+
+/// Verified against Scryfall 2026-07-27 (`cards/named?exact=Siren's Call`).
+const SIRENS_CALL: &str = "Cast this spell only during an opponent's turn, before attackers are declared.\nCreatures the active player controls attack this turn if able.\nAt the beginning of the next end step, destroy all non-Wall creatures that player controls that didn't attack this turn. Ignore this effect for each creature the player didn't control continuously since the beginning of the turn.";
+
+/// The delayed punisher's destroyed set, plus whether its exemption sibling is
+/// still hanging off the delayed ability.
+fn punisher_destroy_target(parsed: &ParsedAbilities) -> (TargetFilter, bool) {
+    for ability in &parsed.abilities {
+        if let Effect::CreateDelayedTrigger { effect, .. } = ability.effect.as_ref() {
+            if let Effect::DestroyAll { target, .. } = effect.effect.as_ref() {
+                return (target.clone(), effect.sub_ability.is_some());
+            }
+        }
+    }
+    panic!("expected a delayed DestroyAll punisher ability, got {parsed:?}");
+}
+
+fn typed_controllers(filter: &TargetFilter, out: &mut Vec<Option<ControllerRef>>) {
+    match filter {
+        TargetFilter::Typed(tf) => out.push(tf.controller.clone()),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().for_each(|f| typed_controllers(f, out))
+        }
+        TargetFilter::Not { filter } => typed_controllers(filter, out),
+        _ => {}
+    }
+}
+
+fn typed_props(filter: &TargetFilter, out: &mut Vec<FilterProp>) {
+    match filter {
+        TargetFilter::Typed(tf) => out.extend(tf.properties.iter().cloned()),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().for_each(|f| typed_props(f, out))
+        }
+        TargetFilter::Not { filter } => typed_props(filter, out),
+        _ => {}
+    }
+}
+
+/// CR 102.1 + CR 603.7c + CR 608.2c: the `ActivePlayerPunisher` relation pairs
+/// the mass-attack coerce clause with its sibling delayed punisher, then
+/// rebinds the punisher's "that player controls" anaphor from the line-local
+/// `You` default to `ActivePlayer`.
+///
+/// Siren's Call is the witness because BOTH sides of the relation are ability
+/// items — two printed abilities on one instant — so a single card drives
+/// `item_ability` twice, once per predicate.
+///
+/// DISCRIMINATING: the rebind is reachable ONLY through the relation, and the
+/// relation is discovered only if `item_ability` returns a definition for both
+/// participating items. Blind the reader on either side and this sees the
+/// line-local `You` — the wrong player, which destroys the caster's own
+/// creatures.
+#[test]
+fn active_player_punisher_relation_survives_the_item_ability_reader() {
+    let parsed = parse_oracle_text(
+        SIRENS_CALL,
+        "Siren's Call",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let (target, exemption_sibling_present) = punisher_destroy_target(&parsed);
+
+    let mut controllers = Vec::new();
+    typed_controllers(&target, &mut controllers);
+    assert!(
+        !controllers.is_empty(),
+        "reach-guard: the destroyed set must carry at least one typed node to rebind, got {target:?}"
+    );
+    assert!(
+        controllers
+            .iter()
+            .all(|c| *c == Some(ControllerRef::ActivePlayer)),
+        "the punisher's destroyed set must be rebound to ActivePlayer by the CR 607.2d relation; \
+         a `You` here means the relation was not discovered, got {controllers:?}"
+    );
+
+    // CR 302.6 + CR 508.1a: the same relation folds the continuous-control
+    // exemption into the destroyed set and CONSUMES the redundant sibling. Both
+    // halves are asserted so a partial application cannot pass.
+    let mut props = Vec::new();
+    typed_props(&target, &mut props);
+    assert!(
+        props.contains(&FilterProp::ControlledContinuouslySinceTurnBegan),
+        "the exemption must be folded into the destroyed set as a filter prop, got {props:?}"
+    );
+    assert!(
+        !exemption_sibling_present,
+        "the redundant exemption sibling must be consumed once folded"
+    );
+}
+
+/// Reach-guard for the assertion above: `ActivePlayer` must not be something
+/// the punisher line parses to on its own. With no sibling coerce clause there
+/// is no relation to discover, so the anaphor keeps its line-local `You`.
+///
+/// Without this, the test above would still pass against an `item_ability` that
+/// returned `Some` for every item, or against a parser that hardcoded
+/// `ActivePlayer` into the punisher line.
+#[test]
+fn the_punisher_line_alone_keeps_its_line_local_controller() {
+    let parsed = parse_oracle_text(
+        "At the beginning of the next end step, destroy all non-Wall creatures that player controls that didn't attack this turn.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let (target, _) = punisher_destroy_target(&parsed);
+    let mut controllers = Vec::new();
+    typed_controllers(&target, &mut controllers);
+    assert!(
+        !controllers.contains(&Some(ControllerRef::ActivePlayer)),
+        "with no coerce sibling there is no relation, so the anaphor must NOT be \
+         rebound to ActivePlayer, got {controllers:?}"
     );
 }

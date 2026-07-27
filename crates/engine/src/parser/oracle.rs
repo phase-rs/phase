@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while};
@@ -1158,9 +1160,33 @@ fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
     }
 }
 
-fn item_ability(item: &OracleItemIr) -> Option<&AbilityDefinition> {
+/// CR 607.2d: the ability side of document-relation discovery.
+///
+/// Returns `Cow` because the two spell-bearing node shapes own their definition
+/// at different times. A pre-lowered item already holds an `AbilityDefinition`
+/// and lends it out; an IR-native item holds only an `EffectChainIr` and owns no
+/// definition at all until lowering builds one, so it must lower and hand back
+/// the result owned. A plain `&AbilityDefinition` cannot express the second case
+/// — there is nothing to borrow from — and a plain `AbilityDefinition` would
+/// clone the first case at all seven call sites, most of which scan every item
+/// on the card.
+///
+/// This is where the trigger side's reasoning stops applying.
+/// `item_trigger` keeps a borrow and pushes exhaustiveness down onto
+/// `TriggerNodeIr::definition()`, because both of its shapes own a
+/// `TriggerDefinition` — `TriggerNodeIr::Assembled` carries one directly. There
+/// is no equivalent layer to push this obligation onto: a spell node's IR
+/// payload is an `EffectChainIr`, not an enum of definition-owning
+/// representations, so both shapes are named here. `_ => None` is safe for the
+/// same reason it is safe there: every remaining variant is genuinely `None`.
+///
+/// Lowering is the identity conversion `lower_oracle_ir` (the `Spell` arm) will
+/// perform for the same item, so a relation predicate sees exactly the
+/// definition the relation will later be applied to.
+fn item_ability(item: &OracleItemIr) -> Option<Cow<'_, AbilityDefinition>> {
     match &item.node {
-        OracleNodeIr::PreLoweredSpell(def) => Some(def),
+        OracleNodeIr::PreLoweredSpell(def) => Some(Cow::Borrowed(def)),
+        OracleNodeIr::Spell(effect_ir) => Some(Cow::Owned(lower_effect_chain_ir(effect_ir))),
         _ => None,
     }
 }
@@ -1421,7 +1447,7 @@ fn detect_linked_choice_type_statics(
                     }
                 )
             });
-            let is_dig = item_ability(item).is_some_and(ability_chain_has_dig)
+            let is_dig = item_ability(item).is_some_and(|def| ability_chain_has_dig(&def))
                 || item_trigger(item)
                     .and_then(|trigger| trigger.execute.as_deref())
                     .is_some_and(ability_chain_has_dig);
@@ -1542,7 +1568,7 @@ fn chosen_subtype_kind_from_persisted_choice_items(
             items
                 .iter()
                 .filter_map(item_ability)
-                .find_map(chosen_subtype_kind_from_ability)
+                .find_map(|def| chosen_subtype_kind_from_ability(&def))
         })
         .or_else(|| {
             items
@@ -1643,7 +1669,7 @@ fn detect_linked_choice_persisted_player(
 ) {
     let has_durable_reader = items.iter().any(|item| {
         item_static(item).is_some_and(static_references_source_chosen_player)
-            || item_ability(item).is_some_and(ability_references_source_chosen_player)
+            || item_ability(item).is_some_and(|def| ability_references_source_chosen_player(&def))
             || item_trigger(item).is_some_and(trigger_references_source_chosen_player)
     });
     if !has_durable_reader {
@@ -1652,7 +1678,7 @@ fn detect_linked_choice_persisted_player(
     let choosers: Vec<OracleItemId> = items
         .iter()
         .filter(|item| {
-            item_ability(item).is_some_and(ability_chain_has_player_choice)
+            item_ability(item).is_some_and(|def| ability_chain_has_player_choice(&def))
                 || item_trigger(item)
                     .and_then(|trigger| trigger.execute.as_deref())
                     .is_some_and(ability_chain_has_player_choice)
@@ -1703,9 +1729,9 @@ fn detect_linked_choice_copy_chosen_host(
     items: &[OracleItemIr],
     relations: &mut Vec<DocumentRelationIr>,
 ) {
-    let chooser = items
-        .iter()
-        .find(|item| item_ability(item).is_some_and(ability_is_as_enters_choose_permanent_gap));
+    let chooser = items.iter().find(|item| {
+        item_ability(item).is_some_and(|def| ability_is_as_enters_choose_permanent_gap(&def))
+    });
     let copy_static = items.iter().find(|item| {
         item_static(item).is_some_and(|s| {
             s.modifications
@@ -3075,12 +3101,12 @@ fn ability_is_active_player_punisher(def: &AbilityDefinition) -> bool {
 fn detect_active_player_punisher(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
     let Some(coerce) = items
         .iter()
-        .find(|item| item_ability(item).is_some_and(ability_is_active_player_coerce))
+        .find(|item| item_ability(item).is_some_and(|def| ability_is_active_player_coerce(&def)))
     else {
         return;
     };
     for item in items {
-        if item_ability(item).is_some_and(ability_is_active_player_punisher) {
+        if item_ability(item).is_some_and(|def| ability_is_active_player_punisher(&def)) {
             relations.push(DocumentRelationIr::ActivePlayerPunisher {
                 coerce: coerce.id,
                 punisher: item.id,
@@ -3699,13 +3725,19 @@ impl<'a> DocEmitter<'a> {
     ///
     /// `take_last_spell` pops the emission-ordered spell stack, which equals
     /// `abilities.last_mut()` regardless of triggers/statics emitted in between.
+    ///
+    /// Reads the popped item through `lower_spell_node`, which accepts BOTH
+    /// spell node shapes. It must: `emit` pushes either shape onto
+    /// `spells_emitted` and `take_last_spell` pops it with no variant filter, so
+    /// a destructure that names one shape panics the parser the first time an
+    /// IR-native spell precedes a mutating line.
     fn mutate_last_spell(&mut self, f: impl FnOnce(&mut AbilityDefinition)) {
         let Some(item) = self.builder.take_last_spell() else {
             return;
         };
         let OracleItemIr { source, node, .. } = item;
-        let OracleNodeIr::PreLoweredSpell(mut def) = node else {
-            unreachable!("take_last_spell returns only PreLoweredSpell items");
+        let Some(mut def) = lower_spell_node(&node) else {
+            unreachable!("`spells_emitted` holds only spell nodes, and both spell shapes lower");
         };
         f(&mut def);
         self.reemit_spell(&source, def);
@@ -5852,8 +5884,13 @@ pub(crate) fn parse_oracle_ir(
                             node: base_node,
                             ..
                         } = base_item;
-                        let OracleNodeIr::PreLoweredSpell(mut base) = base_node else {
-                            unreachable!("pop_last_spell returns only PreLoweredSpell items");
+                        // Both spell node shapes, via the shared reader:
+                        // `pop_last_spell` pops `spells_emitted`, which `emit`
+                        // fills from either shape with no variant filter.
+                        let Some(mut base) = lower_spell_node(&base_node) else {
+                            unreachable!(
+                                "`spells_emitted` holds only spell nodes, and both spell shapes lower"
+                            );
                         };
                         // Save the base ability's continuation chain in else_ability
                         // so the engine can run it when the condition is NOT met.
