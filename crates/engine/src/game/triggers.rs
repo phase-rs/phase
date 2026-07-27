@@ -8174,12 +8174,17 @@ pub fn hypothetical_trigger_fireable(
     }
     let definition_ref = source.trigger_definition_ref(entry);
     // CR 603.2-603.4: the trigger's own constraint, in hypothetical (no-event)
-    // mode — the shared authority the live pipeline also uses.
+    // mode — the shared authority the live pipeline also uses. The source
+    // context is supplied (a current snapshot of `source`) so SOURCE-sensitive
+    // constraints like `AtClassLevel` (CR 716) read the real class level; only
+    // the triggering EVENT is withheld (`None`), so event-dependent constraints
+    // stay conservatively not-fireable.
+    let source_context = trigger_source_context_for_latch(state, source);
     if !check_trigger_constraint_with_ref(
         state,
         def,
         Some(&definition_ref),
-        None,
+        Some(&source_context),
         source.controller,
         None,
     ) {

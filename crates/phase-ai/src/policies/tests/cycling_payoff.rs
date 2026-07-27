@@ -635,6 +635,72 @@ fn max_times_per_turn_at_cap_is_neutral() {
     assert_eq!(delta, 0.0);
 }
 
+/// A Class-enchantment cycling engine at `class_level` whose level-gated
+/// "whenever you cycle" payoff fires only while the Class is at `required_level`
+/// (CR 716). The shared hypothetical authority reads the level from the source
+/// context.
+fn class_engine(state: &mut GameState, class_level: u8, required_level: u8) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        AI,
+        ENGINE_NAME.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.class_level = Some(class_level);
+    obj.trigger_definitions
+        .push(
+            cycle_trigger(TargetFilter::Any).constraint(TriggerConstraint::AtClassLevel {
+                level: required_level,
+            }),
+        );
+    id
+}
+
+/// CR 716: an `AtClassLevel` payoff at the required level is live — the shared
+/// hypothetical authority passes the source context, so the class level is read
+/// correctly rather than treated as absent.
+#[test]
+fn at_class_level_engine_at_required_level_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    class_engine(&mut st, 2, 2); // at level 2, needs level 2
+    let source = cycler(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) =
+        score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "cycling_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// Control: the same Class engine at a DIFFERENT level cannot fire its
+/// level-gated payoff, so cycling earns nothing.
+#[test]
+fn at_class_level_engine_at_wrong_level_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    class_engine(&mut st, 1, 2); // at level 1, but the payoff needs level 2
+    let source = cycler(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) =
+        score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "cycling_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
 // ─── production seam (registry routing) ─────────────────────────────────────
 
 #[test]
