@@ -12,6 +12,8 @@ interface CardGridProps {
   onCardHover?: (cardName: string | null) => void;
   cardCounts?: Map<string, number>;
   legalityFormat?: BrowserLegalityFilter;
+  /** When false, the add affordance is disabled (copy ceiling reached). */
+  canAddCard?: (name: string) => boolean;
 }
 
 function getArtCropUrl(card: ScryfallCard): string {
@@ -35,6 +37,7 @@ export function CardGrid({
   onCardHover,
   cardCounts,
   legalityFormat = "all",
+  canAddCard,
 }: CardGridProps) {
   return (
     <div className="grid auto-rows-min grid-cols-[repeat(auto-fill,minmax(110px,1fr))] gap-2 overflow-y-auto p-2 sm:grid-cols-[repeat(auto-fill,minmax(130px,1fr))]">
@@ -44,6 +47,7 @@ export function CardGrid({
             key={card.id ?? card.name}
             card={card}
             legal={isFormatLegal(card, legalityFormat)}
+            canAdd={canAddCard?.(card.name) ?? true}
             count={cardCounts?.get(card.name)}
             legalityFormat={legalityFormat}
             onAddCard={onAddCard}
@@ -58,6 +62,7 @@ export function CardGrid({
 interface CardGridTileProps {
   card: ScryfallCard;
   legal: boolean;
+  canAdd: boolean;
   count: number | undefined;
   legalityFormat: BrowserLegalityFilter;
   onAddCard: (card: ScryfallCard) => void;
@@ -67,6 +72,7 @@ interface CardGridTileProps {
 function CardGridTile({
   card,
   legal,
+  canAdd,
   count,
   legalityFormat,
   onAddCard,
@@ -77,6 +83,7 @@ function CardGridTile({
   const formatLabel = legalityFormat === "all"
     ? t("grid.allFormats")
     : legalityFormat.charAt(0).toUpperCase() + legalityFormat.slice(1);
+  const addEnabled = legal && canAdd;
 
   // Touch model (mirrors MobileHandDrawer's DrawerCard): tap adds the card,
   // long-press opens the preview. firedRef suppresses the click that follows a
@@ -89,8 +96,14 @@ function CardGridTile({
       firedRef.current = false;
       return;
     }
-    if (legal) onAddCard(card);
+    if (addEnabled) onAddCard(card);
   };
+
+  const title = !legal
+    ? t("grid.notLegal", { name: card.name, format: formatLabel })
+    : !canAdd
+      ? t("grid.copyLimitReached", { name: card.name })
+      : t("grid.addCard", { name: card.name });
 
   return (
     <motion.button
@@ -103,10 +116,10 @@ function CardGridTile({
       onClick={handleClick}
       {...mouseHoverPreview(onCardHover, card.name)}
       {...handlers}
-      disabled={!legal}
-      title={legal ? t("grid.addCard", { name: card.name }) : t("grid.notLegal", { name: card.name, format: formatLabel })}
+      disabled={!addEnabled}
+      title={title}
       className={`group relative cursor-pointer overflow-hidden rounded-lg transition-transform hover:scale-105 ${
-        legal
+        addEnabled
           ? "ring-2 ring-transparent hover:ring-green-500"
           : "cursor-not-allowed opacity-60 ring-2 ring-red-600"
       }`}
@@ -128,6 +141,14 @@ function CardGridTile({
         <div className="absolute inset-0 flex items-center justify-center bg-black/50">
           <span className="rounded bg-red-700 px-2 py-0.5 text-[10px] font-bold text-white">
             {t("grid.notFormat", { format: formatLabel })}
+          </span>
+        </div>
+      )}
+
+      {legal && !canAdd && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+          <span className="rounded bg-red-700 px-2 py-0.5 text-[10px] font-bold text-white">
+            {t("grid.atCopyLimit")}
           </span>
         </div>
       )}

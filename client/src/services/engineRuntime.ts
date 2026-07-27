@@ -297,6 +297,17 @@ export async function maxDeckCopies(
 }
 
 /**
+ * CR 201.3 + CR 100.2a: Engine canonical key for aggregating deck copy counts.
+ * Alias spellings, case variants, and DFC combined/front-face names share one
+ * bucket — the deck builder must key affordance counts on this value.
+ */
+export async function canonicalDeckCountKey(name: string): Promise<string> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.canonicalDeckCountKey(name) as string;
+}
+
+/**
  * CR 100.4a: Per-format sideboard policy as a discriminated union.
  *
  * `Forbidden` and `Unlimited` are unit variants and do not carry a `data`

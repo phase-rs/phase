@@ -398,6 +398,7 @@ export function DeckBuilder({
                   onCardHover={onCardHover}
                   cardCounts={cardCounts}
                   legalityFormat={searchFilters.browseFormat}
+                  canAddCard={canIncrement}
                 />
               </div>
             ) : (

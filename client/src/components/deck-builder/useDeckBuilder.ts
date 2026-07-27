@@ -31,6 +31,7 @@ import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { projectSignatureSpellForFormat } from "../../services/savedDeckProjection";
 import {
+  canonicalDeckCountKey,
   commanderPartnerCandidates,
   companionCandidates,
   isCardCommanderEligibleForFormat,
@@ -338,30 +339,41 @@ export function useDeckBuilder({
 
   // CR 100.4a: the copy limit applies to the main deck, sideboard, and command
   // zone combined, so the increment gate counts every slot a card can occupy.
+  // Counts are keyed by the engine's canonical name so alias spellings share a
+  // bucket (#6659) — never fold accents/case/DFC forms in the display layer.
+  const [canonicalKeys, setCanonicalKeys] = useState<Map<string, string>>(
+    () => new Map(),
+  );
+
   const combinedCopyCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    const add = (name: string, n: number) =>
-      counts.set(name, (counts.get(name) ?? 0) + n);
+    const add = (name: string, n: number) => {
+      const key = canonicalKeys.get(name) ?? name;
+      counts.set(key, (counts.get(key) ?? 0) + n);
+    };
     for (const entry of deck.main) add(entry.name, entry.count);
     for (const entry of deck.sideboard) add(entry.name, entry.count);
     for (const name of commanders) add(name, 1);
     for (const name of deck.signature_spell ?? []) add(name, 1);
     if (deck.companion) add(deck.companion, 1);
     return counts;
-  }, [deck, commanders]);
+  }, [deck, commanders, canonicalKeys]);
 
   // Distinct names currently in the partition, as a stable key — the ceiling
   // for a (name, format) pair never changes, so this only refetches when the
   // set of names or the format actually changes, not on every count edit.
-  const copyLimitKey = useMemo(
-    () =>
-      [
-        ...new Set([...deck.main, ...deck.sideboard].map((entry) => entry.name)),
-      ]
-        .sort()
-        .join("|"),
-    [deck.main, deck.sideboard],
-  );
+  const copyLimitKey = useMemo(() => {
+    const names = new Set<string>();
+    for (const entry of deck.main) names.add(entry.name);
+    for (const entry of deck.sideboard) names.add(entry.name);
+    for (const name of commanders) names.add(name);
+    for (const name of deck.signature_spell ?? []) names.add(name);
+    if (deck.companion) names.add(deck.companion);
+    // Search results need ceilings too so CardGrid can disable adds at the
+    // limit — including when the result's spelling differs from a deck entry.
+    for (const card of searchResults) names.add(card.name);
+    return [...names].sort().join("|");
+  }, [deck, commanders, searchResults]);
 
   // CR 100.2a / CR 903.5b: the ceiling is engine-resolved per card and format
   // (basic-land exemption, printed overrides like Relentless Rats or Seven
@@ -373,19 +385,33 @@ export function useDeckBuilder({
     const names = copyLimitKey ? copyLimitKey.split("|") : [];
     if (names.length === 0) {
       setCopyLimits(new Map());
+      setCanonicalKeys(new Map());
       return;
     }
     let cancelled = false;
     Promise.all(
-      names.map(async (name) => [name, await maxDeckCopies(name, format)] as const),
+      names.map(async (name) => {
+        const [limit, canonical] = await Promise.all([
+          maxDeckCopies(name, format),
+          canonicalDeckCountKey(name),
+        ]);
+        return [name, limit, canonical] as const;
+      }),
     )
       .then((results) => {
-        if (!cancelled) setCopyLimits(new Map(results));
+        if (cancelled) return;
+        setCopyLimits(new Map(results.map(([name, limit]) => [name, limit])));
+        setCanonicalKeys(
+          new Map(results.map(([name, , canonical]) => [name, canonical])),
+        );
       })
       .catch(() => {
         // WASM may not be loaded yet; an empty map leaves increments open and
         // the engine's compatibility warnings still flag any real violation.
-        if (!cancelled) setCopyLimits(new Map());
+        if (!cancelled) {
+          setCopyLimits(new Map());
+          setCanonicalKeys(new Map());
+        }
       });
     return () => {
       cancelled = true;
@@ -396,9 +422,10 @@ export function useDeckBuilder({
     (name: string) => {
       const limit = copyLimits.get(name);
       if (!limit || limit.type === "Unlimited") return true;
-      return (combinedCopyCounts.get(name) ?? 0) < limit.data;
+      const key = canonicalKeys.get(name) ?? name;
+      return (combinedCopyCounts.get(key) ?? 0) < limit.data;
     },
-    [copyLimits, combinedCopyCounts],
+    [copyLimits, combinedCopyCounts, canonicalKeys],
   );
 
   const handleIncrementCard = useCallback(

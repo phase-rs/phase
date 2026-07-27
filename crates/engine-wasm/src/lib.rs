@@ -19,8 +19,8 @@ use engine::game::engine::{
 use engine::game::interaction::bind_interaction_authority;
 use engine::game::preview::{compute_preview_diff, preview_auto_payment_sources};
 use engine::game::{
-    can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
-    evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
+    can_pair_commanders, canonical_deck_count_key, companion_candidates, deck_copy_limit_for,
+    estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
     is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
     load_and_hydrate_decks, max_deck_copies, rehydrate_game_from_card_db, resolve_deck_list,
     signature_spell_selection_policy, start_game, start_game_with_starting_player,
@@ -448,6 +448,24 @@ pub fn max_deck_copies_for_format(name: &str, format: JsValue) -> JsValue {
             return to_js(&DeckCopyLimit::Unlimited);
         };
         to_js(&max_deck_copies(db, name, format))
+    })
+}
+
+/// CR 201.3 + CR 100.2a: Canonical key for aggregating deck copy counts so
+/// alias spellings (`Nazgul`/`Nazgûl`), case variants, and DFC combined vs
+/// front-face names share one bucket. The deck builder must key affordance
+/// counts on this — never fold names in JS.
+///
+/// Returns the input lowercased when the card database isn't loaded, matching
+/// `maxDeckCopies`'s fail-open posture for a not-yet-hydrated frontend.
+#[wasm_bindgen(js_name = canonicalDeckCountKey)]
+pub fn canonical_deck_count_key_for_name(name: &str) -> String {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return name.to_lowercase();
+        };
+        canonical_deck_count_key(db, name)
     })
 }
 

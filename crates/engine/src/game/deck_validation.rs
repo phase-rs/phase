@@ -2619,7 +2619,10 @@ fn card_is_known(db: &CardDatabase, name: &str) -> bool {
 /// CR 201.3 + CR 100.2a: Canonical key for aggregating deck copy counts.
 /// Uses the indexed face name when the card resolves so alias spellings
 /// ("Nazgul" vs "Nazgûl") merge into one bucket for copy-limit checks.
-fn canonical_deck_count_key(db: &CardDatabase, name: &str) -> String {
+///
+/// Public so the deck-builder WASM surface can share the same authority the
+/// legality checker uses (affordance gating must not re-derive folding in JS).
+pub fn canonical_deck_count_key(db: &CardDatabase, name: &str) -> String {
     let resolved = resolve_card_name(db, name);
     db.get_face_by_name(resolved)
         .map(|face| face.name.to_lowercase())
@@ -3991,6 +3994,21 @@ mod tests {
         assert_eq!(
             max_deck_copies(&db, "Nazgul", GameFormat::Modern),
             DeckCopyLimit::UpTo(9)
+        );
+    }
+
+    #[test]
+    fn canonical_deck_count_key_merges_alias_spellings() {
+        // Public surface for the deck-builder affordance (#6659): alias
+        // spellings must share one key so client-side counts match validation.
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        assert_eq!(
+            canonical_deck_count_key(&db, "Nazgul"),
+            canonical_deck_count_key(&db, "Nazgûl")
+        );
+        assert_eq!(
+            canonical_deck_count_key(&db, "Nazgul"),
+            canonical_deck_count_key(&db, "nazgûl")
         );
     }
 
