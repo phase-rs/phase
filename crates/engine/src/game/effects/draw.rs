@@ -17,19 +17,20 @@ use crate::types::zones::Zone;
 ///   permitted); or
 /// - the library is empty — an empty-library draw only records an attempted
 ///   draw (CR 704.5b) and delivers no card; or
-/// - a mandatory `Prevent` draw replacement applies to *this player's* draw
-///   (CR 614.6: "skip that draw instead", Living Conundrum) — the replaced draw
-///   event never happens.
+/// - the replacement pipeline removes the draw before it happens (CR 614.6) —
+///   prevented, substituted with a non-Draw chain, or rescaled to zero.
 ///
-/// In each case the draw fires no "whenever you draw" trigger. Routes through the
-/// same `allowed_draw_count` gate and `select_cards_to_draw` delivery authority
-/// the resolver uses, and models the individual draw as the `ProposedEvent::Draw`
-/// the live path proposes so the replacement leg consults the live applicability
-/// authority (`replacement::event_is_mandatorily_prevented`) rather than scanning
-/// definitions by event alone. An unrelated or opponent-scoped source, a false
-/// conditional, and an optional ("may") replacement therefore all leave the draw
-/// deliverable. The single engine authority an AI draw-payoff preflight consults
-/// so it never credits a no-op draw.
+/// In each case the draw fires no "whenever you draw" trigger. Every leg delegates
+/// to the authority that owns it rather than re-deriving it: `allowed_draw_count`
+/// for draw restrictions, `select_cards_to_draw` for library delivery, and
+/// `replacement::proposed_draw_survives_replacement` — which shares its
+/// applicability and substitution classifiers with the live pipeline — for the
+/// replacement leg. The individual draw is modeled as the same
+/// `ProposedEvent::Draw` shape `draw_through_replacement_with_applied` proposes,
+/// so the preflight and the resolver ask the identical question.
+///
+/// The single engine authority an AI draw-payoff preflight consults so it never
+/// credits a no-op draw.
 pub fn can_draw_at_least_one(state: &GameState, player_id: crate::types::player::PlayerId) -> bool {
     let allowed = allowed_draw_count(state, player_id, 1);
     if select_cards_to_draw(state, player_id, allowed as usize).is_empty() {
@@ -42,7 +43,7 @@ pub fn can_draw_at_least_one(state: &GameState, player_id: crate::types::player:
         count: 1,
         applied: HashSet::new(),
     };
-    !replacement::event_is_mandatorily_prevented(state, &proposed)
+    replacement::proposed_draw_survives_replacement(state, &proposed)
 }
 
 pub(crate) fn allowed_draw_count(

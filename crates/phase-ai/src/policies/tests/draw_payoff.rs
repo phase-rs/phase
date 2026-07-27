@@ -1046,31 +1046,52 @@ fn nonempty_library_draw_rewards() {
     assert!(delta > 0.0);
 }
 
-/// Puts a permanent under `controller` carrying a `Prevent` draw replacement
-/// (Living Conundrum shape) on the battlefield, letting `customize` adjust the
-/// definition first. `controller` is the replacement's source player: with the
-/// default `valid_player` scope (CR 614.1a) the replacement applies only to
-/// THAT player's draws, which is what makes source-scope discriminating.
-fn add_prevent_draw_replacement(
+/// Puts a permanent named `name` under `controller` on the battlefield carrying a
+/// `ReplacementEvent::Draw` definition that `customize` shapes, and returns it so
+/// a `runtime_execute` substitute can bind it as its source.
+///
+/// `controller` is the replacement's source player: with the default
+/// `valid_player` scope (CR 614.1a) the replacement applies only to THAT player's
+/// draws, which is what makes source-scope discriminating.
+///
+/// The single Draw-definition producer in this file — every replacement shape
+/// below is a `customize` parameterization of it, so
+/// `scripts/draw_replacement_census.py` freezes one row rather than one per
+/// shape.
+fn add_draw_replacement(
     state: &mut GameState,
     controller: PlayerId,
+    name: &str,
     customize: impl FnOnce(&mut ReplacementDefinition),
-) {
+) -> ObjectId {
     let card_id = CardId(state.next_object_id);
     let id = create_object(
         state,
         card_id,
         controller,
-        "Living Conundrum".to_string(),
+        name.to_string(),
         Zone::Battlefield,
     );
     let obj = state.objects.get_mut(&id).unwrap();
     obj.card_types.core_types.push(CoreType::Enchantment);
     let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
         .draw_scope(DrawReplacementScope::IndividualDraw);
-    repl.quantity_modification = Some(QuantityModification::Prevent);
     customize(&mut repl);
     obj.replacement_definitions.push(repl);
+    id
+}
+
+/// Living Conundrum shape: "if you would draw a card, skip that draw instead" —
+/// a mandatory `Prevent` quantity modification on `controller`'s draws.
+fn add_prevent_draw_replacement(
+    state: &mut GameState,
+    controller: PlayerId,
+    customize: impl FnOnce(&mut ReplacementDefinition),
+) {
+    add_draw_replacement(state, controller, "Living Conundrum", |repl| {
+        repl.quantity_modification = Some(QuantityModification::Prevent);
+        customize(repl);
+    });
 }
 
 /// Scores a cast-a-draw-spell candidate with the payoff engine already out.
@@ -1152,6 +1173,171 @@ fn draw_cards_stub_prevent_replacement_still_rewards() {
     let (delta, reason) = draw_spell_verdict(&mut st);
     assert_eq!(reason.kind, "draw_payoff_engine_active");
     assert!(delta > 0.0);
+}
+
+// ─── replacement substitution and rescaling (CR 614.11) ──────────────────────
+//
+// A `Prevent` quantity modification is only ONE of the three ways the pipeline
+// removes a draw. It can also be substituted away by a non-Draw chain, or
+// rescaled to zero. All three are classified by the shared engine authority
+// `replacement::proposed_draw_survives_replacement`, whose substitution leg is
+// the very function `apply_single_replacement` uses to pre-zero the live count —
+// these cases pin that the preflight and the pipeline stay in agreement.
+
+/// A non-Draw substitute chain: "instead, you gain 5 life" — the body of Words
+/// of Worship, "{1}: The next time you would draw a card this turn, you gain 5
+/// life instead."
+///
+/// The classifier keys on "not a `Draw`, not a pure event modifier", so this
+/// stands in for the whole substitute class: Chains of Mephistopheles' "that
+/// player discards a card instead", Jace, Wielder of Mysteries' "you win the
+/// game instead", Abundance's reveal-until. What varies between those cards is
+/// which slot carries the substitute and whether it is mandatory — the axes the
+/// cases below vary — not the substitute effect itself.
+fn gain_life_substitute() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 5 },
+            player: TargetFilter::Controller,
+        },
+    )
+}
+
+/// A draw-count substitute: "draw that many cards plus one instead"
+/// (Alhammarret's Archive / Teferi's Ageless Insight, CR 614.11a). Still a draw.
+fn draw_count_substitute(value: i32) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value },
+            target: TargetFilter::Controller,
+        },
+    )
+}
+
+/// CR 614.11: a mandatory `execute` substitute that is not a draw replaces the
+/// draw event away — `apply_single_replacement` zeroes the proposed count, so no
+/// `CardDrawn` is emitted and the "whenever you draw" engine never triggers. The
+/// bonus must be withheld even though nothing here is a `Prevent`.
+///
+/// The printed-static half of the class: Chains of Mephistopheles ("that player
+/// discards a card instead"), Jace, Wielder of Mysteries ("you win the game
+/// instead"). Both carry the substitute in `execute`.
+#[test]
+fn mandatory_execute_substitution_is_a_no_op() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_draw_replacement(&mut st, AI, "Chains of Mephistopheles", |repl| {
+        repl.execute = Some(Box::new(gain_life_substitute()));
+    });
+    let (delta, reason) = draw_spell_verdict(&mut st);
+    assert_eq!(reason.kind, "draw_payoff_na");
+    assert_eq!(delta, 0.0);
+}
+
+/// CR 614.11: a one-shot draw replacement created by a resolving ability carries
+/// its substitute in `runtime_execute` while `execute` stays `None`. That slot
+/// substitutes the draw away exactly as `execute` does, so the preflight must
+/// inspect it too — the leg a definition-shaped scan of `execute` alone misses.
+///
+/// The activated-one-shot half of the class, and an exact fit: Words of Worship
+/// is "{1}: The next time you would draw a card this turn, you gain 5 life
+/// instead" (Words of Wilding substitutes a 2/2 Bear token the same way).
+#[test]
+fn mandatory_runtime_execute_substitution_is_a_no_op() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    let source = add_draw_replacement(&mut st, AI, "Words of Worship", |_| {});
+    let runtime = engine::types::ability::ResolvedAbility::new(
+        gain_life_substitute().effect.as_ref().clone(),
+        Vec::new(),
+        source,
+        AI,
+    );
+    let obj = st.objects.get_mut(&source).unwrap();
+    obj.replacement_definitions[0].runtime_execute = Some(Box::new(runtime));
+    let (delta, reason) = draw_spell_verdict(&mut st);
+    assert_eq!(reason.kind, "draw_payoff_na");
+    assert_eq!(delta, 0.0);
+}
+
+/// CR 614.6: the same substitution offered as "you may" is an accept/decline
+/// choice, so it cannot be assumed to apply — the draw is still deliverable and
+/// the payoff still pays. Control that the substitution leg gates on mandatory
+/// mode rather than on the presence of a non-Draw `execute`.
+///
+/// Abundance is the printed case: "If you would draw a card, you MAY instead
+/// choose land or nonland and reveal cards from the top of your library…".
+#[test]
+fn optional_execute_substitution_still_rewards() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_draw_replacement(&mut st, AI, "Abundance", |repl| {
+        repl.execute = Some(Box::new(gain_life_substitute()));
+        repl.mode = ReplacementMode::Optional { decline: None };
+    });
+    let (delta, reason) = draw_spell_verdict(&mut st);
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// CR 614.1a: an opponent-sourced mandatory substitution scopes to THAT player's
+/// draws, so the AI's draw survives. Control that the substitution leg inherits
+/// the live applicability gate rather than scanning definitions by event alone.
+#[test]
+fn opponent_scoped_execute_substitution_still_rewards() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_draw_replacement(&mut st, PlayerId(1), "Chains of Mephistopheles", |repl| {
+        repl.execute = Some(Box::new(gain_life_substitute()));
+    });
+    let (delta, reason) = draw_spell_verdict(&mut st);
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// CR 614.11a: a count-modifying replacement rescales the draw rather than
+/// removing it — Alhammarret's Archive and Teferi's Ageless Insight both read
+/// "…draw two cards instead" (each gated on "except the first one you draw in
+/// each of your draw steps"; the gate is immaterial here, so the definition is
+/// modeled ungated). A rescaled draw still emits `CardDrawn`, so the payoff must
+/// be paid.
+///
+/// The discriminating positive control for
+/// `mandatory_execute_substitution_is_a_no_op`: both carry a mandatory
+/// `execute`, and only the non-Draw one suppresses.
+#[test]
+fn count_modifying_draw_replacement_still_rewards() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_draw_replacement(&mut st, AI, "Alhammarret's Archive", |repl| {
+        repl.execute = Some(Box::new(draw_count_substitute(2)));
+    });
+    let (delta, reason) = draw_spell_verdict(&mut st);
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// CR 614.11a: a mandatory count modification that resolves to ZERO leaves no
+/// card to draw — `draw_applier` yields `Modified { count: 0 }` and the delivery
+/// loop emits no `CardDrawn`. Third suppression leg, distinct from both `Prevent`
+/// and non-Draw substitution: the `execute` here IS a draw, so the substitution
+/// classifier correctly declines it and only the resolved count discriminates.
+///
+/// A synthetic boundary rather than a printed card — the count-modifier surface
+/// accepts any `QuantityExpr`, and zero is the value at which a rescaled draw
+/// stops being a draw. Pinned so the leg cannot regress unnoticed.
+#[test]
+fn zero_count_draw_replacement_is_a_no_op() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_draw_replacement(&mut st, AI, "Zero-Count Draw Rescaler", |repl| {
+        repl.execute = Some(Box::new(draw_count_substitute(0)));
+    });
+    let (delta, reason) = draw_spell_verdict(&mut st);
+    assert_eq!(reason.kind, "draw_payoff_na");
+    assert_eq!(delta, 0.0);
 }
 
 // ─── multi-target engine legality (CR 603.3d) ────────────────────────────────
