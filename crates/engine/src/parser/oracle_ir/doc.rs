@@ -914,14 +914,13 @@ impl OracleDocBuilder {
         // dispatch loop baked in.
         //
         // Match is EXHAUSTIVE over `OracleNodeIr` (no `_`), mirroring `emit`'s
-        // printed-slot match above: a future node variant — or the still
-        // never-constructed `Spell` IR variant once a later commit emits it —
-        // must fail to compile here until its slot behavior is decided, rather
-        // than being silently skipped (which would mis-index every later
-        // trigger/ability). `Trigger` is destructured to its one payload variant
-        // for the same reason: adding an IR-native trigger payload must break
-        // this match, because the stamp targets `execute`, which a decomposition
-        // does not have until lowering builds it.
+        // printed-slot match above: a future node variant must fail to compile
+        // here until its slot behavior is decided, rather than being silently
+        // skipped (which would mis-index every later trigger/ability).
+        // `Trigger` is destructured to its one payload variant for the same
+        // reason: adding an IR-native trigger payload must break this match,
+        // because the stamp targets `execute`, which a decomposition does not
+        // have until lowering builds it.
         let mut trigger_slot = 0usize;
         let mut ability_slot = 0usize;
         for item in self.items.values_mut() {
@@ -938,12 +937,29 @@ impl OracleDocBuilder {
                     stamp_retained_printed_slot(def, ability_slot, PrintedItemKind::Ability);
                     ability_slot += 1;
                 }
-                // No retain modification can reach these today: the `*` IR variants
-                // are never constructed in unit 3a, and the remaining categories do
-                // not carry a copy-except body. Left explicit (not `_`) so a new
-                // slot-bearing node is a compile error, per the note above.
-                OracleNodeIr::Spell(_)
-                | OracleNodeIr::Static(_)
+                // CR 707.9a printed slots count PRINTED abilities. The set of
+                // variants that advance `ability_slot` here must equal the set
+                // `lower_oracle_ir` (`oracle.rs`) pushes into `result.abilities`,
+                // which is in turn the set `emit` pushes onto `spells_emitted`
+                // above: both spell shapes. Three matches over one set.
+                //
+                // Advances WITHOUT stamping, on purpose — do not try to make this
+                // arm symmetric with the arm above. An IR-native spell body has no
+                // `AbilityDefinition` until lowering builds one, and
+                // `stamp_retained_printed_slot` takes `&mut AbilityDefinition`, so
+                // there is nothing here to stamp. The printed slot is consumed all
+                // the same: skipping the advance stamps every LATER ability one
+                // slot low, silently binding a copy's "except it has this ability"
+                // to the wrong ability.
+                OracleNodeIr::Spell(_) => {
+                    ability_slot += 1;
+                }
+                // Neither stamps nor counts: `RetainPrinted*FromSource` exists only
+                // for the trigger and ability categories (CR 707.9a), so these
+                // carry no slot to rewrite and consume neither counter this walk
+                // maintains. Left explicit (not `_`) so a new slot-bearing node is
+                // a compile error, per the note above.
+                OracleNodeIr::Static(_)
                 | OracleNodeIr::PreLoweredStatic(_)
                 | OracleNodeIr::Replacement(_)
                 | OracleNodeIr::PreLoweredReplacement(_)
