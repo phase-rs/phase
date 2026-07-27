@@ -11,18 +11,43 @@ use crate::types::statics::StaticMode;
 #[cfg(test)]
 use crate::types::zones::Zone;
 
-/// CR 121.1 + CR 704.5b: would drawing a card actually put a card into
-/// `player_id`'s hand right now (CR 121.1: a draw moves the top library card to
-/// hand)? False when a `CantDraw` static applies or a `PerTurnDrawLimit` is
-/// exhausted (no draw permitted), AND false when the library is empty — an
-/// empty-library draw only records an attempted draw (CR 704.5b) and delivers no
-/// card, so it produces no `CardDrawn` event and fires no "whenever you draw"
-/// trigger. Routes through the same `allowed_draw_count` gate and
-/// `select_cards_to_draw` delivery authority the resolver uses, so an AI
-/// draw-payoff preflight never credits a no-op draw.
+/// CR 121.1 + CR 704.5b + CR 614.6: would drawing a card actually put a card into
+/// `player_id`'s hand right now, emitting a `GameEvent::CardDrawn`? False when:
+/// - a `CantDraw` static applies or a `PerTurnDrawLimit` is exhausted (no draw
+///   permitted); or
+/// - the library is empty — an empty-library draw only records an attempted
+///   draw (CR 704.5b) and delivers no card; or
+/// - a mandatory `Prevent` draw replacement is active (CR 614.6: "skip that draw
+///   instead", Living Conundrum) — the replaced draw event never happens.
+///
+/// In each case the draw fires no "whenever you draw" trigger. Routes through the
+/// same `allowed_draw_count` gate and `select_cards_to_draw` delivery authority
+/// the resolver uses; the replacement leg is conservative — a payoff preflight
+/// can't establish the post-replacement draw event without running the
+/// state-mutating pipeline, so an active mandatory prevent-draw replacement
+/// blocks delivery. The single engine authority an AI draw-payoff preflight
+/// consults so it never credits a no-op draw.
 pub fn can_draw_at_least_one(state: &GameState, player_id: crate::types::player::PlayerId) -> bool {
+    use crate::types::ability::QuantityModification;
+    use crate::types::replacements::ReplacementEvent;
     let allowed = allowed_draw_count(state, player_id, 1);
-    !select_cards_to_draw(state, player_id, allowed as usize).is_empty()
+    if select_cards_to_draw(state, player_id, allowed as usize).is_empty() {
+        return false;
+    }
+    // CR 614.1 / CR 614.6 / CR 614.11: a mandatory draw replacement that prevents
+    // the draw suppresses the event entirely. Conservatively block delivery when
+    // one is active rather than assume the draw survives.
+    let mandatory_prevent =
+        crate::game::functioning_abilities::active_replacements(state).any(|(_, _, def)| {
+            matches!(
+                def.event,
+                ReplacementEvent::Draw | ReplacementEvent::DrawCards
+            ) && matches!(
+                def.quantity_modification,
+                Some(QuantityModification::Prevent)
+            )
+        });
+    !mandatory_prevent
 }
 
 pub(crate) fn allowed_draw_count(

@@ -9,8 +9,9 @@ use std::sync::Arc;
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CastVariantPaid, Effect, QuantityExpr, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    AbilityDefinition, AbilityKind, CastVariantPaid, Effect, QuantityExpr, QuantityModification,
+    ReplacementDefinition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -21,6 +22,7 @@ use engine::types::game_state::{
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::statics::{ProhibitionScope, StaticMode};
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -1043,6 +1045,43 @@ fn nonempty_library_draw_rewards() {
     assert!(delta > 0.0);
 }
 
+/// Puts a permanent carrying a mandatory `Prevent` draw replacement (Living
+/// Conundrum shape) on the battlefield.
+fn add_prevent_draw_replacement(state: &mut GameState) {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        PlayerId(1),
+        "Living Conundrum".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw);
+    repl.quantity_modification = Some(QuantityModification::Prevent);
+    obj.replacement_definitions.push(repl);
+}
+
+/// CR 614.6: a mandatory `Prevent` draw replacement suppresses the draw entirely
+/// — the replaced event never happens, so no `CardDrawn` fires and the engine
+/// never triggers. The delivery preflight withholds the bonus.
+#[test]
+fn mandatory_prevent_draw_replacement_is_a_no_op() {
+    let config = AiConfig::default();
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_prevent_draw_replacement(&mut st);
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_na");
+    assert_eq!(delta, 0.0);
+}
+
 // ─── multi-target engine legality (CR 603.3d) ────────────────────────────────
 
 /// A creature `TargetFilter`.
@@ -1276,4 +1315,61 @@ fn registry_routes_draw_cast_to_the_policy() {
         .expect("the draw cast must reach the policy through the registry");
     assert_eq!(reason.kind, "draw_payoff_engine_active");
     assert!(delta > 0.0, "routed reward must be positive, got {delta}");
+}
+
+/// End-to-end: an activated DRAW ability routes through `DecisionKind::ActivateAbility`
+/// to the policy and is rewarded — covering the second decision kind the policy
+/// registers, not just the direct-`verdict` path.
+#[test]
+fn registry_routes_activated_draw_to_the_policy() {
+    let config = AiConfig::default();
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    let source_id = activated_permanent(
+        &mut st,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    let context = context(&config, session(0.9));
+    let candidate = activate(source_id, 0);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) = PolicyRegistry::default()
+        .verdicts(&ctx(&st, &candidate, &decision, &context, &config))
+        .into_iter()
+        .find(|(id, _)| *id == PolicyId::DrawPayoff)
+        .map(|(_, v)| score_of(v))
+        .expect("the activated draw must reach the policy through the registry");
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0, "routed reward must be positive, got {delta}");
+}
+
+/// Control: an activated NON-draw ability routes to the policy but is not
+/// rewarded — guards against the classifier crediting every activation.
+#[test]
+fn registry_activated_non_draw_is_not_rewarded() {
+    let config = AiConfig::default();
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    let source_id = activated_permanent(
+        &mut st,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+            player: TargetFilter::Controller,
+        },
+    );
+    let context = context(&config, session(0.9));
+    let candidate = activate(source_id, 0);
+    let decision = priority_decision(&candidate);
+    let routed = PolicyRegistry::default()
+        .verdicts(&ctx(&st, &candidate, &decision, &context, &config))
+        .into_iter()
+        .find(|(id, _)| *id == PolicyId::DrawPayoff)
+        .map(|(_, v)| score_of(v));
+    // Either the policy is absent for this action, or it returns a neutral verdict.
+    if let Some((delta, reason)) = routed {
+        assert_eq!(reason.kind, "draw_payoff_na");
+        assert_eq!(delta, 0.0);
+    }
 }
