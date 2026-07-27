@@ -57,7 +57,7 @@ rg -o '"(local|upstream)\.[a-z0-9-]+"' crates/manabrew-compat/src/lib.rs | sort 
 
 Compare emitted codes against declared entries. Divergence is a defect, not a backlog item.
 
-The registry is now **exhaustive** over emitted codes (82 declared; 69 emitted at live call sites, plus 13 documentary entries that describe a gap without a code path). `no_emitted_capability_code_is_undeclared` scans the production half of `lib.rs` and fails on any new undeclared code, so this no longer needs a manual audit — but re-run the command above if you doubt the test.
+The registry is now **exhaustive** over emitted codes (83 declared; 69 emitted at live call sites, plus 14 documentary entries that describe a gap without a code path). `no_emitted_capability_code_is_undeclared` scans the production half of `lib.rs` and fails on any new undeclared code, so this no longer needs a manual audit — but re-run the command above if you doubt the test.
 
 ### 4. A mapping claim must be exhibited by a test, not asserted in prose.
 

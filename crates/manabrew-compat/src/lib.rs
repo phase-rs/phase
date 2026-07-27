@@ -1359,7 +1359,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 82] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 83] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1405,8 +1405,14 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 82] = [
     UnsupportedCapability {
         code: "local.prompt-family-display-acks-unsupported",
         area: "prompts",
-        reason: "Corrected: the previous text claimed Phase has no matching WaitingFor for RevealCards. It does — WaitingFor::RevealChoice { cards, filter, optional, decline_runs_continuation } (game_state.rs). The mismatch is the response payload, not the state's existence. RevealChoice is answered by GameAction::SelectCards { cards }: a normal reveal picks exactly one card, and under `optional` an EMPTY selection is not a no-op but an explicit decline that runs the source's decline branch (CR 701.20a). RevealCardsOutput has exactly one variant, RevealCardsAcknowledged, a bare ack with no card payload — so routing RevealChoice through RevealCards would submit an empty selection every time, silently declining every optional reveal and submitting an illegal count for every mandatory one. The correct home is ChooseCards (min 0 when optional else 1, max 1); that mapping is unwritten, so RevealChoice currently falls to local.prompt-unsupported. DiceRolled is a separate case and is genuinely unreachable: none of the 127 WaitingFor variants reports a die roll, and game/effects/roll_die.rs sets no waiting_for at all — die results are applied inline, so there is no decision point to acknowledge.",
-        suggested_protocol_extension: "None needed upstream for reveals — ChooseCards already fits, and closing it is adapter work. For DiceRolled, treat it as a display event with audience and sequencing metadata rather than a prompt, since no engine pause backs it.",
+        reason: "Corrected: the previous text claimed Phase has no matching WaitingFor for RevealCards. It does — WaitingFor::RevealChoice { cards, filter, optional, decline_runs_continuation } (game_state.rs). The mismatch is the response payload, not the state's existence. RevealChoice is answered by GameAction::SelectCards { cards }: a normal reveal picks exactly one card, and under `optional` an EMPTY selection is not a no-op but an explicit decline that runs the source's decline branch (CR 701.20a). RevealCardsOutput has exactly one variant, RevealCardsAcknowledged, a bare ack with no card payload — so routing RevealChoice through RevealCards would submit an empty selection every time, silently declining every optional reveal and submitting an illegal count for every mandatory one. Re-verified: this is a FIDELITY gap, not a coverage one. RevealChoice does NOT fall to local.prompt-unsupported — it classifies as HumanResponseModel::ExactCandidates (interaction.rs), so the generic projection serves it as ChooseFromSelection: one labelled option per revealable card at min/max 1, plus a third option carrying the empty decline when `optional`, each resolving back to the SelectCards above. What is lost is presentation — every card reaches the client as its name, where ChooseCards would carry the card itself. The card family is unreachable from here because only a Select schema is reclassified as cards (card_selection_candidates) and a one-of list is not one. Both halves are exhibited by a_mandatory_reveal_renders_as_a_selection_and_answers_with_the_chosen_card and an_optional_reveal_offers_the_decline_as_an_empty_selection rather than asserted here. DiceRolled is a separate case and is genuinely unreachable: none of the 127 WaitingFor variants reports a die roll, and game/effects/roll_die.rs sets no waiting_for at all — die results are applied inline, so there is no decision point to acknowledge.",
+        suggested_protocol_extension: "None needed upstream for reveals — the prompt is already answerable, and raising it from labels to cards is local work: either a bespoke ChooseCards arm here (as DiscardChoice has, with its matching gate entry) or an engine projection that classifies the reveal as a card selection. For DiceRolled, treat it as a display event with audience and sequencing metadata rather than a prompt, since no engine pause backs it.",
+    },
+    UnsupportedCapability {
+        code: "local.targeting-intent-unsourceable",
+        area: "prompts",
+        reason: "Fidelity, not coverage: target prompts are fully answerable, but ChooseBoardTargetsInput.intent is a placeholder rather than a computed value, so a client must not read it. The field is required (no serde default) and all 25 TargetingIntent variants are effect semantics — Damage, Destroy, Sacrifice, Exile, Bounce, Mill, Discard, Counter, Tap, Untap, Copy, Buff, Debuff, Heal, LoseLife, Reveal, Draw, Fetch, GainControl, Fight, Attach, Attack, Block, Hostile, Friendly — with no neutral or unknown member, so every ChooseBoardTargets must claim one. Phase has none to give. Both producing states (WaitingFor::TargetSelection and TriggerTargetSelection) project as TargetSequenceProjection (game/interaction.rs), whose only descriptor is TargetSequenceAction — ChooseTarget | SelectObjects | SelectTargets | Retarget — which is the MECHANISM of the pick, not what the spell does to what it picks. The engine's one intent vocabulary, InteractionIntentCode (14 variants: Choose, Keep, Sacrifice, Return, Exile, Tap, Crew, Saddle, Station, RingBearer, Blight, Pay, Attack, Block), hangs off SelectionProjection for non-targeting Select states and likewise names the action taken on the objects, not a disposition toward a CR 115.1 target; nothing equivalent exists on the targeting path. Deriving intent from the pending spell's effect would be the adapter inventing game semantics, which the thin-boundary rule forbids. Consequence, stated plainly rather than hidden: build_prompt_input has exactly one ChooseBoardTargets construction site, so EVERY target prompt is advertised as Hostile — including targeting your own creature to buff or regenerate it — and the emitted hostile: false contradicts it. The asymmetry is visible inside this same DTO: TargetRefDto.intent is Option<TargetingIntent>, and target_ref_dto declines it with None for every candidate. The adapter already refuses to guess wherever refusing is expressible; the prompt-level field is the one place it cannot.",
+        suggested_protocol_extension: "Preferred: make ChooseBoardTargetsInput.intent an Option<TargetingIntent>, exactly matching TargetRefDto.intent one field away. This asks for no new concept — the protocol already models a declinable targeting intent and already spells it `#[serde(default, skip_serializing_if = \"Option::is_none\")] Option<TargetingIntent>`; the prompt-level field is simply inconsistent with it. Adding a neutral/unknown variant is the weaker fallback: it would let an engine say nothing, but it grows the semantic enum to encode absence, which the type system already expresses. Align hostile's optionality with whichever is chosen, since the two fields can currently contradict each other. Either shape is breaking for older readers (the transport envelope sets deny_unknown_fields and no family enum is non_exhaustive), so it belongs in a major bump.",
     },
     UnsupportedCapability {
         code: "local.library-arrangement-reorder-unsupported",
@@ -2138,6 +2144,30 @@ fn build_prompt_input(
                         .unwrap_or_else(|| "Choose target".to_string()),
                 ),
                 candidates: target_refs(&slot.legal_targets),
+                // PLACEHOLDERS, not computed values — declared as
+                // `local.targeting-intent-unsourceable`.
+                //
+                // `intent` is a required field and every one of
+                // `TargetingIntent`'s 25 variants is effect semantics (Damage,
+                // Destroy, Buff, Heal, ...); none means "unknown". Phase projects
+                // no effect-semantic intent for a CR 115.1 target choice — the
+                // engine's `TargetSequenceProjection` describes only the
+                // MECHANISM of the pick (`TargetSequenceAction`: ChooseTarget |
+                // SelectObjects | SelectTargets | Retarget) — and deriving one
+                // from the pending spell's effect would be this adapter
+                // inventing game semantics. So the field is filled rather than
+                // computed, and there is no value that would make it honest.
+                // Contrast the candidates just above: `TargetRefDto.intent` is
+                // an `Option`, and `target_ref_dto` declines it with `None`.
+                // That is what this field would do if the protocol let it.
+                //
+                // The two fields read as contradictory, and neither is
+                // authoritative: `hostile` is `#[serde(default)]`, so leaving it
+                // false asserts nothing, while `intent` must name a variant and
+                // only `Hostile`/`Friendly` name a disposition rather than a
+                // specific action. A client must not read either as engine-derived
+                // — in particular, targeting your own creature to buff or
+                // regenerate it is advertised here exactly as a kill spell is.
                 hostile: false,
                 intent: TargetingIntent::Hostile,
                 min_targets: if slot.optional { 0 } else { 1 },
@@ -6551,6 +6581,176 @@ mod tests {
         ));
     }
 
+    /// A reveal is answerable today, and the answer is the reveal action.
+    ///
+    /// The exhibit behind `local.prompt-family-display-acks-unsupported`, which
+    /// is a *fidelity* entry rather than a coverage one. `RevealChoice` — the
+    /// engine's pause for a CR 701.20a reveal — classifies as
+    /// `ExactCandidates`, so the generic projection
+    /// serves it: the engine materializes one candidate per revealable card and
+    /// the adapter renders them as labelled options. Both halves of that entry
+    /// are pinned here.
+    ///
+    /// 1. The prompt is `ChooseFromSelection`, not `ChooseCards` — the residual
+    ///    gap, since only the `Select` schema is reclassified as cards
+    ///    ([`card_selection_candidates`]) and a one-of list is not one. Widening
+    ///    that classifier turns this red, which is the intended signal.
+    /// 2. Every offered option resolves to `GameAction::SelectCards` naming one
+    ///    card. That is the assertion that dies if this family is ever routed
+    ///    through `RevealCards` instead: `RevealCardsAcknowledged` is a bare ack
+    ///    with no card payload, so it could only ever submit an empty selection
+    ///    — which a mandatory reveal rejects as an illegal count.
+    ///
+    /// Every index is answered rather than a hand-picked one, so the test does
+    /// not depend on the engine's candidate ordering and cannot pass by
+    /// exercising a single degenerate option.
+    #[test]
+    fn a_mandatory_reveal_renders_as_a_selection_and_answers_with_the_chosen_card() {
+        let mut state = GameState::new_two_player(7);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Land".to_string(),
+            Zone::Hand,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Spell".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards: vec![first, second],
+            filter: TargetFilter::Any,
+            optional: false,
+            decline_runs_continuation: false,
+        };
+        bind_interaction_authority(
+            &mut state,
+            InteractionSessionId("reveal-mandatory".to_string()),
+        )
+        .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt =
+            build_prompt_input(&prepared, &lookup).expect("a reveal is served by the projection");
+        let PromptInput::ChooseFromSelection(input) = prompt else {
+            panic!("a reveal renders as labelled options, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min_total, input.max_total, input.options.len()),
+            (1, 1, 2),
+            "a mandatory reveal picks exactly one of the two offered cards"
+        );
+
+        let mut revealed: Vec<Vec<ObjectId>> = (0..input.options.len())
+            .map(|index| {
+                let action = translate_response(
+                    42,
+                    PromptOutput::ChooseFromSelection(
+                        ChooseFromSelectionOutput::SelectionDecision {
+                            chosen_indices: vec![index],
+                        },
+                    ),
+                    &prepared.prompt_context(),
+                    &state,
+                )
+                .expect("every offered option resolves back through the engine");
+                match action {
+                    GameAction::SelectCards { cards } => cards,
+                    other => panic!("a reveal is answered by SelectCards, got {other:?}"),
+                }
+            })
+            .collect();
+        revealed.sort();
+        assert_eq!(
+            revealed,
+            vec![vec![first], vec![second]],
+            "the two options must denote the two revealable cards, one card each"
+        );
+    }
+
+    /// The optional branch of the same prompt, which is what makes the
+    /// `RevealCards` family actively wrong rather than merely low-fidelity.
+    ///
+    /// For a "you may reveal" (CR 701.20a) the engine models the decline as an
+    /// empty `SelectCards` — a convention of this engine's, not something the
+    /// rule states — and offers it as its own candidate. So the option count
+    /// rises to three against the same two cards, and exactly one option
+    /// answers with an empty selection.
+    ///
+    /// Paired with the mandatory test above, this is the non-vacuity guard for
+    /// both: the two states differ only in `optional`, so neither can be passing
+    /// for a reason unrelated to the reveal. It is also the concrete cost of
+    /// routing this through `RevealCardsAcknowledged` — a payload-free ack
+    /// collapses all three options onto the one that declines.
+    #[test]
+    fn an_optional_reveal_offers_the_decline_as_an_empty_selection() {
+        let mut state = GameState::new_two_player(7);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Land".to_string(),
+            Zone::Hand,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Spell".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards: vec![first, second],
+            filter: TargetFilter::Any,
+            optional: true,
+            decline_runs_continuation: false,
+        };
+        bind_interaction_authority(
+            &mut state,
+            InteractionSessionId("reveal-optional".to_string()),
+        )
+        .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt =
+            build_prompt_input(&prepared, &lookup).expect("a reveal is served by the projection");
+        let PromptInput::ChooseFromSelection(input) = prompt else {
+            panic!("a reveal renders as labelled options, got {prompt:?}");
+        };
+        assert_eq!(
+            input.options.len(),
+            3,
+            "the decline is offered alongside the two revealable cards"
+        );
+
+        let declines = (0..input.options.len())
+            .filter(|index| {
+                translate_response(
+                    42,
+                    PromptOutput::ChooseFromSelection(
+                        ChooseFromSelectionOutput::SelectionDecision {
+                            chosen_indices: vec![*index],
+                        },
+                    ),
+                    &prepared.prompt_context(),
+                    &state,
+                )
+                .expect("every offered option resolves back through the engine")
+                    == GameAction::SelectCards { cards: vec![] }
+            })
+            .count();
+        assert_eq!(
+            declines, 1,
+            "exactly one option declines the reveal with an empty selection"
+        );
+    }
+
     // ------------------------------------------------------- wire shapes ---
 
     /// The core v2 change: `PromptOutput` is ADJACENTLY tagged, so the family's
@@ -8197,13 +8397,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 82);
+        assert_eq!(capabilities.len(), 83);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 82, "capability codes must be unique");
+        assert_eq!(codes.len(), 83, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(
