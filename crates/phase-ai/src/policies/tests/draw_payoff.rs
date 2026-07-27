@@ -9,9 +9,10 @@ use std::sync::Arc;
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CastVariantPaid, DrawReplacementScope, Effect, QuantityExpr,
-    QuantityModification, ReplacementDefinition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition,
+    AbilityDefinition, AbilityKind, CastVariantPaid, DrawReplacementScope, Effect, ModalChoice,
+    QuantityExpr, QuantityModification, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -1045,14 +1046,21 @@ fn nonempty_library_draw_rewards() {
     assert!(delta > 0.0);
 }
 
-/// Puts a permanent carrying a mandatory `Prevent` draw replacement (Living
-/// Conundrum shape) on the battlefield.
-fn add_prevent_draw_replacement(state: &mut GameState) {
+/// Puts a permanent under `controller` carrying a `Prevent` draw replacement
+/// (Living Conundrum shape) on the battlefield, letting `customize` adjust the
+/// definition first. `controller` is the replacement's source player: with the
+/// default `valid_player` scope (CR 614.1a) the replacement applies only to
+/// THAT player's draws, which is what makes source-scope discriminating.
+fn add_prevent_draw_replacement(
+    state: &mut GameState,
+    controller: PlayerId,
+    customize: impl FnOnce(&mut ReplacementDefinition),
+) {
     let card_id = CardId(state.next_object_id);
     let id = create_object(
         state,
         card_id,
-        PlayerId(1),
+        controller,
         "Living Conundrum".to_string(),
         Zone::Battlefield,
     );
@@ -1061,26 +1069,89 @@ fn add_prevent_draw_replacement(state: &mut GameState) {
     let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
         .draw_scope(DrawReplacementScope::IndividualDraw);
     repl.quantity_modification = Some(QuantityModification::Prevent);
+    customize(&mut repl);
     obj.replacement_definitions.push(repl);
 }
 
-/// CR 614.6: a mandatory `Prevent` draw replacement suppresses the draw entirely
-/// — the replaced event never happens, so no `CardDrawn` fires and the engine
-/// never triggers. The delivery preflight withholds the bonus.
-#[test]
-fn mandatory_prevent_draw_replacement_is_a_no_op() {
+/// Scores a cast-a-draw-spell candidate with the payoff engine already out.
+fn draw_spell_verdict(st: &mut GameState) -> (f64, PolicyReason) {
     let config = AiConfig::default();
-    let mut st = state();
-    engine_on_battlefield(&mut st);
-    add_prevent_draw_replacement(&mut st);
-    let (oid, cid) = draw_spell(&mut st);
+    let (oid, cid) = draw_spell(st);
     let context = context(&config, session(0.9));
     let candidate = cast(oid, cid);
     let decision = priority_decision(&candidate);
-    let (delta, reason) =
-        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    score_of(DrawPayoffPolicy.verdict(&ctx(st, &candidate, &decision, &context, &config)))
+}
+
+/// CR 614.6: a mandatory `Prevent` draw replacement whose source scopes it to
+/// the drawing player suppresses the draw entirely — the replaced event never
+/// happens, so no `CardDrawn` fires and the engine never triggers. The delivery
+/// preflight withholds the bonus.
+#[test]
+fn mandatory_prevent_draw_replacement_is_a_no_op() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_prevent_draw_replacement(&mut st, AI, |_| {});
+    let (delta, reason) = draw_spell_verdict(&mut st);
     assert_eq!(reason.kind, "draw_payoff_na");
     assert_eq!(delta, 0.0);
+}
+
+/// CR 614.1a: the same definition on an OPPONENT's permanent replaces that
+/// player's draws, not the AI's. Control for scanning `active_replacements` by
+/// event alone — the AI's draw is still deliverable, so the payoff still pays.
+#[test]
+fn opponent_scoped_prevent_draw_replacement_still_rewards() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_prevent_draw_replacement(&mut st, PlayerId(1), |_| {});
+    let (delta, reason) = draw_spell_verdict(&mut st);
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// CR 614.1d: a conditional replacement whose condition does not hold is not
+/// applicable, so it cannot suppress the draw. `UnlessPlayerLifeAtMost { 20 }`
+/// is false at starting life totals.
+#[test]
+fn false_conditional_prevent_draw_replacement_still_rewards() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_prevent_draw_replacement(&mut st, AI, |repl| {
+        repl.condition = Some(ReplacementCondition::UnlessPlayerLifeAtMost { amount: 20 });
+    });
+    let (delta, reason) = draw_spell_verdict(&mut st);
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// An optional replacement is offered as an accept/decline choice, so it never
+/// obligatorily suppresses the draw — the preflight must not assume it applies.
+#[test]
+fn optional_prevent_draw_replacement_still_rewards() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_prevent_draw_replacement(&mut st, AI, |repl| {
+        repl.mode = ReplacementMode::Optional { decline: None };
+    });
+    let (delta, reason) = draw_spell_verdict(&mut st);
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// `ReplacementEvent::DrawCards` is a recognized-but-stub registry entry, not a
+/// runtime draw handler — it replaces nothing at resolution, so it must not
+/// suppress the payoff either.
+#[test]
+fn draw_cards_stub_prevent_replacement_still_rewards() {
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_prevent_draw_replacement(&mut st, AI, |repl| {
+        repl.event = ReplacementEvent::DrawCards;
+    });
+    let (delta, reason) = draw_spell_verdict(&mut st);
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
 }
 
 // ─── multi-target engine legality (CR 603.3d) ────────────────────────────────
@@ -1091,6 +1162,85 @@ fn creature_filter() -> TargetFilter {
         engine::types::ability::TypedFilter::default()
             .with_type(engine::types::ability::TypeFilter::Creature),
     )
+}
+
+/// A required-modal payoff: "whenever you draw, choose one — deal 3 to target
+/// creature; or deal 3 to target creature". The execute is a modal placeholder
+/// with all target-required modes (the targets live in `mode_abilities`), so on
+/// an empty board every mode is unavailable and the live trigger is dropped
+/// (`DroppedNoLegalMode`, CR 603.3c).
+fn modal_all_target_required_engine(state: &mut GameState) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        AI,
+        ENGINE_NAME.to_string(),
+        Zone::Battlefield,
+    );
+    let mode = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: creature_filter(),
+                damage_source: None,
+                excess: None,
+            },
+        )
+    };
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("modal_placeholder", ""),
+    );
+    execute.modal = Some(ModalChoice {
+        min_choices: 1,
+        max_choices: 1,
+        mode_count: 2,
+        ..Default::default()
+    });
+    execute.mode_abilities = vec![mode(), mode()];
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.trigger_definitions
+        .push(TriggerDefinition::new(TriggerMode::Drawn).execute(execute));
+    id
+}
+
+/// CR 603.3c: a required "choose one" payoff whose every mode needs a target and
+/// none is available on an empty board has no legal mode, so the live trigger is
+/// dropped — the modal-aware preflight reports it not-live.
+#[test]
+fn modal_engine_with_no_legal_mode_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    modal_all_target_required_engine(&mut st); // empty board → no legal mode
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// Control: once a legal creature target exists, at least one mode is choosable,
+/// so the modal engine is live and the draw is rewarded.
+#[test]
+fn modal_engine_with_a_legal_mode_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    modal_all_target_required_engine(&mut st);
+    add_opponent_creature(&mut st); // a legal target for a mode
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
 }
 
 /// A two-target payoff: "whenever you draw, exchange control of two target

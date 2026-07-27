@@ -1329,6 +1329,37 @@ pub fn execute_targets_satisfiable(
     source: &crate::game::game_object::GameObject,
     execute: &AbilityDefinition,
 ) -> bool {
+    // CR 603.3c: a MODAL execute carries a placeholder root and its targets in
+    // `mode_abilities` (which the root slot walk does not descend). Mirror the
+    // live trigger dispatch: filter each mode by its own target legality, then
+    // require a legal modal choice — a required "choose one/two …" whose modes
+    // are all target-unavailable is dropped (`DroppedNoLegalMode`), so it is not
+    // a live payoff.
+    if let Some(modal) = &execute.modal {
+        let mut unavailable_modes = Vec::new();
+        filter_modes_by_target_legality(
+            state,
+            source.id,
+            source.controller,
+            &execute.mode_abilities,
+            modal,
+            &mut unavailable_modes,
+        );
+        if unavailable_modes.len() >= modal.mode_count {
+            return false; // CR 603.3c: no legal mode
+        }
+        // CR 603.3d: the required choose-count must be satisfiable with legal
+        // target assignments across the surviving modes.
+        return modal_choice_with_target_assignment_limit(
+            state,
+            source.id,
+            source.controller,
+            modal,
+            &execute.mode_abilities,
+            &unavailable_modes,
+        )
+        .is_some();
+    }
     // CR 603.3d: build the ability the same way the live trigger pipeline does
     // (`build_resolved_from_def`) so a sub-ability chain's own target slots are
     // preflighted too — not just the root effect's.
@@ -1363,7 +1394,11 @@ pub fn execute_targets_satisfiable(
 /// preflight and the deck-feature classifier) must not credit such a trigger.
 /// The single shared support authority both consult.
 pub fn ability_definition_supported(def: &AbilityDefinition) -> bool {
-    if matches!(*def.effect, Effect::Unimplemented { .. }) {
+    // CR 700.2: a modal ability carries a placeholder `Effect::Unimplemented`
+    // (`modal_placeholder`) root — its real effects live in `mode_abilities`, so
+    // the placeholder is NOT a gap. Only an `Unimplemented` root on a
+    // non-modal ability is a true unsupported node.
+    if matches!(*def.effect, Effect::Unimplemented { .. }) && def.modal.is_none() {
         return false;
     }
     if def

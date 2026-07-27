@@ -8697,14 +8697,50 @@ fn is_counter_placement_event(event: &ProposedEvent) -> bool {
         )
 }
 
-fn counter_placement_prevention_applies(state: &GameState, candidates: &[ReplacementId]) -> bool {
+/// CR 614.6: does any already-applicable candidate obligatorily replace the
+/// event away? A `QuantityModification::Prevent` definition kills the event only
+/// when it is MANDATORY — an optional one is offered to a player as an
+/// accept/decline choice (`replacement_mode_is_optional`), so it cannot be
+/// assumed to apply. `events` scopes the check to the
+/// replacement events that actually govern the proposed event, so a differently
+/// evented `Prevent` sibling on the same source can never suppress it.
+///
+/// `candidates` must come from the live applicability authority
+/// (`find_applicable_replacements`), which has already enforced the handler
+/// matcher, source/player scope, condition, and optional-decline gates. Virtual
+/// rules-source candidates carry no definition and are never preventive here.
+fn mandatory_prevention_applies(
+    state: &GameState,
+    candidates: &[ReplacementId],
+    events: &[ReplacementEvent],
+) -> bool {
     candidates.iter().any(|rid| {
         replacement_definition_for_id(state, *rid).is_some_and(|def| {
-            def.event == ReplacementEvent::AddCounter
+            events.contains(&def.event)
                 && def.quantity_modification == Some(QuantityModification::Prevent)
                 && !replacement_mode_is_optional(&def.mode)
         })
     })
+}
+
+fn counter_placement_prevention_applies(state: &GameState, candidates: &[ReplacementId]) -> bool {
+    mandatory_prevention_applies(state, candidates, &[ReplacementEvent::AddCounter])
+}
+
+/// CR 614.1 + CR 614.6: pure preflight — would `event` be obligatorily replaced
+/// away before it happens, so that it never occurs and emits no `GameEvent`?
+///
+/// Routes the proposed event through the same applicability authority the live
+/// pipeline consults (`find_applicable_replacements`), so an unrelated or
+/// opponent-scoped source, a false conditional, an optional ("may") replacement,
+/// and a recognized-but-stub replacement event all correctly leave the event
+/// deliverable. Read-only: it consults applicability without running any
+/// applier, so it can be called from preflights (AI candidate scoring) that must
+/// not mutate state.
+pub fn event_is_mandatorily_prevented(state: &GameState, event: &ProposedEvent) -> bool {
+    let registry = replacement_registry();
+    let candidates = find_applicable_replacements(state, event, registry);
+    mandatory_prevention_applies(state, &candidates, &replacement_event_keys_for_event(event))
 }
 
 fn replacement_definition_for_id(

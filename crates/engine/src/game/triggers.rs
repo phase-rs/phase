@@ -16515,6 +16515,113 @@ pub mod tests {
         );
     }
 
+    /// Builds and dispatches a "choose one — deal 3 to target creature; or deal
+    /// 3 to target creature" modal trigger from `source`, returning the live
+    /// dispatch disposition.
+    fn dispatch_two_mode_creature_target_modal(
+        state: &mut GameState,
+        source: ObjectId,
+        controller: PlayerId,
+    ) -> TriggerDispatchDisposition {
+        let mode = || {
+            AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Typed(
+                        TypedFilter::default().with_type(TypeFilter::Creature),
+                    ),
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+        };
+        let pending = PendingTrigger {
+            source_id: source,
+            controller,
+            condition: None,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "modal_placeholder".to_string(),
+                    description: None,
+                },
+                vec![],
+                source,
+                controller,
+            )),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: Some(GameEvent::SpellCast {
+                controller,
+                object_id: source,
+                card_id: CardId(0x98),
+            }),
+            modal: Some(ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 2,
+                ..Default::default()
+            }),
+            mode_abilities: vec![mode(), mode()],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        };
+        let context = PendingTriggerContext {
+            pending,
+            trigger_events: Vec::new(),
+            dispatch_origin: PendingTriggerDispatchOrigin::Normal,
+        };
+        let mut events_out = Vec::new();
+        dispatch_pending_trigger_context(state, context, &mut events_out)
+    }
+
+    /// CR 603.3c: a required modal trigger whose every mode needs a target and
+    /// none is available on an empty board is dropped at dispatch
+    /// (`DroppedNoLegalMode`) — the live contract the AI payoff preflight
+    /// (`execute_targets_satisfiable`) mirrors.
+    #[test]
+    fn modal_trigger_all_target_required_modes_no_targets_is_dropped() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_3C01),
+            controller,
+            "Modal Engine".to_string(),
+            Zone::Battlefield,
+        );
+        let disposition = dispatch_two_mode_creature_target_modal(&mut state, source, controller);
+        assert!(
+            matches!(disposition, TriggerDispatchDisposition::DroppedNoLegalMode),
+            "all-target-required modal with no legal target must drop, got {disposition:?}"
+        );
+    }
+
+    /// Control: with a legal creature target present, at least one mode is
+    /// choosable, so the same modal trigger is NOT dropped for lack of a legal
+    /// mode.
+    #[test]
+    fn modal_trigger_with_a_legal_target_is_not_dropped() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_3C02),
+            controller,
+            "Modal Engine".to_string(),
+            Zone::Battlefield,
+        );
+        let _creature = make_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let disposition = dispatch_two_mode_creature_target_modal(&mut state, source, controller);
+        assert!(
+            !matches!(disposition, TriggerDispatchDisposition::DroppedNoLegalMode),
+            "a legal target makes a mode choosable — must not drop, got {disposition:?}"
+        );
+    }
+
     #[test]
     fn keeper_of_the_accord_creature_intervening_if_false_when_tied() {
         let def = crate::parser::oracle_trigger::parse_trigger_line(
