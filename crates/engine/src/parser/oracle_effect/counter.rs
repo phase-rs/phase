@@ -1549,7 +1549,7 @@ fn parse_mana_color_from_text(text: &str) -> Option<ManaColor> {
 mod tests {
     use super::*;
     use crate::types::ability::TargetChoiceTiming;
-    use crate::types::{ControllerRef, TypedFilter};
+    use crate::types::{ControllerRef, FilterProp, TypedFilter};
 
     fn default_ctx() -> ParseContext {
         ParseContext::default()
@@ -1679,6 +1679,86 @@ mod tests {
             } if filter.type_filters == vec![crate::types::ability::TypeFilter::Permanent]
                 && filter.controller == Some(ControllerRef::You)
         ));
+    }
+
+    /// CR 207.2c + CR 608.2c + CR 608.2d + CR 122.1: Contractual Safeguard's
+    /// Addendum effect remains conditional, while its following counter-kind
+    /// choice is an untargeted resolution-time choice over creatures the
+    /// controller controls. The final instruction applies that chosen kind to
+    /// each other creature in the same domain.
+    #[test]
+    fn contractual_safeguard_full_card_preserves_addendum_and_counter_choice_chain() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::AbilityCondition;
+        use crate::types::phase::Phase;
+
+        const ORACLE: &str = "Addendum — If you cast this spell during your main phase, put a shield counter on a creature you control. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)\nChoose a kind of counter on a creature you control. Put a counter of that kind on each other creature you control.";
+        let parsed = parse_oracle_text(
+            ORACLE,
+            "Contractual Safeguard",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert_eq!(
+            parsed.abilities.len(),
+            1,
+            "the three instructions form one sequential spell ability"
+        );
+
+        let shield = &parsed.abilities[0];
+        assert_eq!(
+            shield.condition,
+            Some(AbilityCondition::CastDuringPhase {
+                phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            }),
+            "Addendum still gates the shield-counter instruction"
+        );
+        assert!(matches!(
+            shield.effect.as_ref(),
+            Effect::PutCounter {
+                counter_type: CounterType::Shield,
+                target: TargetFilter::Typed(filter),
+                ..
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Creature]
+                && filter.controller == Some(ControllerRef::You)
+        ));
+
+        let choose = shield
+            .sub_ability
+            .as_ref()
+            .expect("the counter-kind choice follows the Addendum instruction");
+        assert_eq!(
+            choose.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "the choice uses no printed target and is made during resolution"
+        );
+        assert!(matches!(
+            choose.effect.as_ref(),
+            Effect::ChooseCounterKind {
+                target: TargetFilter::Typed(filter),
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Creature]
+                && filter.controller == Some(ControllerRef::You)
+        ));
+
+        let put = choose
+            .sub_ability
+            .as_ref()
+            .expect("placing the chosen counter follows the choice");
+        assert!(matches!(
+            put.effect.as_ref(),
+            Effect::PutChosenCounter {
+                target: TargetFilter::Typed(filter),
+                target_condition: None,
+                ..
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Creature]
+                && filter.controller == Some(ControllerRef::You)
+                && filter.properties.contains(&FilterProp::Another)
+        ));
+        assert!(
+            put.sub_ability.is_none(),
+            "the card has no further instruction after the mass placement"
+        );
     }
 
     #[test]

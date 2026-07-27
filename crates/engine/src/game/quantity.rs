@@ -2083,13 +2083,44 @@ fn filter_population_anchor_ids(state: &GameState, filter: &TargetFilter) -> Opt
     Some(ids.into_iter().filter(|id| seen.insert(*id)).collect())
 }
 
+/// Return the union population declared by an `Or`.
+///
+/// Each disjunct owns its population. An explicitly anchored conjunction keeps
+/// its intersected population, while an unanchored branch contributes its
+/// ordinary candidate universe. This lets an enclosing conjunction use
+/// `Or(TrackedSet A, TrackedSet B)` as one positive population-bearing term.
+fn disjunctive_filter_population_ids(
+    state: &GameState,
+    filter: &TargetFilter,
+) -> Option<Vec<ObjectId>> {
+    let TargetFilter::Or { filters } = filter else {
+        return None;
+    };
+    if filters.is_empty() {
+        return None;
+    }
+
+    let mut ids = Vec::new();
+    for branch in filters {
+        let population = conjunctive_filter_population_ids(state, branch)
+            .or_else(|| disjunctive_filter_population_ids(state, branch))
+            .or_else(|| filter_population_anchor_ids(state, branch))
+            .unwrap_or_else(|| filter_candidate_universe(state, branch));
+        ids.extend(population);
+    }
+    let mut seen = HashSet::new();
+    Some(ids.into_iter().filter(|id| seen.insert(*id)).collect())
+}
+
 /// Return the population declared by a conjunction's population-bearing terms.
 ///
 /// A positive population inside `And` supplies the objects against which its
-/// sibling predicates are evaluated. Multiple such terms intersect. This is
-/// intentionally limited to conjunctions: a naked `Not(TrackedSet)` is an
-/// exclusion from a broader universe, whereas `Not(And(TrackedSet, predicate))`
-/// complements the predicate within the tracked-set domain.
+/// sibling predicates are evaluated. Multiple such terms intersect, and an
+/// `Or` term contributes the union of its disjunct populations. This is
+/// intentionally rooted at a conjunction: a naked `Not(TrackedSet)` is an
+/// exclusion from a broader universe, whereas
+/// `Not(And(Or(TrackedSet A, TrackedSet B), predicate))` complements the
+/// predicate within the unioned tracked-set domain.
 fn conjunctive_filter_population_ids(
     state: &GameState,
     filter: &TargetFilter,
@@ -2099,6 +2130,7 @@ fn conjunctive_filter_population_ids(
     };
     let mut populations = filters.iter().filter_map(|filter| {
         conjunctive_filter_population_ids(state, filter)
+            .or_else(|| disjunctive_filter_population_ids(state, filter))
             .or_else(|| filter_population_anchor_ids(state, filter))
     });
     let mut ids = populations.next()?;
@@ -7440,6 +7472,37 @@ mod tests {
             distinct_counter_kinds_among(&state, &naked_exclusion, &ctx),
             vec![CounterType::Stun],
             "a naked tracked-set negation remains an exclusion from the broader universe"
+        );
+
+        let tracked_a = TrackedSetId(2);
+        let tracked_b = TrackedSetId(3);
+        state
+            .tracked_object_sets
+            .insert(tracked_a, vec![excluded_member]);
+        state
+            .tracked_object_sets
+            .insert(tracked_b, vec![included_member]);
+        let disjunctive_population = TargetFilter::Not {
+            filter: Box::new(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::TrackedSet { id: tracked_a },
+                            TargetFilter::TrackedSet { id: tracked_b },
+                        ],
+                    },
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Red,
+                        },
+                    ])),
+                ],
+            }),
+        };
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &disjunctive_population, &ctx),
+            vec![CounterType::Lore],
+            "the union of tracked-set disjuncts excludes an unrelated battlefield nonmember"
         );
     }
 

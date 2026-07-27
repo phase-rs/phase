@@ -3842,19 +3842,22 @@ fn try_parse_choose_damage_source(rest: &str) -> Option<ChooseImperativeAst> {
     Some(ChooseImperativeAst::DamageSource { source_filter })
 }
 
-/// CR 608.2d + CR 122.1: "a counter on <domain>" — the counter-kind choice
-/// head. An anaphor (`it` / `that permanent` / `that creature`) binds to
-/// `ParentTarget` (The Caves of Androzani); a typed untargeted domain uses the
-/// shared target parser (Aven Courier's "a permanent you control").
+/// CR 608.2d + CR 122.1: "a [kind of] counter on <domain>" — the counter-kind
+/// choice head. An anaphor (`it` / `that permanent` / `that creature`) binds
+/// to `ParentTarget` (The Caves of Androzani); a typed untargeted domain uses
+/// the shared target parser (Aven Courier / Contractual Safeguard).
 ///
 /// The declared-target form ("a counter on target permanent", Ichormoon
 /// Gauntlet / Clockspinning) is intentionally excluded so the declared target
 /// remains owned by the existing target-designation path rather than being
 /// misclassified as a resolution-time source population.
 fn try_parse_choose_counter_kind(rest_lower: &str) -> Option<ChooseImperativeAst> {
-    let (domain, _) = tag::<_, _, OracleError<'_>>("a counter on ")
-        .parse(rest_lower.trim())
-        .ok()?;
+    let (domain, _) = alt((
+        tag::<_, _, OracleError<'_>>("a kind of counter on "),
+        tag("a counter on "),
+    ))
+    .parse(rest_lower.trim())
+    .ok()?;
     if nom_target::parse_declared_target_prefix(domain).is_ok() {
         return None;
     }
@@ -13433,16 +13436,27 @@ mod tests {
     /// `ChooseCounterKind` over permanents the controller controls.
     #[test]
     fn try_parse_choose_counter_kind_accepts_typed_untargeted_domain() {
-        let ast = try_parse_choose_counter_kind("a counter on a permanent you control.")
-            .expect("typed untargeted counter domain must parse");
-        let ChooseImperativeAst::CounterKind {
-            target: TargetFilter::Typed(filter),
-        } = ast
-        else {
-            panic!("expected typed CounterKind domain, got {ast:?}");
-        };
-        assert_eq!(filter.type_filters, vec![TypeFilter::Permanent]);
-        assert_eq!(filter.controller, Some(ControllerRef::You));
+        for (input, expected_type) in [
+            (
+                "a counter on a permanent you control.",
+                TypeFilter::Permanent,
+            ),
+            (
+                "a kind of counter on a creature you control.",
+                TypeFilter::Creature,
+            ),
+        ] {
+            let ast = try_parse_choose_counter_kind(input)
+                .expect("typed untargeted counter domain must parse");
+            let ChooseImperativeAst::CounterKind {
+                target: TargetFilter::Typed(filter),
+            } = ast
+            else {
+                panic!("expected typed CounterKind domain, got {ast:?}");
+            };
+            assert_eq!(filter.type_filters, vec![expected_type]);
+            assert_eq!(filter.controller, Some(ControllerRef::You));
+        }
     }
 
     /// CR 115.1 + CR 608.2d: Literal-target siblings remain owned by the
@@ -13454,10 +13468,14 @@ mod tests {
             "a counter on target permanent.",
             "a counter on another target permanent.",
             "a counter on other target permanent.",
+            "a kind of counter on target creature.",
         ] {
-            let (domain, _) = tag::<_, _, OracleError<'_>>("a counter on ")
-                .parse(input)
-                .expect("test input has the chooser prefix");
+            let (domain, _) = alt((
+                tag::<_, _, OracleError<'_>>("a kind of counter on "),
+                tag("a counter on "),
+            ))
+            .parse(input)
+            .expect("test input has the chooser prefix");
             let (target, remainder) = parse_target(domain);
             assert!(
                 !matches!(target, TargetFilter::Any) && remainder == ".",
