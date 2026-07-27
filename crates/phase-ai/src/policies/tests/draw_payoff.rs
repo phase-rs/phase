@@ -15,7 +15,9 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, GameState, TargetSelectionConstraint, WaitingFor,
+};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -1123,6 +1125,128 @@ fn multi_target_engine_with_a_legal_assignment_rewards() {
         score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
     assert_eq!(reason.kind, "draw_payoff_engine_active");
     assert!(delta > 0.0);
+}
+
+/// Adds an AI-controlled creature to the battlefield.
+fn add_ai_creature(state: &mut GameState) {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(state, card_id, AI, "Bear".to_string(), Zone::Battlefield);
+    state
+        .objects
+        .get_mut(&id)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+}
+
+/// A two-target "exchange control of two target permanents controlled by
+/// DIFFERENT players" engine — the execute carries a
+/// `DifferentObjectControllers` cross-target constraint (CR 115.1). The preflight
+/// must honor that constraint, not just the per-slot filters.
+fn constrained_two_target_engine(state: &mut GameState) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        AI,
+        ENGINE_NAME.to_string(),
+        Zone::Battlefield,
+    );
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ExchangeControl {
+            target_a: creature_filter(),
+            target_b: creature_filter(),
+        },
+    );
+    execute.target_constraints = vec![TargetSelectionConstraint::DifferentObjectControllers];
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.trigger_definitions
+        .push(TriggerDefinition::new(TriggerMode::Drawn).execute(execute));
+    id
+}
+
+/// CR 115.1 + CR 603.3d: two permanents controlled by the SAME player cannot
+/// satisfy the engine's `DifferentObjectControllers` constraint, so the trigger
+/// has no legal assignment and is not a live payoff.
+#[test]
+fn constrained_two_target_engine_same_controller_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    constrained_two_target_engine(&mut st);
+    add_ai_creature(&mut st);
+    add_ai_creature(&mut st); // both mine → different-controllers can't be met
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// Control: one permanent per player satisfies `DifferentObjectControllers`, so
+/// the constrained engine is live and the draw is rewarded.
+#[test]
+fn constrained_two_target_engine_different_controllers_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    constrained_two_target_engine(&mut st);
+    add_ai_creature(&mut st);
+    add_opponent_creature(&mut st); // one each → constraint satisfiable
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// A "whenever you draw" trigger with NO execute resolves to a `TriggerNoExecute`
+/// no-op — no payoff — so it is not a live engine.
+#[test]
+fn no_execute_engine_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    permanent_with_trigger(&mut st, Some(TriggerDefinition::new(TriggerMode::Drawn)));
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// A "whenever you draw" trigger whose execute is an unsupported
+/// (`Effect::Unimplemented`) gap node produces no payoff, so it is not credited.
+#[test]
+fn unsupported_execute_engine_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    permanent_with_trigger(
+        &mut st,
+        Some(
+            TriggerDefinition::new(TriggerMode::Drawn).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("draw_payoff_test_gap", "unsupported payoff"),
+            )),
+        ),
+    );
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_no_engine");
+    assert_eq!(delta, 0.0);
 }
 
 // ─── production seam (registry routing) ─────────────────────────────────────

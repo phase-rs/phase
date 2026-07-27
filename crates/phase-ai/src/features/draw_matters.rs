@@ -32,6 +32,7 @@
 //! a disjoint trigger. A card can read on both axes — the overlap is intentional
 //! and the axes stay independent.
 
+use engine::game::ability_utils::ability_definition_supported;
 use engine::game::DeckEntry;
 use engine::types::ability::{AbilityDefinition, Effect, TargetFilter, TriggerDefinition};
 use engine::types::card_type::CoreType;
@@ -146,7 +147,16 @@ pub(crate) fn is_draw_payoff_trigger(t: &TriggerDefinition) -> bool {
     }
     // 3. Exclude a self-referential "when this is drawn" trigger — that fires
     //    from hand on the card itself, not a battlefield engine.
-    !matches!(&t.valid_card, Some(TargetFilter::SelfRef))
+    if matches!(&t.valid_card, Some(TargetFilter::SelfRef)) {
+        return false;
+    }
+    // 4. The payoff must resolve to a real effect. A missing execute or an
+    //    unsupported one (`TriggerNoExecute` / `Effect::Unimplemented`) produces
+    //    no value, so it is not an engine — the same shared support authority the
+    //    live fireability preflight consults.
+    t.execute
+        .as_deref()
+        .is_some_and(ability_definition_supported)
 }
 
 /// True when the draw effect draws the controller cards (you), not an opponent.

@@ -8165,12 +8165,18 @@ pub fn hypothetical_trigger_fireable(
     ) {
         return false;
     }
+    // A trigger with no execute — or an unsupported execute — resolves to a
+    // `TriggerNoExecute` / `Effect::Unimplemented` no-op that produces no payoff,
+    // so it is not a live payoff (the shared support authority decides this).
+    let Some(execute) = def.execute.as_deref() else {
+        return false;
+    };
+    if !super::ability_utils::ability_definition_supported(execute) {
+        return false;
+    }
     // CR 603.3d: a mandatory-target execute with no legal target is removed from
     // the stack rather than producing its effect.
-    match def.execute.as_deref() {
-        Some(execute) => super::ability_utils::execute_targets_satisfiable(state, source, execute),
-        None => true,
-    }
+    super::ability_utils::execute_targets_satisfiable(state, source, execute)
 }
 
 /// Evaluates the cast-payment facts carried either by the event subject or by

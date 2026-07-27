@@ -154,6 +154,31 @@ fn detects_engine_payoff() {
     assert_eq!(f.payoff_count, 3);
 }
 
+/// A "whenever you draw" trigger with NO execute is a `TriggerNoExecute` no-op —
+/// it produces no value, so deck detection must not count it as an engine (else
+/// commitment is inflated for an unsupported payoff).
+#[test]
+fn payoff_without_execute_is_not_counted() {
+    let mut f = face("No-op Engine", CoreType::Creature);
+    f.triggers = vec![TriggerDefinition::new(TriggerMode::Drawn)]; // no execute
+    assert_eq!(detect(&[entry(f, 3)]).payoff_count, 0);
+}
+
+/// A "whenever you draw" trigger whose execute is an unsupported
+/// (`Effect::Unimplemented`) gap node likewise produces no value and is not
+/// counted as an engine.
+#[test]
+fn payoff_with_unsupported_execute_is_not_counted() {
+    let mut f = face("Unsupported Engine", CoreType::Creature);
+    f.triggers = vec![
+        TriggerDefinition::new(TriggerMode::Drawn).execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("draw_payoff_test_gap", "unsupported payoff"),
+        )),
+    ];
+    assert_eq!(detect(&[entry(f, 3)]).payoff_count, 0);
+}
+
 /// Deck-time uses `AbilityScope::Potential`: a modal "choose one — burn / draw"
 /// card whose draw lives in the `else` branch still marks the card as a draw
 /// enabler for the archetype (the policy is the one that must be stricter live).
