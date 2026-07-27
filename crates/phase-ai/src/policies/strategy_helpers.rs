@@ -767,9 +767,10 @@ fn total_poison_from_ward_cost(ctx: &PolicyContext<'_>, ward: &WardCost) -> Opti
                 | engine::game::effects::player_counter::PlayerCounterAdditionPreview::Transformed {
                     count,
                 } => Some(count),
-                // A "players can't get counters" replacement (Solemnity) means
-                // this sub-cost actually gives zero poison — genuinely safe,
-                // not merely unproven.
+                // For poison-quantity projection only, prevention contributes zero counters.
+                // This does not mean the Ward cost is payable: `can_pay_ward_cost` separately
+                // rejects Prevented, ChoiceRequired, and Unsupported previews because the
+                // engine cannot successfully complete or safely project that payment.
                 engine::game::effects::player_counter::PlayerCounterAdditionPreview::Prevented => {
                     Some(0)
                 }
@@ -854,11 +855,28 @@ pub(crate) fn can_pay_ward_cost(
                 .count();
             matching as u32 >= *count
         }
-        // CR 702.21a + CR 122.1: mechanically always payable — no resource
-        // limit on giving yourself more counters (mirrors the engine's own
-        // `can_pay_resolution`). Lethal poison is already rejected by the
-        // aggregate check above, for direct and compound costs alike.
-        WardCost::GetPlayerCounters { .. } => true,
+        // CR 702.21a + CR 122.1 + CR 104.3d: mechanically payable in the ordinary
+        // case — no resource limit on giving yourself more counters — UNLESS a
+        // replacement effect actually prevents the addition (Solemnity) or its
+        // outcome can't be cleanly projected (a live choice or an unmodeled event
+        // rewrite). `costs.rs`'s `AbilityCost::GetPlayerCounters` payment path
+        // treats `Prevented` as a genuinely FAILED payment, not a paused or
+        // zero-cost one — so the AI must decline here too, or it will target into
+        // Solemnity, believe the Ward is safely payable, and have its spell
+        // countered when payment actually fails. Lethal (but payable) poison is
+        // already rejected by the aggregate check above, for direct and compound
+        // costs alike.
+        WardCost::GetPlayerCounters { counter_kind, count } => matches!(
+            engine::game::effects::player_counter::preview_player_counter_addition(
+                ctx.state,
+                ctx.ai_player,
+                ctx.ai_player,
+                *counter_kind,
+                *count,
+            ),
+            engine::game::effects::player_counter::PlayerCounterAdditionPreview::Applied { .. }
+                | engine::game::effects::player_counter::PlayerCounterAdditionPreview::Transformed { .. }
+        ),
         // CR 702.21a: every conjoined sub-cost must be payable. Mana contention
         // between multiple mana sub-costs is approximated (each checked against
         // the full post-spell pool) — rare enough not to warrant exact tracking.

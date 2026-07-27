@@ -1351,4 +1351,92 @@ mod tests {
         };
         assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
     }
+
+    /// CR 702.21a: a "players can't get counters" replacement (Solemnity) means
+    /// the AI's Ward payment will actually FAIL — `costs.rs`'s
+    /// `AbilityCost::GetPlayerCounters` treats `Prevented` as a failed payment,
+    /// not a zero-cost one — so the AI must not target into this believing the
+    /// Ward is safely (and freely) payable.
+    #[test]
+    fn rejects_targeting_ward_with_prevented_player_counter_payment() {
+        let mut scenario = GameScenario::new();
+        let solemnity_id = scenario.add_creature(P0, "Solemnity", 0, 0).id();
+        let mut prevent_def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Prevent);
+        prevent_def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                count: 3,
+            }))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state
+            .objects
+            .get_mut(&solemnity_id)
+            .unwrap()
+            .replacement_definitions = vec![prevent_def].into();
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// CR 702.21a: a `Compound` Ward's sub-costs are conjoined — ALL must be
+    /// payable, so a prevented `GetPlayerCounters` sub-cost must reject the
+    /// whole cost even when its sibling sub-cost (here, a small life payment)
+    /// is perfectly payable on its own. Proves the recursion through
+    /// `Compound`'s `.all(|cost| can_pay_ward_cost(...))`, not just the direct
+    /// leaf case covered by `rejects_targeting_ward_with_prevented_player_counter_payment`.
+    #[test]
+    fn rejects_compound_ward_with_prevented_player_counter_leaf() {
+        let mut scenario = GameScenario::new();
+        let solemnity_id = scenario.add_creature(P0, "Solemnity", 0, 0).id();
+        let mut prevent_def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Prevent);
+        prevent_def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::Compound(vec![
+                WardCost::PayLife(2), // trivially payable on its own (P0 starts at 20 life)
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                    count: 3,
+                },
+            ])))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state
+            .objects
+            .get_mut(&solemnity_id)
+            .unwrap()
+            .replacement_definitions = vec![prevent_def].into();
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
 }
