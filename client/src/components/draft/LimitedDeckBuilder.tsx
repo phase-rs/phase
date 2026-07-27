@@ -268,12 +268,14 @@ export function LimitedDeckBuilder({
       for (const name of names) {
         countMap.set(name, (countMap.get(name) ?? 0) + 1);
       }
+      for (const [name, count] of Object.entries(extra)) {
+        if (count > 0) {
+          countMap.set(name, (countMap.get(name) ?? 0) + count);
+        }
+      }
       const lines: string[] = [];
       for (const [name, count] of countMap) {
         lines.push(`${count} ${name}`);
-      }
-      for (const [name, count] of Object.entries(extra)) {
-        if (count > 0) lines.push(`${count} ${name}`);
       }
       return lines;
     };

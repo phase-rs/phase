@@ -160,7 +160,7 @@ describe("LimitedDeckBuilder", () => {
     render(
       <LimitedDeckBuilder
         view={COPY_VIEW}
-        mainDeck={["Wind Drake"]}
+        mainDeck={["Wind Drake", "Island"]}
         landCounts={{ Island: 2, Plains: 0, Forest: 1 }}
         onAddToDeck={() => {}}
         onRemoveFromDeck={() => {}}
@@ -176,7 +176,7 @@ describe("LimitedDeckBuilder", () => {
       [
         "Deck",
         "1 Wind Drake",
-        "2 Island",
+        "3 Island",
         "1 Forest",
         "",
         "Sideboard",
