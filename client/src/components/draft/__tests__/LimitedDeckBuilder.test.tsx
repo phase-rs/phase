@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { LimitedDeckBuilder } from "../LimitedDeckBuilder";
 
@@ -18,6 +18,10 @@ vi.mock("../../../stores/draftStore", () => ({
       submitDeck: async () => {},
     }),
 }));
+
+afterEach(() => {
+  cleanup();
+});
 
 type BuilderView = NonNullable<NonNullable<Parameters<typeof LimitedDeckBuilder>[0]>["view"]>;
 
@@ -51,6 +55,23 @@ const TEST_VIEW: BuilderView = {
   tournament_format: "Swiss",
   pod_policy: "Competitive",
   pairings: [],
+};
+
+const COPY_VIEW: BuilderView = {
+  ...TEST_VIEW,
+  pool: [
+    ...TEST_VIEW.pool,
+    {
+      instance_id: "card-2",
+      name: "Eager Cadet",
+      set_code: "dmu",
+      collector_number: "1",
+      rarity: "common",
+      colors: ["W"],
+      cmc: 1,
+      type_line: "Creature - Human Soldier",
+    },
+  ],
 };
 
 function Harness() {
@@ -88,5 +109,43 @@ describe("LimitedDeckBuilder", () => {
     fireEvent.click(screen.getByRole("button", { name: /wind drake/i }));
 
     expect(threeDropBucket).toHaveAttribute("aria-valuenow", "1");
+  });
+
+  it("copies the current deck list to the clipboard", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(
+      <LimitedDeckBuilder
+        view={COPY_VIEW}
+        mainDeck={["Wind Drake"]}
+        landCounts={{ Island: 2, Plains: 0, Forest: 1 }}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy Deck List" }));
+
+    expect(writeText).toHaveBeenCalledWith(
+      [
+        "Deck",
+        "1 Wind Drake",
+        "2 Island",
+        "1 Forest",
+        "",
+        "Sideboard",
+        "1 Eager Cadet",
+      ].join("\n"),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Copied!" })).toBeInTheDocument(),
+    );
   });
 });
