@@ -3333,6 +3333,7 @@ fn detect_condition_if(
     // probes below are deliberately type-agnostic.
     if evidence.has_slot("condition")
         || evidence.has_slot("constraint")
+        || evidence.has_slot("target_condition")
         || evidence.has_slot("unless_filter")
         || evidence.has_slot("unless_pay")
         || evidence.has_slot("if_clause")

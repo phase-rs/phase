@@ -615,6 +615,7 @@ mod issue_6499_flickering_ward_protection_exemption;
 mod issue_6500_loreseekers_stone_hand_cost;
 mod issue_654_stridehangar_automaton;
 mod issue_6566_granted_leave_exile;
+mod issue_6634_aven_courier;
 mod issue_6643_party_dude_opponents_attacked;
 mod issue_680_shalai_and_hallar_forgotten_ancient;
 mod issue_680_shalai_upkeep_move;

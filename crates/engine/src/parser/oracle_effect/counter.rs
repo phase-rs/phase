@@ -7,8 +7,9 @@ use nom::sequence::terminated;
 use nom::Parser;
 
 use crate::types::ability::{
-    CounterMoveSelection, CounterTransferMode, DoublePTMode, DoubleTarget, Effect, MultiTargetSpec,
-    ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
+    ChosenCounterCountCondition, Comparator, CounterMoveSelection, CounterTransferMode,
+    DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, ObjectScope, QuantityExpr, QuantityRef,
+    TargetFilter,
 };
 use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::mana::ManaColor;
@@ -387,26 +388,64 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
     Some(after_sep)
 }
 
-/// CR 122.1 + CR 122.6: "[a[n]] [additional] counter of that kind on
-/// <anaphor>" → `Effect::PutChosenCounter` on the anaphoric object
-/// (`ParentTarget`). Reads the kind chosen by a preceding `ChooseCounterKind`
-/// at resolution; adds exactly one counter (The Caves of Androzani II/III).
-/// Combinator-based, fully consuming the residual. `input` is the clause with
-/// the leading "put " already stripped.
+/// CR 608.2c + CR 122.1 + CR 122.6: "[a[n]] [additional] counter of that kind
+/// on <recipient> [if it doesn't have a counter of that kind on it]" →
+/// `Effect::PutChosenCounter`. Anaphoric recipients bind to `ParentTarget` (The
+/// Caves of Androzani); declared typed recipients use the shared target parser
+/// (Aven Courier). A source-self recipient remains unsupported because its
+/// producer may be a random counter-kind choice that is not yet bound to
+/// resolution state (Crystalline Giant). The optional suffix becomes an
+/// explicit EQ-zero predicate over each resolved target's count of the chosen
+/// kind. Combinator-based and fully consuming; `input` has already had the
+/// leading "put " stripped.
 pub(super) fn try_parse_put_chosen_counter(input: &str) -> Option<Effect> {
-    let parsed = |i| -> OracleResult<'_, ()> {
-        let (i, _) = opt(alt((tag("an "), tag("a ")))).parse(i)?;
-        let (i, _) = opt(tag("additional ")).parse(i)?;
-        let (i, _) = tag("counter of that kind on ").parse(i)?;
-        let (i, _) = alt((tag("it"), tag("that permanent"), tag("that creature"))).parse(i)?;
-        let (i, _) = opt(tag(".")).parse(i)?;
-        let (i, _) = eof.parse(i)?;
-        Ok((i, ()))
+    let (recipient_text, _) = (
+        opt(alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))),
+        opt(tag("additional ")),
+        tag("counter of that kind on "),
+    )
+        .parse(input.trim())
+        .ok()?;
+
+    let (target, remainder) = if let Ok((remainder, _)) = alt((
+        tag::<_, _, OracleError<'_>>("that permanent"),
+        tag("that creature"),
+        tag("it"),
+    ))
+    .parse(recipient_text)
+    {
+        (TargetFilter::ParentTarget, remainder)
+    } else {
+        let (target, remainder) = parse_target(recipient_text);
+        if matches!(target, TargetFilter::Any | TargetFilter::SelfRef) {
+            return None;
+        }
+        (target, remainder)
     };
-    parsed(input.trim()).ok()?;
+
+    let target_condition = |i| -> OracleResult<'_, ChosenCounterCountCondition> {
+        let (i, _) = tag("if ").parse(i)?;
+        let (i, _) = alt((tag("it doesn't have "), tag("it does not have "))).parse(i)?;
+        let (i, _) = alt((tag("a counter"), tag("one or more counters"))).parse(i)?;
+        let (i, _) = tag(" of that kind on it").parse(i)?;
+        Ok((
+            i,
+            ChosenCounterCountCondition {
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        ))
+    };
+    let mut suffix = all_consuming((
+        opt(target_condition),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ));
+    let (_, (target_condition, _)) = suffix.parse(remainder.trim_start()).ok()?;
+
     Some(Effect::PutChosenCounter {
-        target: TargetFilter::ParentTarget,
+        target,
         count: QuantityExpr::Fixed { value: 1 },
+        target_condition,
     })
 }
 
@@ -1509,10 +1548,217 @@ fn parse_mana_color_from_text(text: &str) -> Option<ManaColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TypedFilter;
+    use crate::types::ability::TargetChoiceTiming;
+    use crate::types::{ControllerRef, FilterProp, TypedFilter};
 
     fn default_ctx() -> ParseContext {
         ParseContext::default()
+    }
+
+    /// CR 608.2c + CR 122.1: Aven Courier's destination and chosen-counter
+    /// absence predicate lower together into the existing placement effect.
+    #[test]
+    fn put_chosen_counter_parses_typed_target_and_absence_predicate() {
+        let effect = try_parse_put_chosen_counter(
+            "a counter of that kind on target permanent you control if it doesn't have a counter of that kind on it.",
+        )
+        .expect("Aven Courier put clause must parse");
+        let Effect::PutChosenCounter {
+            target: TargetFilter::Typed(filter),
+            count,
+            target_condition: Some(condition),
+        } = effect
+        else {
+            panic!("expected conditional PutChosenCounter, got {effect:?}");
+        };
+        assert_eq!(
+            filter.type_filters,
+            vec![crate::types::ability::TypeFilter::Permanent]
+        );
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(condition.comparator, Comparator::EQ);
+        assert_eq!(condition.rhs, QuantityExpr::Fixed { value: 0 });
+    }
+
+    /// CR 608.2c + CR 122.6: The Caves of Androzani's anaphoric,
+    /// condition-free sibling keeps its ParentTarget binding and legacy shape.
+    #[test]
+    fn put_chosen_counter_preserves_anaphoric_condition_free_form() {
+        let effect =
+            try_parse_put_chosen_counter("an additional counter of that kind on that permanent.")
+                .expect("Caves put clause must parse");
+        assert!(matches!(
+            effect,
+            Effect::PutChosenCounter {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                target_condition: None,
+            }
+        ));
+    }
+
+    /// Crystalline Giant's random counter-kind producer is not represented by
+    /// `ChoiceType::CounterKind`, so its source-self consumer must stay outside
+    /// the supported `PutChosenCounter` grammar until that binding exists.
+    #[test]
+    fn put_chosen_counter_rejects_unbound_source_self_consumer() {
+        assert!(
+            try_parse_put_chosen_counter("a counter of that kind on ~.").is_none(),
+            "an unbound random counter kind must remain a strict parser gap"
+        );
+    }
+
+    /// CR 115.1d + CR 608.2c + CR 608.2d: Full-card reach guard for Aven
+    /// Courier. The source-domain choice is made at resolution, while the
+    /// destination is the sole stack-timed target in the following clause.
+    #[test]
+    fn aven_courier_full_card_separates_stack_target_from_resolution_choice() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::triggers::TriggerMode;
+
+        const ORACLE: &str = "Flying\nWhenever this creature attacks, choose a counter on a permanent you control. Put a counter of that kind on target permanent you control if it doesn't have a counter of that kind on it.";
+        let parsed = parse_oracle_text(
+            ORACLE,
+            "Aven Courier",
+            &["Flying".to_string()],
+            &["Creature".to_string()],
+            &["Bird".to_string(), "Advisor".to_string()],
+        );
+        assert!(
+            parsed.parse_warnings.iter().all(|warning| !matches!(
+                warning,
+                crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                    detector,
+                    ..
+                } if detector == "Condition_If"
+            )),
+            "the typed target_condition must discharge the Condition_If audit: {:?}",
+            parsed.parse_warnings
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == TriggerMode::Attacks)
+            .expect("Aven must have an attack trigger");
+        let choose = trigger
+            .execute
+            .as_ref()
+            .expect("attack trigger has an effect");
+        assert_eq!(
+            choose.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "the untargeted counter-kind choice is made during resolution"
+        );
+        assert!(matches!(
+            choose.effect.as_ref(),
+            Effect::ChooseCounterKind {
+                target: TargetFilter::Typed(filter),
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Permanent]
+                && filter.controller == Some(ControllerRef::You)
+        ));
+
+        let put = choose
+            .sub_ability
+            .as_ref()
+            .expect("the destination placement follows the choice");
+        assert_eq!(
+            put.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "the printed target is declared when the trigger goes on the stack"
+        );
+        assert!(matches!(
+            put.effect.as_ref(),
+            Effect::PutChosenCounter {
+                target: TargetFilter::Typed(filter),
+                target_condition: Some(ChosenCounterCountCondition {
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                }),
+                ..
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Permanent]
+                && filter.controller == Some(ControllerRef::You)
+        ));
+    }
+
+    /// CR 207.2c + CR 608.2c + CR 608.2d + CR 122.1: Contractual Safeguard's
+    /// Addendum effect remains conditional, while its following counter-kind
+    /// choice is an untargeted resolution-time choice over creatures the
+    /// controller controls. The final instruction applies that chosen kind to
+    /// each other creature in the same domain.
+    #[test]
+    fn contractual_safeguard_full_card_preserves_addendum_and_counter_choice_chain() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::AbilityCondition;
+        use crate::types::phase::Phase;
+
+        const ORACLE: &str = "Addendum — If you cast this spell during your main phase, put a shield counter on a creature you control. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)\nChoose a kind of counter on a creature you control. Put a counter of that kind on each other creature you control.";
+        let parsed = parse_oracle_text(
+            ORACLE,
+            "Contractual Safeguard",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert_eq!(
+            parsed.abilities.len(),
+            1,
+            "the three instructions form one sequential spell ability"
+        );
+
+        let shield = &parsed.abilities[0];
+        assert_eq!(
+            shield.condition,
+            Some(AbilityCondition::CastDuringPhase {
+                phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            }),
+            "Addendum still gates the shield-counter instruction"
+        );
+        assert!(matches!(
+            shield.effect.as_ref(),
+            Effect::PutCounter {
+                counter_type: CounterType::Shield,
+                target: TargetFilter::Typed(filter),
+                ..
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Creature]
+                && filter.controller == Some(ControllerRef::You)
+        ));
+
+        let choose = shield
+            .sub_ability
+            .as_ref()
+            .expect("the counter-kind choice follows the Addendum instruction");
+        assert_eq!(
+            choose.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "the choice uses no printed target and is made during resolution"
+        );
+        assert!(matches!(
+            choose.effect.as_ref(),
+            Effect::ChooseCounterKind {
+                target: TargetFilter::Typed(filter),
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Creature]
+                && filter.controller == Some(ControllerRef::You)
+        ));
+
+        let put = choose
+            .sub_ability
+            .as_ref()
+            .expect("placing the chosen counter follows the choice");
+        assert!(matches!(
+            put.effect.as_ref(),
+            Effect::PutChosenCounter {
+                target: TargetFilter::Typed(filter),
+                target_condition: None,
+                ..
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Creature]
+                && filter.controller == Some(ControllerRef::You)
+                && filter.properties.contains(&FilterProp::Another)
+        ));
+        assert!(
+            put.sub_ability.is_none(),
+            "the card has no further instruction after the mass placement"
+        );
     }
 
     #[test]

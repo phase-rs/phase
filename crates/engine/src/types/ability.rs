@@ -624,8 +624,8 @@ pub enum ChoiceType {
     /// Androzani II/III). The concrete `options` list is enumerated at
     /// resolution from the target object's counters (mirroring the runtime-baked
     /// `Keyword { options }` template idiom), so the same interactive
-    /// `WaitingFor::NamedChoice` seam renders it. The chosen kind persists as
-    /// `ChosenAttribute::Counter` on the source for a downstream
+    /// `WaitingFor::NamedChoice` seam renders it. The chosen kind is retained
+    /// only in resolution-local state for a downstream
     /// `Effect::PutChosenCounter` ("put an additional counter of that kind").
     CounterKind {
         options: Vec<CounterType>,
@@ -1482,8 +1482,8 @@ pub enum ChoiceValue {
     /// `RemoveChosenKeyword` resolution.
     Keyword(Keyword),
     /// CR 608.2d + CR 122.1: typed counter-kind choice from a
-    /// `ChoiceType::CounterKind` option list (The Caves of Androzani). Persisted
-    /// as `ChosenAttribute::Counter` for later `PutChosenCounter` resolution.
+    /// `ChoiceType::CounterKind` option list (The Caves of Androzani). Retained
+    /// only for the current resolution for later `PutChosenCounter` resolution.
     Counter(CounterType),
 }
 
@@ -10089,6 +10089,16 @@ pub enum ExiledSpellRider {
     BecomePlotted,
 }
 
+/// CR 608.2c + CR 122.1: A resolution-time predicate over the number of
+/// counters of the kind selected by a preceding `ChooseCounterKind` instruction.
+/// `rhs` is explicit so "no counter of that kind" (`EQ 0`) and future numeric
+/// thresholds share one parameterized representation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChosenCounterCountCondition {
+    pub comparator: Comparator,
+    pub rhs: QuantityExpr,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
@@ -11236,25 +11246,28 @@ pub enum Effect {
     /// of the distinct counter kinds currently on `target`. Zero kinds → no-op
     /// (CR 608.2d "can't choose an impossible option"); one kind → auto-select
     /// (no prompt); two or more → an interactive `WaitingFor::NamedChoice`
-    /// (`ChoiceType::CounterKind`). The chosen kind persists as
-    /// `ChosenAttribute::Counter` on the source for a following
-    /// `Effect::PutChosenCounter`. Building block for The Caves of Androzani
-    /// II/III (member-driven `repeat_for` over each non-Saga permanent).
+    /// (`ChoiceType::CounterKind`). The chosen kind is retained only in
+    /// resolution-local state for a following `Effect::PutChosenCounter`.
+    /// Building block for The Caves of Androzani II/III (member-driven
+    /// `repeat_for` over each non-Saga permanent).
     ChooseCounterKind {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
     /// CR 122.1 + CR 122.6: "put an additional counter of that kind on that
-    /// permanent" — read the source's `ChosenAttribute::Counter` and add `count`
-    /// counters of that kind to `target`. No-op when no counter kind was chosen
-    /// (the preceding `ChooseCounterKind` was skipped because the object had no
-    /// counters). Mirrors the `ChosenAttribute::Keyword` → `RemoveChosenKeyword`
-    /// consume precedent.
+    /// permanent" — read the resolution-local counter-kind choice and add
+    /// `count` counters of that kind to `target`. No-op when no counter kind was
+    /// chosen (the preceding `ChooseCounterKind` was skipped because the object
+    /// had no counters).
     PutChosenCounter {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 608.2c: Optional eligibility predicate evaluated against the
+        /// resolved target's count of the chosen counter kind before placement.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_condition: Option<ChosenCounterCountCondition>,
     },
     /// CR 122.1: Place counters on all objects matching a filter (no targeting).
     PutCounterAll {
@@ -15177,8 +15190,15 @@ impl Effect {
             Effect::PutCounter { count, .. } => {
                 f(count);
             }
-            Effect::PutChosenCounter { count, .. } => {
+            Effect::PutChosenCounter {
+                count,
+                target_condition,
+                ..
+            } => {
                 f(count);
+                if let Some(condition) = target_condition {
+                    f(&condition.rhs);
+                }
             }
             Effect::PutCounterAll { count, .. } => {
                 f(count);
@@ -23449,6 +23469,25 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn put_chosen_counter_quantity_visitor_includes_target_condition_rhs() {
+        let count = QuantityExpr::Fixed { value: 1 };
+        let rhs = QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        };
+        let effect = Effect::PutChosenCounter {
+            target: TargetFilter::ParentTarget,
+            count: count.clone(),
+            target_condition: Some(ChosenCounterCountCondition {
+                comparator: Comparator::EQ,
+                rhs: rhs.clone(),
+            }),
+        };
+        let mut visited = Vec::new();
+        effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![count, rhs]);
+    }
 
     /// CR 109.1: `with_own_cast_exclusion` injects the `Another` marker and
     /// `peel_own_cast_exclusion` is its exact dual across the three inner shapes

@@ -759,6 +759,22 @@ impl<'a> FilterContext<'a> {
         }
     }
 
+    /// CR 608.2c: Full ability context with an explicit object chosen by an
+    /// earlier instruction as the recipient-relative authority for "other."
+    pub fn from_ability_with_recipient(
+        ability: &'a ResolvedAbility,
+        recipient_id: ObjectId,
+    ) -> Self {
+        Self {
+            source_id: ability.source_id,
+            source_controller: Some(ability.controller),
+            ability: Some(ability),
+            trigger_source: ability.trigger_source.as_ref(),
+            recipient_id: Some(recipient_id),
+            scoped_iteration_player: None,
+        }
+    }
+
     /// CR 109.4: Full ability context with an explicit controller override.
     /// Use when the filter controller differs from `ability.controller`
     /// (e.g., "creature that player controls" mass-move dispatched to a target

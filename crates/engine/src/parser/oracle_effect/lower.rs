@@ -1632,6 +1632,19 @@ pub(super) fn change_zone_selects_battlefield_permanent(
 }
 
 pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
+    if let Effect::ChooseCounterKind { target } = &clause_ir.parsed.effect {
+        let lower = clause_ir
+            .source
+            .fragment()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        // CR 115.1 + CR 608.2d: "choose a counter on a permanent you
+        // control" is an untargeted choice made while the ability resolves.
+        // Context references are already bound and need no selection slot.
+        if !nom_primitives::scan_contains(&lower, "target ") && !target.is_context_ref() {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
     if let Effect::PutCounter { target, .. } = &clause_ir.parsed.effect {
         let lower = clause_ir
             .source
