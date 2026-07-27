@@ -1343,6 +1343,7 @@ pub(crate) fn build_ability_from_actions(
                 static_abilities: vec![],
                 duration: None,
                 target: None,
+                end_cost: None,
             };
             let mut ability =
                 AbilityDefinition::new(kind, parent_effect).with_modal(modal, mode_abilities);

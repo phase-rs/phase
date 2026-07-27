@@ -1682,6 +1682,7 @@ fn trigger_life_of_the_party_etb_goads_created_tokens() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(*target, Some(TargetFilter::LastCreated));
             assert_eq!(*duration, Some(Duration::Permanent));

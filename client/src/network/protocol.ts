@@ -1,4 +1,5 @@
 import type {
+  EndContinuousEffectOffer,
   GameAction,
   GameEvent,
   GameLogEntry,
@@ -25,6 +26,7 @@ import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
 export interface LegalActionsWire {
   legalActions: GameAction[];
   autoPassRecommended?: boolean;
+  endContinuousEffectOffers?: EndContinuousEffectOffer[];
   manaPaymentShortcutActions?: GameAction[];
   legalActionsByObject?: Record<string, ObjectAction[]>;
   spellCosts?: Record<string, ManaCost>;
@@ -36,6 +38,7 @@ export function legalActionsToWire(result: LegalActionsResult): LegalActionsWire
   return {
     legalActions: result.actions,
     autoPassRecommended: result.autoPassRecommended,
+    endContinuousEffectOffers: result.endContinuousEffectOffers ?? [],
     manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     legalActionsByObject: result.legalActionsByObject,
     spellCosts: result.spellCosts,
@@ -48,6 +51,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
   return {
     actions: wire.legalActions,
     autoPassRecommended: wire.autoPassRecommended ?? false,
+    endContinuousEffectOffers: wire.endContinuousEffectOffers ?? [],
     manaPaymentShortcutActions: wire.manaPaymentShortcutActions ?? [],
     legalActionsByObject: wire.legalActionsByObject,
     spellCosts: wire.spellCosts,

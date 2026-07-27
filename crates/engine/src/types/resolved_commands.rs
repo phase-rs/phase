@@ -290,11 +290,12 @@ pub enum ResolvedDelayedTriggerReplayInvariantError {
 /// - `effect.id`, taken from `GameState::next_continuous_effect_id`, which is
 ///   the handle later duration/recipient binding addresses the effect by.
 ///
-/// Both are carried as post-draw high-water marks
-/// (`resulting_next_continuous_effect_id` / `resulting_next_timestamp`) so
+/// All allocator draws are carried as post-draw high-water marks
+/// (`resulting_next_continuous_effect_id`,
+/// `resulting_next_end_effect_group_id`, and `resulting_next_timestamp`) so
 /// replay advances the allocators past the installed values exactly the way the
 /// token-birth family advances `next_object_id`, rather than leaving a
-/// replayed state that would hand the same id or timestamp out twice.
+/// replayed state that would hand the same identity or timestamp out twice.
 ///
 /// `expected_installed_count` mirrors the delayed-trigger command: the live
 /// length of `GameState::transient_continuous_effects` before the push, which
@@ -304,6 +305,11 @@ pub struct ResolvedContinuousEffectCommand {
     pub effect: TransientContinuousEffect,
     pub expected_installed_count: usize,
     pub resulting_next_continuous_effect_id: u64,
+    /// CR 116.2c: post-draw high-water for the optional termination group
+    /// carried by `effect`. Defaults to `0` for journals written before
+    /// pay-to-end permissions existed; those commands cannot carry a group.
+    #[serde(default)]
+    pub resulting_next_end_effect_group_id: u64,
     pub resulting_next_timestamp: u64,
     pub cause: RulesExecutionNodeRef,
 }
@@ -320,6 +326,10 @@ pub enum ResolvedContinuousEffectReplayInvariantError {
     DuplicateEffectId(u64),
     #[error("continuous-effect id {id} is not below its recorded high-water {high_water}")]
     IdAboveHighWater { id: u64, high_water: u64 },
+    #[error(
+        "continuous-effect termination group {group} is not below its recorded high-water {high_water}"
+    )]
+    EndEffectGroupAboveHighWater { group: u64, high_water: u64 },
     #[error(
         "continuous-effect timestamp {timestamp} is not below its recorded high-water {high_water}"
     )]
@@ -2826,12 +2836,21 @@ impl ResolvedRulesJournal {
             }
             ResolvedRulesCommand::ContinuousEffectInstall(command) => {
                 // CR 613.7b: the effect's timestamp was drawn when it was
-                // created, so it — and the effect id drawn alongside it — must
-                // lie strictly below the high-water the draw left behind, or the
-                // receipt describes an allocation that never happened.
+                // created, so it — the effect id drawn alongside it, and any CR
+                // 116.2c termination-group identity — must lie strictly below
+                // the high-water the draw left behind, or the receipt describes
+                // an allocation that never happened.
+                let end_group_above_high_water = command
+                    .effect
+                    .end_permission
+                    .as_ref()
+                    .is_some_and(|permission| {
+                        permission.group.0 >= command.resulting_next_end_effect_group_id
+                    });
                 if entry.node != command.cause
                     || command.effect.id >= command.resulting_next_continuous_effect_id
                     || command.effect.timestamp >= command.resulting_next_timestamp
+                    || end_group_above_high_water
                 {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "continuous-effect install command has an impossible allocator receipt, \

@@ -771,6 +771,26 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             Ordering::Equal
         }
+        // CR 116.2c: the group key is the semantic identity, followed by the
+        // engine-authored display payload so this remains a true total order
+        // over every `GameAction` field even for forged wire actions.
+        GameAction::EndContinuousEffect {
+            group: a0,
+            source_name: a1,
+            cost: a2,
+        } => {
+            let GameAction::EndContinuousEffect {
+                group: b0,
+                source_name: b1,
+                cost: b2,
+            } = b
+            else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+                .then_with(|| cmp_val(a1, b1))
+                .then_with(|| cmp_val(a2, b2))
+        }
         GameAction::DiscoverChoice { choice: a0 } => {
             let GameAction::DiscoverChoice { choice: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
@@ -1617,8 +1637,9 @@ mod tests {
     };
     use crate::game::combat::AttackTarget;
     use crate::types::actions::{MayTriggerAutoChoiceOp, PrecastCopyShortcutResponse};
-    use crate::types::game_state::{MayTriggerAutoChoiceKey, MayTriggerOrigin};
+    use crate::types::game_state::{EndEffectGroupId, MayTriggerAutoChoiceKey, MayTriggerOrigin};
     use crate::types::identifiers::ObjectId;
+    use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
 
     fn assert_distinct_order(a: GameAction, b: GameAction) {
@@ -1628,6 +1649,24 @@ mod tests {
 
     #[test]
     fn newer_action_variants_compare_their_payloads() {
+        assert_distinct_order(
+            GameAction::EndContinuousEffect {
+                group: EndEffectGroupId(1),
+                source_name: "Calming Licid".to_string(),
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 0,
+                },
+            },
+            GameAction::EndContinuousEffect {
+                group: EndEffectGroupId(1),
+                source_name: "Calming Licid".to_string(),
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                },
+            },
+        );
         assert_distinct_order(
             GameAction::ChooseMeldPair {
                 source_id: ObjectId(1),

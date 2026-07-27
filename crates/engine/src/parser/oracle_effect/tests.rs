@@ -13630,6 +13630,7 @@ fn targeted_keyword_choice_grant_uses_target_only_then_choose_one_of() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } = &*branch.effect
         else {
             panic!(
@@ -13691,6 +13692,7 @@ fn golem_artisan_three_way_keyword_choice_grant_has_no_controller_restriction() 
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } = &*branch.effect
         else {
             panic!(
@@ -14345,6 +14347,7 @@ fn effect_target_graveyard_spell_gains_flashback_until_end_of_turn() {
             target: Some(TargetFilter::Or { filters }),
             static_abilities,
             duration,
+            end_cost: _,
         } => {
             assert_eq!(filters.len(), 2);
             for filter in filters {
@@ -14418,6 +14421,7 @@ fn self_cost_graveyard_keyword_grants_absorb_cost_clarification() {
             static_abilities,
             duration,
             target: Some(_),
+            end_cost: _,
         } = &*def.effect
         else {
             panic!("Expected GenericEffect for {text:?}, got {:?}", def.effect);
@@ -14476,6 +14480,7 @@ fn effect_target_graveyard_card_gains_escape_compound_cost() {
             static_abilities,
             duration,
             target: Some(target),
+            end_cost: _,
         } = &*def.effect
         else {
             panic!(
@@ -14675,6 +14680,7 @@ fn effect_target_noncreature_artifact_becomes_dynamic_artifact_creature_until_eo
         target: Some(TargetFilter::Typed(tf)),
         static_abilities,
         duration: Some(Duration::UntilEndOfTurn),
+        end_cost: _,
     } = e
     else {
         panic!("expected UEOT GenericEffect, got {e:?}");
@@ -14717,6 +14723,7 @@ fn effect_target_enchantment_becomes_creature_with_dynamic_base_pt() {
         target: Some(TargetFilter::Typed(tf)),
         static_abilities,
         duration: Some(Duration::Permanent),
+        end_cost: _,
     } = e
     else {
         panic!("expected permanent GenericEffect, got {e:?}");
@@ -14950,6 +14957,7 @@ fn effect_becomes_color_and_attacks_if_able_chains_requirement() {
             target: Some(TargetFilter::Typed(tf)),
             static_abilities,
             duration: Some(Duration::UntilEndOfTurn),
+            end_cost: _,
         } if tf.type_filters.contains(&TypeFilter::Creature)
             && static_abilities.len() == 1
             && static_abilities[0]
@@ -14991,6 +14999,7 @@ fn target_creature_attacks_if_able_binds_to_parent_target() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
             assert!(
@@ -15023,6 +15032,7 @@ fn target_creature_attacks_this_combat_if_able_binds_with_combat_duration() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(*duration, Some(Duration::UntilEndOfCombat));
             assert!(
@@ -20019,6 +20029,7 @@ fn cant_be_activated_effect_standalone_targets_creature() {
             static_abilities,
             target,
             duration,
+            end_cost: _,
         } => {
             assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
             assert_eq!(static_abilities.len(), 1);
@@ -20190,6 +20201,7 @@ fn cant_be_regenerated_effect_standalone_targets_creature() {
         static_abilities,
         target,
         duration,
+        end_cost: _,
     } = &*def.effect
     else {
         panic!("expected GenericEffect, got {:?}", def.effect);
@@ -20283,6 +20295,7 @@ fn cant_be_regenerated_damage_rider_incinerate() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*sub.effect
     else {
         panic!("expected GenericEffect rider, got {:?}", sub.effect);
@@ -20446,6 +20459,7 @@ fn chain_has_cant_be_regenerated_rider(def: &crate::types::ability::AbilityDefin
                 static_abilities,
                 duration: Some(Duration::UntilEndOfTurn),
                 target: Some(TargetFilter::TrackedSet { id: TrackedSetId(0) }),
+                end_cost: _,
             } if static_abilities.first().is_some_and(|sd| {
                 matches!(sd.mode, StaticMode::CantBeRegenerated)
                     && sd.affected == Some(TargetFilter::ParentTarget)
@@ -22767,6 +22781,22 @@ fn dominating_licid_activation_is_not_optional() {
     assert!(
         !ability_tree_has_optional(&def),
         "no sub_ability in the licid chain may carry optional=true"
+    );
+    let Effect::GenericEffect { end_cost, .. } = def.effect.as_ref() else {
+        panic!(
+            "the Licid animation must lower to the continuous-effect-producing \
+             GenericEffect, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(
+        *end_cost,
+        Some(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        }),
+        "CR 116.2c: the later special-action cost must be bound to the exact \
+         continuous effect installed by this activation"
     );
 }
 
@@ -27279,6 +27309,7 @@ fn have_redirection_filter_subject_ally_creatures_gain_first_strike() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*def.effect
     else {
         panic!("expected GenericEffect, got {:?}", def.effect);
@@ -39215,6 +39246,7 @@ fn the_token_plain_anaphor_after_token_creator_preserves_duration() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(*target, Some(TargetFilter::LastCreated));
             assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
@@ -39263,6 +39295,7 @@ fn copy_token_that_token_anaphor_rewrites_generic_effect_to_last_created() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(*target, Some(TargetFilter::LastCreated));
             assert_eq!(*duration, Some(Duration::Permanent));
@@ -39295,6 +39328,7 @@ fn token_anaphor_preserves_explicit_until_end_of_turn_duration() {
             duration,
             target,
             static_abilities,
+            end_cost: _,
         } => {
             assert_eq!(*target, Some(TargetFilter::LastCreated));
             assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
@@ -39328,6 +39362,7 @@ fn rewrite_recognizer_accepts_this_token_prefix() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(target, Some(TargetFilter::LastCreated));
             assert_eq!(duration, Some(Duration::Permanent));
@@ -39388,6 +39423,7 @@ fn rewrite_recognizer_accepts_the_tokens_goaded_prefix() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(target, Some(TargetFilter::LastCreated));
             assert_eq!(duration, Some(Duration::Permanent));
@@ -43301,6 +43337,7 @@ fn source_and_other_cant_be_blocked_splits_into_two_grants() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = def.effect.as_ref()
     else {
         panic!("expected primary GenericEffect, got {:?}", def.effect);
@@ -43330,6 +43367,7 @@ fn source_and_other_cant_be_blocked_splits_into_two_grants() {
         static_abilities: sub_statics,
         duration: sub_duration,
         target: Some(sub_target),
+        end_cost: _,
     } = other.effect.as_ref()
     else {
         panic!(
@@ -48028,6 +48066,7 @@ fn dining_car_chaos_body_parses_reduce_activated_ability_cost() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &effect
     else {
         panic!("expected GenericEffect, got {effect:?}");

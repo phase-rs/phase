@@ -309,6 +309,9 @@ pub enum ServerMessage {
         legal_actions: Vec<GameAction>,
         #[serde(default)]
         auto_pass_recommended: bool,
+        /// Ordered CR 116.2c offers projected by the engine for direct rendering.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        end_continuous_effect_offers: Vec<GameAction>,
         /// Exact engine-authored actions for the deterministic mana-payment shortcut.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mana_payment_shortcut_actions: Vec<GameAction>,
@@ -351,6 +354,9 @@ pub enum ServerMessage {
         legal_actions: Vec<GameAction>,
         #[serde(default)]
         auto_pass_recommended: bool,
+        /// Ordered CR 116.2c offers projected by the engine for direct rendering.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        end_continuous_effect_offers: Vec<GameAction>,
         /// Exact engine-authored actions for the deterministic mana-payment shortcut.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mana_payment_shortcut_actions: Vec<GameAction>,
@@ -977,6 +983,14 @@ mod tests {
     fn server_message_game_started_with_opponent_name_roundtrips() {
         let state = GameState::new_two_player(42);
         let action = GameAction::PassPriority;
+        let end_offer = GameAction::EndContinuousEffect {
+            group: engine::types::game_state::EndEffectGroupId(8),
+            source_name: "Calming Licid".to_string(),
+            cost: ManaCost::Cost {
+                shards: vec![engine::types::mana::ManaCostShard::White],
+                generic: 0,
+            },
+        };
         let interaction_action_id = engine::game::interaction::interaction_action_id(&action);
         let viewer_interaction =
             engine::game::interaction::derive_viewer_interaction(&state, &state, PlayerId(0));
@@ -988,6 +1002,7 @@ mod tests {
             player_names: vec!["Me".to_string(), "Opponent".to_string()],
             legal_actions: vec![action.clone()],
             auto_pass_recommended: false,
+            end_continuous_effect_offers: vec![end_offer.clone()],
             mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::from([(
@@ -1010,6 +1025,7 @@ mod tests {
                 opponent_name,
                 player_names,
                 legal_actions,
+                end_continuous_effect_offers,
                 legal_actions_by_object,
                 viewer_interaction: decoded_viewer_interaction,
                 ..
@@ -1018,6 +1034,7 @@ mod tests {
                 assert_eq!(opponent_name, Some("Opponent".to_string()));
                 assert_eq!(player_names.len(), 2);
                 assert_eq!(legal_actions.len(), 1);
+                assert_eq!(end_continuous_effect_offers, vec![end_offer]);
                 assert_eq!(decoded_viewer_interaction, viewer_interaction);
                 assert_eq!(
                     legal_actions_by_object[&engine::types::identifiers::ObjectId(7)][0]
@@ -1040,6 +1057,7 @@ mod tests {
             player_names: vec![],
             legal_actions: vec![],
             auto_pass_recommended: false,
+            end_continuous_effect_offers: vec![],
             mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
