@@ -18,12 +18,17 @@ use engine::game::derived::derive_display_state;
 use engine::game::derived_views::{derive_views, DerivedViews};
 use engine::game::filter_state_for_viewer;
 use engine::game::game_object::{AttachTarget, GameObject};
+use engine::game::interaction::{derive_viewer_interaction, resolve_interaction_response};
 use engine::game::turn_control;
 use engine::types::ability::TargetRef;
 use engine::types::card::CardFace;
 use engine::types::game_state::{
     GameState, ManaChoice, ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction,
     ShardChoice, StackEntryKind, WaitingFor,
+};
+use engine::types::interaction::{
+    InteractionChoice, InteractionOpportunityResponse, InteractionPresentationSurface,
+    InteractionResponse, InteractionSubmission, ViewerInteraction,
 };
 use engine::types::mana::{ManaColor as EngineManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
@@ -134,6 +139,20 @@ pub struct PreparedManabrewSnapshot {
     /// object here is what lets `build_prompt` construct the `CardDto` later,
     /// where a `CardTextLookup` is finally in scope.
     pub source_card_object: Option<GameObject>,
+    /// The engine's own projection of what this viewer may answer right now.
+    ///
+    /// Captured here because it is derivable only from **raw** state, which
+    /// `build_prompt_input` no longer has: `derive_viewer_interaction` reads
+    /// authorization and capability identity from the authoritative state and
+    /// every presentation surface from the filtered one, and collapsing that to
+    /// a single filtered state would silently change what the viewer is told.
+    ///
+    /// Derived unconditionally rather than on demand. One projection per prompt
+    /// is proportionate — a prompt is a human decision point, not a search-tree
+    /// node — and making it conditional would mean deciding *here* which waiting
+    /// states the generic path serves, which is precisely the per-variant
+    /// bookkeeping this projection exists to remove.
+    pub interaction: ViewerInteraction,
 }
 
 impl PreparedManabrewSnapshot {
@@ -194,6 +213,9 @@ pub fn prepare_snapshot_with_prompt_id(
         .and_then(|id| raw_state.objects.get(&id))
         .cloned();
     let mut state = filter_state_for_viewer(raw_state, viewer);
+    // Projected from the plain viewer filter, before `derive_display_state`, so
+    // the adapter sees exactly what every other interaction consumer sees.
+    let interaction = derive_viewer_interaction(raw_state, &state, viewer);
     derive_display_state(&mut state);
     let derived = derive_views(&state, Some(viewer));
 
@@ -207,6 +229,7 @@ pub fn prepare_snapshot_with_prompt_id(
         spell_costs,
         legal_actions_by_object,
         source_card_object,
+        interaction,
     })
 }
 
@@ -1335,7 +1358,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 79] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 81] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1526,8 +1549,20 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 79] = [
     UnsupportedCapability {
         code: "local.prompt-unsupported",
         area: "prompts",
-        reason: "Catch-all for the wildcard arm of build_prompt_input(). Phase has 127 WaitingFor variants and this adapter names 34 of them, so any of the remaining 93 that becomes current produces this code instead of a prompt. It is a coverage statement about the adapter's match, not a claim about any mechanic: WaitingFor::PhyrexianPayment and WaitingFor::RevealChoice both land here today despite being fully modeled at both ends. A shape census (bucket each unmapped variant by the payload of its answering GameAction) is the way to shrink this, not per-variant judgement.",
-        suggested_protocol_extension: "None needed upstream — the nineteen families already cover the great majority of the unmapped variants on payload shape alone. This is adapter work.",
+        reason: "Narrowed: this is no longer the wildcard arm's blanket answer. The wildcard now routes to interaction_prompt(), which serves any waiting state the engine projects as a finite ExactChoices list — the largest response class by far — so an unnamed WaitingFor is no longer unmapped by default. What remains here is the degenerate projection: no opportunity for this viewer, or an opportunity whose choice list is empty. Neither is a missing protocol shape; both mean there is nothing for this seat to answer, which is an engine or sequencing condition rather than a capability gap.",
+        suggested_protocol_extension: "None needed upstream. If this is observed while the seat genuinely owes a decision, it is an interaction-projection defect to fix, not a family to add.",
+    },
+    UnsupportedCapability {
+        code: "local.interaction-simultaneous-decisions-unmapped",
+        area: "prompts",
+        reason: "The engine opens one interaction slot per semantic owner, and a single viewer can be the authorized submitter for more than one of them — a decision both seats owe at once, answered independently. The protocol carries one prompt per message and one answer per prompt, so there is no shape for 'here are two decisions, answer both'. Serving only the first would answer one seat and silently drop the other, which is why this fails closed instead. Note this is a projection-level count, not a mechanic: the same waiting state produces one opportunity in the ordinary case and lands here only when authority for several owners collapses onto one viewer.",
+        suggested_protocol_extension: "Either allow a batch of prompts to be outstanding for one recipient with independent prompt ids, or state that the server must serialize simultaneous decisions into successive prompts. The second needs no wire change and is likely the cheaper answer.",
+    },
+    UnsupportedCapability {
+        code: "local.interaction-schema-response-unmapped",
+        area: "prompts",
+        reason: "The engine projects a decision either as a finite ExactChoices list or as a schema: a response spec plus candidates, covering sequences, grouped sequences, relations, mana groups, numbers, amount and damage assignments, deck partitions, text and shortcut replies. interaction_prompt() maps the finite class generically, because a materialized candidate list is exactly ChooseFromSelection's shape. The schema class has an unbounded response space that no single family expresses, so each spec needs its own family: Number -> ChooseNumber, Relations -> ChooseAttackers/ChooseBlockers, AssignDamage -> ChooseCombatDamageAssignment, Sequence -> Reorder or ChooseCards, DeckPartition -> ChooseCards. Those mappings are unwritten, so schema-valued decisions with no bespoke arm fail closed here rather than being flattened into a selection that would lose their bounds.",
+        suggested_protocol_extension: "None needed upstream for most specs — the families listed above already exist. GroupedSequence (per-group min/max) and ManaGroups are the two whose bounds no current family carries; resolve whether ChooseFromSelection should gain per-option group constraints before proposing new families.",
     },
     UnsupportedCapability {
         code: "local.target-slot-missing",
@@ -2308,7 +2343,7 @@ fn build_prompt_input(
         WaitingFor::CombatTaxPayment { .. } => {
             unsupported_prompt(waiting_for, "local.pay-combat-cost-unsupported")
         }
-        _ => unsupported_prompt(waiting_for, "local.prompt-unsupported"),
+        _ => interaction_prompt(prepared),
     }
 }
 
@@ -2317,6 +2352,141 @@ fn unsupported_prompt<T>(waiting_for: &WaitingFor, code: &'static str) -> Result
         waiting_for_type: waiting_for_type(waiting_for),
         code,
     })
+}
+
+/// Build a prompt from the engine's own interaction projection.
+///
+/// The fallback for every waiting state with no bespoke arm above, and
+/// deliberately generic. The engine classifies all of its waiting states into a
+/// small set of response models, and for the finite ones it hands back concrete
+/// labelled choices it has already validated. Hand-writing one mapping per
+/// waiting state instead would re-derive bounds the engine has computed — game
+/// logic duplicated inside a serialization boundary, and the exact drift the
+/// interaction subsystem exists to prevent.
+///
+/// Scope is `ExactChoices` only. A finite, pre-materialized candidate list is
+/// precisely `ChooseFromSelection`'s shape, so the mapping is total and needs no
+/// per-variant judgement. The schema-valued specs (sequences, numbers, amount
+/// assignments, relations) carry an unbounded response space that no single
+/// prompt family expresses; they still fail closed under a declared code.
+fn interaction_prompt(prepared: &PreparedManabrewSnapshot) -> Result<PromptInput> {
+    let waiting_for = &prepared.state.waiting_for;
+    // One opportunity per interaction slot this viewer may submit for, and a
+    // viewer can be the authorized submitter for more than one semantic owner —
+    // a simultaneous decision both seats owe. The wire carries a single prompt,
+    // so serving `.first()` would answer one seat and silently drop the other.
+    let [opportunity] = prepared.interaction.opportunities.as_slice() else {
+        return unsupported_prompt(
+            waiting_for,
+            if prepared.interaction.opportunities.is_empty() {
+                "local.prompt-unsupported"
+            } else {
+                "local.interaction-simultaneous-decisions-unmapped"
+            },
+        );
+    };
+    let InteractionOpportunityResponse::ExactChoices { choices } = &opportunity.response else {
+        return unsupported_prompt(waiting_for, "local.interaction-schema-response-unmapped");
+    };
+    if choices.is_empty() {
+        return unsupported_prompt(waiting_for, "local.prompt-unsupported");
+    }
+    Ok(PromptInput::ChooseFromSelection(ChooseFromSelectionInput {
+        presentation: presentation("Choose"),
+        options: choices
+            .iter()
+            .map(|choice| selection_option(choice_label(choice)))
+            .collect(),
+        // `ExactChoices` is a one-of list: the engine materialized each entry as
+        // a complete answer to the whole decision, so exactly one is chosen.
+        min_total: 1,
+        max_total: 1,
+    }))
+}
+
+/// Answer a generically-projected prompt by handing the pick back to the engine.
+///
+/// The index is positional into the same `ExactChoices` list `interaction_prompt`
+/// rendered. That list is re-derived here rather than carried through
+/// `PromptContext` because the projection is a pure function of state, and
+/// staleness is already the prompt id's obligation — [`translate_response`]
+/// rejects a mismatched id before reaching this point.
+///
+/// The engine, not a local index→action table, turns the pick into a
+/// `GameAction`. Response→action is game logic, and the engine's matcher is
+/// exhaustive over its response models; a table built here would keep compiling
+/// while silently going stale as models are added.
+fn interaction_selection_action(
+    state: &GameState,
+    actor: PlayerId,
+    chosen_indices: &[usize],
+) -> Result<GameAction> {
+    let illegal = |kind: &'static str| AdapterError::IllegalResponseForPrompt {
+        response_kind: kind,
+    };
+    let [index] = chosen_indices else {
+        return Err(illegal(
+            "selectionDecision.chosenIndices expects exactly one pick",
+        ));
+    };
+    let filtered = filter_state_for_viewer(state, actor);
+    let view = derive_viewer_interaction(state, &filtered, actor);
+    // Mirrors `interaction_prompt`'s guard: the prompt this answers was only
+    // ever built for a lone opportunity, so anything else means the projection
+    // moved and the echoed index no longer denotes what the client was shown.
+    let [opportunity] = view.opportunities.as_slice() else {
+        return Err(illegal(
+            "selectionDecision without exactly one open interaction",
+        ));
+    };
+    let InteractionOpportunityResponse::ExactChoices { choices } = &opportunity.response else {
+        return Err(illegal(
+            "selectionDecision against a schema-valued interaction",
+        ));
+    };
+    let choice = choices
+        .get(*index)
+        .ok_or_else(|| illegal("selectionDecision index outside the offered choices"))?;
+    resolve_interaction_response(
+        state,
+        actor,
+        &InteractionSubmission {
+            interaction_id: opportunity.interaction_id.clone(),
+            response: InteractionResponse::Choose {
+                choice_id: choice.id.clone(),
+            },
+        },
+    )
+    .map_err(|_| illegal("selectionDecision the engine refused to materialize"))
+}
+
+/// Label one projected choice, from the strings the engine already put on it.
+///
+/// Every naming surface is joined rather than taking the first, because choices
+/// in one list can share an object and differ only in a `Value` surface — the
+/// priority projection offers auto-payment and manual-payment casts of the same
+/// spell that way. Taking only the object name would render those two as the
+/// same label, and the client picks by label even though it answers by index.
+fn choice_label(choice: &InteractionChoice) -> String {
+    let parts = choice
+        .surfaces
+        .iter()
+        .filter_map(|surface| match surface {
+            InteractionPresentationSurface::Object {
+                name, reference, ..
+            } => Some(name.clone().unwrap_or_else(|| reference.clone())),
+            InteractionPresentationSurface::Value { value, .. } => Some(value.clone()),
+            InteractionPresentationSurface::Player { seat, .. } => Some(format!("Player {seat}")),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        // No naming surface at all. The opaque id is a poor label but a correct
+        // one; it is never empty, so the option stays distinguishable.
+        choice.id.as_str().to_string()
+    } else {
+        parts.join(" — ")
+    }
 }
 
 impl PromptInput {
@@ -2582,9 +2752,18 @@ pub fn translate_response(
         }
         PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
             chosen_indices,
-        }) => Ok(GameAction::SelectModes {
-            indices: chosen_indices,
-        }),
+        }) => match &state.waiting_for {
+            // The two bespoke producers of this family. Their answer is a list
+            // of mode indices — one response covering several picks — which is
+            // not the one-choice-per-answer shape the projection returns, so it
+            // cannot route through `ExactChoices`.
+            WaitingFor::ModeChoice { .. } | WaitingFor::AbilityModeChoice { .. } => {
+                Ok(GameAction::SelectModes {
+                    indices: chosen_indices,
+                })
+            }
+            _ => interaction_selection_action(state, context.deciding_player, &chosen_indices),
+        },
         PromptOutput::ChooseColor(ChooseColorOutput::ColorDecision { chosen_colors }) => {
             translate_color_decision(&state.waiting_for, chosen_colors)
         }
@@ -4058,10 +4237,20 @@ fn output_family_matches_waiting(
             WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
         ),
         PromptOutput::ChooseNumber(_) => matches!(waiting_for, WaitingFor::ChooseXValue { .. }),
-        PromptOutput::ChooseFromSelection(_) => matches!(
-            waiting_for,
-            WaitingFor::ModeChoice { .. } | WaitingFor::AbilityModeChoice { .. }
-        ),
+        // The one family with no fixed `WaitingFor` list, because it is now
+        // reachable two ways: the two bespoke modal arms, and the generic
+        // projection path that serves any state the engine renders as a finite
+        // choice list. Enumerating the latter would reintroduce exactly the
+        // per-variant bookkeeping the projection removes, and would rot the
+        // moment the engine reclassifies a state.
+        //
+        // So ask the real question — would the prompt currently open be a
+        // `ChooseFromSelection`? — by consulting the builder itself. It cannot
+        // drift from the builder because it *is* the builder. Checking the
+        // projection alone would be wrong: `WaitingFor::Priority` also projects
+        // a finite list, and would then accept a `chooseFromSelection` answer to
+        // a `chooseAction` prompt.
+        PromptOutput::ChooseFromSelection(_) => open_prompt_is_generic_selection(state, viewer),
         PromptOutput::ChooseColor(_) => matches!(waiting_for, WaitingFor::ChooseManaColor { .. }),
         PromptOutput::ChooseCombatDamageAssignment(_) => {
             matches!(waiting_for, WaitingFor::AssignCombatDamage { .. })
@@ -4091,6 +4280,25 @@ fn output_family_matches_waiting(
 }
 
 /// The output's family tag, for diagnostics.
+/// Would the prompt currently open for this viewer be a `ChooseFromSelection`?
+///
+/// Rebuilds it rather than re-deriving the answer, so the gate and the prompt
+/// can never disagree about which family is open. One extra prompt build per
+/// answer is proportionate: this runs once per human decision.
+///
+/// The lookup yields no card text on purpose. Family selection never depends on
+/// it — the arms that need text belong to other families, and they fail with
+/// `MissingCardText`, which is not `ChooseFromSelection` and so answers `false`
+/// exactly as it should.
+fn open_prompt_is_generic_selection(state: &GameState, viewer: PlayerId) -> bool {
+    prepare_snapshot(state, viewer, "").is_ok_and(|prepared| {
+        matches!(
+            build_prompt_input(&prepared, &(|_: &GameObject| -> Option<String> { None })),
+            Ok(PromptInput::ChooseFromSelection(_))
+        )
+    })
+}
+
 fn output_family(output: &PromptOutput) -> &'static str {
     match output {
         PromptOutput::Mulligan(_) => "mulligan",
@@ -4591,6 +4799,7 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    use engine::game::interaction::bind_interaction_authority;
     use engine::game::zones::create_object;
     use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
     use engine::types::counter::CounterType;
@@ -4599,6 +4808,7 @@ mod tests {
         TargetSelectionProgress, TargetSelectionSlot,
     };
     use engine::types::identifiers::CardId;
+    use engine::types::interaction::InteractionSessionId;
     use pretty_assertions::assert_eq;
 
     fn lookup(_: &GameObject) -> Option<String> {
@@ -5488,6 +5698,96 @@ mod tests {
             result,
             Err(AdapterError::UnsupportedPrompt {
                 code: "local.keep-with-total-power-unsupported",
+                ..
+            })
+        ));
+    }
+
+    /// The generic path: a waiting state with no bespoke arm is now prompted
+    /// from the engine's own projection instead of being refused.
+    ///
+    /// `TopOrBottomChoice` is chosen deliberately. It is one of the 85 variants
+    /// this adapter never names, and its projected choices differ only by a
+    /// `Value` surface — so this also pins that `choice_label` reads the
+    /// surfaces rather than falling back to the opaque choice id.
+    ///
+    /// Indices are compared by looking the label up rather than by assuming a
+    /// candidate order the engine never promised; the assertion that matters is
+    /// that the index the client echoes round-trips to the action that label
+    /// stands for.
+    #[test]
+    fn an_unmapped_waiting_state_prompts_from_the_interaction_projection() {
+        let mut state = GameState::new_two_player(7);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scried Card".to_string(),
+            Zone::Library,
+        );
+        state.waiting_for = WaitingFor::TopOrBottomChoice {
+            player: PlayerId(0),
+            object_id,
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("generic-path".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("an unmapped waiting state is served by the projection, not refused");
+        let PromptInput::ChooseFromSelection(input) = prompt else {
+            panic!("a finite candidate list is ChooseFromSelection's shape, got {prompt:?}");
+        };
+        let labels = input
+            .options
+            .iter()
+            .map(|option| option.label.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            labels.iter().any(|label| label == "top")
+                && labels.iter().any(|label| label == "bottom"),
+            "the projection labels each choice from its Value surface, got {labels:?}"
+        );
+        assert_eq!((input.min_total, input.max_total), (1, 1));
+
+        let top_index = labels.iter().position(|label| label == "top").unwrap();
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices: vec![top_index],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("the echoed index resolves back through the engine");
+        assert_eq!(action, GameAction::ChooseTopOrBottom { top: true });
+    }
+
+    /// Without a bound interaction authority the projection is empty, so the
+    /// generic path cannot serve the prompt and the adapter must say so rather
+    /// than emit an option-less selection. This is also the non-vacuity guard
+    /// for the test above: it is the same waiting state, differing only in the
+    /// binding, so that test cannot be passing for an unrelated reason.
+    #[test]
+    fn an_unbound_interaction_authority_leaves_the_generic_path_unsupported() {
+        let mut state = GameState::new_two_player(7);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scried Card".to_string(),
+            Zone::Library,
+        );
+        state.waiting_for = WaitingFor::TopOrBottomChoice {
+            player: PlayerId(0),
+            object_id,
+        };
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        assert!(matches!(
+            build_prompt_input(&prepared, &lookup),
+            Err(AdapterError::UnsupportedPrompt {
+                code: "local.prompt-unsupported",
                 ..
             })
         ));
@@ -6672,11 +6972,18 @@ mod tests {
                 object_id: ObjectId(4),
             },
         ];
+        let state = GameState::new_two_player(7);
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
         let prepared = PreparedManabrewSnapshot {
             game_id: "game-a".to_string(),
             viewer: PlayerId(0),
             prompt_id: 7,
-            state: GameState::new_two_player(7),
+            // A real projection rather than a stand-in. This state has no bound
+            // interaction authority, so it comes back empty — which is correct
+            // and irrelevant here: the assertions below concern the payment
+            // action id space, which `pay_mana_cost_input` reads from `actions`.
+            interaction: derive_viewer_interaction(&state, &filtered, PlayerId(0)),
+            state,
             derived: DerivedViews::default(),
             actions: actions.clone(),
             spell_costs: HashMap::new(),
@@ -7132,13 +7439,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 79);
+        assert_eq!(capabilities.len(), 81);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 79, "capability codes must be unique");
+        assert_eq!(codes.len(), 81, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

@@ -8869,6 +8869,41 @@ pub fn preview_interaction(
     }
 }
 
+/// Materialize the `GameAction` an interaction response denotes, **without**
+/// applying it.
+///
+/// [`submit_interaction`] is the mutating path and delegates here for everything
+/// up to the reducer, so the two cannot drift. This variant exists for consumers
+/// that own their own dispatch and need the action itself — the ManaBrew adapter
+/// translates a client's prompt answer into a `GameAction` and returns it to its
+/// caller rather than applying it.
+///
+/// Such a consumer must never re-derive this mapping. `materialize_response`
+/// matches exhaustively on `HumanResponseModel` with no catch-all arm, so the
+/// compiler forces every new decision family through it; a reimplementation
+/// living outside the engine would keep compiling while silently going stale.
+///
+/// Dropping the mutation does not weaken authorization. `slot_for_submission`
+/// still authenticates `actor` against the slot, so this cannot be used to
+/// materialize a decision that belongs to another player.
+pub fn resolve_interaction_response(
+    state: &GameState,
+    actor: PlayerId,
+    submission: &InteractionSubmission,
+) -> Result<GameAction, InteractionSubmitError> {
+    bound_string(submission.interaction_id.as_str())?;
+    validate_response_bounds(&submission.response)?;
+    slot_for_submission(state, actor, &submission.interaction_id)?;
+    let filtered = visibility::filter_state_for_viewer(state, actor);
+    let (action, _) = materialize_response(
+        state,
+        &filtered,
+        &submission.interaction_id,
+        &submission.response,
+    )?;
+    Ok(action)
+}
+
 /// Hidden engine-only submission entry point. The opaque interaction and choice
 /// IDs are looked up against current trusted state, authorization is rechecked,
 /// projection is recomputed from a viewer-filtered clone, and the materialized
@@ -8878,17 +8913,13 @@ pub fn submit_interaction(
     actor: PlayerId,
     submission: InteractionSubmission,
 ) -> Result<ActionResult, InteractionSubmitError> {
-    bound_string(submission.interaction_id.as_str())?;
-    validate_response_bounds(&submission.response)?;
+    let action = resolve_interaction_response(state, actor, &submission)?;
+    // Re-read the slot rather than threading it out of `resolve_*`: keeping that
+    // function's return to the action alone is what makes it usable as a public
+    // seam. The lookup is a scan of `active_interaction_slots`, which holds one
+    // slot per pending decision, and it has already succeeded once here.
     let semantic_owner =
         PlayerId(slot_for_submission(state, actor, &submission.interaction_id)?.semantic_owner);
-    let filtered = visibility::filter_state_for_viewer(state, actor);
-    let (action, _) = materialize_response(
-        state,
-        &filtered,
-        &submission.interaction_id,
-        &submission.response,
-    )?;
     apply_interaction(state, actor, semantic_owner, action).map_err(|_error: EngineError| {
         InteractionSubmitError {
             code: InteractionReasonCode::ReducerRejected,
