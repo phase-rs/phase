@@ -38,7 +38,26 @@ const AI: PlayerId = PlayerId(0);
 const ENGINE_NAME: &str = "The Locust God";
 
 fn state() -> GameState {
-    GameState::new(FormatConfig::standard(), 2, 42)
+    let mut st = GameState::new(FormatConfig::standard(), 2, 42);
+    // Deliverable draws by default: seed the AI a non-empty library so a draw
+    // actually puts a card into hand (CR 121.1). Empty-library behavior is
+    // exercised explicitly by clearing this in the dedicated test.
+    seed_library(&mut st, AI, 3);
+    st
+}
+
+/// Puts `n` cards into `player`'s library so draws are deliverable.
+fn seed_library(state: &mut GameState, player: PlayerId, n: usize) {
+    for _ in 0..n {
+        let card_id = CardId(state.next_object_id);
+        create_object(
+            state,
+            card_id,
+            player,
+            "Library Card".to_string(),
+            Zone::Library,
+        );
+    }
 }
 
 /// A hand spell that draws YOU cards on resolution (an `AbilityKind::Spell`
@@ -880,7 +899,7 @@ fn at_class_level_engine_at_wrong_level_is_neutral() {
     assert_eq!(delta, 0.0);
 }
 
-// ─── draw-delivery gate (CR 120.3 / CR 121.1) ────────────────────────────────
+// ─── draw-delivery gate (CR 121.1 / CR 704.5b) ───────────────────────────────
 
 /// Puts a permanent carrying a static that restricts drawing (Spirit of the
 /// Labyrinth / Narset shape) on the battlefield, scoped to `who`.
@@ -907,7 +926,7 @@ fn set_cards_drawn_this_turn(state: &mut GameState, player: PlayerId, n: u32) {
         .cards_drawn_this_turn = n;
 }
 
-/// CR 120.3: under a `CantDraw` static the draw produces no `CardDrawn` event, so
+/// CR 121.1: under a `CantDraw` static the draw produces no `CardDrawn` event, so
 /// the "whenever you draw" engine never fires — the delivery gate makes it a
 /// no-op and the bonus is withheld even with the engine on the battlefield.
 #[test]
@@ -971,6 +990,47 @@ fn per_turn_draw_limit_with_headroom_rewards() {
         },
     );
     set_cards_drawn_this_turn(&mut st, AI, 0); // one draw still allowed
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// CR 704.5b: with an empty library, a "draw a card" only records an attempted
+/// draw (a state-based loss) and puts no card into hand — no `CardDrawn` event,
+/// so the engine never fires. The delivery preflight withholds the bonus.
+#[test]
+fn empty_library_draw_is_a_no_op() {
+    let config = AiConfig::default();
+    let mut st = state();
+    st.players
+        .iter_mut()
+        .find(|p| p.id == AI)
+        .unwrap()
+        .library
+        .clear(); // empty deck
+    engine_on_battlefield(&mut st);
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_na");
+    assert_eq!(delta, 0.0);
+}
+
+/// Control: with cards left in the library the draw is deliverable (CR 121.1),
+/// so the engine is rewarded. (The default `state()` seeds a non-empty library.)
+#[test]
+fn nonempty_library_draw_rewards() {
+    let config = AiConfig::default();
+    let mut st = state(); // seeded library
+    engine_on_battlefield(&mut st);
     let (oid, cid) = draw_spell(&mut st);
     let context = context(&config, session(0.9));
     let candidate = cast(oid, cid);

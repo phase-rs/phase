@@ -108,11 +108,13 @@ impl TacticalPolicy for DrawPayoffPolicy {
 ///   ability does not fire on cast, so only these two are inspected.
 /// * `ActivateAbility` → the ability at the runtime-enumerated index.
 fn candidate_draws_controller(ctx: &PolicyContext<'_>) -> bool {
-    // CR 120.3 / CR 121.1: a structural "draw a card" produces no `CardDrawn`
+    // CR 121.1 / CR 704.5b: a structural "draw a card" produces no `CardDrawn`
     // event — and fires no "whenever you draw" engine — when the controller
     // can't draw right now (a `CantDraw` static, or a `PerTurnDrawLimit` already
-    // exhausted). The engine's `can_draw_at_least_one` authority gates the whole
-    // classification so the bonus is never added to a no-op draw.
+    // exhausted) OR the library is empty (an empty-library draw only records an
+    // attempt, CR 704.5b, delivering no card). The engine's `can_draw_at_least_one`
+    // authority gates the whole classification so the bonus is never added to a
+    // no-op draw.
     if !engine::game::effects::draw::can_draw_at_least_one(ctx.state, ctx.ai_player) {
         return false;
     }
