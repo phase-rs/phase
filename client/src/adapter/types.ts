@@ -3370,9 +3370,17 @@ export interface StuckDecisionDiagnostic {
 /** Engine-authored object-action identity shared with interaction surfaces. */
 export type ObjectAction = GameAction & { interactionActionId?: InteractionActionId };
 
+/** Engine-authored CR 116.2c action shape, including display name and cost. */
+export type EndContinuousEffectOffer = Extract<
+  GameAction,
+  { type: "EndContinuousEffect" }
+>;
+
 export interface LegalActionsResult {
   actions: GameAction[];
   autoPassRecommended: boolean;
+  /** Ordered pay-to-end offers projected by the engine for direct rendering. */
+  endContinuousEffectOffers?: EndContinuousEffectOffer[];
   /** Exact engine-authored actions for the deterministic mana-payment shortcut. */
   manaPaymentShortcutActions?: GameAction[];
   /** Effective mana costs for castable spells, keyed by object_id string. */
@@ -3402,6 +3410,7 @@ export interface ViewerSnapshot {
   state: GameState;
   actions: GameAction[];
   autoPassRecommended: boolean;
+  endContinuousEffectOffers?: EndContinuousEffectOffer[];
   manaPaymentShortcutActions?: GameAction[];
   spellCosts?: Record<string, ManaCost>;
   legalActionsByObject?: Record<string, ObjectAction[]>;
@@ -3478,6 +3487,7 @@ export function nextSnapshotSeq(): number {
 export const EMPTY_LEGAL_ACTIONS: LegalActionsResult = {
   actions: [],
   autoPassRecommended: false,
+  endContinuousEffectOffers: [],
   manaPaymentShortcutActions: [],
 };
 

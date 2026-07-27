@@ -80,17 +80,11 @@ export function ActionButton() {
     s.legalActions.some((a) => a.type === "CompanionToHand"),
   );
 
-  // CR 116.2c: the engine offers one `EndContinuousEffect` per live pay-to-end
-  // permission the local player controls and can afford. `legalActions` is the
-  // sole authority; each action already carries its engine-authored display name
-  // and cost, so the frontend performs no state join or rules derivation.
-  // `legalActions` is selected by reference (stable across renders) and the
-  // filter runs in `useMemo`, so the selector never mints a fresh array under
-  // zustand's reference equality.
-  const legalActions = useGameStore((s) => s.legalActions);
-  const endContinuousEffectOffers = useMemo(
-    () => legalActions.filter((action) => action.type === "EndContinuousEffect"),
-    [legalActions],
+  // CR 116.2c: this ordered offer list is projected by the engine. Each action
+  // already carries its engine-authored display name and cost, so the frontend
+  // renders and dispatches it unchanged.
+  const endContinuousEffectOffers = useGameStore(
+    (s) => s.endContinuousEffectOffers,
   );
 
   const { advanceLabel } = usePhaseInfo();

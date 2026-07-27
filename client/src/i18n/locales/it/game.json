@@ -122,6 +122,7 @@
     "blockWithNoneConfirm": "Tocca di nuovo: Blocca con nessuno",
     "selectAttackerForBlocker": "Seleziona l'attaccante contro cui questo bloccante deve difendere",
     "companionToHand": "Compagno in mano",
+    "endContinuousEffect": "Termina l'effetto di {{source}} —",
     "resolve": "Risolvi",
     "resolveTooltip": "Passa la priorità così l'oggetto in cima alla pila può risolversi se anche tutti i giocatori passano. Scorciatoia: Spazio.",
     "resolveAll": "Risolvi tutto",

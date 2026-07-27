@@ -646,7 +646,6 @@ fn pay_to_end_is_offered_outside_a_sorcery_speed_window() {
 fn ending_one_licids_effect_leaves_the_other_licid_untouched() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_mana_pool(P0, floating_mana(2, ManaType::White));
     let calming = scenario
         .add_creature(P0, "Calming Licid", 2, 2)
         .from_oracle_text(CALMING_LICID_ORACLE)
@@ -956,7 +955,6 @@ fn animating_an_attached_equipment_unattaches_it_and_keeps_it_on_the_battlefield
     {
         let obj = runner.state_mut().objects.get_mut(&march).unwrap();
         for def in march_static.statics.iter() {
-            obj.static_definitions.push(def.clone());
             std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def.clone());
         }
     }
@@ -1247,6 +1245,11 @@ fn only_mana_termination_costs_are_absorbed() {
         .abilities
         .first()
         .expect("the synthetic card must still parse to an activated ability");
+    assert!(
+        matches!(ability.effect.as_ref(), Effect::GenericEffect { .. }),
+        "reach guard: the animation must still lower to a GenericEffect root: {:?}",
+        ability.effect
+    );
     assert_eq!(
         root_end_cost(ability),
         None,
@@ -1270,8 +1273,17 @@ fn only_mana_termination_costs_are_absorbed() {
         &[],
         &["Licid".to_string()],
     );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("the adjacent-grammar card must still parse to an activated ability");
+    assert!(
+        matches!(ability.effect.as_ref(), Effect::GenericEffect { .. }),
+        "reach guard: the animation must still lower to a GenericEffect root: {:?}",
+        ability.effect
+    );
     assert_eq!(
-        parsed.abilities.first().and_then(root_end_cost),
+        root_end_cost(ability),
         None,
         "\"to end this turn\" is not \"to end this effect\""
     );
@@ -1515,38 +1527,52 @@ fn a_standing_pay_to_end_permission_holds_priority_at_the_opponents_end_step() {
 /// stack. Mana restricted to casting spells must therefore be REJECTED here.
 ///
 /// This is the correctness win `SpecialAction::EndContinuousEffect` buys over
-/// charging the cost through an unlabelled payment context, so the row asserts
-/// it at the `ManaRestriction::allows` seam the payment pipeline consults.
+/// charging the cost through an unlabelled payment context, so the row drives
+/// the production offer and payment pipeline rather than testing the
+/// restriction truth table in isolation.
 #[test]
 fn spell_restricted_mana_cannot_pay_a_termination_cost() {
-    use engine::types::mana::{ManaRestriction, PaymentContext};
+    use engine::types::mana::ManaRestriction;
 
-    let spell_only = ManaRestriction::OnlyForSpell;
+    let (mut runner, licid, _victim, _) = animated_calming_licid(0);
+    runner.state_mut().players[P0.0 as usize]
+        .mana_pool
+        .add(ManaUnit::new(
+            ManaType::White,
+            ObjectId(700),
+            false,
+            vec![ManaRestriction::OnlyForSpell],
+        ));
     assert!(
-        !spell_only.allows(&PaymentContext::SpecialAction(
-            engine::types::mana::SpecialAction::EndContinuousEffect
-        )),
-        "CR 116.1: a special action is not a cast, so \"spend this mana only to \
-         cast spells\" mana must not pay a CR 116.2c termination cost"
+        offered_end_actions(&runner, P0).is_empty(),
+        "CR 116.1 + CR 106.6: spell-only mana must not make the pay-to-end \
+         special action affordable"
+    );
+    assert!(
+        runner.state().objects[&licid].attached_to.is_some(),
+        "the restricted mana must not end or detach the Licid"
     );
 
-    // Paired positive: mana restricted to THIS special action is spendable here
-    // and nowhere else. Without this, the negative above would also hold for a
-    // payment context that rejects everything.
-    let pay_to_end_only = ManaRestriction::OnlyForSpecialAction(
-        engine::types::mana::SpecialAction::EndContinuousEffect,
+    let pool = &mut runner.state_mut().players[P0.0 as usize].mana_pool;
+    pool.clear();
+    pool.add(ManaUnit::new(ManaType::White, ObjectId(701), false, vec![]));
+    let actions = offered_end_actions(&runner, P0);
+    assert_eq!(
+        actions.len(),
+        1,
+        "paired control: unrestricted {{W}} must make the action available"
     );
-    assert!(
-        pay_to_end_only.allows(&PaymentContext::SpecialAction(
-            engine::types::mana::SpecialAction::EndContinuousEffect
-        )),
-        "mana restricted to this exact special action must be eligible for it"
+    runner
+        .act(actions[0].clone())
+        .expect("the production pay-to-end pipeline must accept unrestricted {W}");
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "the production special-action payment must consume the unrestricted {{W}}"
     );
-    assert!(
-        !pay_to_end_only.allows(&PaymentContext::SpecialAction(
-            engine::types::mana::SpecialAction::CompanionToHand
-        )),
-        "CR 106.6: the variant must discriminate — mana for one special action \
-         must not pay for another"
+    assert_eq!(
+        runner.state().objects[&licid].attached_to,
+        None,
+        "the successful special-action payment must end the effect and detach the Licid"
     );
 }

@@ -7,8 +7,8 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{
-    auto_pass_recommended, auto_pass_recommended_for_viewer, legal_actions_for_viewer,
-    legal_actions_full,
+    auto_pass_recommended, auto_pass_recommended_for_viewer, end_continuous_effect_offers,
+    legal_actions_for_viewer, legal_actions_full,
 };
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
@@ -51,6 +51,8 @@ fn decode_restored_game_state(json_str: &str) -> Result<GameState, JsValue> {
 struct LegalActionsResult {
     actions: Vec<GameAction>,
     auto_pass_recommended: bool,
+    /// Ordered CR 116.2c offers already projected by the engine for display.
+    end_continuous_effect_offers: Vec<GameAction>,
     /// Exact engine-authored actions for the deterministic mana-payment shortcut.
     mana_payment_shortcut_actions: Vec<GameAction>,
     /// Effective mana costs for castable spells, keyed by object_id.
@@ -1206,11 +1208,13 @@ pub fn get_legal_actions_js() -> JsValue {
         engine::game::layers::flush_layers(state);
         let (actions, spell_costs, legal_actions_by_object) = legal_actions_full(state);
         let auto_pass = auto_pass_recommended(state, &actions);
+        let end_continuous_effect_offers = end_continuous_effect_offers(&actions);
         let mana_payment_shortcut_actions =
             engine::ai_support::mana_payment_shortcut_actions(state, &legal_actions_by_object);
         to_js(&LegalActionsResult {
             actions,
             auto_pass_recommended: auto_pass,
+            end_continuous_effect_offers,
             mana_payment_shortcut_actions,
             spell_costs,
             legal_actions_by_object: engine::game::interaction::object_action_payloads(
@@ -1299,6 +1303,7 @@ struct ViewerSnapshot {
     state: GameState,
     actions: Vec<GameAction>,
     auto_pass_recommended: bool,
+    end_continuous_effect_offers: Vec<GameAction>,
     mana_payment_shortcut_actions: Vec<GameAction>,
     spell_costs: std::collections::HashMap<ObjectId, ManaCost>,
     legal_actions_by_object:
@@ -1314,11 +1319,13 @@ struct ViewerSnapshot {
 fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsResult {
     let (actions, spell_costs, legal_actions_by_object) = legal_actions_for_viewer(state, viewer);
     let auto_pass_recommended = auto_pass_recommended_for_viewer(state, viewer, &actions);
+    let end_continuous_effect_offers = end_continuous_effect_offers(&actions);
     let mana_payment_shortcut_actions =
         engine::ai_support::mana_payment_shortcut_actions(state, &legal_actions_by_object);
     LegalActionsResult {
         actions,
         auto_pass_recommended,
+        end_continuous_effect_offers,
         mana_payment_shortcut_actions,
         spell_costs,
         legal_actions_by_object: engine::game::interaction::object_action_payloads(
@@ -1387,6 +1394,7 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
             state: filtered,
             actions: legal.actions,
             auto_pass_recommended: legal.auto_pass_recommended,
+            end_continuous_effect_offers: legal.end_continuous_effect_offers,
             mana_payment_shortcut_actions: legal.mana_payment_shortcut_actions,
             spell_costs: legal.spell_costs,
             legal_actions_by_object: legal.legal_actions_by_object,

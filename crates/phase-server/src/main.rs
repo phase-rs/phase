@@ -20,6 +20,7 @@ use axum::Router;
 use clap::Parser;
 use engine::ai_support::{
     auto_pass_recommended_for_viewer as engine_auto_pass_for_viewer,
+    end_continuous_effect_offers as engine_end_continuous_effect_offers,
     legal_actions_full as engine_legal_actions_full,
     mana_payment_shortcut_actions as engine_mana_payment_shortcut_actions,
 };
@@ -326,6 +327,11 @@ fn build_game_started_message(
     let (legal_actions, spell_costs_all, by_object_all) = engine_legal_actions_full(&session.state);
     let is_actor = server_core::is_acting(&session.state, player);
     let auto_pass = engine_auto_pass_for_viewer(&session.state, player, &legal_actions);
+    let end_continuous_effect_offers = if is_actor {
+        engine_end_continuous_effect_offers(&legal_actions)
+    } else {
+        Vec::new()
+    };
     let mana_payment_shortcut_actions = if is_actor {
         engine_mana_payment_shortcut_actions(&session.state, &by_object_all)
     } else {
@@ -353,6 +359,7 @@ fn build_game_started_message(
         player_names: session.display_names.clone(),
         legal_actions: if is_actor { legal_actions } else { Vec::new() },
         auto_pass_recommended: auto_pass,
+        end_continuous_effect_offers,
         mana_payment_shortcut_actions,
         spell_costs: if is_actor {
             spell_costs_all
@@ -420,6 +427,11 @@ fn build_state_update_message(
     } else {
         Vec::new()
     };
+    let end_continuous_effect_offers = if is_actor {
+        engine_end_continuous_effect_offers(legal_actions)
+    } else {
+        Vec::new()
+    };
 
     Ok(ServerMessage::StateUpdate {
         state_revision,
@@ -431,6 +443,7 @@ fn build_state_update_message(
             Vec::new()
         },
         auto_pass_recommended: engine_auto_pass_for_viewer(raw_state, player, legal_actions),
+        end_continuous_effect_offers,
         mana_payment_shortcut_actions,
         eliminated_players: Vec::new(),
         log_entries: log_entries.clone(),
@@ -468,6 +481,7 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
         player_names: session.display_names.clone(),
         legal_actions: Vec::new(),
         auto_pass_recommended: false,
+        end_continuous_effect_offers: Vec::new(),
         mana_payment_shortcut_actions: Vec::new(),
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
@@ -503,6 +517,7 @@ fn build_spectator_state_update_message(
         events: server_core::filter_events_for_player(events, raw_state, SPECTATOR_PLAYER_ID),
         legal_actions: Vec::new(),
         auto_pass_recommended: false,
+        end_continuous_effect_offers: Vec::new(),
         mana_payment_shortcut_actions: Vec::new(),
         eliminated_players,
         log_entries: log_entries.to_vec(),
@@ -3206,6 +3221,8 @@ async fn broadcast_takeback_approved(
                     vec![]
                 };
                 let p_auto_pass = engine_auto_pass_for_viewer(&raw_state, *pid, &legal_actions);
+                let p_end_continuous_effect_offers =
+                    engine_end_continuous_effect_offers(&player_legals);
                 let p_mana_payment_shortcut_actions = if is_actor {
                     engine_mana_payment_shortcut_actions(&raw_state, &by_object)
                 } else {
@@ -3227,6 +3244,7 @@ async fn broadcast_takeback_approved(
                     events: vec![],
                     legal_actions: player_legals,
                     auto_pass_recommended: p_auto_pass,
+                    end_continuous_effect_offers: p_end_continuous_effect_offers,
                     mana_payment_shortcut_actions: p_mana_payment_shortcut_actions,
                     eliminated_players: raw_state.eliminated_players.clone(),
                     log_entries: vec![],
@@ -3735,6 +3753,8 @@ async fn handle_client_message(
                                     } else {
                                         false
                                     };
+                                    let p_end_continuous_effect_offers =
+                                        engine_end_continuous_effect_offers(&player_legals);
                                     let p_mana_payment_shortcut_actions =
                                         if ai_results.is_empty() && is_actor {
                                             engine_mana_payment_shortcut_actions(
@@ -3762,6 +3782,8 @@ async fn handle_client_message(
                                         ),
                                         legal_actions: player_legals,
                                         auto_pass_recommended: p_auto_pass,
+                                        end_continuous_effect_offers:
+                                            p_end_continuous_effect_offers,
                                         mana_payment_shortcut_actions:
                                             p_mana_payment_shortcut_actions,
                                         eliminated_players: eliminated.clone(),
@@ -3859,6 +3881,8 @@ async fn handle_client_message(
                                     } else {
                                         false
                                     };
+                                    let p_end_continuous_effect_offers =
+                                        engine_end_continuous_effect_offers(&player_legals);
                                     let p_mana_payment_shortcut_actions = if is_last && is_actor {
                                         engine_mana_payment_shortcut_actions(
                                             ai_raw_state,
@@ -3887,6 +3911,8 @@ async fn handle_client_message(
                                         ),
                                         legal_actions: player_legals,
                                         auto_pass_recommended: p_auto_pass,
+                                        end_continuous_effect_offers:
+                                            p_end_continuous_effect_offers,
                                         mana_payment_shortcut_actions:
                                             p_mana_payment_shortcut_actions,
                                         eliminated_players: eliminated.clone(),
@@ -5198,6 +5224,7 @@ async fn handle_client_message(
                         events: vec![],
                         legal_actions: vec![],
                         auto_pass_recommended: false,
+                        end_continuous_effect_offers: vec![],
                         mana_payment_shortcut_actions: vec![],
                         eliminated_players: vec![],
                         log_entries: vec![],

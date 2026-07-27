@@ -122,6 +122,7 @@
     "blockWithNoneConfirm": "Erneut tippen: Mit keinem blocken",
     "selectAttackerForBlocker": "Wähle den Angreifer, gegen den dieser Blocker verteidigen soll",
     "companionToHand": "Gefährte auf die Hand",
+    "endContinuousEffect": "Effekt von {{source}} beenden —",
     "resolve": "Auflösen",
     "resolveTooltip": "Gib die Priorität ab, damit das oberste Stapelobjekt aufgelöst werden kann, wenn alle Spieler ebenfalls abgeben. Tastenkürzel: Leertaste.",
     "resolveAll": "Alles auflösen",

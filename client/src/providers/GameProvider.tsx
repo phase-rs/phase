@@ -1758,6 +1758,7 @@ export function GameProvider({
             waitingFor: null,
             legalActions: [],
             autoPassRecommended: false,
+            endContinuousEffectOffers: [],
             manaPaymentShortcutActions: [],
             spellCosts: {},
             stateHistory: [],

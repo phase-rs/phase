@@ -22782,6 +22782,22 @@ fn dominating_licid_activation_is_not_optional() {
         !ability_tree_has_optional(&def),
         "no sub_ability in the licid chain may carry optional=true"
     );
+    let Effect::GenericEffect { end_cost, .. } = def.effect.as_ref() else {
+        panic!(
+            "the Licid animation must lower to the continuous-effect-producing \
+             GenericEffect, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(
+        *end_cost,
+        Some(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        }),
+        "CR 116.2c: the later special-action cost must be bound to the exact \
+         continuous effect installed by this activation"
+    );
 }
 
 #[test]
