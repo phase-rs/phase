@@ -4134,20 +4134,26 @@ fn object_pt_value(obj: &GameObject, stat: PtStat, scope: PtValueScope) -> i32 {
 /// layer pass uses, rather than re-deriving CDA evaluation here: gather the
 /// continuous effects the object's own statics source
 /// (`active_continuous_effects_from_static_source`), keep only the
-/// characteristic-defining self-referential dynamic-P/T modifications, and
-/// resolve each magnitude with the layer pass's quantity resolver
-/// (`resolve_quantity`, mirroring `apply_continuous_effect` at layers.rs). Apply
-/// the layer-7a/7b *set* CDAs before the layer-7c *add* CDAs (CR 613.4a: P/T
-/// characteristic-defining abilities apply first, in layer 7a). A fixed-P/T
-/// object (Fire Elemental) sources
-/// no such effect, so this returns its stored `object_pt_value` unchanged.
+/// characteristic-defining self-referential P/T modifications whose condition
+/// currently holds — both fixed-constant *set* CDAs (`SetPower`/`SetToughness`,
+/// Angry Mob's off-turn "are each 2" clause) and dynamic *set*/*add* CDAs
+/// (Tarmogoyf) — resolving each dynamic magnitude with the layer pass's quantity
+/// resolver (`resolve_quantity`, mirroring `apply_continuous_effect` at
+/// layers.rs). Apply the layer-7a/7b *set* CDAs before the layer-7c *add* CDAs
+/// (CR 613.4a: P/T characteristic-defining abilities apply first, in layer 7a).
+/// A conditional CDA (Angry Mob's turn-window clauses) is gated exactly as the
+/// layer pass gates it — see `self_cda` below. A fixed-P/T object (Fire
+/// Elemental) sources no such effect, so this returns its stored
+/// `object_pt_value` unchanged.
 fn spell_object_effective_pt_value(
     state: &GameState,
     obj: &GameObject,
     stat: PtStat,
     scope: PtValueScope,
 ) -> i32 {
-    use crate::game::layers::active_continuous_effects_from_static_source;
+    use crate::game::layers::{
+        active_continuous_effects_from_static_source, evaluate_condition_with_recipient,
+    };
     use crate::game::quantity::{
         continuous_modification_dynamic_quantity, quantity_expr_uses_recipient,
         resolve_quantity_with_recipient,
@@ -4165,8 +4171,30 @@ fn spell_object_effective_pt_value(
     // Only the object's OWN CDA (SelfRef, characteristic-defining) functions
     // off the battlefield per CR 208.2a; a non-CDA "as long as ..." dynamic P/T
     // static is battlefield-only and is correctly excluded here.
+    // CR 611.3a + CR 613.4a: a conditional self-CDA (Angry Mob's turn-window
+    // clauses) functions only while its condition currently holds. Mirror the
+    // layer pass's per-recipient gate exactly (`apply_continuous_effect_filtered`,
+    // layers.rs: an effect applies to a recipient iff
+    // `effect.condition.is_none_or(evaluate_condition_with_recipient(.., recipient))`).
+    // For a self-CDA the recipient IS the source object, so `obj.id` is the
+    // recipient. `active_continuous_effects_from_static_source` already drops any
+    // def whose non-recipient-context condition fails at the source level (Angry
+    // Mob's `DuringYourTurn` / `Not{DuringYourTurn}` are pre-filtered there); this
+    // re-check additionally honors a RETAINED recipient-context condition so a
+    // conditional constant- or dynamic-P/T CDA is never applied outside its
+    // window. `None` condition (Tarmogoyf, Fire Elemental) passes unchanged.
     let self_cda = |e: &&crate::types::layers::ActiveContinuousEffect| {
-        e.characteristic_defining && matches!(e.affected_filter, TargetFilter::SelfRef)
+        e.characteristic_defining
+            && matches!(e.affected_filter, TargetFilter::SelfRef)
+            && e.condition.as_ref().is_none_or(|condition| {
+                evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    e.controller,
+                    e.source_id,
+                    obj.id,
+                )
+            })
     };
     // Mirror `apply_continuous_effect`'s recipient dispatch: a self-CDA's
     // recipient IS its source, so both resolvers see the same object.
@@ -4179,9 +4207,21 @@ fn spell_object_effective_pt_value(
         })
     };
 
-    // CR 613.4b (layer 7a/7b): dynamic *set* CDAs establish the base P/T first.
+    // CR 613.4a (layer 7a) + CR 613.4b (layer 7b): *set* CDAs establish the base
+    // P/T first. Both the fixed-constant setters (Angry Mob's off-turn "power and
+    // toughness are each 2" clause parses to `SetPower { value }` /
+    // `SetToughness { value }`) and the dynamic setters (Tarmogoyf) are applied in
+    // this single set stage, before the layer-7c *add* loop below — mirroring the
+    // layer authority, which lists all six P/T-set variants together (layers.rs
+    // ~5187-5192) and applies them in one combined stage in timestamp/def/mod
+    // order (the order this iteration over `effects` preserves for same-source
+    // self-CDAs).
     for effect in effects.iter().filter(self_cda) {
         match &effect.modification {
+            // CR 613.4a: fixed-constant set CDA — defines P/T directly, no
+            // quantity resolution.
+            ContinuousModification::SetPower { value } => power = Some(*value),
+            ContinuousModification::SetToughness { value } => toughness = Some(*value),
             ContinuousModification::SetDynamicPower { .. }
             | ContinuousModification::SetPowerDynamic { .. } => {
                 if let Some(v) = resolve(&effect.modification) {

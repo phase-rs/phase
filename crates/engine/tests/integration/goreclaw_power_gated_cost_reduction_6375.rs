@@ -26,6 +26,7 @@
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle_static::parse_static_line;
+use engine::types::ability::TargetFilter;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -258,5 +259,126 @@ fn fixed_power_control_reduced_regardless_of_graveyard() {
         generic, 1,
         "a fixed power-5 creature spell is reduced 3 → 1 regardless of graveyard \
          (control: CDA resolution must not change fixed-P/T behavior)"
+    );
+}
+
+/// Cast-cost probe for a real creature-card FACE in P0's hand that carries an
+/// attached conditional **constant**-P/T CDA, parsed from a verbatim Oracle line
+/// via `parse_static_line` (the Angry Mob off-turn form at
+/// `oracle_static/tests.rs`: `SetPower { value }` / `SetToughness { value }`
+/// gated on a turn-window `StaticCondition`).
+///
+/// The CDA is attached AFTER `rehydrate_game_from_card_db` — which re-applies the
+/// printed face and would otherwise drop any extra static on a fixture card —
+/// onto both `static_definitions` and `base_static_definitions`, exactly as
+/// `GameScenario::with_static_definition` does. The spell's power is still
+/// derived through the production `spell_object_effective_pt_value` path from the
+/// CDA (via `display_spell_cost`), never a force-set `obj.power` (Finding #6).
+fn goreclaw_generic_with_constant_cda(spell_name: &str, cda_line: &str) -> u32 {
+    let db = shared_card_db().expect("Goreclaw regression requires the integration card fixture");
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let cost_static =
+        parse_static_line(GORECLAW_COST_LINE).expect("Goreclaw cost line must parse to a static");
+    scenario
+        .add_creature(P0, "Goreclaw, Terror of Qal Sisma", 4, 5)
+        .with_static_definition(cost_static);
+
+    let spell = scenario.add_real_card(P0, spell_name, Zone::Hand, db);
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    // Parse the conditional constant-P/T CDA from its Oracle line. Fixture
+    // self-check: it must be the exact SelfRef constant-P/T CDA form the review
+    // references (characteristic-defining, SelfRef-affected, `SetPower`/
+    // `SetToughness { value }` set variants under a turn-window condition).
+    let cda = parse_static_line(cda_line)
+        .expect("conditional constant-P/T CDA line must parse to static");
+    assert_eq!(
+        cda.affected,
+        Some(TargetFilter::SelfRef),
+        "constant-P/T CDA must be SelfRef-affected: {cda:?}"
+    );
+    assert!(
+        cda.characteristic_defining,
+        "constant-P/T CDA must be characteristic-defining: {cda:?}"
+    );
+    assert!(
+        cda.condition.is_some(),
+        "the CDA line under test must carry a turn-window condition: {cda:?}"
+    );
+
+    let obj = runner
+        .state_mut()
+        .objects
+        .get_mut(&spell)
+        .expect("spell object must exist post-rehydrate");
+    obj.static_definitions.push(cda.clone());
+    std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(cda);
+
+    let cost = engine::game::casting::display_spell_cost(runner.state(), P0, spell)
+        .expect("spell should have a displayable cost");
+    match cost {
+        ManaCost::Cost { generic, .. } => generic,
+        other => panic!("expected ManaCost::Cost, got {other:?}"),
+    }
+}
+
+/// CR 604.3 + CR 613.4a + CR 601.2f (#6375 HIGH): a creature spell whose ACTIVE
+/// conditional **constant**-P/T CDA sets power to 4 must gate on that CDA power —
+/// the fixed-constant `SetPower` set CDA functions off the battlefield exactly
+/// like the dynamic setter. Hill Giant ({3}{R}, printed 3/3) carries a
+/// "During your turn, ~'s power and toughness are each 4." CDA; the scenario is
+/// at P0's PreCombatMain, so `DuringYourTurn` holds, the constant CDA is active,
+/// effective power is 4, and Goreclaw reduces it: generic 3 → 1.
+///
+/// Revert-guard (RED carrier): reverting the new fixed `SetPower { value }` /
+/// `SetToughness { value }` set-stage arm in `spell_object_effective_pt_value`
+/// makes the resolver skip the constant CDA and read Hill Giant's printed power 3
+/// (< 4). The GE-4 gate then rejects it and the generic stays 3 — this assertion
+/// fails. That is exactly the off-battlefield "evaluated as printed" bug the
+/// review flagged.
+#[test]
+fn conditional_constant_cda_active_power_four_creature_spell_is_reduced() {
+    let generic = goreclaw_generic_with_constant_cda(
+        "Hill Giant",
+        "During your turn, Hill Giant's power and toughness are each 4.",
+    );
+    assert_eq!(
+        generic, 1,
+        "an ACTIVE conditional constant-P/T CDA setting power 4 must be reduced by \
+         {{2}} (generic 3 → 1); reverting the new fixed `SetPower` set-stage arm \
+         reads printed power 3, fails the GE-4 gate, and wrongly leaves it at 3 \
+         (issue #6375 HIGH)"
+    );
+}
+
+/// CR 611.3a + CR 604.3 (#6375 HIGH): the discriminating condition-gating case. A
+/// conditional constant-P/T CDA must apply ONLY while its condition holds. The
+/// SAME Hill Giant carries a "During turns other than yours, ~'s power and
+/// toughness are each 4." CDA (gated `Not{DuringYourTurn}`). On P0's own turn the
+/// off-window condition is FALSE, so the CDA does not function — the spell reads
+/// its printed power 3 (< 4) and is NOT reduced: generic stays 3.
+///
+/// Revert-guard: applying the constant CDA UNCONDITIONALLY (dropping the
+/// condition gate mirrored from the layer authority) would set power to 4 and
+/// wrongly reduce the spell 3 → 1 — this assertion then fails. Together with the
+/// active sibling above this proves the resolver both applies the fixed constant
+/// CDA and honors its condition, never applying it outside its window.
+#[test]
+fn conditional_constant_cda_off_window_creature_spell_is_not_reduced() {
+    let generic = goreclaw_generic_with_constant_cda(
+        "Hill Giant",
+        "During turns other than yours, Hill Giant's power and toughness are each 4.",
+    );
+    assert_eq!(
+        generic, 3,
+        "an off-window conditional constant-P/T CDA must NOT apply — the spell reads \
+         printed power 3 and is not reduced; applying the constant CDA \
+         unconditionally would set power 4 and wrongly reduce it to 1 (condition \
+         gating, issue #6375 HIGH)"
     );
 }
