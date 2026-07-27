@@ -73,6 +73,14 @@ jobs:
           fi
           ./scripts/check-parser-combinators.sh "$BASE"
 
+      - name: PreLowered ratchet (Plan 05b burn-down)
+        # Ceiling check on `OracleNodeIr::PreLowered*` occurrences per parser
+        # file. Counts may only decrease, and a parser file carrying PreLowered
+        # with no ledger entry fails, so a new producer cannot be added in a
+        # third file and escape the burn-down. Ledger:
+        # scripts/prelowered-ratchet.txt
+        run: ./scripts/check-prelowered-ratchet.sh
+
       - name: Skill doc gate (oracle-parser SKILL.md)
         # Asserts .claude/skills/oracle-parser/SKILL.md still matches the
         # parser source tree: documented paths/symbols exist and the §3
