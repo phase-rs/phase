@@ -13,6 +13,7 @@ pub mod blink;
 pub mod commitment;
 pub mod control;
 pub mod devotion;
+pub mod draw_matters;
 pub mod enchantments;
 pub mod energy;
 pub mod equipment;
@@ -37,6 +38,7 @@ pub use artifacts::ArtifactsFeature;
 pub use blink::BlinkFeature;
 pub use control::ControlFeature;
 pub use devotion::DevotionFeature;
+pub use draw_matters::DrawMattersFeature;
 pub use enchantments::EnchantmentsFeature;
 pub use energy::EnergyFeature;
 pub use equipment::EquipmentFeature;
@@ -89,6 +91,8 @@ pub struct DeckFeatures {
     pub poison: PoisonFeature,
     /// CR 207.2c + CR 205.2a: delirium / descend graveyard type-diversity.
     pub graveyard_types: GraveyardTypesFeature,
+    /// CR 121.1: "whenever you draw" payoff density (draw sources + engines).
+    pub draw_matters: DrawMattersFeature,
     /// Declaration-derived: the deck's declared bracket tier. Unlike the
     /// other fields here, this is not structurally detected from card text —
     /// it is a per-deck declaration set at deck-analysis time from deck
@@ -136,6 +140,7 @@ impl DeckFeatures {
             energy: energy::detect(deck),
             poison: poison::detect(deck),
             graveyard_types: graveyard_types::detect(deck),
+            draw_matters: draw_matters::detect(deck),
             bracket_tier: tier,
         }
     }
