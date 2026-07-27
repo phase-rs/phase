@@ -7,13 +7,19 @@
 //! - chosen-kind absence gate → add exactly once when absent, no-op when present;
 //! - CR 608.2b all-targets-illegal path → no resolution choice or placement.
 
+use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::zones::move_to_zone;
-use engine::types::ability::{ChoiceType, TargetRef};
+use engine::game::zones::{create_object, move_to_zone};
+use engine::types::ability::{
+    ChoiceType, ControllerRef, Effect, FilterProp, QuantityExpr, QuantityRef, ResolvedAbility,
+    TargetFilter, TargetRef, ThisWayCause, TypedFilter,
+};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -262,4 +268,135 @@ fn all_targets_illegal_skips_counter_kind_choice_and_placement() {
         "the all-targets-illegal trigger leaves the stack"
     );
     assert_eq!(runner.state().objects[&target].zone, Zone::Graveyard);
+}
+
+/// CR 608.2c + CR 122.1: The production `repeat_for:
+/// DistinctCounterKindsAmong` consumer must snapshot only counter kinds inside
+/// a complemented `TrackedSetFiltered` domain, including its nested object
+/// predicate and producer-action provenance. The observable +1/+1 counter
+/// count proves the loop ran once for Lore, not once for every raw tracked or
+/// unrelated battlefield kind.
+#[test]
+fn filtered_tracked_set_complement_drives_one_production_repeat_iteration() {
+    let mut scenario = GameScenario::new();
+    let source = scenario.add_creature(P0, "Repeat Source", 2, 2).id();
+    let outsider = scenario.add_creature(P0, "Battlefield Outsider", 2, 2).id();
+    scenario.with_counter(outsider, CounterType::Shield, 1);
+    let mut runner = scenario.build();
+
+    let add_member = |state: &mut engine::types::game_state::GameState,
+                      card_id,
+                      controller,
+                      name: &str,
+                      color,
+                      counter_type| {
+        let id = create_object(
+            state,
+            CardId(card_id),
+            controller,
+            name.to_string(),
+            Zone::Exile,
+        );
+        let object = state.objects.get_mut(&id).expect("created tracked member");
+        object.card_types.core_types.push(CoreType::Creature);
+        object.base_card_types = object.card_types.clone();
+        object.color = vec![color];
+        object.counters.insert(counter_type, 1);
+        id
+    };
+    let excluded_red = add_member(
+        runner.state_mut(),
+        10,
+        P0,
+        "Red Sacrificed",
+        ManaColor::Red,
+        CounterType::Plus1Plus1,
+    );
+    let included_green = add_member(
+        runner.state_mut(),
+        11,
+        P0,
+        "Green Sacrificed",
+        ManaColor::Green,
+        CounterType::Lore,
+    );
+    let wrong_cause = add_member(
+        runner.state_mut(),
+        12,
+        P0,
+        "Green Exiled",
+        ManaColor::Green,
+        CounterType::Stun,
+    );
+    let wrong_controller = add_member(
+        runner.state_mut(),
+        13,
+        P1,
+        "Opponent Sacrificed",
+        ManaColor::Green,
+        CounterType::Loyalty,
+    );
+
+    let tracked = TrackedSetId(17);
+    runner.state_mut().tracked_object_sets.insert(
+        tracked,
+        vec![excluded_red, included_green, wrong_cause, wrong_controller],
+    );
+    runner.state_mut().tracked_set_member_causes.insert(
+        tracked,
+        [
+            (excluded_red, ThisWayCause::Sacrificed),
+            (included_green, ThisWayCause::Sacrificed),
+            (wrong_cause, ThisWayCause::Exiled),
+            (wrong_controller, ThisWayCause::Sacrificed),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    let filtered_domain = TargetFilter::TrackedSetFiltered {
+        id: tracked,
+        filter: Box::new(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        )),
+        caused_by: Some(ThisWayCause::Sacrificed),
+    };
+    let complement = TargetFilter::Not {
+        filter: Box::new(TargetFilter::And {
+            filters: vec![
+                filtered_domain,
+                TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+                    color: ManaColor::Red,
+                }])),
+            ],
+        }),
+    };
+    let mut ability = ResolvedAbility::new(
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    ability.repeat_for = Some(QuantityExpr::Ref {
+        qty: QuantityRef::DistinctCounterKindsAmong { filter: complement },
+    });
+
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("production repeat-for chain resolves");
+
+    assert_eq!(
+        runner.state().objects[&source]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "only Lore from the non-red sacrificed controlled member drives an iteration; \
+         wrong cause, wrong controller, and battlefield outsider kinds stay outside the domain"
+    );
 }
