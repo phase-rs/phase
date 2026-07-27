@@ -622,6 +622,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
         | QuantityRef::ObjectCount { .. }
         | QuantityRef::ObjectCountDistinct { .. }
         | QuantityRef::ObjectCountBySharedQuality { .. }
@@ -928,6 +929,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::CountersOn { .. }
@@ -1140,6 +1142,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::CountersOn { .. }
@@ -2170,6 +2173,24 @@ fn resolve_ref(
                     look_count,
                     ..
                 } => look_count,
+                _ => None,
+            })
+            .map(u32_to_i32_saturating)
+            .unwrap_or(0),
+        // CR 701.22a + CR 701.22d: completion records the selected bottom
+        // count on the triggering scry event, so each queued trigger keeps its
+        // own value through target selection and resolution.
+        QuantityRef::TriggeringScryBottomCount => state
+            .current_trigger_event
+            .as_ref()
+            .cloned()
+            .or_else(detection_trigger_event)
+            .and_then(|event| match event {
+                crate::types::events::GameEvent::PlayerPerformedAction {
+                    action: crate::types::events::PlayerActionKind::Scry,
+                    scry_bottom_count,
+                    ..
+                } => scry_bottom_count,
                 _ => None,
             })
             .map(u32_to_i32_saturating)

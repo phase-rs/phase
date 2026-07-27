@@ -4052,6 +4052,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::ExileTopCardOfLibrary => Effect::ExileTop {
             player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
             face_down: false,
         },
 
@@ -4061,6 +4062,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::ExileTheTopNumberCardsOfLibrary(n) => Effect::ExileTop {
             player: TargetFilter::Controller,
             count: quantity::convert(n)?,
+            position: LibraryPosition::Top,
             face_down: false,
         },
 
@@ -6149,13 +6151,17 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             choice_optional,
             reveal,
         },
-        // CR 701.10 + CR 115.2: "Target player exiles the top N cards
+        // CR 701.13a + CR 115.2: "Target player exiles the top N cards
         // of their library."
         Effect::ExileTop {
-            count, face_down, ..
+            count,
+            position,
+            face_down,
+            ..
         } => Effect::ExileTop {
             player: target_filter,
             count,
+            position,
             face_down,
         },
         // CR 111.10 + CR 115.2: "Target player creates a [token]." The
@@ -7331,13 +7337,23 @@ mod tests {
         Permanents, Protectable, ProtectableColor, ReplacementActionWouldEnter, Rule, SubType,
         TokenCopyEffects, TokenFlag, PT,
     };
+    use engine::game::{
+        ability_utils::build_resolved_from_def_with_targets, create_object,
+        effects::resolve_ability_chain,
+    };
     use engine::types::ability::{
         AbilityKind, ChoiceType, Comparator, ContinuousModification, ControllerRef, Effect,
-        FilterProp, PlayerFilter, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        EffectKind, FilterProp, LibraryPosition, PlayerFilter, QuantityRef, TargetFilter,
+        TargetRef, TypeFilter, TypedFilter,
     };
     use engine::types::card_type::CoreType;
+    use engine::types::events::GameEvent;
+    use engine::types::game_state::GameState;
+    use engine::types::identifiers::CardId;
     use engine::types::keywords::{HexproofFilter, Keyword, ProtectionTarget};
     use engine::types::mana::ManaColor;
+    use engine::types::player::PlayerId;
+    use engine::types::zones::Zone;
 
     // Issue #4201 follow-up — Turnabout's "choose artifact, creature, or
     // land" spell action (`Action::ChooseACardtypeFromList`, the
@@ -8240,6 +8256,180 @@ mod tests {
         };
         assert_eq!(amount, QuantityExpr::Fixed { value: 2 });
         assert_eq!(player, TargetFilter::Player);
+    }
+
+    #[test]
+    fn exile_top_card_of_library_sets_explicit_top_position() {
+        let effect = convert(&Action::ExileTopCardOfLibrary).unwrap();
+
+        assert_eq!(
+            effect,
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                face_down: false,
+            }
+        );
+    }
+
+    #[test]
+    fn exile_top_number_cards_of_library_preserves_dynamic_count_and_top_position() {
+        let effect = convert(&Action::ExileTheTopNumberCardsOfLibrary(Box::new(
+            GameNumber::ValueX,
+        )))
+        .unwrap();
+
+        assert_eq!(
+            effect,
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                position: LibraryPosition::Top,
+                face_down: false,
+            }
+        );
+    }
+
+    #[test]
+    fn target_player_exile_top_rebinds_player_and_preserves_metadata() {
+        let effect = convert(&Action::PlayerAction(
+            Box::new(Player::Ref_TargetPlayer),
+            Box::new(Action::ExileTopCardOfLibrary),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            effect,
+            Effect::ExileTop {
+                player: TargetFilter::Player,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                face_down: false,
+            }
+        );
+    }
+
+    #[test]
+    fn target_player_exile_top_chain_preserves_all_exile_metadata() {
+        let conversion = convert_actions(&Actions::ActionList(vec![Action::PlayerAction(
+            Box::new(Player::Ref_TargetPlayer),
+            Box::new(Action::ExileTheTopNumberCardsOfLibrary(Box::new(
+                GameNumber::Integer(3),
+            ))),
+        )]))
+        .unwrap();
+
+        let ActionsConversion::LinearChain { segments } = conversion else {
+            panic!("expected a linear chain for the player-targeted action");
+        };
+        let [segment] = segments.as_slice() else {
+            panic!("expected one chain segment, got {segments:?}");
+        };
+        assert_eq!(
+            segment.effects,
+            vec![Effect::ExileTop {
+                player: TargetFilter::Player,
+                count: QuantityExpr::Fixed { value: 3 },
+                position: LibraryPosition::Top,
+                face_down: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn apply_player_target_preserves_exile_top_non_target_fields() {
+        let dynamic_count = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        let rebound = apply_player_target(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: dynamic_count.clone(),
+                position: LibraryPosition::Bottom,
+                face_down: true,
+            },
+            TargetFilter::Player,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rebound,
+            Effect::ExileTop {
+                player: TargetFilter::Player,
+                count: dynamic_count,
+                position: LibraryPosition::Bottom,
+                face_down: true,
+            }
+        );
+    }
+
+    #[test]
+    fn target_player_exile_top_materializes_and_resolves_against_target_library() {
+        let conversion = convert_actions(&Actions::ActionList(vec![Action::PlayerAction(
+            Box::new(Player::Ref_TargetPlayer),
+            Box::new(Action::ExileTopCardOfLibrary),
+        )]))
+        .unwrap();
+        let definition = build_ability_from_actions(AbilityKind::Spell, None, conversion).unwrap();
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Targeted exile source".to_string(),
+            Zone::Battlefield,
+        );
+        let p0_top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 library card".to_string(),
+            Zone::Library,
+        );
+        let p1_top = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "P1 library card".to_string(),
+            Zone::Library,
+        );
+        let resolved = build_resolved_from_def_with_targets(
+            &definition,
+            source,
+            PlayerId(0),
+            vec![TargetRef::Player(PlayerId(1))],
+        );
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.objects.get(&p1_top).map(|object| object.zone),
+            Some(Zone::Exile)
+        );
+        assert_eq!(
+            state.objects.get(&p0_top).map(|object| object.zone),
+            Some(Zone::Library),
+            "the controller's library must remain untouched"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ExileTop,
+                    ..
+                }
+            )),
+            "the materialized ExileTop must reach the resolver"
+        );
     }
 
     #[test]

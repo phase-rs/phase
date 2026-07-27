@@ -2606,6 +2606,12 @@ pub enum ProhibitedActivity {
     /// static `CantAttack` restrictions.
     Attack {
         defended: crate::types::triggers::AttackTargetFilter,
+        /// The player protected by this resolved restriction. New restrictions
+        /// snapshot this at resolution so they retain the trigger controller's
+        /// meaning of "you" after their source changes controller or leaves the
+        /// battlefield. `None` preserves the legacy source-controller lookup.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protected_player: Option<PlayerId>,
     },
     /// CR 116.2a + CR 305.1 + CR 601.2a: Prohibit *playing* (casting a spell OR
     /// playing a land) cards located in `zone` for the affected players.
@@ -5477,6 +5483,11 @@ pub enum QuantityRef {
     /// number of cards looked at while scrying this way". Resolves to 0
     /// outside a scry-trigger context (fail-safe).
     TriggeringScryLookCount,
+    /// CR 701.22a + CR 701.22d: The number of cards the controller put on the
+    /// bottom while completing the scry that fired this trigger. Reads the
+    /// trigger's own preserved `PlayerPerformedAction` event and returns zero
+    /// outside that context.
+    TriggeringScryBottomCount,
     /// Count of objects on the battlefield matching a filter.
     /// Used for "for each creature you control" and similar patterns.
     ObjectCount { filter: TargetFilter },
@@ -9333,9 +9344,10 @@ impl LegacyPaymentCost {
 
 /// Specific position within a library for placement effects. Top and Bottom use
 /// move_to_library_position; NthFromTop inserts at index n-1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
 pub enum LibraryPosition {
+    #[default]
     Top,
     Bottom,
     /// "second from the top", "third from the top", "seventh from the top"
@@ -11562,6 +11574,10 @@ pub enum Effect {
         /// Number of cards to exile.
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 401.2 + CR 701.13a: selected library edge. Only Top and Bottom
+        /// are valid here; placement-only positions fail closed in the resolver.
+        #[serde(default)]
+        position: LibraryPosition,
         /// CR 406.3: When true the exiled cards enter Exile face down and
         /// must not be examinable by any player (the resolver flips the
         /// moved object's `face_down` flag, and `visibility.rs` redacts the
@@ -20079,6 +20095,9 @@ pub struct TriggerDefinition {
     /// Typed player actions for PlayerPerformedAction trigger mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub player_actions: Option<Vec<PlayerActionKind>>,
+    /// CR 701.22a + CR 603.2: Optional completed-scry bottom-count predicate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scry_bottom_count: Option<(Comparator, u32)>,
     /// CR 603.2 + CR 120.1: Per-event damage-amount threshold for damage triggers
     /// ("…deals 5 or more damage to a player"). When `Some((cmp, n))`, the
     /// matcher requires the `DamageDealt` event's `amount` to satisfy
@@ -20589,6 +20608,7 @@ impl TriggerDefinition {
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,
+            scry_bottom_count: None,
             damage_amount: None,
             life_amount: None,
             coin_flip_result: None,
@@ -24527,6 +24547,7 @@ mod tests {
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,
+            scry_bottom_count: None,
             damage_amount: None,
             life_amount: None,
             coin_flip_result: None,

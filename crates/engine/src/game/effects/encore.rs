@@ -124,7 +124,7 @@ pub fn resolve(
             state,
             DelayedTrigger {
                 condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-                ability: sacrifice,
+                ability: Box::new(sacrifice),
                 controller: ability.controller,
                 source_id: ability.source_id,
                 one_shot: true,

@@ -6,7 +6,6 @@ import { CardImage } from "../card/CardImage.tsx";
 import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell.tsx";
 import { ScrollableCardStrip } from "../modal/ChoiceOverlay.tsx";
-import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -236,18 +235,12 @@ function ZoneCard({
   onCast: () => void;
   onDelve: () => void;
 }) {
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  // `hoverProps` owns the long-press → sticky-preview gesture and swallows the
+  // click that follows it in the capture phase, so this component needs neither
+  // its own useLongPress nor a firedRef guard here.
   const hoverProps = useInspectHoverProps();
-  const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
-    useCallback(() => {
-      inspectObject(obj.id);
-      setPreviewSticky(true);
-    }, [inspectObject, setPreviewSticky, obj.id]),
-  );
 
   const handleClick = useCallback((e: React.MouseEvent) => {
-    if (longPressFired.current) { longPressFired.current = false; return; }
     if (useUiStore.getState().debugInteractionMode) {
       e.stopPropagation();
       useUiStore.getState().openDebugContextMenu({ objectId: obj.id, x: e.clientX, y: e.clientY });
@@ -256,7 +249,7 @@ function ZoneCard({
     if (isValidTarget) { onTarget(); return; }
     if (canDelve) { onDelve(); return; }
     if (canCast) onCast();
-  }, [obj.id, isValidTarget, canDelve, canCast, onTarget, onDelve, onCast, longPressFired]);
+  }, [obj.id, isValidTarget, canDelve, canCast, onTarget, onDelve, onCast]);
 
   return (
     <div
@@ -272,7 +265,6 @@ function ZoneCard({
       title={canCast && !isValidTarget ? castTitle : undefined}
       {...hoverProps(obj.id)}
       onClick={handleClick}
-      {...longPressHandlers}
     >
       {/* Resolve the image via the engine's printed_ref (oracle_id + face)
           like every other object-rendering modal — name-only lookup fails for

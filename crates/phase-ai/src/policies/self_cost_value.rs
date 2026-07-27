@@ -1207,7 +1207,7 @@ mod tests {
             controller: OPP,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },

@@ -61,7 +61,7 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
             player: controller,
             gate: crate::types::ability::TurnGate::None,
         },
-        ability: inner,
+        ability: Box::new(inner),
         // CR 603.7d: controller of the delayed trigger is the player who
         // controlled the resolving Rebound spell.
         controller,

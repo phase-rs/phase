@@ -5814,6 +5814,7 @@ fn build_ingest_trigger() -> TriggerDefinition {
     let exile = Effect::ExileTop {
         player: TargetFilter::TriggeringPlayer,
         count: QuantityExpr::Fixed { value: 1 },
+        position: crate::types::ability::LibraryPosition::Top,
         face_down: false,
     };
     let execute = AbilityDefinition::new(AbilityKind::Spell, exile).description(
@@ -5845,6 +5846,7 @@ fn is_ingest_trigger(t: &TriggerDefinition) -> bool {
             Some(Effect::ExileTop {
                 player: TargetFilter::TriggeringPlayer,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             })
         )
@@ -24674,6 +24676,7 @@ mod ingest_gravestorm_synthesis_tests {
         let Effect::ExileTop {
             player,
             count,
+            position: _,
             face_down,
         } = effect
         else {

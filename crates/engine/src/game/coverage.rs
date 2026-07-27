@@ -1303,6 +1303,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::TriggeringScryLookCount => {
             "the number of cards looked at while scrying this way".into()
         }
+        QuantityRef::TriggeringScryBottomCount => {
+            "the number of cards put on the bottom while scrying this way".into()
+        }
         QuantityRef::Speed { player } => {
             format!("speed ({})", fmt_player_scope(player))
         }
@@ -2296,10 +2299,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExileTop {
             player,
             count,
+            position,
             face_down,
         } => {
             d.push(("player".into(), fmt_target(player)));
             d.push(("count".into(), fmt_quantity(count)));
+            if !matches!(position, crate::types::ability::LibraryPosition::Top) {
+                d.push(("position".into(), format!("{position:?}")));
+            }
             if *face_down {
                 d.push(("face_down".into(), "true".into()));
             }
@@ -7455,6 +7462,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
         QuantityRef::TriggeringDiscoverValue => ("TriggeringDiscoverValue", Handled),
         QuantityRef::TriggeringScryLookCount => ("TriggeringScryLookCount", Handled),
+        QuantityRef::TriggeringScryBottomCount => ("TriggeringScryBottomCount", Handled),
         QuantityRef::Speed { .. } => ("Speed", Handled),
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
         QuantityRef::ObjectCountDistinct { .. } => ("ObjectCountDistinct", Handled),

@@ -257,6 +257,7 @@ fn complete_cost_payment(
         player_id: player,
         action: PlayerActionKind::CollectEvidence,
         look_count: None,
+        scry_bottom_count: None,
     });
 
     match resume {
@@ -286,7 +287,7 @@ fn complete_cost_payment(
                 player,
                 pending.object_id,
                 pending.card_id,
-                pending.ability,
+                *pending.ability,
                 &pending.cost,
                 base_cost,
                 pending.casting_variant,

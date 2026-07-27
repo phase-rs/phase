@@ -79,14 +79,14 @@ pub(crate) fn epic_upkeep_trigger(effect: &EpicEffect) -> DelayedTrigger {
             player: effect.controller,
             gate: crate::types::ability::TurnGate::None,
         },
-        ability: ResolvedAbility::new(
+        ability: Box::new(ResolvedAbility::new(
             Effect::EpicCopy {
                 spell: effect.spell.clone(),
             },
             Vec::new(),
             effect.prototype_id,
             effect.controller,
-        ),
+        )),
         controller: effect.controller,
         source_id: effect.prototype_id,
         // Synthesized fresh each upkeep; the one-shot flag is irrelevant because
@@ -157,7 +157,7 @@ pub(crate) fn resolve(
             controller,
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(copy_ability.clone()),
+                ability: Some(Box::new(copy_ability.clone())),
                 casting_variant: CastingVariant::default(),
                 actual_mana_spent: 0,
             },

@@ -2174,7 +2174,7 @@ fn try_begin_reflexive_target_selection_inner(
             source_id,
             controller,
             condition: None,
-            ability: reflexive_clone,
+            ability: Box::new(reflexive_clone),
             timestamp: state.turn_number,
             target_constraints: reflexive.target_constraints.clone(),
             distribute: None,
@@ -2198,7 +2198,7 @@ fn try_begin_reflexive_target_selection_inner(
             trigger_events,
             events,
         );
-        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger = Some(Box::new(pending_for_state));
         state.pending_trigger_entry = Some(entry_id);
 
         match crate::game::engine::begin_pending_trigger_target_selection(state)
@@ -2261,7 +2261,7 @@ fn try_begin_reflexive_target_selection_inner(
         source_id,
         controller,
         condition: None,
-        ability: reflexive_clone,
+        ability: Box::new(reflexive_clone),
         timestamp: state.turn_number,
         target_constraints: reflexive.target_constraints.clone(),
         distribute: None,
@@ -2291,7 +2291,7 @@ fn try_begin_reflexive_target_selection_inner(
         trigger_events,
         events,
     );
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
     // CR 115.1d + CR 603.3d: the reflexive triggered ability is on the stack
     // before targets are chosen; finalization mutates this pending entry once
@@ -13043,6 +13043,7 @@ mod tests {
             player_id: PlayerId(1),
             action: crate::types::events::PlayerActionKind::SearchedLibrary,
             look_count: None,
+            scry_bottom_count: None,
         });
         let ability = ResolvedAbility::new(
             Effect::Draw {
@@ -14127,6 +14128,7 @@ mod tests {
             Effect::ExileTop {
                 count: QuantityExpr::Fixed { value: 2 },
                 player: TargetFilter::Controller,
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             },
             vec![],
@@ -19289,6 +19291,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             },
             vec![],
@@ -19373,6 +19376,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             },
             vec![],
@@ -22637,6 +22641,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             },
             vec![],

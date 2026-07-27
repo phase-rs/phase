@@ -103,6 +103,28 @@ pub fn is_acting(state: &GameState, player: PlayerId) -> bool {
     engine::game::turn_control::is_authorized_submitter(state, player)
 }
 
+/// Deployment shape of this `phase-server` instance. Selected once at startup
+/// from `--single-user`; never per-session, because a session cannot prove it
+/// is unobserved — `SpectatorJoin` admits any started game by code, with no
+/// `public` / password / `ai_seats` check. Deriving capability from the seat
+/// mix would therefore open sandbox on a *shared* server to any client that
+/// created an all-AI game.
+///
+/// Shape precedent: `phase_server::persistence::SessionRetention`, which is
+/// likewise a two-variant `Copy` enum selected from the same CLI flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostingMode {
+    /// A shared instance: other humans may join or spectate any session.
+    Shared,
+    /// The desktop shell's sidecar. `SingleUser` asserts that no other client
+    /// can reach this instance at all, and that assertion rests on the spawn
+    /// arguments — `--bind 127.0.0.1` plus `--allowed-origin`
+    /// (`client/src-tauri/src/native_engine.rs`), NOT on the seat mix. If the
+    /// sidecar is ever bound beyond loopback, this variant stops being true
+    /// and the capability it grants must be re-derived.
+    SingleUser,
+}
+
 pub struct GameSession {
     pub game_code: String,
     /// Monotonic server-authored revision of the current authoritative state.
@@ -120,6 +142,27 @@ pub struct GameSession {
     /// reservations are released by socket cleanup.
     pub reservations: HashMap<String, SeatReservation>,
     pub timer_seconds: Option<u32>,
+    /// Deployment shape of the process hosting this session, copied from the
+    /// owning `SessionManager` at creation and **re-stamped, never
+    /// deserialized**, at `SessionManager::restore_session`. Deliberately
+    /// absent from `PersistedSession`.
+    ///
+    /// The stamp blocks re-*derivation* only: it stops a restored blob from
+    /// claiming this process is a sidecar when it is not. The capability the
+    /// derivation produces (`GameState::debug_mode` / `debug_permitted`) is
+    /// a plain `#[serde(default)]` pair that rides inside the blob, so the
+    /// stamp alone does not keep a sidecar's capability out of a shared
+    /// server — `GameSession::revoke_unentitled_debug_capability`, called
+    /// immediately after the stamp, is what does that.
+    ///
+    /// **Read fence.** This field is read by exactly one function,
+    /// `seed_debug_capability`, which is reachable only via
+    /// `rebuild_pregame_state`, which is called only from `start_game` and
+    /// from `apply_seat_delta`. Neither runs during the lobby re-registration
+    /// window in which a restored session still holds the `from_persisted`
+    /// placeholder. **Any new read must either sit behind
+    /// `rebuild_pregame_state` or be added after the restore stamp.**
+    pub hosting: HostingMode,
     /// Number of human player seats in this game.
     pub player_count: u8,
     /// Seats controlled by AI (not occupied by a human player).
@@ -317,17 +360,106 @@ impl GameSession {
             }
         };
         self.state.set_match_config(match_config);
-        // Preserve sandbox seeding through rematch — the format flag is
-        // immutable, so debug capability survives the new game. Every seat
-        // is permitted by default (see initial create site for rationale);
-        // explicit revocations from the previous game are dropped at rematch
-        // since the new game is a fresh debug context.
+        self.seed_debug_capability();
+    }
+
+    /// Seeds `debug_mode` / `debug_permitted` for the state just built by
+    /// `rebuild_pregame_state`.
+    ///
+    /// That function is the only SESSION-LAYER seeding site whose result
+    /// survives `start_game`: it replaces `self.state` wholesale, discarding
+    /// anything seeded during construction (`create_game_n_players` seeds
+    /// before `start_game` runs, so its seeding is unobservable to a client —
+    /// `create_game_with_ai` starts the game before returning the game code).
+    ///
+    /// It is *not* the only seeding site in the codebase. The engine's
+    /// between-games rebuild (`engine::game::match_flow`'s
+    /// `restart_between_games_with_starting_player`) builds a fresh
+    /// `GameState` that never touches `GameSession`, so it carries these two
+    /// fields forward itself. A `session.rs` authority structurally cannot
+    /// reach it.
+    ///
+    /// Note `GameState::debug_mode`'s own doc comment still reads "Always
+    /// false for multiplayer games" — stale as of this commit, since the
+    /// client classifies `native-ai` as multiplayer. A rider is filed against
+    /// `crates/engine/src/types/game_state.rs` to correct it. That file is
+    /// clean in the working tree; it is out of this change's scope because it
+    /// belongs to the sibling Item 1 workstream, not because another agent
+    /// holds it. (The earlier wording here claimed the latter and was wrong —
+    /// an unverified ownership claim is the same failure mode as the stale
+    /// comment it defers.)
+    ///
+    /// Both branches below read `self.player_count` as the single seat-count
+    /// authority: `human_seats()` derives from it, and `apply_seat_delta`
+    /// assigns it before rebuilding, so a parameter would only reintroduce
+    /// the chance of the two disagreeing.
+    fn seed_debug_capability(&mut self) {
         if self.state.format_config.allow_debug_actions {
+            // Sandbox is a shared playground, not an admin console: every seat
+            // is permitted by default. Explicit revocations from a previous
+            // game are dropped, since a rebuilt pregame state is a fresh debug
+            // context. (The old comment here claimed this preserved seeding
+            // "through rematch" — it does not: a Bo3 rematch rebuilds in the
+            // engine, never through this function.)
             self.state.debug_mode = true;
-            for i in 0..player_count {
+            for i in 0..self.player_count {
                 self.state.debug_permitted.insert(PlayerId(i));
             }
+        } else if self.hosting == HostingMode::SingleUser {
+            // Desktop-solo parity with the browser engine, which enables
+            // `debug_mode` unconditionally for single-player. The sandbox
+            // *format* flag stays false, so own-library name exposure
+            // (`engine::game::visibility`) and the host grant/revoke flow
+            // (rejected above with "Sandbox mode is not enabled") remain
+            // closed — this grants the debug panel, not a shared sandbox.
+            //
+            // Human seats only. An AI seat has no client and never submits a
+            // Debug action; excluding it keeps the strict wire gate in
+            // `handle_action` a meaningful per-seat check rather than a global
+            // on-switch. `human_seats()` is correct here and only here: both
+            // callers of `rebuild_pregame_state` have already populated
+            // `ai_seats` (`start_game` <- `create_game_with_ai`;
+            // `apply_seat_delta` <- its own rebuild).
+            self.state.debug_mode = true;
+            for seat in self.human_seats() {
+                self.state.debug_permitted.insert(seat);
+            }
         }
+    }
+
+    /// Drop debug capability this process is not entitled to grant.
+    ///
+    /// The inverse of `seed_debug_capability`, applied on the restore path.
+    /// `debug_mode` / `debug_permitted` are plain `#[serde(default)]` fields
+    /// on `GameState` and `to_persisted` captures the whole state, so both
+    /// ride inside `PersistedGameState`; `rebuild_pregame_state` never runs
+    /// on a restore, so nothing else re-examines them. Two things can entitle
+    /// a session to the capability, and they belong to different owners:
+    ///
+    /// - `format_config.allow_debug_actions` — a property of the GAME, which
+    ///   legitimately travels with the blob. A sandbox game is a sandbox game
+    ///   wherever it is resumed.
+    /// - `HostingMode::SingleUser` — a property of THIS PROCESS, which does
+    ///   not travel. This is the one the restore stamp establishes.
+    ///
+    /// If neither holds, `seed_debug_capability` would take neither branch,
+    /// so the capability is one this process would never have granted: a blob
+    /// written by a `--single-user` sidecar (`debug_mode: true`,
+    /// `debug_permitted: {0}`) must not arrive on a shared server with seat 0
+    /// still past the `handle_action` debug gate. Only deployment
+    /// configuration (the sidecar's separate `PHASE_GAMES_DB`) keeps that
+    /// unreachable today, which is not a mechanism.
+    ///
+    /// An entitled session keeps its persisted values **verbatim** rather
+    /// than being re-seeded. An explicit `RevokeDebugPermission` taken before
+    /// the save is game state, and re-deriving would silently reinstate the
+    /// revoked seat.
+    fn revoke_unentitled_debug_capability(&mut self) {
+        if self.state.format_config.allow_debug_actions || self.hosting == HostingMode::SingleUser {
+            return;
+        }
+        self.state.debug_mode = false;
+        self.state.debug_permitted.clear();
     }
 
     pub fn apply_seat_delta(&mut self, new_state: SeatState, delta: &SeatDelta, db: &CardDatabase) {
@@ -686,6 +818,11 @@ impl GameSession {
             display_names: ps.display_names,
             reservations: HashMap::new(),
             timer_seconds: ps.timer_seconds,
+            // Least-privilege placeholder. `hosting` is a property of THIS
+            // process, not of the persisted blob, and is re-stamped by
+            // `SessionManager::restore_session`. Between here and that stamp
+            // the value can only *under*-grant, never over-grant.
+            hosting: HostingMode::Shared,
             player_count: ps.player_count,
             ai_seats,
             ai_configs,
@@ -704,23 +841,32 @@ impl GameSession {
 pub struct SessionManager {
     pub sessions: HashMap<String, GameSession>,
     pub reconnect: ReconnectManager,
+    /// Deployment shape of this process, stamped onto every session this
+    /// manager creates or restores. See `HostingMode`.
+    pub hosting: HostingMode,
     /// Maps player_token -> game_code for token-based lookups.
     token_to_game: HashMap<String, String>,
 }
 
 impl SessionManager {
+    /// A shared instance: other humans may join or spectate.
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
             reconnect: ReconnectManager::default(),
+            hosting: HostingMode::Shared,
             token_to_game: HashMap::new(),
         }
     }
 
-    pub fn with_grace_period(grace_period: Duration) -> Self {
+    /// The desktop shell's sidecar: one user, loopback-bound, no other client
+    /// can reach it. `grace_period` sets the reconnect window, which a
+    /// single-user instance makes effectively unbounded.
+    pub fn single_user(grace_period: Duration) -> Self {
         Self {
             sessions: HashMap::new(),
             reconnect: ReconnectManager::new(grace_period),
+            hosting: HostingMode::SingleUser,
             token_to_game: HashMap::new(),
         }
     }
@@ -807,6 +953,7 @@ impl SessionManager {
             display_names,
             reservations: HashMap::new(),
             timer_seconds,
+            hosting: self.hosting,
             player_count,
             ai_seats: HashSet::new(),
             ai_configs: HashMap::new(),
@@ -1061,18 +1208,19 @@ impl SessionManager {
             );
         }
 
-        // Sandbox capability gate. A `Debug(_)` is accepted only when the
-        // session was created in sandbox mode AND the submitting player is in
-        // the `debug_permitted` set. The set is host-managed via
-        // `GrantDebugPermission` / `RevokeDebugPermission` and is initialized
-        // to `{host}` when the game is sandbox-flagged.
+        // Debug capability gate. `debug_permitted` is the single authority:
+        // a `Debug(_)` is accepted iff the submitting player is in the set.
+        // `seed_debug_capability` fills it from one of two sources — every
+        // seat when the game is sandbox-flagged, or the human seats when this
+        // process is a `HostingMode::SingleUser` desktop instance — and the
+        // host adjusts it afterwards via `GrantDebugPermission` /
+        // `RevokeDebugPermission` (sandbox games only). Naming a mode in the
+        // refusal would be wrong for the single-user source, so the message
+        // stays on the seat, which is what was actually checked.
         if matches!(action, GameAction::Debug(_))
             && !session.state.debug_permitted.contains(&player)
         {
-            return Err(
-                "Debug actions are not permitted (Sandbox mode disabled or no permission)"
-                    .to_string(),
-            );
+            return Err("Debug actions are not permitted for this seat".to_string());
         }
 
         // Grant/Revoke debug permission: host-only, and only meaningful in a
@@ -1241,7 +1389,18 @@ impl SessionManager {
 
     /// Restore a pre-built session (e.g., from disk persistence).
     /// Registers all player tokens in the token-to-game index.
-    pub fn restore_session(&mut self, session: GameSession) {
+    pub fn restore_session(&mut self, mut session: GameSession) {
+        // Deployment shape is a property of THIS process, never of the
+        // persisted blob. Re-stamped here, never deserialized. This is the
+        // sole entry for a restored session into a manager (`sessions.insert`
+        // has exactly two call sites: create, and this one).
+        session.hosting = self.hosting;
+        // The stamp above only stops the blob from driving a future
+        // *derivation*. `debug_mode` / `debug_permitted` are serialized state
+        // and arrive already set, so a sidecar's capability would otherwise
+        // walk straight into a shared server. Order matters: this reads the
+        // `hosting` just stamped.
+        session.revoke_unentitled_debug_capability();
         let game_code = session.game_code.clone();
         for token in &session.player_tokens {
             if !token.is_empty() {
@@ -1276,6 +1435,8 @@ pub fn generate_player_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
     use engine::database::card_db::CardDatabase;
     use engine::game::deck_loading::DeckEntry;
     use engine::game::engine::apply;
@@ -2538,6 +2699,349 @@ mod tests {
         );
     }
 
+    /// Fixture shape for the `HostingMode` tests below, matching the existing
+    /// `takeback_auto_approves_for_sole_human_seat` precedent: a default
+    /// `CardDatabase` and `format_config: None` are enough to run
+    /// `create_game_with_ai` all the way through `start_game`. (The
+    /// "can't fully start the game without a database" comment elsewhere in
+    /// this module does not apply to this path.) `format_config: None`
+    /// yields `FormatConfig::standard`, so `allow_debug_actions` is false —
+    /// which is what makes the capability assertions load-bearing rather
+    /// than a restatement of the sandbox flag.
+    fn single_ai_opponent_game(mgr: &mut SessionManager) -> String {
+        let db = engine::database::CardDatabase::default();
+        let (code, _token) = mgr.create_game_with_ai(
+            make_deck(),
+            "Host".to_string(),
+            None,
+            MatchConfig::default(),
+            vec![(1, AiDifficulty::Easy, make_deck())],
+            Vec::new(),
+            None,
+            &db,
+        );
+        code
+    }
+
+    #[test]
+    fn single_user_instance_seeds_human_seats_through_start_game() {
+        // The surviving-seam probe. `create_game_with_ai` calls `start_game`,
+        // which calls `rebuild_pregame_state`, which replaces `self.state`
+        // wholesale. Seeding placed anywhere earlier — `create_game_n_players`,
+        // or the tail of `create_game_with_ai` — is wiped, and this test fails.
+        // A test built on `create_game_n_players` alone (the shape both
+        // pre-existing debug tests use) would pass against the wrong seam.
+        let mut mgr = SessionManager::single_user(Duration::from_secs(60));
+        let code = single_ai_opponent_game(&mut mgr);
+        let session = mgr.sessions.get(&code).unwrap();
+
+        // The capability came from the hosting mode, NOT from a sandbox
+        // format flag: this assertion fails if someone reaches for
+        // `FormatConfig::with_sandbox()` instead.
+        assert!(
+            !session.state.format_config.allow_debug_actions,
+            "sandbox format flag must stay off — it changes hidden-info exposure"
+        );
+        assert!(session.state.debug_mode);
+        assert_eq!(
+            session.state.debug_permitted,
+            BTreeSet::from([PlayerId(0)]),
+            "human seats only: the AI seat has no client and never submits Debug"
+        );
+    }
+
+    #[test]
+    fn shared_instance_does_not_seed_debug_capability() {
+        // Discriminates "seeded from the hosting mode" from "seeded always".
+        // Without this, the test above passes for an implementation that
+        // seeds unconditionally — which would open the debug panel on the
+        // online server.
+        let mut mgr = SessionManager::new();
+        let code = single_ai_opponent_game(&mut mgr);
+        let session = mgr.sessions.get(&code).unwrap();
+
+        assert!(!session.state.debug_mode);
+        assert!(session.state.debug_permitted.is_empty());
+    }
+
+    #[test]
+    fn single_user_human_seat_may_submit_debug_action_but_ai_seat_may_not() {
+        // Two authorities in one fixture, positive then negative, against the
+        // SAME `session.state`.
+        let mut mgr = SessionManager::single_user(Duration::from_secs(60));
+        let db = engine::database::CardDatabase::default();
+        let (code, host_token) = mgr.create_game_with_ai(
+            make_deck(),
+            "Host".to_string(),
+            None,
+            MatchConfig::default(),
+            vec![(1, AiDifficulty::Easy, make_deck())],
+            Vec::new(),
+            None,
+            &db,
+        );
+
+        // POSITIVE, through the real wire gate. `ShuffleLibrary` (not
+        // `CreateCard`) is the reach-guard: `CreateCard` is resolved at the
+        // WASM layer and the engine returns `InvalidAction` if it reaches
+        // `apply()`, so a positive built on it passes identically against a
+        // totally broken gate. `ShuffleLibrary` is state-only and actually
+        // applied, so `Ok` is reachable only past the strict wire gate in
+        // `handle_action` AND both engine gates.
+        let ok = mgr.handle_action(
+            &code,
+            &host_token,
+            GameAction::Debug(engine::types::actions::DebugAction::ShuffleLibrary {
+                player_id: PlayerId(0),
+            }),
+        );
+        assert!(ok.is_ok(), "seat 0 must be permitted: {:?}", ok.err());
+
+        // NEGATIVE — and it deliberately does NOT go through `handle_action`.
+        // That function authenticates by TOKEN, never by `PlayerId`:
+        // `player_for_token` scans `player_tokens`, `create_game_n_players`
+        // builds `vec![String::new(); pc]` and assigns only index 0, and
+        // `create_game_with_ai` never assigns a token to an AI seat. So any
+        // AI-seat attempt returns `Err("Invalid player token")`, satisfying a
+        // bare `assert!(result.is_err())` IDENTICALLY against a totally broken
+        // debug gate. Drive the per-seat gate where an AI seat is addressable:
+        // the engine.
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        assert_eq!(
+            session.state.debug_permitted,
+            BTreeSet::from([PlayerId(0)]),
+            "fixture premise: only the human seat is permitted. An empty set \
+             would make the engine's lenient gate ALLOW, flipping this test red"
+        );
+        let err = engine::game::apply(
+            &mut session.state,
+            PlayerId(1),
+            GameAction::Debug(engine::types::actions::DebugAction::ShuffleLibrary {
+                player_id: PlayerId(1),
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("Debug actions require debug permission"),
+            "must fail the per-seat gate specifically, not the debug_mode gate \
+             ('Debug actions require debug_mode to be enabled') and not a token \
+             check: {err:?}"
+        );
+    }
+
+    #[test]
+    fn seat_delta_rebuild_rederives_debug_capability() {
+        // The SECOND caller of `rebuild_pregame_state`. `start_game` is the
+        // first (covered above); `apply_seat_delta` reaches the same seam,
+        // gated on `old_player_count != new_player_count`. A seeding
+        // implementation wired only into `start_game` passes every test above
+        // and fails this one.
+        struct UnusedResolver;
+        impl seat_reducer::types::DeckResolver for UnusedResolver {
+            fn resolve(
+                &self,
+                _choice: &DeckChoice,
+            ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
+                panic!("human seat removal must not resolve a deck")
+            }
+        }
+
+        let db = engine::database::CardDatabase::default();
+        let mut mgr = SessionManager::single_user(Duration::from_secs(60));
+        let (code, _host) = mgr.create_game_n_players(
+            make_deck(),
+            "Host".to_string(),
+            None,
+            3,
+            MatchConfig::default(),
+            None,
+        );
+        // Seat 1 joins; seat 2 is left waiting, because the reducer rejects
+        // removing a claimed seat (`SeatClaimed`).
+        mgr.join_game(&code, make_deck()).unwrap();
+
+        // Premise: nothing is seeded before the rebuild, so the assertion
+        // below cannot be satisfied by leftovers from game creation.
+        assert!(
+            mgr.sessions
+                .get(&code)
+                .unwrap()
+                .state
+                .debug_permitted
+                .is_empty(),
+            "fixture premise: pregame state carries no capability yet"
+        );
+
+        let resolver = UnusedResolver;
+        let ctx = seat_reducer::types::ReducerCtx {
+            platform: Platform::Native,
+            deck_resolver: &resolver,
+        };
+        let mut seat_state = mgr.sessions.get(&code).unwrap().seat_state();
+        let delta = seat_reducer::apply(
+            &mut seat_state,
+            SeatMutation::Remove { seat_index: 2 },
+            &ctx,
+        )
+        .unwrap();
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.apply_seat_delta(seat_state, &delta, &db);
+
+        // Re-derived at the NEW seat count, not carried stale from 3 seats.
+        assert_eq!(session.player_count, 2);
+        assert!(session.state.debug_mode);
+        assert_eq!(
+            session.state.debug_permitted,
+            BTreeSet::from([PlayerId(0), PlayerId(1)]),
+            "both remaining seats are human, and seat 2 must not survive"
+        );
+    }
+
+    #[test]
+    fn restore_session_stamps_this_instances_hosting() {
+        // Direction matters, and only this one discriminates. `hosting` is
+        // deliberately absent from `PersistedSession`, so `from_persisted`
+        // ALWAYS yields the least-privilege `Shared` placeholder. Restoring
+        // into a `Shared` manager therefore has the placeholder and the
+        // manager agreeing, and would pass with the stamp deleted — verified,
+        // not assumed. Restoring into a `SingleUser` manager makes the two
+        // sources disagree, so only the manager's value winning can produce
+        // `SingleUser` here.
+        //
+        // It is also the production direction: the desktop sidecar restores
+        // its own suspended game and must regain the capability.
+        let db = engine::database::CardDatabase::default();
+        let mut origin = SessionManager::new();
+        let code = single_ai_opponent_game(&mut origin);
+        let persisted = origin.sessions.get(&code).unwrap().to_persisted();
+        let restored = GameSession::from_persisted(persisted, &db);
+        assert_eq!(
+            restored.hosting,
+            HostingMode::Shared,
+            "premise: the un-stamped placeholder is Shared, so a SingleUser \
+             result below can only have come from the manager"
+        );
+
+        let mut sidecar = SessionManager::single_user(Duration::from_secs(60));
+        sidecar.restore_session(restored);
+        let session = sidecar.sessions.get_mut(&code).unwrap();
+        assert_eq!(session.hosting, HostingMode::SingleUser);
+
+        // And the stamp is load-bearing, not decorative: a rebuild on the
+        // sidecar manager re-derives the capability the placeholder would
+        // have denied. Cleared first so the assertion cannot be satisfied by
+        // values riding along inside `PersistedGameState` (both fields are
+        // `#[serde(default)]`, not `skip`).
+        let pc = session.player_count;
+        session.state.debug_mode = false;
+        session.state.debug_permitted.clear();
+        session.rebuild_pregame_state(pc);
+        assert!(session.state.debug_mode);
+        assert_eq!(session.state.debug_permitted, BTreeSet::from([PlayerId(0)]));
+    }
+
+    /// Serialize through JSON exactly as `persist.rs` writes to disk, so the
+    /// "the capability rides in the blob" premise is measured rather than
+    /// asserted from the `#[serde(default)]` attributes.
+    fn round_trip_through_disk(session: &GameSession, db: &CardDatabase) -> GameSession {
+        let json = serde_json::to_string(&session.to_persisted()).unwrap();
+        let persisted: crate::persist::PersistedSession = serde_json::from_str(&json).unwrap();
+        GameSession::from_persisted(persisted, db)
+    }
+
+    #[test]
+    fn restore_drops_a_sidecar_blobs_debug_capability_on_a_shared_server() {
+        // The `hosting` re-stamp blocks re-DERIVATION only. `debug_mode` and
+        // `debug_permitted` are `#[serde(default)]` (not `skip`) and
+        // `to_persisted` captures the whole `GameState`, so they arrive
+        // already set and `rebuild_pregame_state` never runs on the restore
+        // path to re-examine them.
+        let db = engine::database::CardDatabase::default();
+        let mut sidecar = SessionManager::single_user(Duration::from_secs(60));
+        let code = single_ai_opponent_game(&mut sidecar);
+
+        let origin = sidecar.sessions.get(&code).unwrap();
+        // Premise 1: the sidecar really granted it, so a cleared result below
+        // cannot come from the blob never having had the capability.
+        assert!(origin.state.debug_mode);
+        assert_eq!(origin.state.debug_permitted, BTreeSet::from([PlayerId(0)]));
+        // Premise 2: the grant came from the hosting mode, not the sandbox
+        // format flag — the flag is what legitimately travels with the blob,
+        // and if it were set here the session would stay entitled.
+        assert!(!origin.state.format_config.allow_debug_actions);
+
+        let restored = round_trip_through_disk(origin, &db);
+        // Premise 3: both fields genuinely survive a disk round trip. If this
+        // ever goes false the assertions below become vacuous.
+        assert!(restored.state.debug_mode);
+        assert_eq!(
+            restored.state.debug_permitted,
+            BTreeSet::from([PlayerId(0)])
+        );
+
+        let mut shared = SessionManager::new();
+        shared.restore_session(restored);
+        let session = shared.sessions.get(&code).unwrap();
+        assert_eq!(session.hosting, HostingMode::Shared);
+        assert!(
+            !session.state.debug_mode,
+            "a --single-user sidecar's capability must not survive into a shared server"
+        );
+        assert!(
+            session.state.debug_permitted.is_empty(),
+            "seat 0 would otherwise stay past the handle_action debug gate"
+        );
+    }
+
+    #[test]
+    fn restore_keeps_a_sandbox_games_capability_including_its_revocations() {
+        // The paired positive, and the guard against clearing unconditionally:
+        // `allow_debug_actions` is a property of the GAME and travels with the
+        // blob, so a sandbox game is still a sandbox game after a restart.
+        // Values are kept VERBATIM rather than re-seeded — an explicit
+        // `RevokeDebugPermission` is game state, and re-deriving would
+        // silently reinstate the revoked seat.
+        let db = engine::database::CardDatabase::default();
+        let mut origin_mgr = SessionManager::new();
+        let (code, _token) = create_sandbox_game(&mut origin_mgr);
+        let origin = origin_mgr.sessions.get_mut(&code).unwrap();
+        assert_eq!(
+            origin.state.debug_permitted,
+            BTreeSet::from([PlayerId(0), PlayerId(1)]),
+            "premise: sandbox seeds every seat"
+        );
+        origin.state.debug_permitted.remove(&PlayerId(1));
+
+        let restored = round_trip_through_disk(origin, &db);
+        let mut shared = SessionManager::new();
+        shared.restore_session(restored);
+        let session = shared.sessions.get(&code).unwrap();
+        assert!(session.state.debug_mode);
+        assert_eq!(
+            session.state.debug_permitted,
+            BTreeSet::from([PlayerId(0)]),
+            "seat 0 keeps its grant and seat 1 stays revoked"
+        );
+    }
+
+    #[test]
+    fn restore_keeps_the_sidecars_capability_when_it_resumes_its_own_game() {
+        // The production restore direction: the desktop sidecar resuming a
+        // suspended game. `HostingMode::SingleUser` is the second entitlement,
+        // so nothing is dropped here. Fails against a restore that clears
+        // whenever `allow_debug_actions` is false.
+        let db = engine::database::CardDatabase::default();
+        let mut origin_mgr = SessionManager::single_user(Duration::from_secs(60));
+        let code = single_ai_opponent_game(&mut origin_mgr);
+        let restored = round_trip_through_disk(origin_mgr.sessions.get(&code).unwrap(), &db);
+
+        let mut sidecar = SessionManager::single_user(Duration::from_secs(60));
+        sidecar.restore_session(restored);
+        let session = sidecar.sessions.get(&code).unwrap();
+        assert!(session.state.debug_mode);
+        assert_eq!(session.state.debug_permitted, BTreeSet::from([PlayerId(0)]));
+    }
+
     // CR 107.1c: "remove any number of counters" — a human's intermediate submit
     // ("remove 2 of 3") is not one of the coarse AI candidates (remove-none /
     // remove-all), but the engine validates the full legal space directly.
@@ -2829,6 +3333,8 @@ mod tests {
             display_names: vec!["Host".to_string(), "AI (CEDH)".to_string()],
             reservations: HashMap::new(),
             timer_seconds: None,
+            // This test asserts cEDH bracket validation, not capability.
+            hosting: HostingMode::Shared,
             player_count: pc as u8,
             ai_seats: [ai_pid].into_iter().collect(),
             ai_configs: [(ai_pid, cedh_config)].into_iter().collect(),

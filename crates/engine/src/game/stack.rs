@@ -17,6 +17,9 @@ use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
     ResolvedStackEntryFinalizeCommand, ResolvedStackEntryFinalizeReplayInvariantError,
     ResolvedStackPushCommand, ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError,
+    ResolvedStackRemovalCommand, ResolvedStackRemovalReplayInvariantError,
+    ResolvedUncommittedTriggerRemovalCommand,
+    ResolvedUncommittedTriggerRemovalReplayInvariantError,
 };
 use crate::types::zones::Zone;
 
@@ -267,6 +270,123 @@ pub fn apply_resolved_stack_entry_finalize(
     Ok(())
 }
 
+/// Everything one stack removal settles: the entry plus the per-entry side-table
+/// rows keyed on it.
+///
+/// The rows are returned rather than discarded because the resolution pop
+/// consumes both — the paid snapshot feeds cost-dependent resolution and the
+/// batch feeds CR 603.7c event context. Callers that only need the entry drop
+/// the rest.
+pub(crate) struct PoppedStackEntry {
+    pub entry: StackEntry,
+    pub paid_facts: Option<StackPaidSnapshot>,
+    pub trigger_event_batch: Option<Vec<GameEvent>>,
+}
+
+/// CR 405.2: removes one object from the stack at a known index.
+///
+/// The single authority for every one-entry stack removal — the CR 405.5
+/// resolution pop and the drain loops (batched resolution, inert no-op batches,
+/// CR 724.1b stack exile) via [`pop_top_stack_entry`], the CR 701.6a counter,
+/// and the CR 601.2a / CR 601.2i cast rollbacks. Each call removes exactly one
+/// object, so a drain of N entries is N removals rather than one bulk mutation.
+///
+/// Both side tables are dropped here rather than by the callers because they are
+/// keyed on the entry and settle WITH the removal: dropping the entry but
+/// leaving `stack_paid_facts` or `stack_trigger_event_batches` behind would
+/// strand rows against an id no longer on the stack. The counter and rollback
+/// sites previously dropped only `stack_paid_facts` (and the CR 601.2a reject
+/// dropped neither), so routing them here also closes those leaks.
+///
+/// NOT used by [`pop_uncommitted_pending_trigger_entry`], which performs the
+/// same mutation. That is deliberate: the CR 603.3d removal is a distinct family
+/// with its own record, and routing it through this authority would journal one
+/// mutation twice, so a replay would remove two entries where execution removed
+/// one.
+pub(crate) fn remove_stack_entry_at(
+    state: &mut GameState,
+    index: usize,
+) -> Option<PoppedStackEntry> {
+    // `im::Vector::remove` panics out of range rather than returning `Option`,
+    // so the bound is checked here rather than leaned on.
+    if index >= state.stack.len() {
+        return None;
+    }
+    let entry = state.stack.remove(index);
+    let paid_facts = state.stack_paid_facts.remove(&entry.id);
+    let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
+
+    // CR 733: journal once ALL THREE removals have settled, so the record
+    // describes a stack the entry has already left. An out-of-range index is the
+    // one case that journals nothing — `?` returns above, because no mutation
+    // happened at all.
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_stack_removal(ResolvedStackRemovalCommand {
+            entry: Box::new(entry.clone()),
+            index,
+            resulting_depth: state.stack.len(),
+            cause,
+        })
+        .expect("resolved stack removal must have a live journal cause");
+
+    Some(PoppedStackEntry {
+        entry,
+        paid_facts,
+        trigger_event_batch,
+    })
+}
+
+/// CR 405.2: removes the topmost object from the stack.
+///
+/// A thin wrapper over [`remove_stack_entry_at`] — the top of an N-deep stack is
+/// index N-1 — kept because the resolution and drain callers have no index to
+/// pass and reading `remove_stack_entry_at(state, state.stack.len() - 1)` at
+/// each of them would obscure that they are simply resolving the top object.
+pub(crate) fn pop_top_stack_entry(state: &mut GameState) -> Option<PoppedStackEntry> {
+    remove_stack_entry_at(state, state.stack.len().checked_sub(1)?)
+}
+
+/// Replays one already-resolved CR 405.2 stack removal.
+///
+/// Installs the recorded removal with nothing re-derived: the entry is verified
+/// at the RECORDED index rather than located by a fresh scan, which matters
+/// because the production sites find it with predicates that can match a
+/// different entry on a diverged stack. All preconditions are checked BEFORE any
+/// mutation, so a rejected replay leaves the stack and both side tables
+/// untouched.
+pub fn apply_resolved_stack_removal(
+    state: &mut GameState,
+    command: &ResolvedStackRemovalCommand,
+) -> Result<(), ResolvedStackRemovalReplayInvariantError> {
+    // CR 405.2: the predecessor must be exactly one deeper than the record.
+    let expected_depth = command.resulting_depth + 1;
+    if state.stack.len() != expected_depth {
+        return Err(ResolvedStackRemovalReplayInvariantError::DepthMismatch {
+            expected: expected_depth,
+            found: state.stack.len(),
+        });
+    }
+    let Some(found) = state.stack.get(command.index) else {
+        return Err(ResolvedStackRemovalReplayInvariantError::IndexOutOfRange {
+            index: command.index,
+            depth: state.stack.len(),
+        });
+    };
+    // Compared WHOLE rather than by id: an applier that matched on `id` alone
+    // would discard a divergent object that merely reused the identifier.
+    if found != command.entry.as_ref() {
+        return Err(ResolvedStackRemovalReplayInvariantError::RemovedEntryMismatch);
+    }
+
+    // In range: the `get` above returned `Some`, so this cannot panic.
+    let entry = state.stack.remove(command.index);
+    state.stack_paid_facts.remove(&entry.id);
+    state.stack_trigger_event_batches.remove(&entry.id);
+    Ok(())
+}
+
 /// CR 603.3d: removes an uncommitted triggered ability from the stack.
 ///
 /// The "push first, choose second" invariant (see
@@ -292,13 +412,105 @@ pub fn apply_resolved_stack_entry_finalize(
 /// `engine::drop_mid_construction_pending_trigger`, which calls this and then
 /// clears it.
 pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
-    if let Some(entry_id) = state.pending_trigger_entry.take() {
-        if state.stack.back().map(|e| e.id) == Some(entry_id) {
-            state.stack.pop_back();
+    let Some(entry_id) = state.pending_trigger_entry.take() else {
+        // No cursor: nothing was consumed and nothing settled, so there is no
+        // mutation to journal.
+        return;
+    };
+    let removed = (state.stack.back().map(|e| e.id) == Some(entry_id))
+        .then(|| {
+            let entry = state.stack.pop_back().expect("the entry was just observed");
             state.stack_paid_facts.remove(&entry_id);
             state.stack_trigger_event_batches.remove(&entry_id);
+            entry
+        })
+        .map(Box::new);
+
+    // CR 733: journal AFTER the removal settles, and journal BOTH outcomes. The
+    // `.take()` above is unconditional, so a guard that declines to pop still
+    // consumed the cursor — recording only the popping case would leave a replay
+    // of the other holding a `pending_trigger_entry` the real execution cleared.
+    let cause = state.current_or_begin_rules_execution_node();
+    let command = ResolvedUncommittedTriggerRemovalCommand {
+        consumed_entry_id: entry_id,
+        removed,
+        resulting_depth: state.stack.len(),
+        cause,
+    };
+    state
+        .resolved_rules_journal
+        .record_uncommitted_trigger_removal(command)
+        .expect("resolved uncommitted trigger removal must have a live journal cause");
+}
+
+/// Installs one already-resolved CR 603.3d removal verbatim.
+///
+/// Nothing is re-derived: the entry is compared WHOLE against the recorded one
+/// rather than matched by id, so a replay whose stack top merely shares an id
+/// fails closed instead of discarding a different object. The two side tables are
+/// dropped by the recorded entry's own id.
+///
+/// Both recorded outcomes are honoured. `removed: None` means the original
+/// execution consumed the cursor without popping, so this refuses to pop — and
+/// asserts the predecessor agrees, because a replay whose top IS that entry would
+/// otherwise silently diverge from the execution being replayed.
+pub fn apply_resolved_uncommitted_trigger_removal(
+    state: &mut GameState,
+    command: &ResolvedUncommittedTriggerRemovalCommand,
+) -> Result<(), ResolvedUncommittedTriggerRemovalReplayInvariantError> {
+    if state.pending_trigger_entry != Some(command.consumed_entry_id) {
+        return Err(
+            ResolvedUncommittedTriggerRemovalReplayInvariantError::CursorMismatch {
+                expected: command.consumed_entry_id,
+                found: state.pending_trigger_entry,
+            },
+        );
+    }
+    let top_id = state.stack.back().map(|e| e.id);
+    match command.removed.as_deref() {
+        Some(recorded) => {
+            if state.stack.len() != command.resulting_depth + 1 {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::DepthMismatch {
+                        expected: command.resulting_depth + 1,
+                        found: state.stack.len(),
+                    },
+                );
+            }
+            if state.stack.back() != Some(recorded) {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::RemovedEntryMismatch,
+                );
+            }
+        }
+        None => {
+            if state.stack.len() != command.resulting_depth {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::DepthMismatch {
+                        expected: command.resulting_depth,
+                        found: state.stack.len(),
+                    },
+                );
+            }
+            if top_id == Some(command.consumed_entry_id) {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::UnexpectedRemovableEntry(
+                        command.consumed_entry_id,
+                    ),
+                );
+            }
         }
     }
+
+    state.pending_trigger_entry = None;
+    if command.removed.is_some() {
+        state.stack.pop_back();
+        state.stack_paid_facts.remove(&command.consumed_entry_id);
+        state
+            .stack_trigger_event_batches
+            .remove(&command.consumed_entry_id);
+    }
+    Ok(())
 }
 
 /// The ability currently represented by a stack entry for presentation.
@@ -573,11 +785,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.announced_source_x = None;
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
-    let entry = match state.stack.pop_back() {
-        Some(e) => e,
-        None => return,
+    let Some(PoppedStackEntry {
+        entry,
+        paid_facts: paid_snapshot,
+        trigger_event_batch,
+    }) = pop_top_stack_entry(state)
+    else {
+        return;
     };
-    let paid_snapshot = state.stack_paid_facts.remove(&entry.id);
 
     // CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     // resolve via their typed payload — they have no ResolvedAbility/targets
@@ -591,8 +806,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         });
         return;
     }
-
-    let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
 
     // CR 603.4: Intervening-if condition rechecked at resolution time.
     if let StackEntryKind::TriggeredAbility {
@@ -664,12 +877,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         StackEntryKind::ActivatedAbility { ability, .. } => {
             (Some(ability.clone()), false, CastingVariant::Normal, 0)
         }
-        StackEntryKind::TriggeredAbility { ability, .. } => (
-            Some(ResolvedAbility::clone(ability)),
-            false,
-            CastingVariant::Normal,
-            0,
-        ),
+        StackEntryKind::TriggeredAbility { ability, .. } => {
+            (Some(ability.clone()), false, CastingVariant::Normal, 0)
+        }
         StackEntryKind::KeywordAction { .. } => unreachable!(
             "KeywordAction stack entries are resolved via the early-return branch above"
         ),
@@ -1057,7 +1267,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         });
         if has_epic {
             if let Some(spell_ability) = ability.clone() {
-                super::effects::epic::arm_epic(state, entry.id, entry.controller, spell_ability);
+                super::effects::epic::arm_epic(state, entry.id, entry.controller, *spell_ability);
             }
         }
     }
@@ -1410,7 +1620,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     state.push_spell_resolution(pending_spell_resolution_snapshot(
                                         state,
                                         &entry,
-                                        ability.as_ref(),
+                                        ability.as_deref(),
                                         casting_variant,
                                         actual_mana_spent,
                                         &spell_targets,
@@ -1556,7 +1766,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     state.push_spell_resolution(pending_spell_resolution_snapshot(
                         state,
                         &entry,
-                        ability.as_ref(),
+                        ability.as_deref(),
                         casting_variant,
                         actual_mana_spent,
                         &spell_targets,
@@ -1784,7 +1994,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             state.push_spell_resolution(pending_spell_resolution_snapshot(
                                 state,
                                 &entry,
-                                ability.as_ref(),
+                                ability.as_deref(),
                                 casting_variant,
                                 actual_mana_spent,
                                 &spell_targets,
@@ -3051,18 +3261,15 @@ fn resolve_batched(
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
 
-    // Pop the run's entries (resolution order is back-to-front), cleaning the
-    // per-entry side tables exactly as `resolve_top` does for a single entry.
+    // Pop the run's entries (resolution order is back-to-front) through the same
+    // authority `resolve_top` uses for a single entry, so the per-entry side
+    // tables settle with each removal.
     let mut popped = Vec::with_capacity(consumed as usize);
     for _ in 0..consumed {
-        match state.stack.pop_back() {
-            Some(entry) => {
-                state.stack_paid_facts.remove(&entry.id);
-                state.stack_trigger_event_batches.remove(&entry.id);
-                popped.push(entry);
-            }
-            None => break,
-        }
+        let Some(removed) = pop_top_stack_entry(state) else {
+            break;
+        };
+        popped.push(removed.entry);
     }
 
     // CR 603.7c: Set the trigger event context once from the (identical) top
@@ -3388,13 +3595,11 @@ fn resolve_inert_noop_batch(
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
     for _ in 0..consumed {
-        let Some(entry) = state.stack.pop_back() else {
+        let Some(removed) = pop_top_stack_entry(state) else {
             break;
         };
-        state.stack_paid_facts.remove(&entry.id);
-        state.stack_trigger_event_batches.remove(&entry.id);
         events.push(GameEvent::StackResolved {
-            object_id: entry.id,
+            object_id: removed.entry.id,
         });
     }
     consumed
@@ -4057,7 +4262,7 @@ pub(crate) fn create_warp_delayed_trigger(
         state,
         crate::types::game_state::DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            ability: delayed_ability,
+            ability: Box::new(delayed_ability),
             controller,
             source_id: object_id,
             one_shot: true,
@@ -4112,7 +4317,7 @@ mod tests {
         let entry = StackEntry {
             kind: StackEntryKind::Spell {
                 card_id: CardId(10),
-                ability: Some(final_ability),
+                ability: Some(Box::new(final_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -4319,7 +4524,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -4419,11 +4624,11 @@ mod tests {
         });
         state.pending_trigger_entry = Some(entry_id);
         state.pending_trigger_event_batch = vec![trigger_event.clone()];
-        state.pending_trigger = Some(PendingTrigger {
+        state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id: predator,
             controller: PlayerId(0),
             condition: None,
-            ability: state.stack.back().unwrap().ability().unwrap().clone(),
+            ability: Box::new(state.stack.back().unwrap().ability().unwrap().clone()),
             timestamp: state.turn_number,
             target_constraints: Vec::new(),
             distribute: None,
@@ -4434,7 +4639,7 @@ mod tests {
             may_trigger_origin: Some(MayTriggerOrigin::Printed { trigger_index: 0 }),
             subject_match_count: None,
             die_result: None,
-        });
+        }));
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
@@ -4503,7 +4708,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(102),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -4770,7 +4975,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(724),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -5091,7 +5296,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(72),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -5682,7 +5887,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Flashback,
                 actual_mana_spent: 0,
             },
@@ -5713,7 +5918,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::GraveyardPermission {
                     source: ObjectId(999),
                     frequency: crate::types::statics::CastFrequency::OncePerTurn,
@@ -5818,7 +6023,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Flashback,
                 actual_mana_spent: 0,
             },
@@ -6137,7 +6342,7 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::Spell {
                     card_id: CardId(1),
-                    ability: Some(ability),
+                    ability: Some(Box::new(ability)),
                     casting_variant: CastingVariant::Normal,
                     actual_mana_spent: 0,
                 },
@@ -6189,7 +6394,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(modal_ability.clone()),
+                ability: Some(Box::new(modal_ability.clone())),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 3,
             },
@@ -6236,7 +6441,7 @@ mod tests {
         };
         state.stack.back_mut().unwrap().kind = StackEntryKind::Spell {
             card_id: CardId(1),
-            ability: Some(modal_ability),
+            ability: Some(Box::new(modal_ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 3,
         };
@@ -6402,7 +6607,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(300),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -6504,7 +6709,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(900),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -6554,7 +6759,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(901),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -10881,7 +11086,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },

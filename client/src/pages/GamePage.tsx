@@ -506,6 +506,15 @@ export function GamePage() {
           setReconnectState({ status: "failed" });
         }
         break;
+      case "requestRejected":
+        // The server refused a request; the session is intact. Deliberately
+        // does NOT touch `reconnectState` — that is the whole point of this
+        // case existing beside `error` rather than being folded into it.
+        // `event.reason` is server-authored and so passes through raw, per
+        // `client/src/i18n/README.md` ("a string gets `t()` if and only if the
+        // frontend authored it").
+        useMultiplayerStore.getState().showToast(event.reason);
+        break;
       case "deckRejected":
         navigate("/multiplayer", {
           state: {
@@ -1536,7 +1545,27 @@ function GamePageContent({
         onSettingsClick={() => setPreferencesOpen({})}
         onHelpClick={() => setHelpSheetOpen(true)}
         onConcede={onShowConcedeDialog}
-        onRequestTakeback={isOnlineMode ? handleRequestTakeback : undefined}
+        // Takeback is a TRANSPORT capability, not a mode policy: only
+        // `WebSocketAdapter` implements `sendRequestTakeback`, which is why
+        // `handleRequestTakeback` already guards on the adapter type. Gating
+        // the prop the same way makes the button's presence agree with the
+        // handler instead of duplicating a different rule.
+        //
+        // `isOnlineMode` was wrong twice over. It is URL-derived and can never
+        // see `native-ai` (desktop solo arrives as `mode=ai`), so desktop solo
+        // — which has a real server-authoritative takeback and no client-side
+        // undo — never got the button. And it showed the button to spectators,
+        // whom `request_takeback` rejects server-side.
+        //
+        // A mode-based replacement would be wrong in the other direction:
+        // `p2p-host`/`p2p-join`/`draft-match` are also wire-authoritative but
+        // do not necessarily carry a `WebSocketAdapter`, so they would get a
+        // dead button that silently no-ops inside the handler's own guard.
+        onRequestTakeback={
+          adapter instanceof WebSocketAdapter && mode !== "spectate"
+            ? handleRequestTakeback
+            : undefined
+        }
         showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
         onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
         debugClickModeButtonVisible={debugClickModeButtonVisible}

@@ -2395,6 +2395,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::ControlledByEachPlayer { .. }
@@ -2730,6 +2731,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }

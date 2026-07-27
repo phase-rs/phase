@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 724
 expression: "&lowered"
 ---
 {
@@ -17,6 +18,9 @@ expression: "&lowered"
           "count": {
             "type": "Fixed",
             "value": 1
+          },
+          "position": {
+            "type": "Top"
           }
         },
         "cost": null,

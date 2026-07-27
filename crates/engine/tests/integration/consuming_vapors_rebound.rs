@@ -117,7 +117,7 @@ fn push_to_stack_as_spell_from(
         controller,
         kind: StackEntryKind::Spell {
             card_id,
-            ability: Some(resolved),
+            ability: Some(Box::new(resolved)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },

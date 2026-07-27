@@ -7556,7 +7556,7 @@ fn x_cost_activated_minimum_rejects_zero_and_accepts_one() {
         controller: PlayerId(0),
         kind: StackEntryKind::ActivatedAbility {
             source_id: ObjectId(901),
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -7564,7 +7564,7 @@ fn x_cost_activated_minimum_rejects_zero_and_accepts_one() {
                 Vec::new(),
                 ObjectId(901),
                 PlayerId(0),
-            ),
+            )),
         },
     });
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
@@ -11733,7 +11733,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
         controller: PlayerId(1),
         kind: StackEntryKind::Spell {
             card_id: CardId(997),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::Destroy {
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     cant_regenerate: false,
@@ -11741,7 +11741,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
                 vec![TargetRef::Object(large_creature)],
                 opposing_bolt,
                 PlayerId(1),
-            )),
+            ))),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 1,
         },
@@ -11791,7 +11791,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
         controller: PlayerId(1),
         kind: StackEntryKind::ActivatedAbility {
             source_id: ability_source,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Destroy {
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     cant_regenerate: false,
@@ -11799,7 +11799,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
                 vec![TargetRef::Object(large_creature)],
                 ability_source,
                 PlayerId(1),
-            ),
+            )),
         },
     });
     let not_of_this_world_targeting_ability = ResolvedAbility::new(
@@ -25688,7 +25688,7 @@ fn adventure_exile_on_resolve() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(70),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::DealDamage {
                     amount: QuantityExpr::Fixed { value: 2 },
                     target: crate::types::ability::TargetFilter::Any,
@@ -25698,7 +25698,7 @@ fn adventure_exile_on_resolve() {
                 vec![TargetRef::Player(PlayerId(1))],
                 obj_id,
                 PlayerId(0),
-            )),
+            ))),
             casting_variant: CastingVariant::Adventure,
             actual_mana_spent: 0,
         },
@@ -25739,7 +25739,7 @@ fn adventure_countered_to_graveyard() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(70),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::DealDamage {
                     amount: QuantityExpr::Fixed { value: 2 },
                     target: crate::types::ability::TargetFilter::Any,
@@ -25749,7 +25749,7 @@ fn adventure_countered_to_graveyard() {
                 vec![TargetRef::Player(PlayerId(1))],
                 obj_id,
                 PlayerId(0),
-            )),
+            ))),
             casting_variant: CastingVariant::Adventure,
             actual_mana_spent: 0,
         },
@@ -38724,7 +38724,7 @@ fn bestow_illegal_target_at_resolution_reverts_to_creature() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(707),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "Aura".to_string(),
                     description: None,
@@ -38732,7 +38732,7 @@ fn bestow_illegal_target_at_resolution_reverts_to_creature() {
                 vec![TargetRef::Object(target_creature)],
                 bestow_id,
                 PlayerId(0),
-            )),
+            ))),
             casting_variant: CastingVariant::Bestow,
             actual_mana_spent: 0,
         },
@@ -38811,7 +38811,7 @@ fn bestow_legal_target_resolves_attached_as_aura() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(709),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "Aura".to_string(),
                     description: None,
@@ -38819,7 +38819,7 @@ fn bestow_legal_target_resolves_attached_as_aura() {
                 vec![TargetRef::Object(target_creature)],
                 bestow_id,
                 PlayerId(0),
-            )),
+            ))),
             casting_variant: CastingVariant::Bestow,
             actual_mana_spent: 0,
         },

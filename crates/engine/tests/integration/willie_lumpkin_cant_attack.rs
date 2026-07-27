@@ -72,7 +72,7 @@ fn willie_cant_attack_clause_parses_to_player_scoped_prohibition() {
             restriction:
                 GameRestriction::ProhibitActivity {
                     affected_players,
-                    activity: ProhibitedActivity::Attack { defended },
+                    activity: ProhibitedActivity::Attack { defended, .. },
                     ..
                 },
         } => {
@@ -145,6 +145,7 @@ fn board_with_restriction() -> (GameState, ObjectId, ObjectId, ObjectId, ObjectI
                 expiry: RestrictionExpiry::EndOfTurn,
                 activity: ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::PlayerOrPermanents,
+                    protected_player: None,
                 },
             },
         },

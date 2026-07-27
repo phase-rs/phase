@@ -7268,7 +7268,7 @@ fn apply_action(
                 source_id: source,
                 controller: p,
                 condition: None,
-                ability,
+                ability: Box::new(ability),
                 timestamp: 0,
                 target_constraints: vec![],
                 distribute: None,
@@ -7804,6 +7804,7 @@ fn apply_action(
                 player_id: p,
                 action: PlayerActionKind::Proliferate,
                 look_count: None,
+                scry_bottom_count: None,
             });
             let pending = state
                 .take_active_proliferate_frame()
@@ -8241,7 +8242,7 @@ fn apply_action(
                         state,
                         p,
                         *pending,
-                        ability,
+                        *ability,
                         cost,
                         &mut events,
                     ) {

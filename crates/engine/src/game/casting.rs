@@ -15199,7 +15199,7 @@ fn apply_mana_spell_grants(
                     source_id: unit.source_id,
                     controller: caster,
                     condition: None,
-                    ability: resolved,
+                    ability: Box::new(resolved),
                     timestamp,
                     target_constraints: Vec::new(),
                     distribute: None,
@@ -16731,7 +16731,7 @@ fn try_finalize_activation_mana_payment_from_root(
     if find_non_self_battlefield_removal_cost(cost).is_some() || has_self_ref_discard_cost(cost) {
         return Ok(None);
     }
-    pending.ability = resolved.clone();
+    pending.ability = Box::new(resolved.clone());
     try_finalize_pending_activation_mana_leg(state, player, pending, ability_index, cost, events)
 }
 
@@ -17564,7 +17564,7 @@ pub fn handle_activate_ability(
                     controller: player,
                     kind: StackEntryKind::ActivatedAbility {
                         source_id,
-                        ability: resolved,
+                        ability: Box::new(resolved),
                     },
                 },
                 events,
@@ -17700,7 +17700,7 @@ pub fn handle_activate_ability(
             controller: player,
             kind: StackEntryKind::ActivatedAbility {
                 source_id,
-                ability: resolved,
+                ability: Box::new(resolved),
             },
         },
         events,
@@ -17851,8 +17851,8 @@ pub fn handle_cancel_cast(
             .iter()
             .rposition(|entry| entry.id == pending.object_id)
         {
-            state.stack.remove(pos);
-            state.stack_paid_facts.remove(&pending.object_id);
+            super::stack::remove_stack_entry_at(state, pos)
+                .expect("rposition yielded a live stack index");
         }
     }
 

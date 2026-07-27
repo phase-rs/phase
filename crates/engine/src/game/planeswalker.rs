@@ -456,7 +456,7 @@ fn complete_loyalty_activation(
             controller: player,
             kind: StackEntryKind::ActivatedAbility {
                 source_id: pw_id,
-                ability: resolved_with_idx,
+                ability: Box::new(resolved_with_idx),
             },
         },
         events,

@@ -431,6 +431,25 @@ fn restart_between_games_with_starting_player(
     // If the game is drawn, this chooser gets to choose again. Archenemy fixes
     // the chooser/starter to the archenemy per CR 904.6.
     next_state.next_game_chooser = Some(chooser);
+    // Debug capability is a property of the match, not of a single game: it is
+    // derived once (from the sandbox format flag, or from a single-user server
+    // instance) and must survive this rebuild exactly as `match_config` does.
+    // `GameState::new` defaults these to false/empty, so without an explicit
+    // carry the sandbox panel silently stops working from game 2 onward.
+    // Revocations are preserved because this is a continuation of the same
+    // match — unlike `GameSession::rebuild_pregame_state`, which resets them
+    // because it builds a fresh pregame context.
+    //
+    // A verbatim carry, not a re-derivation: this is engine state continuity
+    // and must stay ignorant of the server's deployment shape. Re-seeding from
+    // `format_config.allow_debug_actions` here would work for sandbox games and
+    // would silently break desktop solo, whose flag is false.
+    //
+    // No CR annotation: debug capability implements no game rule (see
+    // `visibility.rs` — "CR is silent; this is an out-of-game capability").
+    // In particular this is NOT covered by the CR 732.2a note above.
+    next_state.debug_mode = state.debug_mode;
+    next_state.debug_permitted = state.debug_permitted.clone();
 
     load_deck_into_state(&mut next_state, &payload);
     let start = super::engine::start_game_with_starting_player(&mut next_state, starting_player);
@@ -943,6 +962,118 @@ mod tests {
             "detector opt-in must persist across the engine between-games rebuild"
         );
         assert_eq!(state.match_config.loop_detection, LoopDetectionMode::On);
+    }
+
+    /// Debug capability must survive the ENGINE between-games rebuild, exactly
+    /// as the `loop_detection` opt-in above does. Without the carry, a sandbox
+    /// or desktop-solo match gets a working debug panel for game 1 and a
+    /// silently dead one from game 2 onward: `GameState::new` defaults
+    /// `debug_mode` to false and `debug_permitted` to empty, and this rebuild
+    /// never touches `GameSession`, so no server-side seeding authority can
+    /// reach it.
+    ///
+    /// Mode-agnostic by construction (it drives the engine directly), which is
+    /// why the two-line carry repairs desktop solo, browser solo, and sandbox
+    /// multiplayer at once.
+    ///
+    /// REVERT-FAIL: remove either carry ⇒ that field reverts to its
+    /// `GameState::new` default and its assertion below fails.
+    #[test]
+    fn bo3_restart_preserves_debug_capability() {
+        let mut state = GameState::new_two_player(19);
+        state.match_config.match_type = MatchType::Bo3;
+
+        // Seat 0 only — the desktop-solo shape. Seat 1 must stay absent, which
+        // is what proves the carry is a copy and not a re-seed of all seats.
+        state.debug_mode = true;
+        state.debug_permitted.insert(PlayerId(0));
+        // The capability did NOT come from the sandbox format flag: this is
+        // the desktop-solo case, where the flag is false and only a verbatim
+        // carry can preserve it.
+        assert!(!state.format_config.allow_debug_actions);
+
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![entry("P0", 7)],
+                sideboard: vec![entry("P0SB", 1)],
+                commander: vec![],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![entry("P1", 7)],
+                sideboard: vec![entry("P1SB", 1)],
+                commander: vec![],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        load_deck_into_state(&mut state, &payload);
+        let _ = start_game(&mut state);
+
+        state.match_phase = MatchPhase::BetweenGames;
+        state.match_score = crate::types::match_config::MatchScore {
+            p0_wins: 1,
+            p1_wins: 0,
+            draws: 0,
+        };
+        state.game_number = 2;
+        state.next_game_chooser = Some(PlayerId(1));
+        state.sideboard_submitted.clear();
+        state.waiting_for = WaitingFor::BetweenGamesSideboard {
+            player: PlayerId(0),
+            game_number: 2,
+            score: state.match_score,
+            min_main_deck_size: 0,
+            max_sideboard_size: None,
+        };
+
+        apply_as_current(
+            &mut state,
+            GameAction::SubmitSideboard {
+                main: vec![DeckCardCount {
+                    name: "P0".to_string(),
+                    count: 7,
+                }],
+                sideboard: vec![DeckCardCount {
+                    name: "P0SB".to_string(),
+                    count: 1,
+                }],
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::SubmitSideboard {
+                main: vec![DeckCardCount {
+                    name: "P1".to_string(),
+                    count: 7,
+                }],
+                sideboard: vec![DeckCardCount {
+                    name: "P1SB".to_string(),
+                    count: 1,
+                }],
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::ChoosePlayDraw { play_first: true }).unwrap();
+
+        // Sibling probe: if these fail, the test drove the wrong path and the
+        // capability assertions below would be meaningless.
+        assert_eq!(state.match_phase, MatchPhase::InGame);
+        assert_eq!(state.game_number, 2);
+        assert_eq!(state.match_score.p0_wins, 1);
+
+        // Asserted AFTER `*state = next_state`, against a state this test did
+        // not construct.
+        assert!(
+            state.debug_mode,
+            "debug_mode must survive the between-games rebuild"
+        );
+        assert!(state.debug_permitted.contains(&PlayerId(0)));
+        assert!(
+            !state.debug_permitted.contains(&PlayerId(1)),
+            "the carry is a copy, not a re-seed of every seat"
+        );
     }
 
     #[test]

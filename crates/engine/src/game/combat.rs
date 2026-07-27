@@ -3746,13 +3746,22 @@ fn attack_passes_temporary_prohibition(
         let crate::types::ability::GameRestriction::ProhibitActivity {
             source,
             affected_players,
-            activity: crate::types::ability::ProhibitedActivity::Attack { defended },
+            activity:
+                crate::types::ability::ProhibitedActivity::Attack {
+                    defended,
+                    protected_player,
+                },
             ..
         } = restriction
         else {
             continue;
         };
-        let Some(protected) = state.objects.get(source).map(|o| o.controller) else {
+        // New restrictions snapshot the protected player on resolution. Legacy
+        // serialized restrictions have no snapshot and retain their historic
+        // source-controller lookup.
+        let Some(protected) = (*protected_player)
+            .or_else(|| state.objects.get(source).map(|object| object.controller))
+        else {
             continue;
         };
         let attacker_is_affected = match affected_players {

@@ -1276,6 +1276,17 @@ pub(super) fn handle_resolution_choice(
                 // allow-raw-zone: scry reorder never leaves the library (CR 701.22a).
                 player_state.library.push_back(card_id);
             }
+            // CR 701.22a + CR 701.22d: a scry event occurs only after the
+            // controller has completed its top/bottom choices. Keep both the
+            // clamped look count and an explicit `Some(0)` bottom count on the
+            // event that observers preserve into their eventual trigger.
+            let resumed_events_start = events.len();
+            events.push(GameEvent::PlayerPerformedAction {
+                player_id: player,
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(all_cards.len() as u32),
+                scry_bottom_count: Some(bottom_cards.len() as u32),
+            });
             // CR 401.5 + CR 611.3a: Scry reorders the library top directly (not
             // through the zone-move seam), so a continuous `TopOfLibraryMatches`
             // static must be re-evaluated — self-gated so it's a no-op otherwise.
@@ -1292,7 +1303,6 @@ pub(super) fn handle_resolution_choice(
             // `deferred_triggers` (B2, mirroring
             // `batch_or_drain_observer_triggers`); the queue drains with each
             // trigger's own preserved event once resolution truly settles.
-            let resumed_events_start = events.len();
             let waiting_for = finish_with_continuation(state, player, events);
             crate::game::triggers::park_observer_triggers_if_paused(
                 state,
@@ -5629,7 +5639,7 @@ pub(super) fn handle_resolution_choice(
                     let ability = pending.ability.clone();
                     let cost = pending.cost.clone();
                     state.waiting_for = match casting_costs::finish_pending_cast_cost_or_pay(
-                        state, player, *pending, ability, cost, events,
+                        state, player, *pending, *ability, cost, events,
                     ) {
                         Ok(waiting_for) => waiting_for,
                         Err(err) => {
