@@ -87,7 +87,9 @@
     "allFormats": "Wszystkie",
     "addCard": "Dodaj {{name}}",
     "notLegal": "{{name}} - Niedozwolona w formacie {{format}}",
-    "notFormat": "Nie {{format}}"
+    "notFormat": "Nie {{format}}",
+    "copyLimitReached": "{{name}} - osiągnięto limit kopii",
+    "atCopyLimit": "Limit"
   },
   "deckList": {
     "currentList": "Bieżąca lista",

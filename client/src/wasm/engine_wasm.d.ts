@@ -294,6 +294,13 @@ export function load_replay_for_playback(json_str: string): number;
 export function maxDeckCopies(name: string, format: any): any;
 
 /**
+ * CR 201.3 + CR 100.2a: Canonical key for aggregating deck copy counts so
+ * alias spellings share one bucket. Returns the lowercased input when the
+ * card database isn't loaded.
+ */
+export function canonicalDeckCountKey(name: string): string;
+
+/**
  * Verify WASM integration works.
  */
 export function ping(): string;
@@ -493,6 +500,7 @@ export interface InitOutput {
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly maxDeckCopies: (a: number, b: number, c: any) => any;
+    readonly canonicalDeckCountKey: (a: number, b: number) => [number, number];
     readonly ping: () => [number, number];
     readonly preview_action_js: (a: number, b: any) => any;
     readonly preview_mana_payment_js: (a: number, b: any) => any;
