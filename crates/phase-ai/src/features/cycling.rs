@@ -109,10 +109,12 @@ pub(crate) fn is_cycle_source_parts(keywords: &[Keyword]) -> bool {
 pub(crate) fn is_cycle_payoff_parts<'a>(
     triggers: impl IntoIterator<Item = &'a TriggerDefinition>,
 ) -> bool {
-    triggers.into_iter().any(trigger_is_cycle_payoff)
+    triggers.into_iter().any(is_cycle_payoff_trigger)
 }
 
-fn trigger_is_cycle_payoff(t: &TriggerDefinition) -> bool {
+/// Single-trigger structural classifier (mode + scope), exposed so the policy
+/// can pair it with live per-turn firing eligibility per trigger entry.
+pub(crate) fn is_cycle_payoff_trigger(t: &TriggerDefinition) -> bool {
     // 1. Mode fires on a cycle event (CR 702.29c/d).
     if !matches!(t.mode, TriggerMode::Cycled | TriggerMode::CycledOrDiscarded) {
         return false;

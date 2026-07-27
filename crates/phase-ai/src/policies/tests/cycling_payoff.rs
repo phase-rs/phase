@@ -10,7 +10,8 @@ use std::sync::Arc;
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
+    AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerConstraint,
+    TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -276,6 +277,71 @@ fn no_target_payoff_still_rewards() {
         delta > 0.0,
         "no-target payoff must still reward, got {delta}"
     );
+}
+
+/// A once-per-turn "whenever you cycle" engine (Valiant Rescuer shape).
+fn once_per_turn_engine(state: &mut GameState) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        AI,
+        ENGINE_NAME.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.trigger_definitions
+        .push(cycle_trigger(TargetFilter::Any).constraint(TriggerConstraint::OncePerTurn));
+    id
+}
+
+/// [MED review] A once-per-turn engine that has already fired this turn cannot
+/// fire again (CR 603.4), so a second cycle earns nothing — the policy consults
+/// the fired-trigger ledger, not just the structural trigger shape.
+#[test]
+fn rate_limited_engine_already_fired_this_turn_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    let engine_id = once_per_turn_engine(&mut st);
+    // Mark its trigger as already fired this turn via the ledger authority.
+    let key = {
+        let obj = st.objects.get(&engine_id).unwrap();
+        let entry = obj.trigger_definitions.iter_unchecked().next().unwrap();
+        obj.trigger_definition_ref(entry)
+    };
+    st.triggers_fired_this_turn.insert(key);
+
+    let source = cycler(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) =
+        score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "cycling_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// Control: the same once-per-turn engine that has NOT fired yet still rewards.
+#[test]
+fn rate_limited_engine_not_yet_fired_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    once_per_turn_engine(&mut st);
+    let source = cycler(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) =
+        score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "cycling_payoff_engine_active");
+    assert!(delta > 0.0, "an unfired once-per-turn engine still rewards");
 }
 
 // ─── production seam (registry routing) ─────────────────────────────────────

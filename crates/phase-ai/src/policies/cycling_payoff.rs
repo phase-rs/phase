@@ -28,7 +28,10 @@ use engine::types::ability::AbilityTag;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
-use crate::features::cycling::{is_cycle_payoff_parts, CYCLING_PAYOFF_FLOOR};
+use engine::game::game_object::GameObject;
+use engine::types::ability::{TriggerConstraint, TriggerEntry};
+
+use crate::features::cycling::{is_cycle_payoff_trigger, CYCLING_PAYOFF_FLOOR};
 use crate::features::DeckFeatures;
 
 use super::context::PolicyContext;
@@ -82,11 +85,10 @@ impl TacticalPolicy for CyclingPayoffPolicy {
             .filter(|id| {
                 ctx.state.objects.get(id).is_some_and(|obj| {
                     obj.controller == ctx.ai_player
-                        && is_cycle_payoff_parts(
-                            obj.trigger_definitions
-                                .iter_unchecked()
-                                .map(|entry| &entry.definition),
-                        )
+                        && obj.trigger_definitions.iter_unchecked().any(|entry| {
+                            is_cycle_payoff_trigger(&entry.definition)
+                                && trigger_still_fireable(ctx.state, obj, entry)
+                        })
                 })
             })
             .count();
@@ -102,5 +104,26 @@ impl TacticalPolicy for CyclingPayoffPolicy {
             ctx.config.policy_penalties.cycling_payoff_bonus * rewarded,
             PolicyReason::new("cycling_payoff_engine_active").with_fact("engines", engines as i64),
         )
+    }
+}
+
+/// CR 603.4 + CR 603.2: a rate-limited engine that has already fired this
+/// turn/game cannot fire again, so cycling into it earns nothing more. Consults
+/// the engine's authoritative fired-trigger ledgers rather than re-deriving
+/// eligibility. Constraints this policy does not model (their eligibility is a
+/// value nuance, not a hard on/off) are treated as live.
+fn trigger_still_fireable(
+    state: &engine::types::game_state::GameState,
+    obj: &GameObject,
+    entry: &TriggerEntry,
+) -> bool {
+    match &entry.definition.constraint {
+        Some(TriggerConstraint::OncePerTurn) => !state
+            .triggers_fired_this_turn
+            .contains(&obj.trigger_definition_ref(entry)),
+        Some(TriggerConstraint::OncePerGame) => !state
+            .triggers_fired_this_game
+            .contains(&obj.trigger_definition_ref(entry)),
+        _ => true,
     }
 }
