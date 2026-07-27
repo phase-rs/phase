@@ -22,76 +22,81 @@ expression: "&ir"
         "fragment": "Visit — Target creature must be blocked this turn if able."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "VisitAttraction",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "GenericEffect",
-              "static_abilities": [
-                {
-                  "mode": {
-                    "MustBeBlocked": {
-                      "by": null
-                    }
-                  },
-                  "affected": {
-                    "type": "ParentTarget"
-                  },
-                  "modifications": [
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "VisitAttraction",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "GenericEffect",
+                  "static_abilities": [
                     {
-                      "type": "AddStaticMode",
                       "mode": {
                         "MustBeBlocked": {
                           "by": null
                         }
-                      }
+                      },
+                      "affected": {
+                        "type": "ParentTarget"
+                      },
+                      "modifications": [
+                        {
+                          "type": "AddStaticMode",
+                          "mode": {
+                            "MustBeBlocked": {
+                              "by": null
+                            }
+                          }
+                        }
+                      ],
+                      "condition": null,
+                      "affected_zone": null,
+                      "effect_zone": null,
+                      "active_zones": [],
+                      "characteristic_defining": false,
+                      "description": null
                     }
                   ],
-                  "condition": null,
-                  "affected_zone": null,
-                  "effect_zone": null,
-                  "active_zones": [],
-                  "characteristic_defining": false,
-                  "description": null
-                }
-              ],
-              "duration": "UntilEndOfTurn",
-              "target": {
-                "type": "Typed",
-                "type_filters": [
-                  "Creature"
-                ],
-                "controller": null,
-                "properties": []
-              }
+                  "duration": "UntilEndOfTurn",
+                  "target": {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Creature"
+                    ],
+                    "controller": null,
+                    "properties": []
+                  }
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": "UntilEndOfTurn",
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": "UntilEndOfTurn",
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": null,
-          "constraint": null,
-          "condition": null,
-          "batched": false
+            "source_text": "Visit — Target creature must be blocked this turn if able."
+          }
         }
       }
     }
