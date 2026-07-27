@@ -37,7 +37,8 @@ use engine::types::ability::{AbilityDefinition, Effect, TargetFilter, TriggerDef
 use engine::types::card_type::CoreType;
 use engine::types::triggers::TriggerMode;
 
-use crate::ability_chain::{collect_scoped_effects, AbilityScope};
+use crate::ability_chain::collect_scoped_effects;
+pub(crate) use crate::ability_chain::AbilityScope;
 use crate::features::commitment;
 
 /// Commitment at or above which "drawing matters" is a real plan for this deck
@@ -78,7 +79,9 @@ pub fn detect(deck: &[DeckEntry]) -> DrawMattersFeature {
             total_nonland = total_nonland.saturating_add(entry.count);
         }
 
-        if is_draw_source_parts(&face.abilities) {
+        // Deck-time: a modal card whose draw lives in a branch still counts as a
+        // draw enabler for the archetype, so scan the full potential tree.
+        if is_draw_source_parts(&face.abilities, AbilityScope::Potential) {
             source_count = source_count.saturating_add(entry.count);
         }
         if is_draw_payoff_parts(&face.triggers) {
@@ -96,15 +99,19 @@ pub fn detect(deck: &[DeckEntry]) -> DrawMattersFeature {
 }
 
 /// CR 121.1: the abilities draw YOU one or more cards — a repeatable enabler for
-/// the payoff engine. `AbilityScope::Potential` walks modal / else branches so a
-/// draw mode of a modal spell still counts. Parts-based so it classifies both a
-/// deck-time `CardFace.abilities` slice and the action's runtime effect chain
-/// (`CastFacts::primary_effects` / the activated ability).
+/// the payoff engine. Parts-based so it classifies both a deck-time
+/// `CardFace.abilities` slice and the action's runtime effect chain
+/// (`CastFacts::primary_effects` / the activated ability). The caller chooses the
+/// `scope`: `Potential` for deck-time (a modal draw mode still marks the card),
+/// `Unconditional` for a live candidate before its mode is selected (CR 700.2 —
+/// a modal "choose one — draw / …" must NOT be credited a draw until the draw
+/// mode is actually chosen).
 pub(crate) fn is_draw_source_parts<'a>(
     abilities: impl IntoIterator<Item = &'a AbilityDefinition>,
+    scope: AbilityScope,
 ) -> bool {
     abilities.into_iter().any(|ability| {
-        collect_scoped_effects(ability, AbilityScope::Potential)
+        collect_scoped_effects(ability, scope)
             .iter()
             .any(|effect| matches!(effect, Effect::Draw { target, .. } if draws_controller(target)))
     })

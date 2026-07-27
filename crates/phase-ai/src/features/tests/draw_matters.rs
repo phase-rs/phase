@@ -113,6 +113,32 @@ fn detects_engine_payoff() {
     assert_eq!(f.payoff_count, 3);
 }
 
+/// Deck-time uses `AbilityScope::Potential`: a modal "choose one — burn / draw"
+/// card whose draw lives in the `else` branch still marks the card as a draw
+/// enabler for the archetype (the policy is the one that must be stricter live).
+#[test]
+fn modal_draw_mode_still_counts_as_a_deck_source() {
+    let mut modal = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Any,
+            damage_source: None,
+            excess: None,
+        },
+    );
+    modal.else_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )));
+    let mut f = face("Modal Burn-or-Draw", CoreType::Instant);
+    f.abilities = vec![modal];
+    assert_eq!(detect(&[entry(f, 4)]).source_count, 4);
+}
+
 /// An opponent-scoped "whenever an opponent draws" punisher is not your payoff.
 #[test]
 fn opponent_scoped_trigger_ignored() {

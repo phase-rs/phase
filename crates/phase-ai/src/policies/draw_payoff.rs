@@ -20,15 +20,15 @@
 //! `trigger_definitions`), and only in a deck whose `activation` floor is already
 //! cleared. No affordability sweep, no `find_legal_targets`.
 
-use engine::types::actions::GameAction;
-use engine::types::game_state::GameState;
-use engine::types::player::PlayerId;
-
 use engine::game::game_object::GameObject;
 use engine::types::ability::{TriggerConstraint, TriggerEntry};
+use engine::types::actions::GameAction;
+use engine::types::game_state::GameState;
+use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 
 use crate::features::draw_matters::{
-    is_draw_payoff_trigger, is_draw_source_parts, DRAW_MATTERS_FLOOR,
+    is_draw_payoff_trigger, is_draw_source_parts, AbilityScope, DRAW_MATTERS_FLOOR,
 };
 use crate::features::DeckFeatures;
 
@@ -108,34 +108,66 @@ impl TacticalPolicy for DrawPayoffPolicy {
 ///   ability does not fire on cast, so only these two are inspected.
 /// * `ActivateAbility` → the ability at the runtime-enumerated index.
 fn candidate_draws_controller(ctx: &PolicyContext<'_>) -> bool {
+    // CR 700.2: a live candidate is scored before its modes are chosen, so only
+    // an UNCONDITIONAL draw counts — a modal "choose one — draw / …" must not be
+    // credited a draw here.
     match &ctx.candidate.action {
         GameAction::CastSpell { .. } => ctx.cast_facts().is_some_and(|facts| {
             let etb_bodies = facts
                 .immediate_etb_triggers
                 .iter()
                 .filter_map(|trigger| trigger.execute.as_deref());
-            is_draw_source_parts(facts.primary_effects.iter().copied().chain(etb_bodies))
+            is_draw_source_parts(
+                facts.primary_effects.iter().copied().chain(etb_bodies),
+                AbilityScope::Unconditional,
+            )
         }),
-        GameAction::ActivateAbility { .. } => ctx
-            .effective_activated_ability()
-            .is_some_and(|ability| is_draw_source_parts(std::iter::once(&ability))),
+        GameAction::ActivateAbility { .. } => {
+            ctx.effective_activated_ability().is_some_and(|ability| {
+                is_draw_source_parts(std::iter::once(&ability), AbilityScope::Unconditional)
+            })
+        }
         _ => false,
     }
 }
 
-/// CR 603.4: a rate-limited engine that has already fired this turn/game cannot
-/// fire again, so drawing into it earns nothing more. Consults the engine's
-/// authoritative fired-trigger ledgers rather than re-deriving eligibility.
-/// Constraints this policy does not model (their eligibility is a value nuance,
-/// not a hard on/off) are treated as live.
+/// Whether `obj`'s draw-engine trigger `entry` could still fire this turn — so
+/// that drawing into it is actually worth something. Exhaustive over
+/// `TriggerConstraint` (no wildcard) so a new constraint forces a decision here.
+///
+/// - The once/timing constraints are evaluated against authoritative state (the
+///   fired-trigger ledgers, `active_player`, and the phase) rather than
+///   re-derived.
+/// - Constraints whose fireability depends on the triggering event or a per-turn
+///   *count* the policy can't cheaply/correctly evaluate at decision time
+///   (`MaxTimesPerTurn`, `NthDrawThisTurn`, …) are treated as NOT confirmed, so
+///   the payoff is never OVER-credited (the review concern). These are rare on
+///   draw engines; the conservative miss is preferable to a false bonus.
 fn trigger_still_fireable(state: &GameState, obj: &GameObject, entry: &TriggerEntry) -> bool {
-    match &entry.definition.constraint {
-        Some(TriggerConstraint::OncePerTurn) => !state
+    let Some(constraint) = &entry.definition.constraint else {
+        return true; // no constraint — always fireable
+    };
+    match constraint {
+        // CR 603.4 / CR 603.2: already-consumed "once" limits.
+        TriggerConstraint::OncePerTurn => !state
             .triggers_fired_this_turn
             .contains(&obj.trigger_definition_ref(entry)),
-        Some(TriggerConstraint::OncePerGame) => !state
+        TriggerConstraint::OncePerGame => !state
             .triggers_fired_this_game
             .contains(&obj.trigger_definition_ref(entry)),
-        _ => true,
+        // Turn/phase timing — evaluable from turn state alone.
+        TriggerConstraint::OnlyDuringYourTurn => state.active_player == obj.controller,
+        TriggerConstraint::OnlyDuringOpponentsTurn => state.active_player != obj.controller,
+        TriggerConstraint::OnlyDuringYourMainPhase => {
+            state.active_player == obj.controller
+                && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+        }
+        // Event- or count-dependent: not confirmable at decision time.
+        TriggerConstraint::MaxTimesPerTurn { .. }
+        | TriggerConstraint::NthSpellThisTurn { .. }
+        | TriggerConstraint::NthDrawThisTurn { .. }
+        | TriggerConstraint::OncePerOpponentPerTurn
+        | TriggerConstraint::AtClassLevel { .. }
+        | TriggerConstraint::EventSourceControlledBy { .. } => false,
     }
 }

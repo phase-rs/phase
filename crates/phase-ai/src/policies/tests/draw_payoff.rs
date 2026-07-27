@@ -315,6 +315,138 @@ fn rate_limited_engine_not_yet_fired_rewards() {
     assert!(delta > 0.0, "an unfired once-per-turn engine still rewards");
 }
 
+/// [MED review] A modal "choose one — deal 3 damage; OR draw a card" spell (the
+/// draw lives in the `else` branch) is scored before its mode is chosen, so the
+/// runtime scan (Unconditional) must NOT credit it a draw.
+fn modal_burn_or_draw_spell(state: &mut GameState) -> (ObjectId, CardId) {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(state, card_id, AI, "Modal".to_string(), Zone::Hand);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Instant);
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Any,
+            damage_source: None,
+            excess: None,
+        },
+    );
+    ability.else_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )));
+    Arc::make_mut(&mut obj.abilities).push(ability);
+    (id, card_id)
+}
+
+#[test]
+fn modal_draw_not_credited_before_mode_selected() {
+    let config = AiConfig::default();
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    let (oid, cid) = modal_burn_or_draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_na");
+    assert_eq!(delta, 0.0);
+}
+
+/// An engine trigger with a per-game constraint on the AI's own permanent.
+fn engine_with_constraint(state: &mut GameState, constraint: TriggerConstraint) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        AI,
+        ENGINE_NAME.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.trigger_definitions
+        .push(drawn_engine_trigger().constraint(constraint));
+    id
+}
+
+#[test]
+fn once_per_game_engine_already_fired_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    let engine_id = engine_with_constraint(&mut st, TriggerConstraint::OncePerGame);
+    let key = {
+        let obj = st.objects.get(&engine_id).unwrap();
+        let entry = obj.trigger_definitions.iter_unchecked().next().unwrap();
+        obj.trigger_definition_ref(entry)
+    };
+    st.triggers_fired_this_game.insert(key);
+
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+#[test]
+fn once_per_game_engine_unfired_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    engine_with_constraint(&mut st, TriggerConstraint::OncePerGame);
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// [MED review] An `OnlyDuringYourTurn` engine on the opponent's turn cannot
+/// fire, so an instant-speed draw during their turn earns nothing.
+#[test]
+fn only_during_your_turn_engine_is_neutral_off_turn() {
+    let config = AiConfig::default();
+    let mut st = state();
+    st.active_player = PlayerId(1); // the opponent's turn
+    engine_with_constraint(&mut st, TriggerConstraint::OnlyDuringYourTurn);
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// Control: the same `OnlyDuringYourTurn` engine on YOUR turn still rewards.
+#[test]
+fn only_during_your_turn_engine_rewards_on_your_turn() {
+    let config = AiConfig::default();
+    let mut st = state();
+    st.active_player = AI;
+    engine_with_constraint(&mut st, TriggerConstraint::OnlyDuringYourTurn);
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
 // ─── production seam (registry routing) ─────────────────────────────────────
 
 #[test]
