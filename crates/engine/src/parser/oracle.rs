@@ -5996,7 +5996,13 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // Priority 13e ("X can't be 0.") was deleted as structurally unreachable:
+        // The former priority slot 13e ("X can't be 0.") was deleted as
+        // structurally unreachable. This gravestone deliberately avoids the
+        // labeled-slot comment shape that `check-skill-doc.sh` harvests: in
+        // that shape it reads as a live declaration and demands a §3 row for a
+        // slot that no longer exists. A retired slot is documented by its
+        // absence from the table, not by a row saying it is gone.
+        //
         // `strip_x_cant_be_zero_suffix` returns `""` for exactly that input, and
         // `lower` is bound once from the post-strip line and never rebound, so
         // the empty-line guard above always claims it first. Its own comment

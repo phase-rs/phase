@@ -453,7 +453,6 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `13b` | Kicker/Multikicker leftovers | skip (handled by keywords) | — |
 | `13c` | Vehicle tier lines "N+ \| keyword(s)" | skip | `oracle_classifier.rs` |
 | `13d` | "Activate only…" constraint line | skip | — |
-| `13e` | "X can't be 0." annotation → `min_x_value` on previous ability | defensive fallback | `oracle.rs` |
 | `14` | Ability word prefix ("Landfall —") — strip, map known words to typed conditions, re-classify the body | `strip_ability_word_with_name()` + `ability_word_to_condition()` | `oracle.rs` |
 | `14a` | Nom fallback dispatch — try effect, trigger, static, and replacement sub-parsers | `dispatch_line_nom()` | `oracle_dispatch.rs` |
 | `15` | Final fallback | `Effect::Unimplemented` with diagnostic trace | — |
