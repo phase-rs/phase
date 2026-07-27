@@ -37,7 +37,10 @@ pub struct DrawPayoffPolicy;
 
 /// Cap on how many simultaneous engines are rewarded, so a stacked board can't
 /// push a single draw into the critical band.
-const MAX_REWARDED_ENGINES: usize = 3;
+///
+/// `pub(crate)` so the bounded-score regression asserts against this constant
+/// rather than a copied literal — raising the cap must move the test with it.
+pub(crate) const MAX_REWARDED_ENGINES: usize = 3;
 
 impl TacticalPolicy for DrawPayoffPolicy {
     fn id(&self) -> PolicyId {
@@ -101,23 +104,42 @@ impl TacticalPolicy for DrawPayoffPolicy {
     }
 }
 
-/// True when the candidate action draws the controller one or more cards.
+/// True when the candidate action draws the controller one or more cards AND
+/// that draw can actually be delivered.
+///
+/// Ordered cheapest-discriminator-first, because `verdict` runs for every
+/// `CastSpell` and `ActivateAbility` candidate at every search node. The
+/// card-local structural test reads only the candidate's own AST and rejects the
+/// overwhelming majority of candidates; only a candidate that structurally draws
+/// pays for `can_draw_at_least_one`, which scans battlefield statics and consults
+/// the replacement applicability authority. Reversing these two costs every
+/// non-draw candidate that scan for nothing.
+fn candidate_draws_controller(ctx: &PolicyContext<'_>) -> bool {
+    candidate_draws_structurally(ctx) && draw_is_deliverable(ctx)
+}
+
+/// CR 121.1 / CR 704.5b + CR 614.6: would a draw right now actually put a card
+/// into the AI's hand, emitting the `CardDrawn` event a "whenever you draw"
+/// engine rides on? False under a `CantDraw` static or an exhausted
+/// `PerTurnDrawLimit`, from an empty library, or when the replacement pipeline
+/// removes the draw. Delegates wholly to the engine's `can_draw_at_least_one`
+/// authority so the bonus is never added to a no-op draw.
+///
+/// Deliberately the SECOND gate: it is the expensive one (a battlefield static
+/// scan plus replacement applicability), and it is candidate-independent, so it
+/// is only worth asking once a candidate is known to draw.
+fn draw_is_deliverable(ctx: &PolicyContext<'_>) -> bool {
+    engine::game::effects::draw::can_draw_at_least_one(ctx.state, ctx.ai_player)
+}
+
+/// Card-local structural test: does this candidate's own AST draw its controller
+/// a card? Reads only the candidate, never the board.
 ///
 /// * `CastSpell` → the spell's own resolution chain (`CastFacts::primary_effects`)
 ///   plus its immediate ETB triggers — a cast permanent's *activated* draw
 ///   ability does not fire on cast, so only these two are inspected.
 /// * `ActivateAbility` → the ability at the runtime-enumerated index.
-fn candidate_draws_controller(ctx: &PolicyContext<'_>) -> bool {
-    // CR 121.1 / CR 704.5b: a structural "draw a card" produces no `CardDrawn`
-    // event — and fires no "whenever you draw" engine — when the controller
-    // can't draw right now (a `CantDraw` static, or a `PerTurnDrawLimit` already
-    // exhausted) OR the library is empty (an empty-library draw only records an
-    // attempt, CR 704.5b, delivering no card). The engine's `can_draw_at_least_one`
-    // authority gates the whole classification so the bonus is never added to a
-    // no-op draw.
-    if !engine::game::effects::draw::can_draw_at_least_one(ctx.state, ctx.ai_player) {
-        return false;
-    }
+fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
     // CR 700.2: a live candidate is scored before its modes are chosen, so only
     // an UNCONDITIONAL draw counts — a modal "choose one — draw / …" must not be
     // credited a draw here.
@@ -141,6 +163,142 @@ fn candidate_draws_controller(ctx: &PolicyContext<'_>) -> bool {
                 is_draw_source_parts(std::iter::once(&ability), AbilityScope::Unconditional)
             })
         }
-        _ => false,
+        // CR 601.2 + CR 702.34a: cast-shaped siblings of the plain `CastSpell`
+        // seam (alternative costs, madness, miracle, foretell, ninjutsu, copies).
+        // `PolicyContext::cast_facts` is populated only for the `CastSpell`
+        // announcement seam, so this policy has no AST to classify for these and
+        // must report neutral rather than guess. Listed explicitly, not swept
+        // into a wildcard: if `cast_facts` later covers one, this arm is where
+        // the decision to start crediting it gets made.
+        GameAction::Foretell { .. }
+        | GameAction::PlayFaceDown { .. }
+        | GameAction::ActivateNinjutsu { .. }
+        | GameAction::CastSpellAsSneak { .. }
+        | GameAction::CastSpellAsWebSlinging { .. }
+        | GameAction::CastSpellForFree { .. }
+        | GameAction::CastSpellAsMiracle { .. }
+        | GameAction::CastSpellAsMadness { .. }
+        | GameAction::CastPreparedCopy { .. }
+        | GameAction::CastParadigmCopy { .. } => false,
+        // Every remaining action: not a spell cast or ability activation, so it
+        // cannot draw its controller a card as part of the candidate itself.
+        // Enumerated rather than wildcarded so a newly added `GameAction` fails
+        // this match at compile time and forces an intentional classification
+        // instead of silently bypassing the draw payoff (CR 121.1).
+        GameAction::PassPriority
+        | GameAction::ChooseMeldPair { .. }
+        | GameAction::ChooseEntryAttackTarget { .. }
+        | GameAction::PlayLand { .. }
+        | GameAction::DeclareAttackers { .. }
+        | GameAction::DeclareBlockers { .. }
+        | GameAction::ChooseUntap { .. }
+        | GameAction::ChooseExert { .. }
+        | GameAction::ChooseEnlist { .. }
+        | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseZoneOpponentChooser { .. }
+        | GameAction::ChoosePileOpponent { .. }
+        | GameAction::ChooseAnnouncingOpponent { .. }
+        | GameAction::ChooseGiftRecipient { .. }
+        | GameAction::ChooseAssistPlayer { .. }
+        | GameAction::CommitAssistPayment { .. }
+        | GameAction::MulliganDecision { .. }
+        | GameAction::ReorderHand { .. }
+        | GameAction::TapLandForMana { .. }
+        | GameAction::UntapLandForMana { .. }
+        | GameAction::SpendPoolMana { .. }
+        | GameAction::UnspendPoolMana { .. }
+        | GameAction::SelectCards { .. }
+        | GameAction::ChooseRemoveCounterCostDistribution { .. }
+        | GameAction::SelectCoinFlips { .. }
+        | GameAction::ChooseOutsideGameCards { .. }
+        | GameAction::SelectTargets { .. }
+        | GameAction::ChooseTarget { .. }
+        | GameAction::ChooseReplacement { .. }
+        | GameAction::OrderTriggers { .. }
+        | GameAction::CancelCast
+        | GameAction::Equip { .. }
+        | GameAction::CrewVehicle { .. }
+        | GameAction::ActivateStation { .. }
+        | GameAction::SaddleMount { .. }
+        | GameAction::Transform { .. }
+        | GameAction::TurnFaceUp { .. }
+        | GameAction::SubmitSideboard { .. }
+        | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseOption { .. }
+        | GameAction::SubmitVoteCandidate { .. }
+        | GameAction::SubmitSpellbookDraft { .. }
+        | GameAction::SubmitPilePartition { .. }
+        | GameAction::ChoosePile { .. }
+        | GameAction::ChooseBranch { .. }
+        | GameAction::SubmitLifeRedistribution { .. }
+        | GameAction::ChooseDamageSource { .. }
+        | GameAction::SelectModes { .. }
+        | GameAction::DecideOptionalCost { .. }
+        | GameAction::ChooseAdventureFace { .. }
+        | GameAction::ChooseModalFace { .. }
+        | GameAction::ChooseAlternativeCast { .. }
+        | GameAction::ChooseCastingVariant { .. }
+        | GameAction::KeepAllCopyTargets
+        | GameAction::ChoosePermanentTypeSlot { .. }
+        | GameAction::DecideOptionalEffect { .. }
+        | GameAction::RespondToSpliceOffer { .. }
+        | GameAction::DecideOptionalEffectAndRemember { .. }
+        | GameAction::PayUnlessCost { .. }
+        | GameAction::ChooseUnlessCostBranch { .. }
+        | GameAction::ChooseActivationCostBranch { .. }
+        | GameAction::PayCombatTax { .. }
+        | GameAction::ChooseRingBearer { .. }
+        | GameAction::ChoosePair { .. }
+        | GameAction::ChooseDungeon { .. }
+        | GameAction::ChooseDungeonRoom { .. }
+        | GameAction::UnlockRoomDoor { .. }
+        | GameAction::RollPlanarDie
+        | GameAction::ChooseRoomDoor { .. }
+        | GameAction::TapForConvoke { .. }
+        | GameAction::HarmonizeTap { .. }
+        | GameAction::DeclareCompanion { .. }
+        | GameAction::CompanionToHand
+        | GameAction::DiscoverChoice { .. }
+        | GameAction::GraveyardPaidCastChoice { .. }
+        | GameAction::CascadeChoice { .. }
+        | GameAction::RippleChoice { .. }
+        | GameAction::FreeCastWindowChoice { .. }
+        | GameAction::ChooseTopOrBottom { .. }
+        | GameAction::ChooseMutateMergeSide { .. }
+        | GameAction::CipherEncode { .. }
+        | GameAction::ChooseLegend { .. }
+        | GameAction::ChooseBattleProtector { .. }
+        | GameAction::SetAutoPass { .. }
+        | GameAction::CancelAutoPass
+        | GameAction::SetPhaseStops { .. }
+        | GameAction::SetPriorityPassingMode { .. }
+        | GameAction::SetPriorityYield { .. }
+        | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetTriggerOrderTemplate { .. }
+        | GameAction::AssignCombatDamage { .. }
+        | GameAction::AssignBlockerDamage { .. }
+        | GameAction::DistributeAmong { .. }
+        | GameAction::ChooseCounterMoveDistribution { .. }
+        | GameAction::ChooseCountersToRemove { .. }
+        | GameAction::SubmitPayAmount { .. }
+        | GameAction::RetargetSpell { .. }
+        | GameAction::LearnDecision { .. }
+        | GameAction::SelectCategoryPermanents { .. }
+        | GameAction::ChooseKeptCreatures { .. }
+        | GameAction::ChooseKeptPermanents { .. }
+        | GameAction::ChooseX { .. }
+        | GameAction::SubmitPhyrexianChoices { .. }
+        | GameAction::ChooseManaColor { .. }
+        | GameAction::PayManaAbilityMana { .. }
+        | GameAction::ChooseSpecializeColor { .. }
+        | GameAction::PassParadigmOffer
+        | GameAction::Debug(..)
+        | GameAction::GrantDebugPermission { .. }
+        | GameAction::RevokeDebugPermission { .. }
+        | GameAction::Concede { .. }
+        | GameAction::DeclareShortcut { .. }
+        | GameAction::RespondToShortcut { .. }
+        | GameAction::DeclineShortcut
+        | GameAction::PrecastCopyShortcut { .. } => false,
     }
 }

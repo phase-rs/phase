@@ -1175,6 +1175,73 @@ fn draw_cards_stub_prevent_replacement_still_rewards() {
     assert!(delta > 0.0);
 }
 
+// ─── bounded score (MAX_REWARDED_ENGINES) ────────────────────────────────────
+
+/// Reads the `engines` observability fact off a verdict reason.
+fn engines_fact(reason: &PolicyReason) -> Option<i64> {
+    reason
+        .facts
+        .iter()
+        .find(|(key, _)| *key == "engines")
+        .map(|(_, value)| *value)
+}
+
+/// The per-draw reward scales with the number of live engines but is capped at
+/// `MAX_REWARDED_ENGINES`, so a stacked board can't push a single draw into the
+/// critical band. With one engine PAST the cap the delta must not grow.
+///
+/// The `engines` fact deliberately reports the TRUE uncapped count — that is an
+/// observability contract (it explains the board to a log reader), distinct from
+/// the bounded score. Both halves are asserted so neither can drift.
+#[test]
+fn reward_is_capped_at_max_rewarded_engines() {
+    let bonus = AiConfig::default().policy_penalties.draw_payoff_bonus;
+
+    let mut at_cap = state();
+    for _ in 0..MAX_REWARDED_ENGINES {
+        engine_on_battlefield(&mut at_cap);
+    }
+    let (delta_at_cap, reason_at_cap) = draw_spell_verdict(&mut at_cap);
+
+    let mut over_cap = state();
+    for _ in 0..MAX_REWARDED_ENGINES + 1 {
+        engine_on_battlefield(&mut over_cap);
+    }
+    let (delta_over_cap, reason_over_cap) = draw_spell_verdict(&mut over_cap);
+
+    assert_eq!(reason_at_cap.kind, "draw_payoff_engine_active");
+    assert_eq!(reason_over_cap.kind, "draw_payoff_engine_active");
+    assert_eq!(
+        delta_at_cap,
+        bonus * MAX_REWARDED_ENGINES as f64,
+        "at the cap the reward is one bonus per live engine"
+    );
+    assert_eq!(
+        delta_over_cap, delta_at_cap,
+        "an engine past MAX_REWARDED_ENGINES must not increase the reward — \
+         without the cap this would scale without bound"
+    );
+    assert_eq!(
+        engines_fact(&reason_over_cap),
+        Some(MAX_REWARDED_ENGINES as i64 + 1),
+        "the `engines` fact reports the true uncapped count for observability"
+    );
+}
+
+/// Below the cap the reward still scales, so the test above is pinning a CAP and
+/// not merely a constant score.
+#[test]
+fn reward_scales_below_the_cap() {
+    let bonus = AiConfig::default().policy_penalties.draw_payoff_bonus;
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    engine_on_battlefield(&mut st);
+    let (delta, reason) = draw_spell_verdict(&mut st);
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert_eq!(delta, bonus * 2.0);
+    assert_eq!(engines_fact(&reason), Some(2));
+}
+
 // ─── replacement substitution and rescaling (CR 614.11) ──────────────────────
 //
 // A `Prevent` quantity modification is only ONE of the three ways the pipeline
