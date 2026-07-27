@@ -1869,33 +1869,6 @@ pub(crate) fn etb_observer_provably_excludes_class(
         }
 }
 
-fn source_was_not_co_departed_into_zone(
-    event: &GameEvent,
-    source_id: ObjectId,
-    zone: Zone,
-) -> bool {
-    match event {
-        // CR 603.2 + CR 702.59a: Off-zone triggers fire only if their source was
-        // already functioning in the scanned zone when the trigger event
-        // occurred. A source that co-departed into that zone as the triggering
-        // object moved there was not there yet for this event, so Recover-style
-        // graveyard triggers must not see it. The event object itself may still
-        // have self-referential LTB triggers (Rancor class), but the destination
-        // scan must read those from the CR 603.10a LKI record, not from the
-        // post-move object.
-        GameEvent::ZoneChanged {
-            object_id,
-            to,
-            record,
-            ..
-        } if *to == zone => {
-            (*object_id != source_id || record.from_zone != Some(Zone::Battlefield))
-                && !record.co_departed.contains(&source_id)
-        }
-        _ => true,
-    }
-}
-
 fn live_battlefield_source_was_present_at_event(event: &GameEvent, source_id: ObjectId) -> bool {
     !matches!(
         event,
@@ -3547,7 +3520,9 @@ fn collect_pending_triggers_with_collection(
         for cache in &off_zone_trigger_sources {
             for source_ref in cache.source_ids.iter().copied() {
                 let obj_id = source_ref.object_id;
-                if !source_was_not_co_departed_into_zone(event, obj_id, cache.zone) {
+                if !crate::types::events::source_was_not_co_departed_into_zone(
+                    event, obj_id, cache.zone,
+                ) {
                     continue;
                 }
                 let matched_triggers = {

@@ -1902,7 +1902,7 @@ pub(crate) fn aggregate_property_over(
     }
 }
 
-fn object_count_zone_object_ids(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
+fn filter_zone_object_ids(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
     let zones = filter.extract_zones();
     let zones = if zones.is_empty() {
         vec![crate::types::zones::Zone::Battlefield]
@@ -1915,15 +1915,17 @@ fn object_count_zone_object_ids(state: &GameState, filter: &TargetFilter) -> Vec
         .collect()
 }
 
-/// Candidate universe for `object_count_matching_ids`: union ledger, explicit
-/// zones, and recursive branch populations for every boolean node.
-fn object_count_candidate_universe(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
+/// Candidate universe for evaluating `filter`: union ledger, explicit zones,
+/// and recursive branch populations for every boolean node. Recursing per
+/// branch preserves a branch without a zone constraint as a battlefield domain
+/// even when its sibling names another zone.
+fn filter_candidate_universe(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
     match filter {
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             let mut seen = HashSet::new();
             let mut out = Vec::new();
             for branch in filters {
-                for id in object_count_candidate_universe(state, branch) {
+                for id in filter_candidate_universe(state, branch) {
                     if seen.insert(id) {
                         out.push(id);
                     }
@@ -1934,12 +1936,12 @@ fn object_count_candidate_universe(state: &GameState, filter: &TargetFilter) -> 
         TargetFilter::Not { filter: inner } => {
             let mut seen = HashSet::new();
             let mut out = Vec::new();
-            for id in object_count_zone_object_ids(state, filter) {
+            for id in filter_zone_object_ids(state, filter) {
                 if seen.insert(id) {
                     out.push(id);
                 }
             }
-            for id in object_count_candidate_universe(state, inner) {
+            for id in filter_candidate_universe(state, inner) {
                 if seen.insert(id) {
                     out.push(id);
                 }
@@ -1947,11 +1949,297 @@ fn object_count_candidate_universe(state: &GameState, filter: &TargetFilter) -> 
             out
         }
         TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
-        TargetFilter::TrackedSetFiltered { filter, .. } => {
-            object_count_candidate_universe(state, filter)
+        TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => {
+            tracked_set_object_ids(state, *id)
         }
-        _ => object_count_zone_object_ids(state, filter),
+        _ => filter_zone_object_ids(state, filter),
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FilterTermRole {
+    Predicate,
+    Population,
+}
+
+#[derive(Clone)]
+struct FilterPopulationTerm {
+    filter: TargetFilter,
+    role: FilterTermRole,
+}
+
+type FilterPopulationBranch = Vec<FilterPopulationTerm>;
+
+/// Expand boolean population filters into disjunctive branches while
+/// preserving which terms define their own population.
+///
+/// A `Not` used directly as an `Or` alternative is set-valued: it complements
+/// its own candidate universe. The same `Not` used directly inside `And` is
+/// predicate-valued: it tests candidates supplied by the conjunction. Carrying
+/// that distinction through distribution keeps an outer conjunction from
+/// silently converting a population-defining negation into a local predicate.
+fn filter_disjunctive_branches(
+    filter: &TargetFilter,
+    role: FilterTermRole,
+) -> Vec<FilterPopulationBranch> {
+    match filter {
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .flat_map(|filter| filter_disjunctive_branches(filter, FilterTermRole::Population))
+            .collect(),
+        TargetFilter::And { filters } => {
+            let mut products: Vec<FilterPopulationBranch> = vec![Vec::new()];
+            for filter in filters {
+                let branches = filter_disjunctive_branches(filter, FilterTermRole::Predicate);
+                let mut next = Vec::new();
+                for product in products {
+                    for branch in &branches {
+                        let mut combined = product.clone();
+                        combined.extend(branch.iter().cloned());
+                        next.push(combined);
+                    }
+                }
+                products = next;
+            }
+            products
+        }
+        TargetFilter::Not { .. } => vec![vec![FilterPopulationTerm {
+            filter: filter.clone(),
+            role,
+        }]],
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
+            vec![vec![FilterPopulationTerm {
+                filter: filter.clone(),
+                role: FilterTermRole::Population,
+            }]]
+        }
+        filter => vec![vec![FilterPopulationTerm {
+            filter: filter.clone(),
+            role: FilterTermRole::Predicate,
+        }]],
+    }
+}
+
+fn target_filter_matches_population_semantics(
+    state: &GameState,
+    id: ObjectId,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+) -> bool {
+    match filter {
+        TargetFilter::Or { .. } => {
+            matching_object_ids_in_filter_universe(state, filter, filter_ctx).contains(&id)
+        }
+        TargetFilter::And { filters } => filters.iter().all(|filter| {
+            target_filter_matches_population_semantics(state, id, filter, filter_ctx)
+        }),
+        // This `Not` is nested inside the current normalized branch, whose
+        // candidate universe is already established by its surrounding
+        // conjunction. Negate the predicate directly on this candidate rather
+        // than giving the inner filter a new battlefield-default population.
+        TargetFilter::Not { .. } => matches_target_filter(state, id, filter, filter_ctx),
+        _ => matches_target_filter(state, id, filter, filter_ctx),
+    }
+}
+
+fn tracked_set_object_ids(
+    state: &GameState,
+    id: crate::types::identifiers::TrackedSetId,
+) -> Vec<ObjectId> {
+    let resolved = if id.0 == 0 {
+        crate::game::targeting::resolve_tracked_set_id(state)
+    } else {
+        Some(id)
+    };
+    resolved
+        .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+        .unwrap_or_default()
+}
+
+/// Return the positive population explicitly supplied by a normalized branch
+/// term. A surrounding conjunction uses this population as the universe for
+/// predicate-valued negations nested below an `Or`.
+fn filter_population_anchor_ids(
+    state: &GameState,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+) -> Option<Vec<ObjectId>> {
+    let ids = match filter {
+        TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
+        TargetFilter::TrackedSet { id } => tracked_set_object_ids(state, *id),
+        // CR 608.2c: The population of a filtered tracked set is the set
+        // membership intersected with its full nested predicate and producer
+        // provenance. Reducing it to raw membership makes an enclosing `Not`
+        // manufacture results outside the domain the effect actually named.
+        TargetFilter::TrackedSetFiltered { id, .. } => tracked_set_object_ids(state, *id)
+            .into_iter()
+            .filter(|id| matches_target_filter(state, *id, filter, filter_ctx))
+            .collect(),
+        TargetFilter::Not { .. } | TargetFilter::Or { .. } | TargetFilter::And { .. } => {
+            return None;
+        }
+        _ => {
+            let zones = filter.extract_zones();
+            if zones.is_empty() {
+                return None;
+            }
+            zones
+                .into_iter()
+                .flat_map(|zone| crate::game::targeting::zone_object_ids(state, zone))
+                .collect()
+        }
+    };
+    let mut seen = HashSet::new();
+    Some(ids.into_iter().filter(|id| seen.insert(*id)).collect())
+}
+
+/// Return the union population declared by an `Or`.
+///
+/// Each disjunct owns its population. An explicitly anchored conjunction keeps
+/// its intersected population, while an unanchored branch contributes its
+/// ordinary candidate universe. This lets an enclosing conjunction use
+/// `Or(TrackedSet A, TrackedSet B)` as one positive population-bearing term.
+fn disjunctive_filter_population_ids(
+    state: &GameState,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+) -> Option<Vec<ObjectId>> {
+    let TargetFilter::Or { filters } = filter else {
+        return None;
+    };
+    if filters.is_empty() {
+        return None;
+    }
+
+    let mut ids = Vec::new();
+    for branch in filters {
+        let population = conjunctive_filter_population_ids(state, branch, filter_ctx)
+            .or_else(|| disjunctive_filter_population_ids(state, branch, filter_ctx))
+            .or_else(|| filter_population_anchor_ids(state, branch, filter_ctx))
+            .unwrap_or_else(|| filter_candidate_universe(state, branch));
+        ids.extend(population);
+    }
+    let mut seen = HashSet::new();
+    Some(ids.into_iter().filter(|id| seen.insert(*id)).collect())
+}
+
+/// Return the population declared by a conjunction's population-bearing terms.
+///
+/// A positive population inside `And` supplies the objects against which its
+/// sibling predicates are evaluated. Multiple such terms intersect, and an
+/// `Or` term contributes the union of its disjunct populations. This is
+/// intentionally rooted at a conjunction: a naked `Not(TrackedSet)` is an
+/// exclusion from a broader universe, whereas
+/// `Not(And(Or(TrackedSet A, TrackedSet B), predicate))` complements the
+/// predicate within the unioned tracked-set domain.
+fn conjunctive_filter_population_ids(
+    state: &GameState,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+) -> Option<Vec<ObjectId>> {
+    let TargetFilter::And { filters } = filter else {
+        return None;
+    };
+    let mut populations = filters.iter().filter_map(|filter| {
+        conjunctive_filter_population_ids(state, filter, filter_ctx)
+            .or_else(|| disjunctive_filter_population_ids(state, filter, filter_ctx))
+            .or_else(|| filter_population_anchor_ids(state, filter, filter_ctx))
+    });
+    let mut ids = populations.next()?;
+    for population in populations {
+        let population: HashSet<ObjectId> = population.into_iter().collect();
+        ids.retain(|id| population.contains(id));
+    }
+    let mut seen = HashSet::new();
+    Some(ids.into_iter().filter(|id| seen.insert(*id)).collect())
+}
+
+/// Match object ids within the population declared by `filter`.
+///
+/// Disjunctive branches own independent populations: an unzoned branch
+/// defaults to the battlefield even when a sibling explicitly names another
+/// zone. Match every normalized branch against its own candidate universe
+/// before taking the union so a sibling's off-battlefield objects cannot leak
+/// into the unzoned predicate.
+fn matching_object_ids_in_filter_universe(
+    state: &GameState,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+) -> Vec<ObjectId> {
+    if let TargetFilter::Not { filter: inner } = filter {
+        let excluded: HashSet<ObjectId> =
+            matching_object_ids_in_filter_universe(state, inner, filter_ctx)
+                .into_iter()
+                .collect();
+        return filter_candidate_universe(state, filter)
+            .into_iter()
+            .filter(|id| !excluded.contains(id))
+            .collect();
+    }
+
+    if let TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } = filter {
+        return tracked_set_object_ids(state, *id)
+            .into_iter()
+            .filter(|id| matches_target_filter(state, *id, filter, filter_ctx))
+            .collect();
+    }
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for branch in filter_disjunctive_branches(filter, FilterTermRole::Predicate) {
+        let mut anchor_populations = branch
+            .iter()
+            .filter_map(|term| filter_population_anchor_ids(state, &term.filter, filter_ctx));
+        let mut anchored_branch_ids = anchor_populations.next();
+        if let Some(branch_ids) = &mut anchored_branch_ids {
+            for population in anchor_populations {
+                let population: HashSet<ObjectId> = population.into_iter().collect();
+                branch_ids.retain(|id| population.contains(id));
+            }
+        }
+        let population_terms: Vec<&FilterPopulationTerm> = branch
+            .iter()
+            .filter(|term| term.role == FilterTermRole::Population)
+            .collect();
+        let has_population_anchor = anchored_branch_ids.is_some();
+        let mut branch_ids = if let Some(anchored) = anchored_branch_ids {
+            anchored
+        } else if let Some(first) = population_terms.first() {
+            matching_object_ids_in_filter_universe(state, &first.filter, filter_ctx)
+        } else {
+            let combined = TargetFilter::And {
+                filters: branch.iter().map(|term| term.filter.clone()).collect(),
+            }
+            .normalized();
+            filter_candidate_universe(state, &combined)
+        };
+        if !has_population_anchor {
+            for term in population_terms.iter().skip(1) {
+                let matching: HashSet<ObjectId> =
+                    matching_object_ids_in_filter_universe(state, &term.filter, filter_ctx)
+                        .into_iter()
+                        .collect();
+                branch_ids.retain(|id| matching.contains(id));
+            }
+        }
+        branch_ids.retain(|id| {
+            branch.iter().all(|term| {
+                (!has_population_anchor && term.role == FilterTermRole::Population)
+                    || target_filter_matches_population_semantics(
+                        state,
+                        *id,
+                        &term.filter,
+                        filter_ctx,
+                    )
+            })
+        });
+        for id in branch_ids {
+            if seen.insert(id) {
+                out.push(id);
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn object_count_matching_ids(
@@ -1960,10 +2248,7 @@ pub(crate) fn object_count_matching_ids(
     filter_ctx: &FilterContext<'_>,
     source_id: ObjectId,
 ) -> Vec<ObjectId> {
-    let mut ids: Vec<ObjectId> = object_count_candidate_universe(state, filter)
-        .into_iter()
-        .filter(|&id| matches_target_filter(state, id, filter, filter_ctx))
-        .collect();
+    let mut ids = matching_object_ids_in_filter_universe(state, filter, filter_ctx);
     // Drop the triggering object for an "other than" filter (Valakut's "five
     // other Mountains" — the newly-entered Mountain matches the per-object filter
     // as a pass-through and is removed here). The exclusion is the Oracle-text
@@ -4437,9 +4722,9 @@ fn object_id_for_scope(
     }
 }
 
-/// CR 122.1: Distinct counter kinds present on permanents matching `filter`
+/// CR 122.1: Distinct counter kinds present on objects matching `filter`
 /// (controller-relative, CR 109.4). Mirrors `DistinctColorsAmongPermanents`'s
-/// resolver (zone from `filter.extract_in_zone()`, `zone_object_ids`,
+/// resolver (zones from `filter.extract_zones()`, `zone_object_ids`,
 /// `matches_target_filter`), enumerating only positive-count counter kinds the
 /// same way proliferate does. Returns a `Vec<CounterType>` SORTED by
 /// `CounterType::as_str`
@@ -4454,34 +4739,39 @@ pub(crate) fn distinct_counter_kinds_among(
     filter_ctx: &FilterContext<'_>,
 ) -> Vec<CounterType> {
     let mut seen: HashSet<CounterType> = HashSet::new();
-    // CR 608.2c + CR 122.1: a `ParentTarget` iteration source ("for each kind of
-    // counter on target permanent" — Dramatist's Puppet, Quarry Hauler) resolves
-    // to the chosen target(s) carried on the resolving ability, not via
-    // battlefield object matching (`matches_target_filter` returns false for
-    // `ParentTarget` by design — it is resolution-time context, not a predicate).
-    if matches!(filter, TargetFilter::ParentTarget) {
-        if let Some(ability) = filter_ctx.ability {
-            for target in &ability.targets {
-                if let TargetRef::Object(id) = target {
-                    if let Some(obj) = state.objects.get(id) {
-                        for counter_type in positive_counter_types(&obj.counters) {
-                            seen.insert(counter_type);
-                        }
-                    }
-                }
+    // CR 608.2c + CR 122.1: parent-target domains ("it", "that permanent",
+    // or an indexed parent slot) resolve through the same ability-bound
+    // authorities as other resolution effects. Predicate domains instead scan
+    // every zone declared by `InZone` / `InAnyZone`, defaulting to the
+    // battlefield only when the filter declares no zone.
+    let object_ids: Vec<ObjectId> = match filter {
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => filter_ctx
+            .ability
+            .map(|ability| {
+                crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter)
+            })
+            .unwrap_or_default(),
+        // CR 608.2c + CR 122.1: A complement preserves an explicitly declared
+        // tracked, ledger, or zoned population from its operand. In particular,
+        // `Not(And(TrackedSet, predicate))` means the nonmatching members of
+        // that tracked set, not every unrelated object on the battlefield.
+        TargetFilter::Not { filter: inner } => {
+            if let Some(population) = conjunctive_filter_population_ids(state, inner, filter_ctx) {
+                let excluded: HashSet<ObjectId> =
+                    matching_object_ids_in_filter_universe(state, inner, filter_ctx)
+                        .into_iter()
+                        .collect();
+                population
+                    .into_iter()
+                    .filter(|id| !excluded.contains(id))
+                    .collect()
+            } else {
+                matching_object_ids_in_filter_universe(state, filter, filter_ctx)
             }
         }
-        let mut kinds: Vec<CounterType> = seen.into_iter().collect();
-        kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-        return kinds;
-    }
-    let zone = filter
-        .extract_in_zone()
-        .unwrap_or(crate::types::zones::Zone::Battlefield);
-    for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
-        if !matches_target_filter(state, id, filter, filter_ctx) {
-            continue;
-        }
+        _ => matching_object_ids_in_filter_universe(state, filter, filter_ctx),
+    };
+    for id in object_ids {
         if let Some(obj) = state.objects.get(&id) {
             for counter_type in positive_counter_types(&obj.counters) {
                 seen.insert(counter_type);
@@ -6865,6 +7155,656 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), perm_a), 2);
     }
 
+    /// CR 400.1 + CR 122.1: an `InAnyZone` counter-kind domain scans every
+    /// declared zone exactly. It must not collapse to the battlefield or to the
+    /// first zone in the property.
+    #[test]
+    fn distinct_counter_kinds_among_preserves_in_any_zone_domain() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exiled".to_string(),
+            Zone::Exile,
+        );
+        let graveyard = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Graveyard".to_string(),
+            Zone::Graveyard,
+        );
+        let battlefield = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Battlefield".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+        state
+            .objects
+            .get_mut(&graveyard)
+            .unwrap()
+            .counters
+            .insert(CounterType::Lore, 1);
+        state
+            .objects
+            .get_mut(&battlefield)
+            .unwrap()
+            .counters
+            .insert(CounterType::Loyalty, 1);
+
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: Vec::new(),
+            controller: None,
+            properties: vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Exile, Zone::Graveyard],
+            }],
+        });
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &filter, &ctx),
+            vec![CounterType::Lore, CounterType::Stun],
+        );
+    }
+
+    /// CR 400.1 + CR 122.1: a disjunctive domain preserves each branch's
+    /// candidate universe. An unzoned creature branch defaults to the
+    /// battlefield even when its sibling explicitly names the graveyard.
+    #[test]
+    fn distinct_counter_kinds_among_preserves_mixed_cross_zone_or_domain() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exiled".to_string(),
+            Zone::Exile,
+        );
+        let graveyard = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Graveyard".to_string(),
+            Zone::Graveyard,
+        );
+        let battlefield = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Battlefield".to_string(),
+            Zone::Battlefield,
+        );
+        let graveyard_creature = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Graveyard Creature".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state
+            .objects
+            .get_mut(&graveyard)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state
+            .objects
+            .get_mut(&graveyard)
+            .unwrap()
+            .counters
+            .insert(CounterType::Lore, 1);
+        state
+            .objects
+            .get_mut(&battlefield)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&battlefield)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+        state
+            .objects
+            .get_mut(&graveyard_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&graveyard_creature)
+            .unwrap()
+            .counters
+            .insert(CounterType::Loyalty, 1);
+
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: Vec::new(),
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Land],
+                    controller: None,
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+            ],
+        };
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+        let matched = matching_object_ids_in_filter_universe(&state, &filter, &ctx);
+        assert_eq!(matched.len(), 2);
+        assert!(matched.contains(&battlefield));
+        assert!(matched.contains(&graveyard));
+        assert!(!matched.contains(&graveyard_creature));
+
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &filter, &ctx),
+            vec![CounterType::Lore, CounterType::Stun],
+        );
+
+        let nested = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: Vec::new(),
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+                filter.clone(),
+            ],
+        };
+        let nested_matched = matching_object_ids_in_filter_universe(&state, &nested, &ctx);
+        assert_eq!(nested_matched.len(), 2);
+        assert!(nested_matched.contains(&battlefield));
+        assert!(nested_matched.contains(&graveyard));
+        assert!(!nested_matched.contains(&graveyard_creature));
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &nested, &ctx),
+            vec![CounterType::Lore, CounterType::Stun],
+        );
+
+        let negated = TargetFilter::Not {
+            filter: Box::new(filter),
+        };
+        let standalone_negation = matching_object_ids_in_filter_universe(&state, &negated, &ctx);
+        assert!(standalone_negation.contains(&graveyard_creature));
+        let wrapped_negation = matching_object_ids_in_filter_universe(
+            &state,
+            &TargetFilter::Or {
+                filters: vec![negated.clone(), TargetFilter::None],
+            },
+            &ctx,
+        );
+        assert_eq!(
+            wrapped_negation, standalone_negation,
+            "a disjoint Or sibling must not change a population-defining negation"
+        );
+        let conjunctive_wrapper = matching_object_ids_in_filter_universe(
+            &state,
+            &TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: Vec::new(),
+                        controller: Some(ControllerRef::You),
+                        properties: Vec::new(),
+                    }),
+                    TargetFilter::Or {
+                        filters: vec![negated, TargetFilter::None],
+                    },
+                ],
+            },
+            &ctx,
+        );
+        assert_eq!(
+            conjunctive_wrapper, standalone_negation,
+            "an outer conjunction must preserve a disjunct's population boundary"
+        );
+    }
+
+    /// CR 608.2c + CR 122.1: complementing a predicate inside a tracked-set
+    /// domain stays bounded to that set. An unrelated battlefield object must
+    /// not contribute its counter kind merely because the outer filter is
+    /// negated.
+    #[test]
+    fn distinct_counter_kinds_among_bounds_negation_to_tracked_set() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let excluded_member = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Excluded Member".to_string(),
+            Zone::Exile,
+        );
+        let included_member = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Included Member".to_string(),
+            Zone::Exile,
+        );
+        let battlefield_nonmember = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Battlefield Nonmember".to_string(),
+            Zone::Battlefield,
+        );
+
+        state.objects.get_mut(&excluded_member).unwrap().color = vec![ManaColor::Red];
+        state
+            .objects
+            .get_mut(&excluded_member)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state.objects.get_mut(&included_member).unwrap().color = vec![ManaColor::Green];
+        state
+            .objects
+            .get_mut(&included_member)
+            .unwrap()
+            .counters
+            .insert(CounterType::Lore, 1);
+        state
+            .objects
+            .get_mut(&battlefield_nonmember)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let tracked = TrackedSetId(1);
+        state
+            .tracked_object_sets
+            .insert(tracked, vec![excluded_member, included_member]);
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::TrackedSet { id: tracked },
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Red,
+                        },
+                    ])),
+                ],
+            }),
+        };
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &filter, &ctx),
+            vec![CounterType::Lore],
+            "only the nonmatching tracked member contributes a counter kind"
+        );
+
+        let naked_exclusion = TargetFilter::Not {
+            filter: Box::new(TargetFilter::TrackedSet { id: tracked }),
+        };
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &naked_exclusion, &ctx),
+            vec![CounterType::Stun],
+            "a naked tracked-set negation remains an exclusion from the broader universe"
+        );
+
+        let tracked_a = TrackedSetId(2);
+        let tracked_b = TrackedSetId(3);
+        state
+            .tracked_object_sets
+            .insert(tracked_a, vec![excluded_member]);
+        state
+            .tracked_object_sets
+            .insert(tracked_b, vec![included_member]);
+        let disjunctive_population = TargetFilter::Not {
+            filter: Box::new(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::TrackedSet { id: tracked_a },
+                            TargetFilter::TrackedSet { id: tracked_b },
+                        ],
+                    },
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Red,
+                        },
+                    ])),
+                ],
+            }),
+        };
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &disjunctive_population, &ctx),
+            vec![CounterType::Lore],
+            "the union of tracked-set disjuncts excludes an unrelated battlefield nonmember"
+        );
+    }
+
+    /// CR 608.2c + CR 122.1: A complemented `TrackedSetFiltered` keeps both
+    /// its nested object predicate and its producer-action provenance as part
+    /// of the population. Raw tracked members outside either constraint cannot
+    /// contribute counter kinds to the complement.
+    #[test]
+    fn distinct_counter_kinds_among_preserves_filtered_tracked_set_domain() {
+        use crate::types::ability::ThisWayCause;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let add_member =
+            |state: &mut GameState, card_id, controller, name: &str, color, counter_type| {
+                let id = create_object(
+                    state,
+                    CardId(card_id),
+                    controller,
+                    name.to_string(),
+                    Zone::Exile,
+                );
+                let object = state.objects.get_mut(&id).unwrap();
+                object.card_types.core_types.push(CoreType::Creature);
+                object.base_card_types = object.card_types.clone();
+                object.color = vec![color];
+                object.counters.insert(counter_type, 1);
+                id
+            };
+        let excluded_red = add_member(
+            &mut state,
+            2,
+            PlayerId(0),
+            "Red Sacrificed",
+            ManaColor::Red,
+            CounterType::Plus1Plus1,
+        );
+        let included_green = add_member(
+            &mut state,
+            3,
+            PlayerId(0),
+            "Green Sacrificed",
+            ManaColor::Green,
+            CounterType::Lore,
+        );
+        let wrong_cause = add_member(
+            &mut state,
+            4,
+            PlayerId(0),
+            "Green Exiled",
+            ManaColor::Green,
+            CounterType::Stun,
+        );
+        let wrong_controller = add_member(
+            &mut state,
+            5,
+            PlayerId(1),
+            "Opponent Sacrificed",
+            ManaColor::Green,
+            CounterType::Loyalty,
+        );
+        let outsider = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(0),
+            "Battlefield Outsider".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&outsider)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+
+        let tracked = TrackedSetId(11);
+        state.tracked_object_sets.insert(
+            tracked,
+            vec![excluded_red, included_green, wrong_cause, wrong_controller],
+        );
+        state.tracked_set_member_causes.insert(
+            tracked,
+            [
+                (excluded_red, ThisWayCause::Sacrificed),
+                (included_green, ThisWayCause::Sacrificed),
+                (wrong_cause, ThisWayCause::Exiled),
+                (wrong_controller, ThisWayCause::Sacrificed),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let filtered_domain = TargetFilter::TrackedSetFiltered {
+            id: tracked,
+            filter: Box::new(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            caused_by: Some(ThisWayCause::Sacrificed),
+        };
+        let complement = TargetFilter::Not {
+            filter: Box::new(TargetFilter::And {
+                filters: vec![
+                    filtered_domain,
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Red,
+                        },
+                    ])),
+                ],
+            }),
+        };
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &complement, &ctx),
+            vec![CounterType::Lore],
+            "only the non-red member inside the nested controlled-creature and sacrificed domain contributes"
+        );
+    }
+
+    /// CR 400.1 + CR 122.1: two explicitly zoned disjuncts contribute both
+    /// candidate populations while excluding objects in an unrelated zone.
+    #[test]
+    fn distinct_counter_kinds_among_preserves_explicit_cross_zone_or_domain() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exiled".to_string(),
+            Zone::Exile,
+        );
+        let graveyard = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Graveyard".to_string(),
+            Zone::Graveyard,
+        );
+        let battlefield = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Battlefield".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state
+            .objects
+            .get_mut(&graveyard)
+            .unwrap()
+            .counters
+            .insert(CounterType::Lore, 1);
+        state
+            .objects
+            .get_mut(&battlefield)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let zone_filter = |zone| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: Vec::new(),
+                controller: None,
+                properties: vec![FilterProp::InZone { zone }],
+            })
+        };
+        let filter = TargetFilter::Or {
+            filters: vec![zone_filter(Zone::Exile), zone_filter(Zone::Graveyard)],
+        };
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &filter, &ctx),
+            vec![CounterType::Plus1Plus1, CounterType::Lore],
+        );
+    }
+
+    /// CR 608.2c + CR 122.1: an indexed parent domain reads the flattened root
+    /// target slots, not the resolving tail node's most-recent local target.
+    #[test]
+    fn distinct_counter_kinds_among_parent_slot_uses_chain_root() {
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&first)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state
+            .objects
+            .get_mut(&second)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(first)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(second)],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+
+        let local_tail = |index| {
+            ResolvedAbility::new(
+                Effect::ChooseCounterKind {
+                    target: TargetFilter::ParentTargetSlot { index },
+                },
+                vec![TargetRef::Object(second)],
+                source,
+                PlayerId(0),
+            )
+        };
+        let first_ability = local_tail(0);
+        let first_ctx = FilterContext::from_ability(&first_ability);
+        assert_eq!(
+            distinct_counter_kinds_among(
+                &state,
+                &TargetFilter::ParentTargetSlot { index: 0 },
+                &first_ctx,
+            ),
+            vec![CounterType::Plus1Plus1],
+        );
+
+        let second_ability = local_tail(1);
+        let second_ctx = FilterContext::from_ability(&second_ability);
+        assert_eq!(
+            distinct_counter_kinds_among(
+                &state,
+                &TargetFilter::ParentTargetSlot { index: 1 },
+                &second_ctx,
+            ),
+            vec![CounterType::Stun],
+        );
+    }
+
     #[test]
     fn resolve_source_qualified_mana_spent_uses_entering_context() {
         let mut state = GameState::new_two_player(42);
@@ -8043,6 +8983,266 @@ mod tests {
         assert!(ids.contains(&red_on_battlefield));
         assert!(!ids.contains(&red_a));
         assert!(!ids.contains(&red_b));
+    }
+
+    #[test]
+    fn object_count_matching_ids_last_zone_changed_and_not_red_uses_ledger_population() {
+        let mut state = GameState::new_two_player(46);
+        let red = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red".to_string(),
+            Zone::Graveyard,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Green".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&red).unwrap().color = vec![ManaColor::Red];
+        state.objects.get_mut(&green).unwrap().color = vec![ManaColor::Green];
+        state.last_zone_changed_ids = vec![red, green];
+
+        let red_filter =
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+                color: ManaColor::Red,
+            }]));
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::LastZoneChanged,
+                TargetFilter::Not {
+                    filter: Box::new(red_filter),
+                },
+            ],
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+
+        assert_eq!(
+            object_count_matching_ids(&state, &filter, &ctx, ObjectId(0)),
+            vec![green],
+            "a nested negation evaluates against the enclosing ledger population"
+        );
+    }
+
+    #[test]
+    fn object_count_matching_ids_nested_or_not_uses_explicit_graveyard_population() {
+        let mut state = GameState::new_two_player(46);
+        let red = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red".to_string(),
+            Zone::Graveyard,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Green".to_string(),
+            Zone::Graveyard,
+        );
+        let battlefield_green = create_object(
+            &mut state,
+            CardId(407),
+            PlayerId(1),
+            "Battlefield Green".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&red).unwrap().color = vec![ManaColor::Red];
+        state.objects.get_mut(&green).unwrap().color = vec![ManaColor::Green];
+        state.objects.get_mut(&battlefield_green).unwrap().color = vec![ManaColor::Green];
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }])),
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::Typed(TypedFilter::card().properties(
+                                vec![FilterProp::HasColor {
+                                    color: ManaColor::Red,
+                                }],
+                            ))),
+                        },
+                        TargetFilter::None,
+                    ],
+                },
+            ],
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+
+        assert_eq!(
+            object_count_matching_ids(&state, &filter, &ctx, ObjectId(0)),
+            vec![green],
+            "a negated Or branch must use the enclosing graveyard population"
+        );
+    }
+
+    #[test]
+    fn object_count_matching_ids_nested_or_not_uses_last_zone_changed_population() {
+        let mut state = GameState::new_two_player(46);
+        let red = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red".to_string(),
+            Zone::Graveyard,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Green".to_string(),
+            Zone::Graveyard,
+        );
+        let untracked_green = create_object(
+            &mut state,
+            CardId(407),
+            PlayerId(1),
+            "Untracked Green".to_string(),
+            Zone::Graveyard,
+        );
+        for id in [red, green, untracked_green] {
+            state.objects.get_mut(&id).unwrap().color = if id == red {
+                vec![ManaColor::Red]
+            } else {
+                vec![ManaColor::Green]
+            };
+        }
+        state.last_zone_changed_ids = vec![red, green];
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::LastZoneChanged,
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::Typed(TypedFilter::card().properties(
+                                vec![FilterProp::HasColor {
+                                    color: ManaColor::Red,
+                                }],
+                            ))),
+                        },
+                        TargetFilter::None,
+                    ],
+                },
+            ],
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+
+        assert_eq!(
+            object_count_matching_ids(&state, &filter, &ctx, ObjectId(0)),
+            vec![green],
+            "a negated Or branch must use the enclosing zone-change ledger"
+        );
+    }
+
+    #[test]
+    fn object_count_matching_ids_nested_or_not_uses_tracked_set_population() {
+        let mut state = GameState::new_two_player(46);
+        let red = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red".to_string(),
+            Zone::Exile,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Green".to_string(),
+            Zone::Exile,
+        );
+        let untracked_green = create_object(
+            &mut state,
+            CardId(407),
+            PlayerId(1),
+            "Untracked Green".to_string(),
+            Zone::Exile,
+        );
+        for id in [red, green, untracked_green] {
+            state.objects.get_mut(&id).unwrap().color = if id == red {
+                vec![ManaColor::Red]
+            } else {
+                vec![ManaColor::Green]
+            };
+        }
+        let tracked = TrackedSetId(1);
+        state.tracked_object_sets.insert(tracked, vec![red, green]);
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::TrackedSet { id: tracked },
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::Typed(TypedFilter::card().properties(
+                                vec![FilterProp::HasColor {
+                                    color: ManaColor::Red,
+                                }],
+                            ))),
+                        },
+                        TargetFilter::None,
+                    ],
+                },
+            ],
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+
+        assert_eq!(
+            object_count_matching_ids(&state, &filter, &ctx, ObjectId(0)),
+            vec![green],
+            "a negated Or branch must use the enclosing tracked set"
+        );
+    }
+
+    #[test]
+    fn object_count_matching_ids_not_tracked_red_preserves_green_member() {
+        let mut state = GameState::new_two_player(46);
+        let red = create_object(
+            &mut state,
+            CardId(405),
+            PlayerId(1),
+            "Red".to_string(),
+            Zone::Exile,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(406),
+            PlayerId(1),
+            "Green".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&red).unwrap().color = vec![ManaColor::Red];
+        state.objects.get_mut(&green).unwrap().color = vec![ManaColor::Green];
+        let tracked = TrackedSetId(1);
+        state.tracked_object_sets.insert(tracked, vec![red, green]);
+
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::TrackedSet { id: tracked },
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Red,
+                        },
+                    ])),
+                ],
+            }),
+        };
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+
+        assert_eq!(
+            object_count_matching_ids(&state, &filter, &ctx, ObjectId(0)),
+            vec![green],
+            "a tracked-set member excluded by the inner predicate remains in the complement"
+        );
     }
 
     #[test]

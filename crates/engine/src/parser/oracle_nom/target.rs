@@ -20,6 +20,19 @@ use crate::types::card_type::Supertype;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+/// Parse the Oracle prefixes that declare a target slot.
+///
+/// Keeps callers that distinguish stack-time targeting from resolution-time
+/// selection aligned on the full grammatical family rather than checking only
+/// the literal `"target "` sibling.
+pub fn parse_declared_target_prefix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((tag("another target "), tag("other target "), tag("target "))),
+    )
+    .parse(input)
+}
+
 /// Parse a type phrase into a `TargetFilter`.
 ///
 /// Handles: optional "non" prefix, optional supertype, optional color prefix,
