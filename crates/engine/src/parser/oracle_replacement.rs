@@ -2876,9 +2876,7 @@ pub(crate) fn lower_as_enters_or_face_up_counters(text: &str) -> Option<Vec<Repl
 
     // Recover the ORIGINAL-case effect slice via byte offset (mirrors
     // `split_once_on_lower`) so `parse_effect_chain` sees the printed casing.
-    let Some(effect_start) = text.len().checked_sub(tail_lower.len()) else {
-        return None;
-    };
+    let effect_start = text.len().checked_sub(tail_lower.len())?;
     let effect_text = text[effect_start..].trim().trim_end_matches('.').trim();
     if effect_text.is_empty() {
         return None;
