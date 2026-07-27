@@ -1562,8 +1562,8 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 82] = [
     UnsupportedCapability {
         code: "local.interaction-schema-response-unmapped",
         area: "prompts",
-        reason: "The engine projects a decision either as a finite ExactChoices list or as a schema: a response spec plus candidates. interaction_prompt() maps three of those generically — ExactChoices (a one-of list), Select (a subset choice, whose count bounds ChooseFromSelection's min/max totals express exactly), and Number (a range, which is ChooseNumber verbatim). The rest still fail closed here, because their payload is not a count over a candidate list nor a scalar, and flattening one into either would advertise illegal answers as legal. Each needs its own family and none of those mappings are written yet: Sequence -> Reorder (ordering is the payload, not membership), Relations -> ChooseAttackers/ChooseBlockers, AssignDamage -> ChooseCombatDamageAssignment, DeckPartition -> ChooseCards. AssignAmounts is a distribution of a total across candidates, which resembles ChooseCombatDamageAssignment but is not damage, so reusing that family would misname it. GroupedSequence, ManaGroups, Text, Shortcut and ShortcutReply have no current family at all.",
-        suggested_protocol_extension: "None needed upstream for Sequence, Relations, AssignDamage or DeckPartition — those families already exist and this is adapter work. GroupedSequence (per-group min/max), ManaGroups, AssignAmounts (a non-damage distribution), and the Text/Shortcut pair are the ones whose payload no current family carries; resolve whether ChooseFromSelection should gain per-option group constraints and a generic distribution shape before proposing new families.",
+        reason: "The engine projects a decision either as a finite ExactChoices list or as a schema: a response spec plus candidates. interaction_prompt() now maps four generically — ExactChoices (a one-of list), Select (an unordered subset, whose count bounds ChooseFromSelection's min/max totals express exactly), Sequence (an ordered subset; chosen_indices is itself ordered, so the order survives), and Number (a range, which is ChooseNumber verbatim). What remains fails closed because its payload is none of those things: not a count over a list, not an order over a list, not a scalar. AssignAmounts distributes a total across candidates — a per-candidate amount, which ChooseCombatDamageAssignment shapes but names as damage, so reusing it would misdescribe counter distribution. GroupedSequence carries per-group min/max, DeckPartition splits a pool in two, and ManaGroups, Text, Shortcut and ShortcutReply have no current family at all. Flattening any of them into a selection would drop the very constraint that makes the answer legal.",
+        suggested_protocol_extension: "Two shapes would close most of it: a per-candidate amount distribution with a required total (covers AssignAmounts, and generalizes ChooseCombatDamageAssignment rather than competing with it), and per-option group constraints on ChooseFromSelection (covers GroupedSequence, and DeckPartition as the two-group case). The Text and Shortcut families are genuinely absent and need their own design conversation.",
     },
     UnsupportedCapability {
         code: "local.interaction-aggregate-bound-unmapped",
@@ -2440,6 +2440,18 @@ fn interaction_prompt(prepared: &PreparedManabrewSnapshot) -> Result<PromptInput
                 )
             }
         },
+        // An ordered subset of the same candidate list. `chosen_indices` is a
+        // sequence, so the order the client sends survives to the engine, which
+        // fills its target slots in exactly that order.
+        //
+        // Fidelity gap, recorded rather than hidden: this family cannot *tell*
+        // the client that order is significant — it renders as a selection. The
+        // ordering family, `Reorder`, is not a substitute, because it orders the
+        // whole list and a target sequence is usually a proper subset.
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Sequence { min, max, .. },
+            candidates,
+        } => (candidates, *min as usize, *max as usize),
         InteractionOpportunityResponse::Schema { .. } => {
             return unsupported_prompt(waiting_for, "local.interaction-schema-response-unmapped")
         }
@@ -2505,6 +2517,18 @@ fn interaction_selection_action(
             // Count bounds are not rechecked here. The engine owns them and
             // rejects a violating submission; duplicating the check would put a
             // second, drifting authority on the same constraint.
+            choice_ids: chosen_indices
+                .iter()
+                .map(|index| id_at(index, candidates))
+                .collect::<Result<Vec<_>>>()?,
+        },
+        // Distinct from `Select` on the wire even though the prompt looks the
+        // same: the engine fills its slots in the order given, so the indices
+        // must stay in the order the client sent them.
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Sequence { .. },
+            candidates,
+        } => InteractionResponse::Sequence {
             choice_ids: chosen_indices
                 .iter()
                 .map(|index| id_at(index, candidates))
@@ -6017,6 +6041,73 @@ mod tests {
         )
         .expect("the chosen number resolves back through the engine");
         assert_eq!(action, GameAction::SubmitPayAmount { amount: 2 });
+    }
+
+    /// A `Sequence` schema is an *ordered* subset, and the order must survive.
+    ///
+    /// `ProliferateChoice` (CR 701.27) projects min 0 / max = eligible count, so
+    /// it also pins that a zero minimum reaches the prompt intact rather than
+    /// being coerced to the one-of path's 1.
+    ///
+    /// The answer deliberately reverses the offered order. That is the whole
+    /// assertion: the engine fills its slots in the order the client sent, so a
+    /// path that collected indices into a set — or sorted them — would return
+    /// the targets the other way round and fail here.
+    #[test]
+    fn a_sequence_schema_preserves_the_order_the_client_sent() {
+        let mut state = GameState::new_two_player(7);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Holder A".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Holder B".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::ProliferateChoice {
+            player: PlayerId(0),
+            eligible: vec![TargetRef::Object(first), TargetRef::Object(second)],
+        };
+        bind_interaction_authority(
+            &mut state,
+            InteractionSessionId("sequence-path".to_string()),
+        )
+        .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("a Sequence schema is served by the projection");
+        let PromptInput::ChooseFromSelection(input) = prompt else {
+            panic!("an ordered subset still renders as ChooseFromSelection, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min_total, input.max_total),
+            (0, 2),
+            "proliferate is optional, so the zero minimum must survive"
+        );
+
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices: vec![1, 0],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("an ordered subset resolves back through the engine");
+        assert_eq!(
+            action,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(second), TargetRef::Object(first)],
+            },
+            "the engine must receive the targets in the order the client chose"
+        );
     }
 
     /// Without a bound interaction authority the projection is empty, so the
