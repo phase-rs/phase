@@ -58,9 +58,9 @@ use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_re
 use super::oracle_dispatch::dispatch_line_nom;
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
-    lower_effect_chain_ir, parse_additional_cost_instead_condition_fragment, parse_effect_chain,
-    parse_effect_chain_ir, parse_effect_chain_with_context, rewrite_condition_keyword,
-    try_parse_temporal_delayed_trigger_ability,
+    lower_ability_ir, lower_effect_chain_ir, parse_additional_cost_instead_condition_fragment,
+    parse_effect_chain, parse_effect_chain_ir, parse_effect_chain_with_context,
+    rewrite_condition_keyword, try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
@@ -68,6 +68,7 @@ use super::oracle_ir::doc::{
     OracleDocBuilder, OracleDocIr, OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan,
     OracleUnitSource, PrintedAbilityIndex, PrintedTriggerIndex,
 };
+use super::oracle_ir::effect_chain::AbilityIr;
 use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
 use super::oracle_ir::replacement::ReplacementIr;
@@ -3597,6 +3598,48 @@ impl<'a> DocEmitter<'a> {
         // `spells_emitted` stack (see `last_ability_node`).
         self.emit_at(line, OracleNodeIr::PreLoweredSpell(def));
     }
+
+    /// The IR seam for spell/activated bodies — Plan 05b Unit 3b, **phase A**.
+    ///
+    /// Phase A lowers **eagerly and still emits the pre-lowered node**, which is
+    /// what lets every producer convert one tranche at a time with the node
+    /// payload, `finish()`, `item_ability`, `mutate_last_spell`, `reemit_spell`
+    /// and the cross-line instead-fold all untouched — and therefore with zero
+    /// snapshot churn and a diff a reviewer can actually read. Phase B (T9)
+    /// changes this body to `self.emit_at(line, OracleNodeIr::Spell(ir))` and
+    /// every producer is already correct.
+    ///
+    /// Written as delegation to `ability_at` rather than as a second emission of
+    /// its own for two reasons. It states the phase-A identity
+    /// `ability_ir_at(l, ir) == ability_at(l, lower_ability_ir(&ir))` literally
+    /// instead of restating it as a separately-maintained copy. And it keeps the
+    /// Plan 05b burn-down ratchet (`scripts/check-prelowered-ratchet.sh`)
+    /// monotone: that gate counts a bare token textually, `oracle.rs` sits
+    /// exactly at its ceiling, and one more occurrence of that token here — in
+    /// code OR in prose — would raise the count and fail a gate whose ceiling may
+    /// only ever decrease.
+    ///
+    /// # CR 707.9a is NOT gapped by this seam
+    ///
+    /// Printed-slot stamping happens only in `OracleDocBuilder::finish`, which
+    /// runs *before* lowering, so a copy-except clause inside an IR-native
+    /// `OracleNodeIr::Spell` body can never be stamped — there is no definition
+    /// to stamp until lowering builds one (`doc.rs`, the `Spell(_)` arm advances
+    /// `ability_slot` without stamping, on purpose). That gap cannot open in
+    /// phase A: this method emits the pre-lowered spell variant, so every
+    /// phase-A-converted producer lands in the corresponding `finish()` arm and
+    /// is stamped by `stamp_retained_printed_slot`, which recurses the whole
+    /// definition (effect, `sub_ability`, `else_ability`, `mode_abilities`). The
+    /// gap becomes reachable exactly when this body switches to
+    /// `OracleNodeIr::Spell(ir)`, so moving the stamp into `lower_oracle_ir`
+    /// belongs to T9 — where it is also the only place it can be done without a
+    /// byte delta on the one pre-existing `Spell` producer, which is deliberately
+    /// not stamped today.
+    // Producer arrives in T8-A1; the allow is deleted, not moved, by that tranche.
+    #[allow(dead_code)]
+    fn ability_ir_at(&mut self, line: usize, ir: AbilityIr) {
+        self.ability_at(line, lower_ability_ir(&ir));
+    }
     fn trigger_at(&mut self, line: usize, def: TriggerDefinition) {
         self.last_trigger = Some(def.clone());
         self.emit_at(line, OracleNodeIr::PreLoweredTrigger(def));
@@ -6885,7 +6928,7 @@ fn strip_cost_reduction_node(
 /// as a `ManaSpellGrant::TriggerOnSpend` (Lapis Orb of Dragonkind, Scaled
 /// Nurturer, Gilanra). Only applies to mana abilities; otherwise the clause
 /// drops to an `Effect:when` gap.
-fn extract_mana_spend_trigger_from_chain(def: &mut AbilityDefinition) {
+pub(crate) fn extract_mana_spend_trigger_from_chain(def: &mut AbilityDefinition) {
     if !matches!(&*def.effect, Effect::Mana { .. }) {
         return;
     }

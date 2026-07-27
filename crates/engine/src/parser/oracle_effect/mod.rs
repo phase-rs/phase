@@ -157,7 +157,7 @@ pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
     EffectChainIr, OtherwiseKind, PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind,
-    ReplicateKind,
+    ReplicateKind, ShellStage,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -26578,6 +26578,17 @@ pub(crate) enum ChainLoweringMode {
 /// `finalize_effect_chain` and the owner-library anchor belong here and not in
 /// `lower_effect_chain_ir`: pushing them down would newly apply them at the
 /// production callers that lower a *chain* without being a whole ability body.
+///
+/// # The order is pinned and behavior-load-bearing
+///
+/// **chain → finalize → anchor → `sub_link` → envelope stamps → stages.**
+///
+/// It is not an aesthetic choice: it reproduces what the whole-body recognizers
+/// in `oracle.rs` do by hand. Every one of them stamps its root fields *after*
+/// `parse_effect_chain_with_context` returns (which is itself this function) and
+/// runs the `extract_*` folds last. Reordering — in particular running a stage
+/// before the stamps — changes output, because both stages write root fields
+/// that a stamp may also write. Do not reorder for elegance.
 pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     let mut def = lower_effect_chain_ir(&ir.body);
     finalize_effect_chain(&mut def);
@@ -26586,10 +26597,74 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     if let Some(sub_link) = ir.shell.sub_link {
         def.sub_link = sub_link;
     }
+    apply_ability_shell_envelope(&mut def, &ir.shell);
+    for stage in &ir.shell.stages {
+        match stage {
+            ShellStage::ExtractCostReduction => {
+                crate::parser::oracle::extract_cost_reduction_from_chain(&mut def);
+            }
+            ShellStage::ExtractManaSpendTrigger => {
+                crate::parser::oracle::extract_mana_spend_trigger_from_chain(&mut def);
+            }
+        }
+    }
     def
 }
 
-fn parse_ability_ir(
+/// Apply the CR 602.1 activation envelope onto an already-lowered root.
+///
+/// Every field is **defer-on-default**, so a `default()` shell is a no-op and the
+/// widening is byte-identical by construction: `AbilityShellIr::default()` is the
+/// only shell any producer builds until T8-A1 converts the first recognizer.
+///
+/// Split out of `lower_ability_ir` so the pinned step order above reads as six
+/// named steps rather than one field-stamp wall.
+fn apply_ability_shell_envelope(def: &mut AbilityDefinition, shell: &AbilityShellIr) {
+    // CR 602.1a: the activation cost (everything before the colon).
+    if let Some(cost) = &shell.cost {
+        def.cost = Some(cost.clone());
+    }
+    // CR 601.2f: an explicitly stamped reduction. A site that sets this must not
+    // also list `ShellStage::ExtractCostReduction`, which derives the same field.
+    if let Some(cost_reduction) = &shell.cost_reduction {
+        def.cost_reduction = Some(cost_reduction.clone());
+    }
+    // CR 602.1b: activation instructions. `extend`, never `=` — see the field doc
+    // on `AbilityShellIr::activation_restrictions` for the exhaustive verification
+    // that nothing inside this function writes the root's restrictions.
+    def.activation_restrictions
+        .extend(shell.activation_restrictions.iter().cloned());
+    if let Some(restriction) = shell.activation_mana_payment_restriction {
+        def.activation_mana_payment_restriction = Some(restriction);
+    }
+    if let Some(activator_filter) = &shell.activator_filter {
+        def.activator_filter = Some(activator_filter.clone());
+    }
+    // CR 113.6m: the zone the ability functions in.
+    if let Some(activation_zone) = shell.activation_zone {
+        def.activation_zone = Some(activation_zone);
+    }
+    if let Some(ability_tag) = shell.ability_tag {
+        def.ability_tag = Some(ability_tag);
+    }
+    // CR 601.2b: `max`, so the `0` default can never lower an established floor.
+    def.min_x_value = def.min_x_value.max(shell.min_x_value);
+    // CR 707.10: monotone OR, so a `false` default can never clear the flag.
+    def.cant_be_copied |= shell.cant_be_copied;
+    if let Some(description) = &shell.description {
+        def.description = Some(description.clone());
+    }
+}
+
+/// Parse a whole ability body into its `AbilityIr` decomposition.
+///
+/// Prefer the mode-pinned wrappers [`parse_ability_ir_with_context`] and
+/// [`parse_ability_ir_standalone`] over naming a [`ChainLoweringMode`] at a call
+/// site: they exist so a recognizer converted to the IR seam inherits its
+/// original entry point's recognizer set **mechanically** rather than by a
+/// reviewer's judgment. See the `ChainLoweringMode` doc block for why the two
+/// sets must never be unified.
+pub(crate) fn parse_ability_ir(
     text: &str,
     kind: AbilityKind,
     mode: ChainLoweringMode,
@@ -26638,6 +26713,7 @@ fn parse_ability_ir(
             // no preceding ClauseBoundary can stamp its link.
             shell: AbilityShellIr {
                 sub_link: Some(SubAbilityLink::SequentialSibling),
+                ..AbilityShellIr::default()
             },
         };
     }
@@ -26648,29 +26724,61 @@ fn parse_ability_ir(
     }
 }
 
-pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
-    lower_ability_ir(&parse_ability_ir(
+/// Parse an ability body in `Standalone` mode — the mode-pinned wrapper for
+/// every site whose original body called [`parse_effect_chain`].
+///
+/// Takes no `ParseContext` **on purpose**, mirroring `parse_effect_chain`'s own
+/// signature: the standalone entry point has always parsed against a fresh
+/// `default()` context that is discarded. A converted site therefore inherits its
+/// original mode by swapping one function name, with the argument list unchanged
+/// — there is no context argument for a reviewer to get wrong.
+pub(crate) fn parse_ability_ir_standalone(text: &str, kind: AbilityKind) -> AbilityIr {
+    parse_ability_ir(
         text,
         kind,
         ChainLoweringMode::Standalone,
         &mut ParseContext::default(),
-    ))
+    )
+}
+
+/// Parse an ability body in `WithContext` mode — the mode-pinned wrapper for
+/// every site whose original body called [`parse_effect_chain_with_context`].
+///
+/// Same argument list as the function it replaces, for the same reason as
+/// [`parse_ability_ir_standalone`]. **Never** substitute one wrapper for the
+/// other while converting a site: the two modes run different whole-body
+/// recognizer sets, and crossing them silently moves ~113 die-roll cards.
+pub(crate) fn parse_ability_ir_with_context(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> AbilityIr {
+    parse_ability_ir(text, kind, ChainLoweringMode::WithContext, ctx)
+}
+
+/// The algebraic identity T8 rests on, written literally:
+/// `parse_effect_chain(t, k)` **is** `lower_ability_ir(&parse_ability_ir_standalone(t, k))`.
+pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
+    lower_ability_ir(&parse_ability_ir_standalone(text, kind))
 }
 
 /// Parse a compound effect chain with subject context for pronoun resolution.
 /// CR 608.2k: Used by the trigger parser to thread the trigger subject so that
 /// bare pronouns ("it") resolve to TriggeringSource instead of SelfRef.
+///
+/// The `WithContext` half of the same identity:
+/// `parse_effect_chain_with_context(t, k, cx)` **is**
+/// `lower_ability_ir(&parse_ability_ir_with_context(t, k, cx))`. A T8 producer
+/// conversion replaces this single call with the two halves and inserts its root
+/// stamps into the `AbilityShellIr` between them, which is why the conversion is
+/// byte-identical for the whole *class* of text the recognizer handles rather
+/// than merely for today's corpus.
 pub(crate) fn parse_effect_chain_with_context(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
-    lower_ability_ir(&parse_ability_ir(
-        text,
-        kind,
-        ChainLoweringMode::WithContext,
-        ctx,
-    ))
+    lower_ability_ir(&parse_ability_ir_with_context(text, kind, ctx))
 }
 
 /// CR 701.24a + CR 701.58a/e + CR 608.2c: Expose the Culprit mode 2 — "Exile any
