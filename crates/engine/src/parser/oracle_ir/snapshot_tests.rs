@@ -413,6 +413,35 @@ fn lumen_class_frigate() {
 }
 
 // ---------------------------------------------------------------------------
+// CR 603.12 deferred rider on a top-of-library play permission
+// ---------------------------------------------------------------------------
+
+/// The `". When you do, …"` rider gap (Plan 05b, T4 witness).
+///
+/// The converted site emits BOTH halves of the second line: a static for the
+/// top-of-library play permission and, beside it, a deliberately-honest gap
+/// marker for the rider — `TriggerMode::Unknown("when you do")` with
+/// `execute: None`, so coverage shows the gap instead of an approximated and
+/// rules-incorrect `PlayCard` trigger.
+///
+/// This fixture exists because T4's churn is otherwise ZERO: none of the 28
+/// corpus cards carrying a trigger reaches this site, which would make the
+/// tranche's byte gate vacuous. It is the non-vacuity proof — the `_ir`
+/// snapshot must show a `Trigger` node rather than the pre-lowered variant on
+/// line 1, and `_lowered` must match what the old path produced.
+#[test]
+fn the_fourth_doctor() {
+    let (ir, lowered) = parse_two_layer(
+        "You may look at the top card of your library any time.\nWould You Like A...? — Once each turn, you may play a historic land or cast a historic spell from the top of your library. When you do, create a Food token. (Artifacts, legendaries, and Sagas are historic.)",
+        "The Fourth Doctor",
+        &["Creature"],
+        &["Time Lord", "Doctor"],
+    );
+    insta::assert_json_snapshot!("the_fourth_doctor_ir", &ir);
+    insta::assert_json_snapshot!("the_fourth_doctor_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
 // Adventure
 // ---------------------------------------------------------------------------
 

@@ -28,7 +28,7 @@ use super::effect_chain::EffectChainIr;
 use super::relation::DocumentRelationIr;
 use super::replacement::ReplacementIr;
 use super::static_ir::StaticIr;
-use super::trigger::TriggerIr;
+use super::trigger::TriggerNodeIr;
 use crate::types::ability::{
     AbilityDefinition, AdditionalCost, CastingPermission, CastingRestriction,
     ContinuousModification, Effect, ModalChoice, ReplacementDefinition, SolveCondition,
@@ -313,9 +313,7 @@ pub(crate) enum OracleNodeIr {
     /// becomes typed IR rather than a pre-lowered `AbilityDefinition`.
     Spell(EffectChainIr),
     /// Triggered ability.
-    // PLAN-05 DEBT (2026-07-17, post-U2): constructed only by the Class-B bring-up (unit 3); retire this allow there.
-    #[allow(dead_code)]
-    Trigger(TriggerIr),
+    Trigger(TriggerNodeIr),
     /// Static ability.
     Static(StaticIr),
     /// Replacement effect.
@@ -916,17 +914,24 @@ impl OracleDocBuilder {
         // dispatch loop baked in.
         //
         // Match is EXHAUSTIVE over `OracleNodeIr` (no `_`), mirroring `emit`'s
-        // printed-slot match above: a future node variant — or the currently
-        // never-constructed `Trigger`/`Spell` IR variants once a later commit emits
-        // them — must fail to compile here until its slot behavior is decided,
-        // rather than being silently skipped (which would mis-index every later
-        // trigger/ability).
+        // printed-slot match above: a future node variant — or the still
+        // never-constructed `Spell` IR variant once a later commit emits it —
+        // must fail to compile here until its slot behavior is decided, rather
+        // than being silently skipped (which would mis-index every later
+        // trigger/ability). `Trigger` is destructured to its one payload variant
+        // for the same reason: adding an IR-native trigger payload must break
+        // this match, because the stamp targets `execute`, which a decomposition
+        // does not have until lowering builds it.
         let mut trigger_slot = 0usize;
         let mut ability_slot = 0usize;
         for item in self.items.values_mut() {
             match &mut item.node {
                 OracleNodeIr::PreLoweredTrigger(trigger) => {
                     stamp_trigger_printed_slot(trigger, trigger_slot, PrintedItemKind::Trigger);
+                    trigger_slot += 1;
+                }
+                OracleNodeIr::Trigger(TriggerNodeIr::Assembled { definition, .. }) => {
+                    stamp_trigger_printed_slot(definition, trigger_slot, PrintedItemKind::Trigger);
                     trigger_slot += 1;
                 }
                 OracleNodeIr::PreLoweredSpell(def) => {
@@ -937,8 +942,7 @@ impl OracleDocBuilder {
                 // are never constructed in unit 3a, and the remaining categories do
                 // not carry a copy-except body. Left explicit (not `_`) so a new
                 // slot-bearing node is a compile error, per the note above.
-                OracleNodeIr::Trigger(_)
-                | OracleNodeIr::Spell(_)
+                OracleNodeIr::Spell(_)
                 | OracleNodeIr::Static(_)
                 | OracleNodeIr::PreLoweredStatic(_)
                 | OracleNodeIr::Replacement(_)

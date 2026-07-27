@@ -70,6 +70,7 @@ use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_ir::static_ir::StaticIr;
+use super::oracle_ir::trigger::TriggerNodeIr;
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     is_keyword_cost_line, is_kicker_family_line, parse_kicker_additional_cost_line,
@@ -101,7 +102,7 @@ use super::oracle_static::{
     try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
     GrantedCastKeywordKind,
 };
-use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
+use super::oracle_trigger::{lower_trigger_node_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
     normalize_card_name_refs, parse_mana_symbols, parse_number, split_same_is_true_static_tail,
     strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
@@ -1164,8 +1165,23 @@ fn item_ability(item: &OracleItemIr) -> Option<&AbilityDefinition> {
     }
 }
 
+/// CR 607.2d: the trigger side of document-relation discovery.
+///
+/// Both trigger-bearing node shapes are handled, which is what makes the
+/// `_ => None` safe here. Seven readers drive four document relations off this
+/// and five of them read `trigger.execute`, so a trigger node this failed to
+/// recognize would not fail loudly — it would silently drop the relation, and
+/// the regression would surface on a DIFFERENT card from the converted one,
+/// where per-card byte-identity cannot catch it.
+///
+/// The exhaustiveness obligation lives on `TriggerNodeIr::definition()`, not on
+/// this match, and that is the correct layer: a new trigger representation is a
+/// new `TriggerNodeIr` variant, so it breaks that match at compile time before
+/// it can reach here. Enumerating `OracleNodeIr` instead would add nothing —
+/// every other variant is genuinely `None`.
 fn item_trigger(item: &OracleItemIr) -> Option<&TriggerDefinition> {
     match &item.node {
+        OracleNodeIr::Trigger(node) => node.definition(),
         OracleNodeIr::PreLoweredTrigger(def) => Some(def),
         _ => None,
     }
@@ -2873,8 +2889,8 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                 result.abilities.push(lower_effect_chain_ir(effect_ir));
                 ability_ids.push(item.id);
             }
-            OracleNodeIr::Trigger(trigger_ir) => {
-                result.triggers.push(lower_trigger_ir(trigger_ir));
+            OracleNodeIr::Trigger(trigger_node) => {
+                result.triggers.push(lower_trigger_node_ir(trigger_node));
                 trigger_ids.push(item.id);
             }
             OracleNodeIr::Static(static_ir) => {
@@ -3558,6 +3574,14 @@ impl<'a> DocEmitter<'a> {
     fn trigger_at(&mut self, line: usize, def: TriggerDefinition) {
         self.last_trigger = Some(def.clone());
         self.emit_at(line, OracleNodeIr::PreLoweredTrigger(def));
+    }
+    /// Mirrors `static_ir_at`: the peek mirror stores the LOWERED definition, so
+    /// the peek reader is unchanged and no `source_text` is invented for a slot
+    /// nothing reads it from. Lowering here is a clone (`lower_trigger_node_ir`
+    /// passes an assembled definition through), exactly what `trigger_at` paid.
+    fn trigger_ir_at(&mut self, line: usize, ir: TriggerNodeIr) {
+        self.last_trigger = Some(lower_trigger_node_ir(&ir));
+        self.emit_at(line, OracleNodeIr::Trigger(ir));
     }
     fn static_at(&mut self, line: usize, def: StaticDefinition) {
         self.last_static = Some(def.clone());
@@ -5015,7 +5039,11 @@ pub(crate) fn parse_oracle_ir(
                         item_line,
                         StaticIr::from_definition(&line, static_def.description(line.to_string())),
                     );
-                    emitter.trigger_at(item_line, rider_gap);
+                    // Same `&line` the sibling static above passes: both halves
+                    // of this sentence were recognized from the whole printed
+                    // line, before the `". when you do, "` split.
+                    emitter
+                        .trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, rider_gap));
                     i += 1;
                     continue;
                 }
