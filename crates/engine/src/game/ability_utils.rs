@@ -1311,6 +1311,32 @@ pub fn simple_legal_target_assignment_exists_for_ability(
     ))
 }
 
+/// CR 603.3d: could `execute` — a trigger's ability, resolving from `source` —
+/// either need no target at all, or find a legal target right now? A
+/// mandatory-target trigger with no legal choice is removed rather than
+/// producing an effect, so a payoff-eligibility preflight must not credit it.
+/// Complex/undecidable target shapes return `true` (don't under-credit — the
+/// caller is asking "could this possibly produce value").
+pub fn execute_targets_satisfiable(
+    state: &GameState,
+    source: &crate::game::game_object::GameObject,
+    execute: &AbilityDefinition,
+) -> bool {
+    let resolved = ResolvedAbility::new(
+        execute.effect.as_ref().clone(),
+        Vec::new(),
+        source.id,
+        source.controller,
+    );
+    let specs = target_slot_specs(state, &resolved);
+    if specs.is_empty() {
+        return true; // the effect requires no target
+    }
+    // `Some(false)` = a mandatory target with no legal choice; `Some(true)` =
+    // legal or optional; `None` = a shape this cheap check can't decide.
+    simple_legal_target_assignment_exists_for_ability(state, &resolved, &[]).unwrap_or(true)
+}
+
 /// CR 115.1 + CR 701.9b: Resolve a `Random`-mode ability's target slots by
 /// uniformly choosing from each slot's legal-target set using the engine's
 /// seeded RNG (`state.rng`). The game (not the controller) makes the selection;

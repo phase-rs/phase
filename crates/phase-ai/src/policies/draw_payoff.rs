@@ -20,11 +20,9 @@
 //! `trigger_definitions`), and only in a deck whose `activation` floor is already
 //! cleared. No affordability sweep, no `find_legal_targets`.
 
-use engine::game::game_object::GameObject;
-use engine::types::ability::{TriggerConstraint, TriggerEntry};
+use engine::game::triggers::hypothetical_trigger_fireable;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
-use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
 use crate::features::draw_matters::{
@@ -69,10 +67,12 @@ impl TacticalPolicy for DrawPayoffPolicy {
             return PolicyVerdict::neutral(PolicyReason::new("draw_payoff_na"));
         }
 
-        // Only now pay for the battlefield scan. Re-classify each permanent the
-        // AI controls STRUCTURALLY against its live `trigger_definitions` (CR
-        // 121.1) — the object must actually carry a "whenever you draw" trigger
-        // to produce value.
+        // Only now pay for the battlefield scan. A permanent counts only when it
+        // carries a "whenever you draw" trigger (CR 121.1) that is actually LIVE:
+        // the engine's `hypothetical_trigger_fireable` authority preflights the
+        // trigger's constraint AND its execution target legality (CR 603.3d), so
+        // a rate-limited, off-timing, conditional, or no-legal-target engine is
+        // not credited value it cannot produce.
         let engines = ctx
             .state
             .battlefield
@@ -82,7 +82,7 @@ impl TacticalPolicy for DrawPayoffPolicy {
                     obj.controller == ctx.ai_player
                         && obj.trigger_definitions.iter_unchecked().any(|entry| {
                             is_draw_payoff_trigger(&entry.definition)
-                                && trigger_still_fireable(ctx.state, obj, entry)
+                                && hypothetical_trigger_fireable(ctx.state, obj, entry)
                         })
                 })
             })
@@ -116,6 +116,10 @@ fn candidate_draws_controller(ctx: &PolicyContext<'_>) -> bool {
             let etb_bodies = facts
                 .immediate_etb_triggers
                 .iter()
+                // CR 603.4: an ETB trigger with an intervening-if condition
+                // (Latchkey Faerie's prowl clause) is not preflighted here, so
+                // its draw is not credited until it is known it will fire.
+                .filter(|trigger| trigger.condition.is_none())
                 .filter_map(|trigger| trigger.execute.as_deref());
             is_draw_source_parts(
                 facts.primary_effects.iter().copied().chain(etb_bodies),
@@ -128,46 +132,5 @@ fn candidate_draws_controller(ctx: &PolicyContext<'_>) -> bool {
             })
         }
         _ => false,
-    }
-}
-
-/// Whether `obj`'s draw-engine trigger `entry` could still fire this turn — so
-/// that drawing into it is actually worth something. Exhaustive over
-/// `TriggerConstraint` (no wildcard) so a new constraint forces a decision here.
-///
-/// - The once/timing constraints are evaluated against authoritative state (the
-///   fired-trigger ledgers, `active_player`, and the phase) rather than
-///   re-derived.
-/// - Constraints whose fireability depends on the triggering event or a per-turn
-///   *count* the policy can't cheaply/correctly evaluate at decision time
-///   (`MaxTimesPerTurn`, `NthDrawThisTurn`, …) are treated as NOT confirmed, so
-///   the payoff is never OVER-credited (the review concern). These are rare on
-///   draw engines; the conservative miss is preferable to a false bonus.
-fn trigger_still_fireable(state: &GameState, obj: &GameObject, entry: &TriggerEntry) -> bool {
-    let Some(constraint) = &entry.definition.constraint else {
-        return true; // no constraint — always fireable
-    };
-    match constraint {
-        // CR 603.4 / CR 603.2: already-consumed "once" limits.
-        TriggerConstraint::OncePerTurn => !state
-            .triggers_fired_this_turn
-            .contains(&obj.trigger_definition_ref(entry)),
-        TriggerConstraint::OncePerGame => !state
-            .triggers_fired_this_game
-            .contains(&obj.trigger_definition_ref(entry)),
-        // Turn/phase timing — evaluable from turn state alone.
-        TriggerConstraint::OnlyDuringYourTurn => state.active_player == obj.controller,
-        TriggerConstraint::OnlyDuringOpponentsTurn => state.active_player != obj.controller,
-        TriggerConstraint::OnlyDuringYourMainPhase => {
-            state.active_player == obj.controller
-                && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
-        }
-        // Event- or count-dependent: not confirmable at decision time.
-        TriggerConstraint::MaxTimesPerTurn { .. }
-        | TriggerConstraint::NthSpellThisTurn { .. }
-        | TriggerConstraint::NthDrawThisTurn { .. }
-        | TriggerConstraint::OncePerOpponentPerTurn
-        | TriggerConstraint::AtClassLevel { .. }
-        | TriggerConstraint::EventSourceControlledBy { .. } => false,
     }
 }

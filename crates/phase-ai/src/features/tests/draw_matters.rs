@@ -8,6 +8,7 @@ use engine::types::ability::{
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
 
 use crate::features::draw_matters::*;
 
@@ -91,6 +92,46 @@ fn vanilla_deck_not_registered() {
 fn detects_draw_source() {
     let f = detect(&[entry(draw_source("Divination"), 4)]);
     assert_eq!(f.source_count, 4);
+}
+
+/// An ETB "cantrip" creature (Elvish Visionary) — "when this enters, draw a card"
+/// — has no `Effect::Draw` in `abilities`, only a self-ETB trigger. The live
+/// policy credits these via `CastFacts::immediate_etb_triggers`, so deck-time
+/// detection must count them as draw sources too (CR 603.6a), or an ETB-cantrip
+/// shell is undercounted.
+fn etb_draw_source(name: &str, drawn: TargetFilter) -> CardFace {
+    let mut f = face(name, CoreType::Creature);
+    let mut t = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: drawn,
+            },
+        ));
+    t.destination = Some(Zone::Battlefield);
+    f.triggers = vec![t];
+    f
+}
+
+#[test]
+fn etb_cantrip_counts_as_a_draw_source() {
+    let f = detect(&[entry(
+        etb_draw_source("Elvish Visionary", TargetFilter::Controller),
+        4,
+    )]);
+    assert_eq!(f.source_count, 4);
+}
+
+/// Control: an ETB that draws an OPPONENT a card is not an enabler for your engine.
+#[test]
+fn etb_opponent_draw_is_not_a_source() {
+    let f = detect(&[entry(
+        etb_draw_source("Opponent Cantrip", TargetFilter::Opponent),
+        4,
+    )]);
+    assert_eq!(f.source_count, 0);
 }
 
 /// A draw effect that draws an OPPONENT is not an enabler for your engine.

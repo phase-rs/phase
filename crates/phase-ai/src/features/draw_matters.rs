@@ -36,6 +36,7 @@ use engine::game::DeckEntry;
 use engine::types::ability::{AbilityDefinition, Effect, TargetFilter, TriggerDefinition};
 use engine::types::card_type::CoreType;
 use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
 
 use crate::ability_chain::collect_scoped_effects;
 pub(crate) use crate::ability_chain::AbilityScope;
@@ -80,8 +81,12 @@ pub fn detect(deck: &[DeckEntry]) -> DrawMattersFeature {
         }
 
         // Deck-time: a modal card whose draw lives in a branch still counts as a
-        // draw enabler for the archetype, so scan the full potential tree.
-        if is_draw_source_parts(&face.abilities, AbilityScope::Potential) {
+        // draw enabler for the archetype, so scan the full potential tree — plus
+        // ETB "cantrip" triggers (Elvish Visionary), which the live policy also
+        // credits via `CastFacts::immediate_etb_triggers`.
+        if is_draw_source_parts(&face.abilities, AbilityScope::Potential)
+            || is_etb_draw_source(&face.triggers)
+        {
             source_count = source_count.saturating_add(entry.count);
         }
         if is_draw_payoff_parts(&face.triggers) {
@@ -147,6 +152,23 @@ pub(crate) fn is_draw_payoff_trigger(t: &TriggerDefinition) -> bool {
 /// True when the draw effect draws the controller cards (you), not an opponent.
 fn draws_controller(target: &TargetFilter) -> bool {
     matches!(target, TargetFilter::Controller)
+}
+
+/// CR 603.6a: the face carries a self-ETB "when this enters, draw a card"
+/// trigger (Elvish Visionary) — the live policy credits these via
+/// `CastFacts::immediate_etb_triggers`, so deck-time detection must count them
+/// as draw sources too, or an ETB-cantrip deck is undercounted.
+fn is_etb_draw_source(triggers: &[TriggerDefinition]) -> bool {
+    triggers.iter().any(|t| {
+        t.mode == TriggerMode::ChangesZone
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && t.execute.as_deref().is_some_and(|execute| {
+                collect_scoped_effects(execute, AbilityScope::Potential)
+                    .iter()
+                    .any(|e| matches!(e, Effect::Draw { target, .. } if draws_controller(target)))
+            })
+    })
 }
 
 /// Calibration: a dedicated draw engine deck (e.g. Izzet "draw-two": ~20 card-

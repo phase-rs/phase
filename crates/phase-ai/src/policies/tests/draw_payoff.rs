@@ -9,14 +9,15 @@ use std::sync::Arc;
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerConstraint,
-    TriggerDefinition,
+    AbilityDefinition, AbilityKind, CastVariantPaid, Effect, QuantityExpr, TargetFilter,
+    TriggerCondition, TriggerConstraint, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -78,12 +79,29 @@ fn permanent_with_trigger(state: &mut GameState, trigger: Option<TriggerDefiniti
     }
 }
 
+/// The Locust God shape: a no-target on-draw payoff (here, gain life) — always
+/// resolves to an effect, so target legality never blocks it.
 fn drawn_engine_trigger() -> TriggerDefinition {
     TriggerDefinition::new(TriggerMode::Drawn).execute(AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::DealDamage {
+        Effect::GainLife {
             amount: QuantityExpr::Fixed { value: 1 },
-            target: TargetFilter::Opponent,
+            player: TargetFilter::Controller,
+        },
+    ))
+}
+
+/// A Wizard-Class shape: a "whenever you draw, deal 3 damage to TARGET creature"
+/// payoff whose value depends on a legal target existing (CR 603.3d).
+fn drawn_targeted_engine_trigger() -> TriggerDefinition {
+    TriggerDefinition::new(TriggerMode::Drawn).execute(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Typed(
+                engine::types::ability::TypedFilter::default()
+                    .with_type(engine::types::ability::TypeFilter::Creature),
+            ),
             damage_source: None,
             excess: None,
         },
@@ -445,6 +463,359 @@ fn only_during_your_turn_engine_rewards_on_your_turn() {
         score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
     assert_eq!(reason.kind, "draw_payoff_engine_active");
     assert!(delta > 0.0);
+}
+
+/// An enchantment engine whose "whenever you draw" trigger targets a creature —
+/// value depends on a legal target existing (CR 603.3d). Deliberately NOT a
+/// creature itself, so with an empty board the trigger has no legal target.
+fn targeted_engine(state: &mut GameState) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        AI,
+        ENGINE_NAME.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.trigger_definitions
+        .push(drawn_targeted_engine_trigger());
+    id
+}
+
+/// Puts an opponent creature on the battlefield — a legal target for a
+/// "target creature" trigger.
+fn add_opponent_creature(state: &mut GameState) {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        PlayerId(1),
+        "Grizzly Bears".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&id)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+}
+
+/// CR 603.3d: a mandatory-target "whenever you draw" engine with no legal target
+/// on the board cannot resolve to an effect, so it is not a live payoff — the
+/// engine's `hypothetical_trigger_fireable` target-legality preflight rejects it.
+#[test]
+fn targeted_engine_with_no_legal_target_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    targeted_engine(&mut st); // enchantment, empty board → no creature to hit
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// Control: once a legal creature target exists, the same targeted engine is live
+/// and the draw is rewarded.
+#[test]
+fn targeted_engine_with_a_legal_target_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    targeted_engine(&mut st);
+    add_opponent_creature(&mut st); // now the "target creature" trigger can resolve
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// A `MaxTimesPerTurn { max }` engine that has fired fewer than `max` times this
+/// turn can still fire, so the draw is rewarded — the engine authority reads the
+/// live `trigger_fire_counts_this_turn` ledger.
+#[test]
+fn max_times_per_turn_below_cap_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    let engine_id = engine_with_constraint(&mut st, TriggerConstraint::MaxTimesPerTurn { max: 2 });
+    let key = {
+        let obj = st.objects.get(&engine_id).unwrap();
+        let entry = obj.trigger_definitions.iter_unchecked().next().unwrap();
+        obj.trigger_definition_ref(entry)
+    };
+    st.trigger_fire_counts_this_turn.insert(key, 1); // 1 < 2 → can still fire
+
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// Control: the same engine that has already fired `max` times this turn cannot
+/// fire again, so the draw earns nothing.
+#[test]
+fn max_times_per_turn_at_cap_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    let engine_id = engine_with_constraint(&mut st, TriggerConstraint::MaxTimesPerTurn { max: 2 });
+    let key = {
+        let obj = st.objects.get(&engine_id).unwrap();
+        let entry = obj.trigger_definitions.iter_unchecked().next().unwrap();
+        obj.trigger_definition_ref(entry)
+    };
+    st.trigger_fire_counts_this_turn.insert(key, 2); // 2 == max → exhausted
+
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// An `OnlyDuringYourMainPhase` engine is live during BOTH main phases — the
+/// pre-combat and the post-combat main — so a draw in either is rewarded.
+#[test]
+fn only_during_your_main_phase_rewards_in_both_main_phases() {
+    for phase in [Phase::PreCombatMain, Phase::PostCombatMain] {
+        let config = AiConfig::default();
+        let mut st = state();
+        st.active_player = AI;
+        st.phase = phase;
+        engine_with_constraint(&mut st, TriggerConstraint::OnlyDuringYourMainPhase);
+        let (oid, cid) = draw_spell(&mut st);
+        let context = context(&config, session(0.9));
+        let candidate = cast(oid, cid);
+        let decision = priority_decision(&candidate);
+        let (delta, reason) =
+            score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+        assert_eq!(
+            reason.kind, "draw_payoff_engine_active",
+            "main phase {phase:?} should be live"
+        );
+        assert!(delta > 0.0, "main phase {phase:?} should reward");
+    }
+}
+
+/// An `OnlyDuringOpponentsTurn` engine (a punish-on-their-draw payoff) is live
+/// only while it is NOT your turn — a draw during the opponent's turn is
+/// rewarded.
+#[test]
+fn only_during_opponents_turn_rewards_off_turn() {
+    let config = AiConfig::default();
+    let mut st = state();
+    st.active_player = PlayerId(1); // the opponent's turn
+    engine_with_constraint(&mut st, TriggerConstraint::OnlyDuringOpponentsTurn);
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// Control: the same `OnlyDuringOpponentsTurn` engine on YOUR turn cannot fire,
+/// so a draw earns nothing.
+#[test]
+fn only_during_opponents_turn_is_neutral_on_your_turn() {
+    let config = AiConfig::default();
+    let mut st = state();
+    st.active_player = AI;
+    engine_with_constraint(&mut st, TriggerConstraint::OnlyDuringOpponentsTurn);
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// Negative for the main-phase timing: an `OnlyDuringYourMainPhase` engine during
+/// a non-main phase (here, upkeep) cannot fire (CR 505.1), so an instant-speed
+/// draw in that step earns nothing.
+#[test]
+fn only_during_your_main_phase_off_phase_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    st.active_player = AI;
+    st.phase = Phase::Upkeep; // your turn, but not a main phase
+    engine_with_constraint(&mut st, TriggerConstraint::OnlyDuringYourMainPhase);
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// A permanent-spell creature whose self-ETB trigger draws you a card
+/// (Elvish Visionary / Latchkey Faerie), with an optional intervening-if
+/// `condition` — `qualifies_immediate_etb` picks it up as a `CastFacts`
+/// immediate ETB.
+fn etb_draw_spell(
+    state: &mut GameState,
+    condition: Option<TriggerCondition>,
+) -> (ObjectId, CardId) {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        AI,
+        "Elvish Visionary".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    let mut etb = TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    ));
+    etb.destination = Some(Zone::Battlefield);
+    etb.valid_card = Some(TargetFilter::SelfRef);
+    etb.condition = condition;
+    obj.trigger_definitions.push(etb);
+    (id, card_id)
+}
+
+/// CR 603.4: Latchkey Faerie's "if its prowl cost was paid, draw a card" ETB is
+/// an intervening-if the AI cannot confirm at decision time, so its draw is NOT
+/// credited — the cast is treated as a non-draw and earns nothing even with an
+/// engine out.
+#[test]
+fn conditional_etb_draw_is_not_credited() {
+    let config = AiConfig::default();
+    let mut st = state();
+    engine_on_battlefield(&mut st); // a live engine is present…
+    let (oid, cid) = etb_draw_spell(
+        &mut st,
+        Some(TriggerCondition::CastVariantPaid {
+            variant: CastVariantPaid::Prowl,
+        }),
+    );
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    // …but the conditional ETB is not a confirmed draw, so no engine reward.
+    assert_eq!(reason.kind, "draw_payoff_na");
+    assert_eq!(delta, 0.0);
+}
+
+/// Control: Elvish Visionary's unconditional "when this enters, draw a card" ETB
+/// IS a confirmed draw, so with an engine out the cast is rewarded.
+#[test]
+fn unconditional_etb_draw_is_credited() {
+    let config = AiConfig::default();
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    let (oid, cid) = etb_draw_spell(&mut st, None);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// A battlefield permanent whose activated ability at index 0 runs `effect`, plus
+/// its id for an `ActivateAbility` candidate.
+fn activated_permanent(state: &mut GameState, effect: Effect) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        AI,
+        "Draw Engine".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Artifact);
+    Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(AbilityKind::Activated, effect));
+    id
+}
+
+fn activate(source_id: ObjectId, ability_index: usize) -> CandidateAction {
+    CandidateAction {
+        action: GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        },
+        metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
+    }
+}
+
+/// An activated ability that draws you a card ("{T}: Draw a card") is a draw
+/// action, so with an engine out it is rewarded — covering the policy's second
+/// `DecisionKind::ActivateAbility` seam.
+#[test]
+fn activated_draw_ability_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    let source_id = activated_permanent(
+        &mut st,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    let context = context(&config, session(0.9));
+    let candidate = activate(source_id, 0);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// Control: a non-draw activated ability (gain life) is not a draw action, so it
+/// earns nothing regardless of the engine.
+#[test]
+fn activated_non_draw_ability_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    let source_id = activated_permanent(
+        &mut st,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+            player: TargetFilter::Controller,
+        },
+    );
+    let context = context(&config, session(0.9));
+    let candidate = activate(source_id, 0);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_na");
+    assert_eq!(delta, 0.0);
 }
 
 // ─── production seam (registry routing) ─────────────────────────────────────
