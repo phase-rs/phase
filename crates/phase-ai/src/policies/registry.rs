@@ -117,6 +117,8 @@ pub enum PolicyId {
     ComboLineProgress,
     CedhKeepablesMulligan,
     FixedDeckKeepMulligan,
+    /// Universal mulligan card-count floor — see `policies::mulligan::card_floor`.
+    MulliganCardFloor,
     PlaneswalkerLoyalty,
     EquipmentPriority,
     SpellskitePriority,
