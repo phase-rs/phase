@@ -30,6 +30,7 @@ use engine::types::player::PlayerId;
 
 use engine::game::game_object::GameObject;
 use engine::types::ability::{TriggerConstraint, TriggerEntry};
+use engine::types::phase::Phase;
 
 use crate::features::cycling::{is_cycle_payoff_trigger, CYCLING_PAYOFF_FLOOR};
 use crate::features::DeckFeatures;
@@ -107,23 +108,41 @@ impl TacticalPolicy for CyclingPayoffPolicy {
     }
 }
 
-/// CR 603.4 + CR 603.2: a rate-limited engine that has already fired this
-/// turn/game cannot fire again, so cycling into it earns nothing more. Consults
-/// the engine's authoritative fired-trigger ledgers rather than re-deriving
-/// eligibility. Constraints this policy does not model (their eligibility is a
-/// value nuance, not a hard on/off) are treated as live.
+/// Whether `obj`'s cycling-payoff trigger `entry` could still fire this turn.
+/// Exhaustive over `TriggerConstraint` (no wildcard): the once/timing limits are
+/// evaluated against authoritative state (fired-trigger ledgers, `active_player`,
+/// phase); event/count-dependent constraints the policy can't confirm at decision
+/// time are treated as NOT fireable so the payoff is never over-credited.
 fn trigger_still_fireable(
     state: &engine::types::game_state::GameState,
     obj: &GameObject,
     entry: &TriggerEntry,
 ) -> bool {
-    match &entry.definition.constraint {
-        Some(TriggerConstraint::OncePerTurn) => !state
+    let Some(constraint) = &entry.definition.constraint else {
+        return true; // no constraint — always fireable
+    };
+    match constraint {
+        // CR 603.4 / CR 603.2: already-consumed "once" limits.
+        TriggerConstraint::OncePerTurn => !state
             .triggers_fired_this_turn
             .contains(&obj.trigger_definition_ref(entry)),
-        Some(TriggerConstraint::OncePerGame) => !state
+        TriggerConstraint::OncePerGame => !state
             .triggers_fired_this_game
             .contains(&obj.trigger_definition_ref(entry)),
-        _ => true,
+        // Turn/phase timing — evaluable from turn state alone.
+        TriggerConstraint::OnlyDuringYourTurn => state.active_player == obj.controller,
+        TriggerConstraint::OnlyDuringOpponentsTurn => state.active_player != obj.controller,
+        TriggerConstraint::OnlyDuringYourMainPhase => {
+            state.active_player == obj.controller
+                && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+        }
+        // Event- or count-dependent: not confirmable at decision time, so never
+        // over-credit the payoff.
+        TriggerConstraint::MaxTimesPerTurn { .. }
+        | TriggerConstraint::NthSpellThisTurn { .. }
+        | TriggerConstraint::NthDrawThisTurn { .. }
+        | TriggerConstraint::OncePerOpponentPerTurn
+        | TriggerConstraint::AtClassLevel { .. }
+        | TriggerConstraint::EventSourceControlledBy { .. } => false,
     }
 }

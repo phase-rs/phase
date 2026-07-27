@@ -344,6 +344,70 @@ fn rate_limited_engine_not_yet_fired_rewards() {
     assert!(delta > 0.0, "an unfired once-per-turn engine still rewards");
 }
 
+/// An engine trigger with `constraint` on the AI's own permanent.
+fn engine_with_constraint(state: &mut GameState, constraint: TriggerConstraint) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        AI,
+        ENGINE_NAME.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.trigger_definitions
+        .push(cycle_trigger(TargetFilter::Any).constraint(constraint));
+    id
+}
+
+/// A once-per-game engine already fired this game earns nothing more.
+#[test]
+fn once_per_game_engine_already_fired_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    let engine_id = engine_with_constraint(&mut st, TriggerConstraint::OncePerGame);
+    let key = {
+        let obj = st.objects.get(&engine_id).unwrap();
+        let entry = obj.trigger_definitions.iter_unchecked().next().unwrap();
+        obj.trigger_definition_ref(entry)
+    };
+    st.triggers_fired_this_game.insert(key);
+
+    let source = cycler(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) =
+        score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "cycling_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// An `OnlyDuringYourTurn` engine on the opponent's turn cannot fire, so cycling
+/// at instant speed during their turn earns nothing.
+#[test]
+fn only_during_your_turn_engine_is_neutral_off_turn() {
+    let config = AiConfig::default();
+    let mut st = state();
+    st.active_player = PlayerId(1);
+    engine_with_constraint(&mut st, TriggerConstraint::OnlyDuringYourTurn);
+    let source = cycler(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = activate(source);
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::Priority { player: AI },
+        candidates: vec![candidate.clone()],
+    };
+    let (delta, reason) =
+        score_of(CyclingPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "cycling_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
 // ─── production seam (registry routing) ─────────────────────────────────────
 
 #[test]
