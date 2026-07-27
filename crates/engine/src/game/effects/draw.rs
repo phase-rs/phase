@@ -11,6 +11,16 @@ use crate::types::statics::StaticMode;
 #[cfg(test)]
 use crate::types::zones::Zone;
 
+/// CR 120.3 + CR 121.1: would drawing a card actually put a card into
+/// `player_id`'s hand right now — i.e. is at least one requested draw allowed?
+/// False when a `CantDraw` static applies or a `PerTurnDrawLimit` is already
+/// exhausted, in which case a "draw a card" action produces no `CardDrawn` event
+/// and fires no "whenever you draw" trigger. The single engine authority an AI
+/// draw-payoff preflight consults so it never credits a no-op draw.
+pub fn can_draw_at_least_one(state: &GameState, player_id: crate::types::player::PlayerId) -> bool {
+    allowed_draw_count(state, player_id, 1) >= 1
+}
+
 pub(crate) fn allowed_draw_count(
     state: &GameState,
     player_id: crate::types::player::PlayerId,

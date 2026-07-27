@@ -1312,11 +1312,16 @@ pub fn simple_legal_target_assignment_exists_for_ability(
 }
 
 /// CR 603.3d: could `execute` — a trigger's ability, resolving from `source` —
-/// either need no target at all, or find a legal target right now? A
+/// either need no target at all, or find a legal target assignment right now? A
 /// mandatory-target trigger with no legal choice is removed rather than
 /// producing an effect, so a payoff-eligibility preflight must not credit it.
-/// Complex/undecidable target shapes return `true` (don't under-credit — the
-/// caller is asking "could this possibly produce value").
+///
+/// The cheap single-slot check (`simple_legal_target_assignment_exists_for_ability`)
+/// decides the common case; when it cannot (multi-target or another complex
+/// shape → `None`), this consults the full legal-assignment authority
+/// (`has_legal_target_assignment_for_ability`, the same solver production target
+/// selection uses) rather than optimistically assuming legality — so a mandatory
+/// multi-target execute with no legal assignment is correctly reported not-live.
 pub fn execute_targets_satisfiable(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
@@ -1333,8 +1338,24 @@ pub fn execute_targets_satisfiable(
         return true; // the effect requires no target
     }
     // `Some(false)` = a mandatory target with no legal choice; `Some(true)` =
-    // legal or optional; `None` = a shape this cheap check can't decide.
-    simple_legal_target_assignment_exists_for_ability(state, &resolved, &[]).unwrap_or(true)
+    // legal or optional; `None` = a shape the cheap check can't decide, so build
+    // the real target slots and run the full legal-assignment search over them
+    // (the same slots + constraints production target selection uses).
+    match simple_legal_target_assignment_exists_for_ability(state, &resolved, &[]) {
+        Some(decided) => decided,
+        None => match build_target_slots(state, &resolved) {
+            Ok(slots) if slots.is_empty() => true,
+            Ok(slots) => {
+                let constraints = resolved
+                    .sub_ability
+                    .as_ref()
+                    .map(|sub| &sub.target_constraints)
+                    .unwrap_or(&resolved.target_constraints);
+                has_legal_target_assignment_for_ability(state, &resolved, &slots, constraints)
+            }
+            Err(_) => false,
+        },
+    }
 }
 
 /// CR 115.1 + CR 701.9b: Resolve a `Random`-mode ability's target slots by

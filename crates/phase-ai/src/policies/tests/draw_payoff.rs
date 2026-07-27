@@ -9,8 +9,8 @@ use std::sync::Arc;
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CastVariantPaid, Effect, QuantityExpr, TargetFilter,
-    TriggerCondition, TriggerConstraint, TriggerDefinition,
+    AbilityDefinition, AbilityKind, CastVariantPaid, Effect, QuantityExpr, StaticDefinition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -19,6 +19,7 @@ use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::{ProhibitionScope, StaticMode};
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -816,6 +817,191 @@ fn activated_non_draw_ability_is_neutral() {
         score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
     assert_eq!(reason.kind, "draw_payoff_na");
     assert_eq!(delta, 0.0);
+}
+
+// ─── draw-delivery gate (CR 120.3 / CR 121.1) ────────────────────────────────
+
+/// Puts a permanent carrying a static that restricts drawing (Spirit of the
+/// Labyrinth / Narset shape) on the battlefield, scoped to `who`.
+fn add_draw_restricting_static(state: &mut GameState, mode: StaticMode) {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        PlayerId(1),
+        "Draw Hoser".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.static_definitions.push(StaticDefinition::new(mode));
+}
+
+fn set_cards_drawn_this_turn(state: &mut GameState, player: PlayerId, n: u32) {
+    state
+        .players
+        .iter_mut()
+        .find(|p| p.id == player)
+        .unwrap()
+        .cards_drawn_this_turn = n;
+}
+
+/// CR 120.3: under a `CantDraw` static the draw produces no `CardDrawn` event, so
+/// the "whenever you draw" engine never fires — the delivery gate makes it a
+/// no-op and the bonus is withheld even with the engine on the battlefield.
+#[test]
+fn cant_draw_static_makes_the_draw_a_no_op() {
+    let config = AiConfig::default();
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_draw_restricting_static(
+        &mut st,
+        StaticMode::CantDraw {
+            who: ProhibitionScope::AllPlayers,
+        },
+    );
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_na");
+    assert_eq!(delta, 0.0);
+}
+
+/// CR 101.2: with a `PerTurnDrawLimit` already exhausted this turn, the extra
+/// draw draws nothing, so no engine fires and the bonus is withheld.
+#[test]
+fn exhausted_per_turn_draw_limit_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_draw_restricting_static(
+        &mut st,
+        StaticMode::PerTurnDrawLimit {
+            who: ProhibitionScope::AllPlayers,
+            max: 1,
+        },
+    );
+    set_cards_drawn_this_turn(&mut st, AI, 1); // already at the cap
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_na");
+    assert_eq!(delta, 0.0);
+}
+
+/// Control: the same per-turn limit with headroom left still lets a draw through,
+/// so the engine is rewarded.
+#[test]
+fn per_turn_draw_limit_with_headroom_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    engine_on_battlefield(&mut st);
+    add_draw_restricting_static(
+        &mut st,
+        StaticMode::PerTurnDrawLimit {
+            who: ProhibitionScope::AllPlayers,
+            max: 1,
+        },
+    );
+    set_cards_drawn_this_turn(&mut st, AI, 0); // one draw still allowed
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+// ─── multi-target engine legality (CR 603.3d) ────────────────────────────────
+
+/// A creature `TargetFilter`.
+fn creature_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        engine::types::ability::TypedFilter::default()
+            .with_type(engine::types::ability::TypeFilter::Creature),
+    )
+}
+
+/// A two-target payoff: "whenever you draw, exchange control of two target
+/// permanents". A multi-target mandatory execute the cheap single-slot check
+/// can't decide, so the engine authority must consult the full legal-assignment
+/// solver (CR 603.3d). Enchantment engine, so an empty board has nothing to hit.
+fn two_target_engine(state: &mut GameState) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        AI,
+        ENGINE_NAME.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.trigger_definitions
+        .push(
+            TriggerDefinition::new(TriggerMode::Drawn).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ExchangeControl {
+                    target_a: creature_filter(),
+                    target_b: creature_filter(),
+                },
+            )),
+        );
+    id
+}
+
+/// CR 603.3d: a mandatory MULTI-target engine with no legal target assignment is
+/// removed rather than producing an effect — the preflight's cheap single-slot
+/// check returns "undecided" here, so it falls through to the full solver, which
+/// finds no assignment and reports the engine not-live.
+#[test]
+fn multi_target_engine_with_no_legal_assignment_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    two_target_engine(&mut st); // empty board → no two permanents to exchange
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
+/// Control: once two exchangeable permanents (one per player) exist, the full
+/// solver finds a legal assignment and the multi-target engine is rewarded.
+#[test]
+fn multi_target_engine_with_a_legal_assignment_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    two_target_engine(&mut st);
+    add_opponent_creature(&mut st); // opponent permanent
+                                    // an AI-controlled creature so the exchange has two sides
+    let card_id = CardId(st.next_object_id);
+    let mine = create_object(&mut st, card_id, AI, "Bear".to_string(), Zone::Battlefield);
+    st.objects
+        .get_mut(&mine)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
 }
 
 // ─── production seam (registry routing) ─────────────────────────────────────
