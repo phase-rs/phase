@@ -440,6 +440,7 @@ describe("multiplayerDraftStore", () => {
               colors: ["R"],
               cmc: 1,
               type_line: "Instant",
+              is_land: false,
             },
           ],
         },

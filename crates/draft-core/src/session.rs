@@ -727,6 +727,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                is_land: false,
             })
             .collect();
 
@@ -758,6 +759,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                is_land: false,
             })
             .collect();
 
@@ -811,6 +813,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                is_land: false,
             })
             .collect();
 
@@ -845,6 +848,7 @@ mod tests {
                     colors: Vec::new(),
                     cmc: 0,
                     type_line: String::new(),
+                    is_land: false,
                 })
                 .collect();
         }

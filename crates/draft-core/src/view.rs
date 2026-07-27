@@ -602,6 +602,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                is_land: false,
             })
             .collect();
         session.pools[1] = session.pools[0].clone();

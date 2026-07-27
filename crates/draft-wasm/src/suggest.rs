@@ -53,7 +53,7 @@ pub fn suggest_deck(
     // would inflate the deck past 40 once basics are layered on top).
     let mut scored: Vec<(&DraftCardInstance, f64)> = pool
         .iter()
-        .filter(|c| !is_land(c))
+        .filter(|c| !c.is_land)
         .map(|c| (c, score_card(c, card_db)))
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -142,7 +142,7 @@ fn select_fixing_lands(
         if admitted >= cap {
             break;
         }
-        if !is_land(card) {
+        if !card.is_land {
             continue;
         }
         let Some(face) = db.get_face_by_name(&card.name) else {
@@ -177,15 +177,6 @@ fn mana_type_to_color_str(t: ManaType) -> Option<&'static str> {
         ManaType::Green => Some("G"),
         ManaType::Colorless => None,
     }
-}
-
-/// Whether a drafted card is a land (so it isn't counted as a spell).
-///
-/// The engine-truth check is `CardFace.card_type` containing `CoreType::Land`,
-/// but this filter runs over the raw `DraftCardInstance` pool before any
-/// `CardDatabase` lookup, so the printed type line is the right tool here.
-fn is_land(card: &DraftCardInstance) -> bool {
-    card.type_line.to_ascii_lowercase().contains("land")
 }
 
 /// Find the 2 strongest colors in the pool by card count weighted by quality.
@@ -410,6 +401,7 @@ fn color_to_land(color: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use draft_core::types::type_line_is_land;
 
     fn instance(name: &str, colors: &[&str], cmc: u8, type_line: &str) -> DraftCardInstance {
         DraftCardInstance {
@@ -421,6 +413,7 @@ mod tests {
             colors: colors.iter().map(|s| s.to_string()).collect(),
             cmc,
             type_line: type_line.to_string(),
+            is_land: type_line_is_land(type_line),
         }
     }
 

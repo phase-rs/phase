@@ -161,6 +161,7 @@ fn card_instance_from_face(face: &CardFace, index: usize, copy: u32) -> DraftCar
         colors: face.color_identity.iter().map(mana_color_letter).collect(),
         cmc: face.mana_cost.mana_value().min(u32::from(u8::MAX)) as u8,
         type_line: type_line(face),
+        is_land: face.card_type.core_types.contains(&CoreType::Land),
     }
 }
 
@@ -301,6 +302,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                is_land: false,
             })
             .collect();
         let source = CubePackSource::new(cards);

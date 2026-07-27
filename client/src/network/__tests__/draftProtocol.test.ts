@@ -116,6 +116,7 @@ describe("draftProtocol", () => {
           colors: ["W", "U"],
           cmc: i % 7,
           type_line: "Creature - Human Wizard",
+          is_land: false,
         })),
         pool: [],
         seats: [],

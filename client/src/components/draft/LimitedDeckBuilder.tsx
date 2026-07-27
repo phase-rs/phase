@@ -176,12 +176,6 @@ function computeRemainingPool(
   return remaining;
 }
 
-function primaryTypeLineIsLand(typeLine: string): boolean {
-  const primary = typeLine.split(" // ")[0] ?? typeLine;
-  const coreTypes = primary.split("—")[0] ?? primary;
-  return coreTypes.split(/\s+/).some((word) => word.toLowerCase() === "land");
-}
-
 // ── Main component ──────────────────────────────────────────────────────
 
 interface LimitedDeckBuilderProps {
@@ -243,7 +237,7 @@ export function LimitedDeckBuilder({
     () =>
       new Set(
         pool
-          .filter((c) => primaryTypeLineIsLand(c.type_line))
+          .filter((c) => c.is_land)
           .map((c) => c.name),
       ),
     [pool],

@@ -42,6 +42,7 @@ const TEST_VIEW: BuilderView = {
       colors: ["U"],
       cmc: 3,
       type_line: "Creature - Drake",
+      is_land: false,
     },
   ],
   seats: [],
@@ -70,6 +71,7 @@ const COPY_VIEW: BuilderView = {
       colors: ["W"],
       cmc: 1,
       type_line: "Creature - Human Soldier",
+      is_land: false,
     },
   ],
 };
@@ -109,6 +111,43 @@ describe("LimitedDeckBuilder", () => {
     fireEvent.click(screen.getByRole("button", { name: /wind drake/i }));
 
     expect(threeDropBucket).toHaveAttribute("aria-valuenow", "1");
+  });
+
+  it("uses domain land classification for deck accounting", () => {
+    const view: BuilderView = {
+      ...TEST_VIEW,
+      pool: [
+        {
+          instance_id: "domain-land",
+          name: "Domain Land",
+          set_code: "tst",
+          collector_number: "100",
+          rarity: "rare",
+          colors: [],
+          cmc: 0,
+          type_line: "Creature",
+          is_land: true,
+        },
+      ],
+    };
+
+    render(
+      <LimitedDeckBuilder
+        view={view}
+        mainDeck={["Domain Land"]}
+        landCounts={{}}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    expect(screen.getByRole("meter", { name: "Mana value 0" })).toHaveAttribute(
+      "aria-valuenow",
+      "0",
+    );
   });
 
   it("copies the current deck list to the clipboard", async () => {

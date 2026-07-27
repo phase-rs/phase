@@ -11,6 +11,7 @@ export interface DraftCardInstance {
   colors: string[];
   cmc: number;
   type_line: string;
+  is_land: boolean;
 }
 
 // @sync-with: crates/draft-core/src/view.rs

@@ -226,6 +226,23 @@ pub struct DraftCardInstance {
     /// Full type line, e.g. "Creature — Human Wizard". Populated at pack generation from set pool data.
     #[serde(default)]
     pub type_line: String,
+    /// Domain-owned classification for deckbuilding views.
+    #[serde(default)]
+    pub is_land: bool,
+}
+
+pub fn type_line_is_land(type_line: &str) -> bool {
+    let primary = type_line.split(" // ").next().unwrap_or(type_line);
+    let core_types = primary
+        .split('—')
+        .next()
+        .unwrap_or(primary)
+        .split(" - ")
+        .next()
+        .unwrap_or(primary);
+    core_types
+        .split_whitespace()
+        .any(|word| word.eq_ignore_ascii_case("land"))
 }
 
 /// A pack of cards, newtype wrapper over Vec<DraftCardInstance>.
@@ -616,6 +633,16 @@ mod tests {
         assert_eq!(PassDirection::Right.next_seat(0, 8), 7);
         assert_eq!(PassDirection::Right.next_seat(1, 8), 0);
         assert_eq!(PassDirection::Right.next_seat(5, 8), 4);
+    }
+
+    #[test]
+    fn type_line_land_classification_uses_primary_core_types() {
+        assert!(type_line_is_land("Artifact Land — Cave"));
+        assert!(type_line_is_land("Artifact Land - Cave"));
+        assert!(type_line_is_land("Land // Instant"));
+        assert!(!type_line_is_land("Creature — Landfall Beast"));
+        assert!(!type_line_is_land("Creature - Landfall Beast"));
+        assert!(!type_line_is_land("Nonland Creature"));
     }
 
     #[test]

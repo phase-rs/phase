@@ -6,7 +6,7 @@ use crate::pack_source::PackSource;
 use crate::set_pool::{
     LimitedSetPool, PackVariant, SheetCard, SheetDefinition, WeightedSheetChoice,
 };
-use crate::types::{DraftCardInstance, DraftPack};
+use crate::types::{type_line_is_land, DraftCardInstance, DraftPack};
 
 /// Generates draft packs from a `LimitedSetPool` using weighted random selection.
 /// Set-specific exceptions (bonus sheets, Mystical Archive, etc.) are expressed
@@ -128,6 +128,7 @@ impl PackSource for PackGenerator {
                 colors: card.colors.clone(),
                 cmc: card.cmc,
                 type_line: card.type_line.clone(),
+                is_land: type_line_is_land(&card.type_line),
             })
             .collect();
 

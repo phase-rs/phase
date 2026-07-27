@@ -48,6 +48,7 @@ impl PackSource for FixturePackSource {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                is_land: false,
             })
             .collect();
         DraftPack(cards)
