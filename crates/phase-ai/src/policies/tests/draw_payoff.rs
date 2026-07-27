@@ -819,6 +819,67 @@ fn activated_non_draw_ability_is_neutral() {
     assert_eq!(delta, 0.0);
 }
 
+// ─── source-sensitive constraint: AtClassLevel (CR 716) ──────────────────────
+
+/// A Class-enchantment engine at `class_level` whose level-gated
+/// "whenever you draw" payoff fires only while the Class is at `required_level`
+/// (CR 716). The engine authority reads the level from the source context.
+fn class_engine(state: &mut GameState, class_level: u8, required_level: u8) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        AI,
+        ENGINE_NAME.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.class_level = Some(class_level);
+    obj.trigger_definitions
+        .push(
+            drawn_engine_trigger().constraint(TriggerConstraint::AtClassLevel {
+                level: required_level,
+            }),
+        );
+    id
+}
+
+/// CR 716: an `AtClassLevel` payoff at the required level is live — the shared
+/// hypothetical authority passes the source context, so the class level is read
+/// correctly rather than treated as absent.
+#[test]
+fn at_class_level_engine_at_required_level_rewards() {
+    let config = AiConfig::default();
+    let mut st = state();
+    class_engine(&mut st, 2, 2); // at level 2, needs level 2
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+/// Control: the same Class engine at a DIFFERENT level cannot fire its
+/// level-gated payoff, so the draw earns nothing.
+#[test]
+fn at_class_level_engine_at_wrong_level_is_neutral() {
+    let config = AiConfig::default();
+    let mut st = state();
+    class_engine(&mut st, 1, 2); // at level 1, but the payoff needs level 2
+    let (oid, cid) = draw_spell(&mut st);
+    let context = context(&config, session(0.9));
+    let candidate = cast(oid, cid);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DrawPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "draw_payoff_no_engine");
+    assert_eq!(delta, 0.0);
+}
+
 // ─── draw-delivery gate (CR 120.3 / CR 121.1) ────────────────────────────────
 
 /// Puts a permanent carrying a static that restricts drawing (Spirit of the
