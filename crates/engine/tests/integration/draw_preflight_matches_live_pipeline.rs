@@ -74,16 +74,18 @@ fn draw_count_substitute(value: i32) -> AbilityDefinition {
     )
 }
 
+/// A replacement-bearing permanent to seat: its card name, and a shaper that
+/// fills in the `ReplacementDefinition` given the permanent's `ObjectId` (needed
+/// because a `runtime_execute` substitute binds its own source).
+type ReplacementShape = (
+    &'static str,
+    Box<dyn Fn(&mut ReplacementDefinition, ObjectId)>,
+);
+
 /// Seats P0 with `library` cards, plus a replacement-bearing permanent when
 /// `customize` is supplied. P1 always gets a library so no state-based action
 /// ends the game mid-test.
-fn scenario(
-    library: usize,
-    customize: Option<(
-        &'static str,
-        Box<dyn Fn(&mut ReplacementDefinition, ObjectId)>,
-    )>,
-) -> GameRunner {
+fn scenario(library: usize, customize: Option<ReplacementShape>) -> GameRunner {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     for i in 0..library {
