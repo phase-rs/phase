@@ -7684,17 +7684,32 @@ pub(super) fn cost_shard_matches_reduction(
         || cost_shard == reduction
 }
 
-fn apply_shard_reduction(shards: &mut Vec<ManaCostShard>, reduction: ManaCostShard) {
+/// CR 118.7b + CR 118.7c + CR 118.7d: Apply one unit of colored/colorless mana
+/// reduction. If the cost still has a matching component, remove it (118.7a
+/// scope). Otherwise — the cost never had that color/colorless component, or
+/// this reduction unit is the excess beyond what the component had left — the
+/// unit spills over to reduce the generic component instead. A reduction can
+/// never touch a mismatched color's pip, and each unit reduces exactly one
+/// cost component (colored/colorless match XOR generic spillover), never both.
+pub(super) fn apply_shard_reduction(
+    shards: &mut Vec<ManaCostShard>,
+    generic: &mut u32,
+    reduction: ManaCostShard,
+) {
     if let Some(index) = shards
         .iter()
         .position(|shard| cost_shard_matches_reduction(*shard, reduction))
     {
         shards.remove(index);
+    } else {
+        *generic = generic.saturating_sub(1);
     }
 }
 
-/// CR 601.2f: Apply a single cost modification (reduce or raise) to a mana cost.
-/// ReduceCost removes matching mana symbols and generic mana (not below zero).
+/// CR 601.2f + CR 118.7: Apply a single cost modification (reduce or raise) to a
+/// mana cost. ReduceCost removes matching mana symbols, spilling any unmatched
+/// or excess colored/colorless reduction over to generic mana (CR 118.7b/c/d)
+/// in addition to reducing generic mana directly (CR 118.7a), floored at zero.
 /// RaiseCost adds the specified symbols and generic mana.
 fn apply_cost_mod_to_mana(
     mana_cost: &mut ManaCost,
@@ -7730,7 +7745,7 @@ fn apply_cost_mod_to_mana(
     } else {
         for _ in 0..multiplier {
             for shard in mod_shards {
-                apply_shard_reduction(shards, *shard);
+                apply_shard_reduction(shards, generic, *shard);
             }
         }
         *generic = generic.saturating_sub(mod_generic);

@@ -6116,13 +6116,10 @@ fn apply_defiler_mana_reduction(
         return;
     };
 
+    // CR 118.7b/c/d: unmatched or excess colored reduction spills over to
+    // generic, same as any other cost reduction (`apply_shard_reduction`).
     for shard in reduction_shards {
-        if let Some(pos) = spell_shards
-            .iter()
-            .position(|candidate| super::casting::cost_shard_matches_reduction(*candidate, *shard))
-        {
-            spell_shards.remove(pos);
-        }
+        super::casting::apply_shard_reduction(spell_shards, spell_generic, *shard);
     }
     *spell_generic = spell_generic.saturating_sub(*reduction_generic);
 }
