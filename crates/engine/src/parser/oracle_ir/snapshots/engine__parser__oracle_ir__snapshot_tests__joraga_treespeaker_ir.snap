@@ -1,0 +1,282 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 554
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 4,
+      "source": {
+        "id": {
+          "item": 4,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 82,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Level up {1}{G} ({1}{G}: Put a level counter on this. Level up only as a sorcery.)"
+      },
+      "node": {
+        "Keyword": {
+          "LevelUp": {
+            "type": "Cost",
+            "shards": [
+              "Green"
+            ],
+            "generic": 1
+          }
+        }
+      }
+    },
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 83,
+          "end_byte": 92,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "LEVEL 1-4"
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [
+              {
+                "type": "SetPower",
+                "value": 1
+              },
+              {
+                "type": "SetToughness",
+                "value": 2
+              }
+            ],
+            "condition": {
+              "type": "HasCounters",
+              "counters": {
+                "type": "OfType",
+                "data": "level"
+              },
+              "minimum": 1,
+              "maximum": 4
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "LEVEL 1-4 / 1/2"
+          },
+          "source_text": "LEVEL 1-4 / 1/2",
+          "body_ir": null
+        }
+      }
+    },
+    {
+      "id": 3,
+      "source": {
+        "id": {
+          "item": 3,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 3,
+          "last_line": 3,
+          "start_byte": 97,
+          "end_byte": 113,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{T}: Add {G}{G}."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": {
+              "type": "Fixed",
+              "colors": [
+                "Green",
+                "Green"
+              ]
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "{T}: Add {G}{G}.",
+          "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "LevelCounterRange",
+              "data": {
+                "minimum": 1,
+                "maximum": 4
+              }
+            }
+          ],
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false,
+          "is_mana_ability": true
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 4,
+          "last_line": 4,
+          "start_byte": 114,
+          "end_byte": 122,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "LEVEL 5+"
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [
+              {
+                "type": "SetPower",
+                "value": 1
+              },
+              {
+                "type": "SetToughness",
+                "value": 4
+              }
+            ],
+            "condition": {
+              "type": "HasCounters",
+              "counters": {
+                "type": "OfType",
+                "data": "level"
+              },
+              "minimum": 5
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "LEVEL 5+ / 1/4"
+          },
+          "source_text": "LEVEL 5+ / 1/4",
+          "body_ir": null
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 6,
+          "last_line": 6,
+          "start_byte": 127,
+          "end_byte": 168,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Elves you control have \"{T}: Add {G}{G}.\""
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature",
+                {
+                  "Subtype": "Elf"
+                }
+              ],
+              "controller": "You",
+              "properties": []
+            },
+            "modifications": [
+              {
+                "type": "GrantAbility",
+                "definition": {
+                  "kind": "Activated",
+                  "effect": {
+                    "type": "Mana",
+                    "produced": {
+                      "type": "Fixed",
+                      "colors": [
+                        "Green",
+                        "Green"
+                      ]
+                    }
+                  },
+                  "cost": {
+                    "type": "Tap"
+                  },
+                  "sub_ability": null,
+                  "duration": null,
+                  "description": "{T}: Add {G}{G}.",
+                  "target_prompt": null,
+                  "condition": null,
+                  "optional_targeting": false,
+                  "optional": false,
+                  "forward_result": false,
+                  "is_mana_ability": true
+                }
+              }
+            ],
+            "condition": {
+              "type": "HasCounters",
+              "counters": {
+                "type": "OfType",
+                "data": "level"
+              },
+              "minimum": 5
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Elves you control have \"{T}: Add {G}{G}.\""
+          },
+          "source_text": "Elves you control have \"{T}: Add {G}{G}.\"",
+          "body_ir": null
+        }
+      }
+    }
+  ],
+  "source_text": "Level up {1}{G} ({1}{G}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 1-4\n1/2\n{T}: Add {G}{G}.\nLEVEL 5+\n1/4\nElves you control have \"{T}: Add {G}{G}.\"",
+  "card_name": "Joraga Treespeaker"
+}

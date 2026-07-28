@@ -463,6 +463,70 @@ fn entropic_battlecruiser() {
 }
 
 // ---------------------------------------------------------------------------
+// Plan 05b T8-A3 (§5.3 remediation): U0-12 had no fixture that witnessed the
+// envelope it stamps.
+// ---------------------------------------------------------------------------
+
+/// U0-12 — the CR 711.2a/711.2b LEVEL-block activated line (T8-A3 witness).
+///
+/// **What was unwitnessed.** The only pre-existing test over this site
+/// (`oracle_tests::leveler_activated_abilities_get_level_counter_range`) asserts
+/// `LevelCounterRange` presence with `.contains(…)`, which is order-insensitive,
+/// and asserts nothing about the `cost` or `description` the site also stamps.
+/// Dropping `LevelCounterRange` was witnessed; every other axis was not.
+///
+/// Guul Draz Assassin is the richest fixture in the nine-card leveler
+/// population: two striations, a two-component `{B}, {T}` cost (so the CR 602.1a
+/// stamp is pinned to something more than a bare `{T}`), a targeted effect, and
+/// two *different* level ranges — a bounded `2-3` and an unbounded `4+` — so a
+/// range that collapsed to a constant would show.
+///
+/// Fixture is pool-verified, not synthetic: Oracle text, `Creature` type and
+/// `Vampire`/`Assassin` subtypes are verbatim from `data/card-data.json`.
+#[test]
+fn guul_draz_assassin_level_activated() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Level up {1}{B} ({1}{B}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 2-3\n2/2\n{B}, {T}: Target creature gets -2/-2 until end of turn.\nLEVEL 4+\n4/4\n{B}, {T}: Target creature gets -4/-4 until end of turn.",
+        "Guul Draz Assassin",
+        &["level up"],
+        &["Creature"],
+        &["Vampire", "Assassin"],
+    );
+    insta::assert_json_snapshot!("guul_draz_assassin_ir", &ir);
+    insta::assert_json_snapshot!("guul_draz_assassin_lowered", &lowered);
+}
+
+/// U0-12 — the first site in phase A where `ExtractManaSpendTrigger`'s guard is
+/// LIVE (T8-A3 witness).
+///
+/// A2 established that its four keyword sites can never run that fold: no pool
+/// card with those keywords lowers to a root `Effect::Mana`, so the stage
+/// early-returns every time. **U0-12 is different.** Joraga Treespeaker's
+/// `LEVEL 1-4` body is `{T}: Add {G}{G}.`, which lowers to a root `Effect::Mana`,
+/// so the guard passes here for the first time in the tranche.
+///
+/// The fold's *body* still does nothing — it additionally needs a trailing "when
+/// you spend this mana …" sub-ability, and no leveler card prints one — so
+/// dropping the stage is still extensionally inert. Pinning the mana root is
+/// what makes that distinction visible: this fixture is the one that would start
+/// discriminating the moment a level striation prints a spend trigger.
+///
+/// Fixture is pool-verified, not synthetic: Oracle text, `Creature` type and
+/// `Elf`/`Druid` subtypes are verbatim from `data/card-data.json`.
+#[test]
+fn joraga_treespeaker_level_mana_ability() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Level up {1}{G} ({1}{G}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 1-4\n1/2\n{T}: Add {G}{G}.\nLEVEL 5+\n1/4\nElves you control have \"{T}: Add {G}{G}.\"",
+        "Joraga Treespeaker",
+        &["level up"],
+        &["Creature"],
+        &["Elf", "Druid"],
+    );
+    insta::assert_json_snapshot!("joraga_treespeaker_ir", &ir);
+    insta::assert_json_snapshot!("joraga_treespeaker_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
 // CR 603.12 deferred rider on a top-of-library play permission
 // ---------------------------------------------------------------------------
 

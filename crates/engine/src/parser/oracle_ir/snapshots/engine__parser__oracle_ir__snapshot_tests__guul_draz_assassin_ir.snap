@@ -1,0 +1,300 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 524
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 4,
+      "source": {
+        "id": {
+          "item": 4,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 82,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Level up {1}{B} ({1}{B}: Put a level counter on this. Level up only as a sorcery.)"
+      },
+      "node": {
+        "Keyword": {
+          "LevelUp": {
+            "type": "Cost",
+            "shards": [
+              "Black"
+            ],
+            "generic": 1
+          }
+        }
+      }
+    },
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 83,
+          "end_byte": 92,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "LEVEL 2-3"
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [
+              {
+                "type": "SetPower",
+                "value": 2
+              },
+              {
+                "type": "SetToughness",
+                "value": 2
+              }
+            ],
+            "condition": {
+              "type": "HasCounters",
+              "counters": {
+                "type": "OfType",
+                "data": "level"
+              },
+              "minimum": 2,
+              "maximum": 3
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "LEVEL 2-3 / 2/2"
+          },
+          "source_text": "LEVEL 2-3 / 2/2",
+          "body_ir": null
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 3,
+          "last_line": 3,
+          "start_byte": 97,
+          "end_byte": 152,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{B}, {T}: Target creature gets -2/-2 until end of turn."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": {
+              "type": "Fixed",
+              "value": -2
+            },
+            "toughness": {
+              "type": "Fixed",
+              "value": -2
+            },
+            "target": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": []
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": {
+                  "type": "Cost",
+                  "shards": [
+                    "Black"
+                  ],
+                  "generic": 0
+                }
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "duration": "UntilEndOfTurn",
+          "description": "{B}, {T}: Target creature gets -2/-2 until end of turn.",
+          "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "LevelCounterRange",
+              "data": {
+                "minimum": 2,
+                "maximum": 3
+              }
+            }
+          ],
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 4,
+          "last_line": 4,
+          "start_byte": 153,
+          "end_byte": 161,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "LEVEL 4+"
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [
+              {
+                "type": "SetPower",
+                "value": 4
+              },
+              {
+                "type": "SetToughness",
+                "value": 4
+              }
+            ],
+            "condition": {
+              "type": "HasCounters",
+              "counters": {
+                "type": "OfType",
+                "data": "level"
+              },
+              "minimum": 4
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "LEVEL 4+ / 4/4"
+          },
+          "source_text": "LEVEL 4+ / 4/4",
+          "body_ir": null
+        }
+      }
+    },
+    {
+      "id": 3,
+      "source": {
+        "id": {
+          "item": 3,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 6,
+          "last_line": 6,
+          "start_byte": 166,
+          "end_byte": 221,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{B}, {T}: Target creature gets -4/-4 until end of turn."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Pump",
+            "power": {
+              "type": "Fixed",
+              "value": -4
+            },
+            "toughness": {
+              "type": "Fixed",
+              "value": -4
+            },
+            "target": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": []
+            }
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": {
+                  "type": "Cost",
+                  "shards": [
+                    "Black"
+                  ],
+                  "generic": 0
+                }
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "duration": "UntilEndOfTurn",
+          "description": "{B}, {T}: Target creature gets -4/-4 until end of turn.",
+          "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "LevelCounterRange",
+              "data": {
+                "minimum": 4
+              }
+            }
+          ],
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    }
+  ],
+  "source_text": "Level up {1}{B} ({1}{B}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 2-3\n2/2\n{B}, {T}: Target creature gets -2/-2 until end of turn.\nLEVEL 4+\n4/4\n{B}, {T}: Target creature gets -4/-4 until end of turn.",
+  "card_name": "Guul Draz Assassin"
+}
