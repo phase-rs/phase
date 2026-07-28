@@ -1763,9 +1763,16 @@ mod tests {
             "12-vs-12 is a zero differential"
         );
 
-        // THE DROP — hand to battlefield, through the engine's own primitive.
-        let mut events = Vec::new();
-        engine::game::zones::move_to_zone(&mut state, hand_land, Zone::Battlefield, &mut events);
+        // THE DROP — the production land-play path includes replacement effects.
+        engine::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            engine::types::actions::GameAction::PlayLand {
+                object_id: hand_land,
+                card_id,
+            },
+        )
+        .expect("the hand land is legal to play");
 
         let after_features = evaluate_features(&state, PlayerId(0)).unwrap();
         let after = evaluate_state_breakdown(&state, PlayerId(0), &weights)
@@ -1981,6 +1988,8 @@ mod tests {
 
             if let Some(seat) = remove_body_of {
                 let body = if seat == PlayerId(1) { body_1 } else { body_2 };
+                // Fixture setup only: this test measures the evaluator after a
+                // threat changes, not zone-change replacement behavior.
                 let mut events = Vec::new();
                 engine::game::zones::move_to_zone(&mut state, body, Zone::Graveyard, &mut events);
             }
@@ -2065,6 +2074,8 @@ mod tests {
             }
             let body = add_creature(&mut state, PlayerId(1), 4, 4, vec![]);
             if remove_body {
+                // Fixture setup only: this test measures the evaluator after a
+                // threat changes, not zone-change replacement behavior.
                 let mut events = Vec::new();
                 engine::game::zones::move_to_zone(&mut state, body, Zone::Graveyard, &mut events);
             }

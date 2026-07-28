@@ -65,10 +65,11 @@ pub struct FeatureRow {
     /// Fixed-coefficient control (`energy × 0.1`); excluded from `weighted_total`,
     /// discarded by the trainer.
     pub energy_offset: f64,
-    /// Fixed-coefficient control (`7.5 × min(sources, 12)`); excluded from
-    /// `weighted_total`, discarded by the trainer. Fed to the regression anyway so
-    /// its explanatory power is not pushed onto the correlated fitted features
-    /// (`hand_size`, `zone_quality`, `card_advantage`).
+    /// Fixed-coefficient control (`7.5 × clamp(self − opponent_aggregate, −12, 12)`),
+    /// signed as of schema 3; excluded from `weighted_total`, discarded by the
+    /// trainer. Fed to the regression anyway so its explanatory power is not pushed
+    /// onto the correlated fitted features (`hand_size`, `zone_quality`,
+    /// `card_advantage`).
     pub mana_development_offset: f64,
 }
 

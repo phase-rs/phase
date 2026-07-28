@@ -149,7 +149,10 @@ impl TacticalPolicy for SelfCostValuePolicy {
             BenefitAppraisal::Priced { value } => {
                 let net = value - cost_value;
                 let benefit_milli = (value * 1000.0) as i64;
-                if net >= 0.0 {
+                // Cost and benefit are summed from different coefficients, so an
+                // exact-cover trade can land a few ULPs below zero. This veto is
+                // categorical, so that rounding must not decide the boundary.
+                if net >= -f64::EPSILON * value.abs().max(cost_value.abs()).max(1.0) {
                     // Inclusive boundary: net == 0 covers. A 0/1 creature token
                     // prices at `max(creature_combat_value(0,1) = 1.0, 0.5) =
                     // 1.0` against draw(1) = 1.0 — exactly 0. Cracking it is

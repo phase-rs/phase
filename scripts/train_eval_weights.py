@@ -77,6 +77,7 @@ SELFPLAY_FEATURE_NAMES = [
     "synergy",
 ]
 SELFPLAY_CONTROLS = ["energy_offset", "mana_development_offset"]
+MIN_HARVEST_SCHEMA = 3
 
 # Smoke thresholds under --allow-tiny-corpus (vs the production 1000 / 100).
 TINY_GLOBAL_MIN = 10
@@ -463,9 +464,9 @@ def load_selfplay_corpus(
     phase_features values are (N, 11) arrays (9 fitted features + the two
     fixed-coefficient controls) and phase_labels values are (N,) arrays of 0/1.
 
-    Pre-schema-2 shards carry no `mana_development_offset` column. Controls are
-    read leniently and zero-filled, with a loud warning naming the affected row
-    count; fitted features stay strict and still raise KeyError.
+    Only schema-3-or-newer shards are admitted. Schema 2 used the same
+    `mana_development_offset` name for an absolute count, so pooling it with the
+    signed schema-3 differential would corrupt the fitted weights.
     """
     files = sorted(glob.glob(glob_pattern))
     if not files:
@@ -480,9 +481,11 @@ def load_selfplay_corpus(
     meta: dict = {}
     seeds: set = set()
     total = 0
-    defaulted_rows = 0
+    accepted_files = []
 
     for path in files:
+        shard_schema = None
+        excluded_reason = None
         with open(path) as handle:
             for line in handle:
                 line = line.strip()
@@ -490,31 +493,32 @@ def load_selfplay_corpus(
                     continue
                 obj = json.loads(line)
                 if "meta" in obj:
+                    shard_schema = int(obj["meta"].get("schema", 0))
+                    if shard_schema < MIN_HARVEST_SCHEMA:
+                        excluded_reason = f"schema {shard_schema} < {MIN_HARVEST_SCHEMA}"
+                        break
                     # First meta line wins for provenance; shards share a run.
                     if not meta:
                         meta = obj["meta"]
                     continue
+                if shard_schema is None:
+                    excluded_reason = "missing harvest metadata"
+                    break
                 feats = obj["features"]
                 phase = turn_phase(int(obj["turn"]))
-                # Fitted features are STRICT — a missing one must still raise
-                # KeyError. Only the controls are lenient, so a pre-schema-2 shard
-                # loads instead of aborting the retrain.
                 row = [float(feats[name]) for name in SELFPLAY_FEATURE_NAMES]
-                if any(name not in feats for name in SELFPLAY_CONTROLS):
-                    defaulted_rows += 1
-                row += [float(feats.get(name, 0.0)) for name in SELFPLAY_CONTROLS]
+                row += [float(feats[name]) for name in SELFPLAY_CONTROLS]
                 phase_feat[phase].append(row)
                 phase_lab[phase].append(1 if obj["won"] else 0)
                 seeds.add(int(obj["seed"]))
                 total += 1
-
-    if defaulted_rows:
-        print(
-            f"WARNING: {defaulted_rows}/{total} rows lacked a control column "
-            "(pre-schema-2 shards); those rows contribute 0.0 for the missing "
-            "control, which partially confounds the fit.",
-            file=sys.stderr,
-        )
+        if excluded_reason:
+            print(f"Skipping {path}: {excluded_reason}", file=sys.stderr)
+            continue
+        if shard_schema is None:
+            print(f"Skipping {path}: missing harvest metadata", file=sys.stderr)
+            continue
+        accepted_files.append(path)
 
     phase_features = {}
     phase_labels = {}
@@ -523,7 +527,9 @@ def load_selfplay_corpus(
             phase_features[phase] = np.asarray(phase_feat[phase], dtype=np.float64)
             phase_labels[phase] = np.asarray(phase_lab[phase], dtype=np.int64)
         else:
-            phase_features[phase] = np.empty((0, len(columns)))
+            phase_features[phase] = np.empty(
+                (0, len(SELFPLAY_FEATURE_NAMES) + len(SELFPLAY_CONTROLS))
+            )
             phase_labels[phase] = np.empty(0)
         print(
             f"  {phase}: {len(phase_features[phase])} samples",
@@ -531,7 +537,7 @@ def load_selfplay_corpus(
         )
 
     print(f"\nTotal self-play samples: {total}", file=sys.stderr)
-    return phase_features, phase_labels, meta, files, seeds
+    return phase_features, phase_labels, meta, accepted_files, seeds
 
 
 def train_selfplay_model(
@@ -587,7 +593,10 @@ def extract_selfplay_weights(model: LogisticRegression, phase_name: str) -> tupl
     applied: self-play measures every weight.
     """
     columns = SELFPLAY_FEATURE_NAMES + SELFPLAY_CONTROLS
-    raw_coefs = {name: round(float(coef), 6) for name, coef in zip(columns, model.coef_[0])}
+    raw_coefs = {
+        name: round(float(coef), 6)
+        for name, coef in zip(columns, model.coef_[0], strict=True)
+    }
 
     print(f"  {phase_name} raw coefficients:", file=sys.stderr)
     for name, coef in raw_coefs.items():

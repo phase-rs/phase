@@ -67,14 +67,14 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
     true
 }
 
-/// CR 701.21a: True when this ability's cost sacrifices **the source itself**.
+/// CR 701.21a: Detects when this ability's cost sacrifices **the source itself**.
 ///
-/// Restricted to [`TargetFilter::SelfRef`] on purpose: a sac-outlet mana ability
-/// that eats *other* permanents (Skirk Prospector, "Sacrifice a Goblin: Add {R}")
-/// keeps its source on the battlefield and stays renewable. Delegates to
-/// [`mana_sources::cost_has_component`] so a **bare** `Sacrifice` cost and a
-/// `Sacrifice` nested in a `Composite` are both matched — the predefined Gold
-/// token prints the bare shape and Treasure the composite one.
+/// Also detects a self-`ReturnToHand` cost: either form removes the source from
+/// the battlefield. Restricted to [`TargetFilter::SelfRef`] on purpose: a
+/// sac-outlet mana ability that eats *other* permanents (Skirk Prospector,
+/// "Sacrifice a Goblin: Add {R}") keeps its source on the battlefield and stays
+/// renewable. Delegates to [`mana_sources::cost_has_component`] so a **bare**
+/// component and one nested in a `Composite` are both matched.
 ///
 /// Deliberately private, but privacy is a signpost rather than a barrier: it
 /// removes the *convenient* route to the naive per-permanent form ("has a mana
@@ -91,11 +91,19 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
 /// for keeping the classification here, not any guarantee privacy provides. The
 /// only exported composition is `.any(is_renewable_mana_ability)`, which *is*
 /// the per-ability filter.
-fn cost_sacrifices_self(cost: &Option<AbilityCost>) -> bool {
-    mana_sources::cost_has_component(
-        cost,
-        |c| matches!(c, AbilityCost::Sacrifice(s) if s.target == TargetFilter::SelfRef),
-    )
+fn cost_removes_self_from_battlefield(cost: &Option<AbilityCost>) -> bool {
+    mana_sources::cost_has_component(cost, |c| {
+        matches!(
+            c,
+            AbilityCost::Sacrifice(s) if s.target == TargetFilter::SelfRef
+        ) || matches!(
+            c,
+            AbilityCost::ReturnToHand {
+                filter: Some(TargetFilter::SelfRef),
+                ..
+            }
+        )
+    })
 }
 
 /// CR 605.1a + CR 701.21: a *renewable* mana ability — one that produces mana
@@ -115,7 +123,7 @@ fn cost_sacrifices_self(cost: &Option<AbilityCost>) -> bool {
 /// **at least one** of its mana abilities is renewable (Crystal Vein carries both
 /// a renewable `{T}: Add {C}` and a self-sac `{T}, Sac: Add {C}{C}`).
 pub fn is_renewable_mana_ability(ability_def: &AbilityDefinition) -> bool {
-    is_mana_ability(ability_def) && !cost_sacrifices_self(&ability_def.cost)
+    is_mana_ability(ability_def) && !cost_removes_self_from_battlefield(&ability_def.cost)
 }
 
 /// CR 605.1b: A triggered ability is a mana ability iff all three hold:
@@ -4410,6 +4418,40 @@ mod tests {
             1,
         )));
         assert!(!is_renewable_mana_ability(&self_sac));
+    }
+
+    /// A self-returning mana source (Grinning Ignus class) is a one-shot
+    /// conversion from the standing manabase, whether its return cost is bare
+    /// or composed with a tap cost.
+    #[test]
+    fn self_return_to_hand_mana_source_is_not_renewable() {
+        let bare_return = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })
+        .cost(AbilityCost::ReturnToHand {
+            count: 1,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone: None,
+        });
+        assert!(!is_renewable_mana_ability(&bare_return));
+
+        let composite_return = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::ReturnToHand {
+                    count: 1,
+                    filter: Some(TargetFilter::SelfRef),
+                    from_zone: None,
+                },
+            ],
+        });
+
+        assert!(!is_renewable_mana_ability(&composite_return));
     }
 
     /// Row 4c — Powerstone and Treasure are both artifact tokens differing only in

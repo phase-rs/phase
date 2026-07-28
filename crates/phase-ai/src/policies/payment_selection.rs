@@ -446,7 +446,9 @@ fn payment_cost(
             Zone::Battlefield => sacrifice_cost(state, obj_id, penalties),
             Zone::Hand => cost_card_value(state, obj_id) * 1.2,
             Zone::Graveyard => 0.1 + cost_card_value(state, obj_id) * 0.2,
-            _ => cost_card_value(state, obj_id) * 0.5,
+            Zone::Library | Zone::Stack | Zone::Exile | Zone::Command => {
+                cost_card_value(state, obj_id) * 0.5
+            }
         },
         PayCostKind::RemoveCounter { .. } => permanent_board_value(state, obj_id, penalties) * 0.5,
         PayCostKind::TapCreatures { .. } => permanent_board_value(state, obj_id, penalties) * 0.35,
@@ -459,7 +461,9 @@ fn payment_cost(
             Zone::Battlefield => sacrifice_cost(state, obj_id, penalties),
             Zone::Hand => cost_card_value(state, obj_id) * 1.2,
             Zone::Graveyard => 0.1 + cost_card_value(state, obj_id) * 0.2,
-            _ => cost_card_value(state, obj_id) * 0.5,
+            Zone::Library | Zone::Stack | Zone::Exile | Zone::Command => {
+                cost_card_value(state, obj_id) * 0.5
+            }
         },
         PayCostKind::Behold { .. } => cost_card_value(state, obj_id) * 0.1,
         // CR 701.3d: Unattaching an Equipment as a cost keeps it on the

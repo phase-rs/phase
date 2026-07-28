@@ -4,8 +4,8 @@
 //! The class, never a card: any cast where paying the cost would force the AI to
 //! surrender a land or accelerant its own development schedule is still short of.
 //! Detection is structural throughout — `AdditionalCost` variant, `FlashbackCost`
-//! variant, `SacrificeRequirement` variant, `Zone`, `CoreType`, `is_mana_ability`,
-//! `is_intrinsic_mana_source`. No card name appears anywhere below.
+//! variant, `SacrificeRequirement` variant, `Zone`, `CoreType`, and `ManaRole`.
+//! No card name appears anywhere below.
 //!
 //! # Two extraction sites, one mechanism
 //!
@@ -127,13 +127,11 @@ use engine::types::keywords::FlashbackCost;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
+use super::context::PolicyContext;
+use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::card_value::{keep_tier, KeepTier};
 use crate::features::DeckFeatures;
 use crate::plan::PlanState;
-use crate::zone_eval::is_intrinsic_mana_source;
-
-use super::context::PolicyContext;
-use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 
 pub struct SacrificeCostManaGatePolicy;
 
@@ -271,16 +269,12 @@ fn mandatory_sacrifice(state: &GameState, object: &GameObject) -> Option<Sacrifi
 /// battlefield directly to its owner's graveyard" — so for a one-shot
 /// self-sacrificing source (Treasure, Gold, Lotus Petal) sacrificing it **is**
 /// using it, and paying a cost with it is its intended use rather than a loss of
-/// development. `is_intrinsic_mana_source` is the engine-side authority
-/// `plan::controlled_mana_sources` already measures the deficit with, so sharing
-/// it means the gate cannot promote a source the deficit does not count. That is
-/// a class — every present and future one-shot mana token — not a carve-out.
-///
-/// The composition is an `&&`, so it can only ever make the gate quieter; it
-/// cannot introduce a reject.
+/// development. `mana_role` uses the same intrinsic-source population as
+/// `plan::controlled_mana_sources`, so the gate cannot promote a source the
+/// deficit does not count. That is a class — every present and future one-shot
+/// mana token — not a carve-out.
 fn deprives_the_plan(state: &GameState, id: ObjectId, plan: Option<PlanState>) -> bool {
-    state.objects.get(&id).is_some_and(is_intrinsic_mana_source)
-        && keep_tier(state, id, plan) == KeepTier::NeededManaSource
+    keep_tier(state, id, plan) == KeepTier::NeededManaSource
 }
 
 fn gate_rejects(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
@@ -459,7 +453,7 @@ mod tests {
 
     /// An untargeted `{T}: Add {B}` — CR 605.1a mana ability whose cost does not
     /// sacrifice its own source, so it is *renewable* and
-    /// `is_intrinsic_mana_source` counts it.
+    /// `mana_role` classifies it as an accelerant.
     fn renewable_mana_ability() -> AbilityDefinition {
         let mut ability = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -1095,13 +1089,9 @@ mod tests {
     /// sacrificing a one-shot self-sacrificing source *is* using it, so paying a
     /// cost with it is its intended use, not a loss of development.
     ///
-    /// REVERT THAT REDDENS IT: delete the `is_intrinsic_mana_source(..)` conjunct
-    /// in `deprives_the_plan` → the Treasure reads `NeededManaSource` →
-    /// `spare(0) < required(1)` → a reject appears.
-    ///
-    /// §8.4 premise guards prove the row turns on the *divergence* rather than
-    /// on a misclassification: the Treasure IS an `Accelerant` and is NOT an
-    /// intrinsic mana source.
+    /// The shared `mana_role` and plan predicate both classify the Treasure as a
+    /// non-source, so it cannot be promoted by a development deficit it cannot
+    /// reduce.
     #[test]
     fn one_shot_mana_token_is_spare_not_a_needed_source() {
         let mut state = base_state();
@@ -1117,13 +1107,8 @@ mod tests {
 
         assert_eq!(
             mana_role(&state, treasure),
-            ManaRole::Accelerant,
-            "fixture premise: `mana_role` DOES promote a Treasure (is_mana_ability)"
-        );
-        assert!(
-            !is_intrinsic_mana_source(state.objects.get(&treasure).unwrap()),
-            "fixture premise: but the deficit does NOT count it — that divergence \
-             is exactly what this row pins"
+            ManaRole::None,
+            "fixture premise: a one-shot mana token is not standing development"
         );
         assert!(realized_plan(&state).mana_behind > 0);
 
@@ -1157,11 +1142,6 @@ mod tests {
         );
 
         assert_eq!(mana_role(&state, rock), ManaRole::Accelerant);
-        assert!(
-            is_intrinsic_mana_source(state.objects.get(&rock).unwrap()),
-            "fixture premise: a renewable rock IS counted by the deficit — the \
-             one axis on which it differs from F10's Treasure"
-        );
         assert!(realized_plan(&state).mana_behind > 0);
 
         assert_rejected(&verdict_with_plan(&state, obj, card), 1, 1, 0);

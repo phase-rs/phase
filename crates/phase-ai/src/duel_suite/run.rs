@@ -212,13 +212,8 @@ pub fn run_suite(db: &CardDatabase, options: &SuiteOptions) -> Result<SuiteRepor
                 // changes its semantics to a signed self-minus-opponent
                 // DIFFERENTIAL (Unit 5).
                 //
-                // Provenance only — the trainer reads columns by name and never
-                // inspects this field. Because the column keeps its NAME across
-                // this change, `scripts/train_eval_weights.py`'s `defaulted_rows`
-                // warning does NOT fire on a mixed pre/post corpus, so this bump
-                // lets a human reading a shard's meta line tell which semantics
-                // that shard carries — it is not a pooling guard. A column rename
-                // or a trainer-side minimum-schema check is the real repair.
+                // The trainer accepts only schema 3+ shards, preventing it from
+                // pooling this signed differential with schema 2's absolute count.
                 schema: 3,
                 git_sha: options.git_sha.clone(),
                 card_data_hash: options.card_data_hash.clone(),

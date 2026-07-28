@@ -39,12 +39,12 @@
 
 use std::cmp::Ordering;
 
-use engine::game::mana_abilities::is_mana_ability;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 
 use crate::plan::PlanState;
+use crate::zone_eval::is_intrinsic_mana_source;
 
 /// CR 305.1 + CR 305.2: how a card in a non-battlefield zone contributes to mana
 /// development.
@@ -116,17 +116,11 @@ pub(crate) enum KeepTier {
 /// whereas a land in hand is merely undeployed. The sacrifice-cost cast gate
 /// relies on that reading.
 ///
-/// **Known divergence, recorded rather than fixed here.** This function promotes
-/// on `is_mana_ability` (CR 605.1a), while `plan::controlled_mana_sources` — which
-/// produces the very `mana_behind` deficit [`keep_tier`] measures against — counts
-/// only `zone_eval::is_intrinsic_mana_source`, which excludes one-shot
-/// self-sacrificing sources (Treasure, Gold, Lotus Petal). A Treasure therefore
-/// classifies `Accelerant` and *raises* the deficit that promotes it, but can
-/// never lower it. Consumers that must not be misled by that — the sacrifice-cost
-/// cast gate is the first — compose an `is_intrinsic_mana_source` conjunct of
-/// their own. The predicate here is **not** changed to match: that is a behaviour
-/// change to the cleanup-discard seam with its own AI-gate baseline, and it
-/// belongs to this module's owner, not to a consumer.
+/// Accelerants share the `plan::controlled_mana_sources` population that produces
+/// the `mana_behind` deficit [`keep_tier`] reads. One-shot self-sacrificing or
+/// self-returning sources (Treasure, Gold, Lotus Petal, Grinning Ignus) are not
+/// standing mana development, so they cannot be promoted by a deficit they never
+/// reduce.
 pub(crate) fn mana_role(state: &GameState, obj_id: ObjectId) -> ManaRole {
     let Some(obj) = state.objects.get(&obj_id) else {
         return ManaRole::None;
@@ -134,7 +128,7 @@ pub(crate) fn mana_role(state: &GameState, obj_id: ObjectId) -> ManaRole {
     if obj.card_types.core_types.contains(&CoreType::Land) {
         return ManaRole::LandDrop;
     }
-    if obj.abilities.iter().any(is_mana_ability) {
+    if is_intrinsic_mana_source(obj) {
         return ManaRole::Accelerant;
     }
     ManaRole::None
@@ -391,6 +385,29 @@ mod tests {
         for id in [land, rock, plain] {
             assert_eq!(keep_tier(&state, id, None), KeepTier::Ordinary);
         }
+    }
+
+    #[test]
+    fn one_shot_mana_source_is_not_an_accelerant() {
+        let mut state = GameState::new_two_player(7);
+        let one_shot = rock_card(&mut state);
+        let ability =
+            &mut Arc::make_mut(&mut state.objects.get_mut(&one_shot).unwrap().abilities)[0];
+        ability.cost = Some(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Sacrifice(engine::types::ability::SacrificeCost::count(
+                    engine::types::ability::TargetFilter::SelfRef,
+                    1,
+                )),
+            ],
+        });
+
+        assert_eq!(mana_role(&state, one_shot), ManaRole::None);
+        assert_eq!(
+            keep_tier(&state, one_shot, behind(0, 3)),
+            KeepTier::Ordinary
+        );
     }
 
     /// The reported failure, at the tier level: the four-land deficit that a
