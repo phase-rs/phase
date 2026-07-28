@@ -2151,12 +2151,17 @@ pub(super) fn apply_post_replacement_effect(
     state: &mut GameState,
     effect_def: &AbilityDefinition,
     object_id: Option<ObjectId>,
-    spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
+    // CR 400.7d: for AmountSpentToCastSource ceilings the entering object's
+    // cast-payment stamp is authoritative — this spell-resolution context is
+    // intentionally unused (issue #6440). Kept so call sites stay stable.
+    _spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
     event: Option<&ReplacementEvent>,
     replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    let (source_id, controller) = object_id
+    // Dual objects→liminal lookup (same as source identity): also yields the
+    // entering object's cast-payment stamp for copy MV ceilings.
+    let (source_id, controller, mana_spent_stamp) = object_id
         .and_then(|obj_id| {
             state
                 .objects
@@ -2167,9 +2172,15 @@ pub(super) fn apply_post_replacement_effect(
                         .get(&obj_id)
                         .map(|entry| &entry.object)
                 })
-                .map(|obj| (obj_id, super::replacement::replacement_source_player(obj)))
+                .map(|obj| {
+                    (
+                        obj_id,
+                        super::replacement::replacement_source_player(obj),
+                        obj.mana_spent_to_cast_amount,
+                    )
+                })
         })
-        .unwrap_or((ObjectId(0), state.active_player));
+        .unwrap_or((ObjectId(0), state.active_player, 0));
 
     // CR 614.1c: Walk past modifier-only effects (Tap/Untap/PutCounter/ChangeZone)
     // in the sub_ability chain to find the real work. Composable replacements like
@@ -2181,8 +2192,12 @@ pub(super) fn apply_post_replacement_effect(
             .unwrap_or(effect_def);
 
     if let Effect::BecomeCopy { ref target, .. } = *real_work.effect {
-        let max_mana_value = spell_resolution
-            .and_then(|ctx| copy_target_mana_value_ceiling(ctx.actual_mana_spent, real_work));
+        // CR 400.7d: a permanent may reference mana spent to cast the spell that
+        // became it. Uncast put-onto-battlefield (Chord of Calling → Mockingbird,
+        // issue #6440) never received cast finalization (CR 601.2h is the stamp
+        // *write* site), so the stamp stays 0 and the ceiling is Some(0) — never
+        // unconstrained None from a missing PendingSpellResolution.
+        let max_mana_value = copy_target_mana_value_ceiling(mana_spent_stamp, real_work);
         let valid_targets = find_copy_targets(state, target, source_id, controller, max_mana_value);
         if valid_targets.is_empty() {
             return None;
@@ -6772,5 +6787,269 @@ mod tests {
             state.deferred_entry_events.is_empty(),
             "deferred entry must remain empty for an unrelated choice"
         );
+    }
+
+    /// Issue #6440 — Mockingbird-class AmountSpentToCastSource ceiling.
+    fn mockingbird_become_copy() -> AbilityDefinition {
+        use crate::types::ability::{CopyManaValueLimit, Duration, Effect, TargetFilter};
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                recipient: TargetFilter::SelfRef,
+                duration: Some(Duration::Permanent),
+                mana_value_limit: Some(CopyManaValueLimit::AmountSpentToCastSource),
+                additional_modifications: Vec::new(),
+            },
+        )
+    }
+
+    fn clone_become_copy() -> AbilityDefinition {
+        use crate::types::ability::{Duration, Effect, TargetFilter};
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                recipient: TargetFilter::SelfRef,
+                duration: Some(Duration::Permanent),
+                mana_value_limit: None,
+                additional_modifications: Vec::new(),
+            },
+        )
+    }
+
+    fn make_creature_with_mv(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        mv: u32,
+    ) -> ObjectId {
+        let id = make_creature(state, owner, name);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.mana_cost = crate::types::mana::ManaCost::generic(mv);
+        id
+    }
+
+    fn chord_like_spell_resolution(
+        chord_id: ObjectId,
+        actual_mana_spent: u32,
+    ) -> crate::types::game_state::PendingSpellResolution {
+        use crate::types::game_state::{CastingVariant, PendingSpellResolution};
+        PendingSpellResolution {
+            object_id: chord_id,
+            controller: PlayerId(0),
+            casting_variant: CastingVariant::Normal,
+            cast_from_zone: None,
+            cast_controller: None,
+            cast_timing_permission: None,
+            spell_targets: vec![],
+            actual_mana_spent,
+            kickers_paid: vec![],
+            additional_cost_payment_count: 0,
+            additional_cost_payments: vec![],
+            convoked_creatures: vec![],
+        }
+    }
+
+    /// Hostile: uncast stamp 0 + Chord-like ctx spent 5 → ceiling Some(0); MV2 excluded.
+    #[test]
+    fn issue_6440_uncast_stamp_ignores_spell_resolution_mana_spent() {
+        let mut state = GameState::new_two_player(42);
+        let mv0 = make_creature_with_mv(&mut state, PlayerId(0), "Mv0", 0);
+        let mv2 = make_creature_with_mv(&mut state, PlayerId(0), "Mv2", 2);
+        let mockingbird = make_creature(&mut state, PlayerId(0), "Mockingbird");
+        // Uncast: stamp stays at default 0.
+        assert_eq!(state.objects[&mockingbird].mana_spent_to_cast_amount, 0);
+
+        let chord = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Chord of Calling".to_string(),
+            Zone::Stack,
+        );
+        let hostile_ctx = chord_like_spell_resolution(chord, 5);
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &mockingbird_become_copy(),
+            Some(mockingbird),
+            Some(&hostile_ctx),
+            None,
+            Default::default(),
+            &mut events,
+        );
+
+        match waiting {
+            Some(WaitingFor::CopyTargetChoice {
+                max_mana_value,
+                valid_targets,
+                ..
+            }) => {
+                assert_eq!(
+                    max_mana_value,
+                    Some(0),
+                    "uncast stamp must yield Some(0), not unconstrained None"
+                );
+                assert!(
+                    valid_targets.contains(&mv0),
+                    "MV 0 must remain legal; got {valid_targets:?}"
+                );
+                assert!(
+                    !valid_targets.contains(&mv2),
+                    "MV 2 must be excluded under ceiling 0; got {valid_targets:?}"
+                );
+            }
+            other => panic!("expected CopyTargetChoice, got {other:?}"),
+        }
+    }
+
+    /// Cast stamp 2 → ceiling Some(2); ctx spent 99 must not override.
+    #[test]
+    fn issue_6440_cast_stamp_drives_ceiling_not_ctx() {
+        let mut state = GameState::new_two_player(42);
+        let mv2 = make_creature_with_mv(&mut state, PlayerId(0), "Mv2", 2);
+        let mv3 = make_creature_with_mv(&mut state, PlayerId(0), "Mv3", 3);
+        let mockingbird = make_creature(&mut state, PlayerId(0), "Mockingbird");
+        state
+            .objects
+            .get_mut(&mockingbird)
+            .unwrap()
+            .mana_spent_to_cast_amount = 2;
+
+        let chord = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Unrelated Spell".to_string(),
+            Zone::Stack,
+        );
+        let hostile_ctx = chord_like_spell_resolution(chord, 99);
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &mockingbird_become_copy(),
+            Some(mockingbird),
+            Some(&hostile_ctx),
+            None,
+            Default::default(),
+            &mut events,
+        );
+
+        match waiting {
+            Some(WaitingFor::CopyTargetChoice {
+                max_mana_value,
+                valid_targets,
+                ..
+            }) => {
+                assert_eq!(max_mana_value, Some(2));
+                assert!(valid_targets.contains(&mv2));
+                assert!(!valid_targets.contains(&mv3));
+            }
+            other => panic!("expected CopyTargetChoice, got {other:?}"),
+        }
+    }
+
+    /// Liminal-only source: stamp read via dual lookup (Gap 1).
+    #[test]
+    fn issue_6440_liminal_stamp_drives_ceiling() {
+        use crate::types::game_state::{LiminalEntry, LiminalEntryKind};
+        use crate::types::zones::EtbTapState;
+
+        let mut state = GameState::new_two_player(42);
+        let mv0 = make_creature_with_mv(&mut state, PlayerId(0), "Mv0", 0);
+        let mv2 = make_creature_with_mv(&mut state, PlayerId(0), "Mv2", 2);
+
+        let liminal_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut liminal = GameObject::new(
+            liminal_id,
+            CardId(50),
+            PlayerId(0),
+            "Liminal Mockingbird".to_string(),
+            Zone::Battlefield,
+        );
+        liminal.card_types.core_types.push(CoreType::Creature);
+        liminal.mana_spent_to_cast_amount = 0;
+        assert!(!state.objects.contains_key(&liminal_id));
+        state.liminal_entries.insert(
+            liminal_id,
+            LiminalEntry {
+                object: liminal,
+                name: "Liminal Mockingbird".to_string(),
+                source_id: ObjectId(999),
+                controller: PlayerId(0),
+                enters_attacking: false,
+                attach_to: None,
+                sacrifice_at: None,
+                remaining_count: 0,
+                created_ids: Vec::new(),
+                copy_resume: None,
+                spec_resume: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enter_with_counters: Vec::new(),
+                kind: LiminalEntryKind::Token,
+                replacement_applied: HashSet::new(),
+            },
+        );
+
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &mockingbird_become_copy(),
+            Some(liminal_id),
+            None,
+            None,
+            Default::default(),
+            &mut events,
+        );
+
+        match waiting {
+            Some(WaitingFor::CopyTargetChoice {
+                max_mana_value,
+                valid_targets,
+                ..
+            }) => {
+                assert_eq!(max_mana_value, Some(0));
+                assert!(valid_targets.contains(&mv0));
+                assert!(!valid_targets.contains(&mv2));
+            }
+            other => panic!("expected CopyTargetChoice from liminal stamp, got {other:?}"),
+        }
+    }
+
+    /// Clone sibling: no mana_value_limit → unconstrained even when uncast.
+    #[test]
+    fn issue_6440_clone_without_limit_stays_unconstrained() {
+        let mut state = GameState::new_two_player(42);
+        let mv2 = make_creature_with_mv(&mut state, PlayerId(0), "Mv2", 2);
+        let clone = make_creature(&mut state, PlayerId(0), "Clone");
+        assert_eq!(state.objects[&clone].mana_spent_to_cast_amount, 0);
+
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &clone_become_copy(),
+            Some(clone),
+            Some(&chord_like_spell_resolution(ObjectId(1), 5)),
+            None,
+            Default::default(),
+            &mut events,
+        );
+
+        match waiting {
+            Some(WaitingFor::CopyTargetChoice {
+                max_mana_value,
+                valid_targets,
+                ..
+            }) => {
+                assert_eq!(max_mana_value, None);
+                assert!(
+                    valid_targets.contains(&mv2),
+                    "Clone without limit must still allow MV 2"
+                );
+            }
+            other => panic!("expected CopyTargetChoice, got {other:?}"),
+        }
     }
 }
