@@ -34,6 +34,7 @@ use engine::database::CardDatabase;
 use engine::game::deck_loading::{
     load_deck_into_state, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
 };
+use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -75,6 +76,10 @@ fn main() {
     let mut action_cap: usize = DEFAULT_ACTION_CAP;
     let mut feed: String = "feeds/mtggoldfish-commander.json".to_string();
     let mut games_file: Option<String> = None;
+    // pod-lab swap-liveness telemetry (loop-3 Q3(b)): empty means the
+    // per-event scan in `play_one_game` is skipped entirely, not merely a
+    // no-op HashSet lookup — a run that doesn't pass this flag pays nothing.
+    let mut watch_cards: HashSet<String> = HashSet::new();
     let mut args_iter = args.iter().skip(1).peekable();
     while let Some(arg) = args_iter.next() {
         match arg.as_str() {
@@ -104,6 +109,20 @@ fn main() {
                 Some(v) => games_file = Some(v.clone()),
                 None => {
                     eprintln!("error: --games-file requires a path");
+                    std::process::exit(1);
+                }
+            },
+            "--watch-cards" => match args_iter.next() {
+                Some(v) => {
+                    watch_cards = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                }
+                None => {
+                    eprintln!("error: --watch-cards requires a comma-separated card name list");
                     std::process::exit(1);
                 }
             },
@@ -161,6 +180,7 @@ fn main() {
         action_cap,
         games_file,
         batch_games,
+        watch_cards,
     };
     let handle = std::thread::Builder::new()
         .name("ai-commander-driver".to_string())
@@ -191,6 +211,7 @@ struct CliArgs {
     action_cap: usize,
     games_file: Option<String>,
     batch_games: Option<Vec<(u64, AiDifficulty)>>,
+    watch_cards: HashSet<String>,
 }
 
 /// Shared immutable inputs for one or more AI-commander game runs.
@@ -202,6 +223,7 @@ struct GameRunContext<'a> {
     action_cap: usize,
     dump_log_path: Option<&'a str>,
     dump_actions_path: Option<&'a str>,
+    watch_cards: &'a HashSet<String>,
 }
 
 /// Everything that isn't argument parsing: loads the card database and feed
@@ -220,6 +242,7 @@ fn run(cli: CliArgs) -> i32 {
         action_cap,
         games_file,
         batch_games,
+        watch_cards,
     } = cli;
 
     let export_path = PathBuf::from(&cards_path).join("card-data.json");
@@ -355,6 +378,7 @@ fn run(cli: CliArgs) -> i32 {
         action_cap,
         dump_log_path: dump_log_path.as_deref(),
         dump_actions_path: dump_actions_path.as_deref(),
+        watch_cards: &watch_cards,
     };
 
     match batch_games {
@@ -408,6 +432,7 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
         action_cap,
         dump_log_path,
         dump_actions_path,
+        watch_cards,
     } = *context;
     let mut state = build_game_state(db, payload, seed);
 
@@ -433,6 +458,13 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     let start = Instant::now();
     let mut game_log: Vec<engine::types::log::GameLogEntry> = Vec::new();
     let mut actions_log: Vec<String> = Vec::new();
+    // pod-lab swap-liveness telemetry (loop-3 Q3(b)): which of `watch_cards`'
+    // names were ever drawn to hand or cast this game. Names, not `CardId`s —
+    // `CardId` is assigned per physical-card-object at deck load
+    // (`deck_loading.rs`), not a stable per-name identity, and every
+    // `GameObject` already carries its own resolved `name`, so matching on
+    // name needs no extra database lookup.
+    let mut cards_seen: HashSet<String> = HashSet::new();
     let mut last_turn_reported: u32 = 0;
     let mut ai_rng = StdRng::seed_from_u64(seed);
     let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
@@ -465,6 +497,10 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
                 for r in &*results {
                     actions_log.push(format!("{:?}", r.action));
                 }
+            }
+
+            if !watch_cards.is_empty() {
+                record_watched_cards(results, watch_cards, &mut cards_seen);
             }
 
             if state.turn_number != last_turn_reported {
@@ -529,6 +565,19 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     println!("Elapsed: {:.1}s", elapsed.as_secs_f64());
     println!("Total actions: {total_actions}");
     println!("Turns played: {}", state.turn_number);
+    // pod-lab swap-liveness telemetry (loop-3 Q3(b)): one line, only when
+    // `--watch-cards` was given, so a harness that doesn't ask for this pays
+    // nothing and every existing consumer's line-by-line parse is untouched.
+    // `PODLAB-TELEM ` is a prefix no other line in this binary's stdout uses,
+    // and this line does not begin with "Turn ", match `^--- GAME`, or
+    // contain "Winner: " / "Difficulty: " / "ABORT: hit " / "did NOT reach
+    // GameOver" (pod-lab's `runner.py`/`mechanisms.py` scan for exactly those
+    // literals). Cards are sorted for a deterministic, diff-friendly line.
+    if !watch_cards.is_empty() {
+        let mut seen: Vec<&str> = cards_seen.iter().map(String::as_str).collect();
+        seen.sort_unstable();
+        println!("PODLAB-TELEM {}", serde_json::json!({ "cards_seen": seen }));
+    }
     println!();
 
     let outcome = classify_run_outcome(aborted, &state.waiting_for);
@@ -631,6 +680,38 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     }
 
     outcome
+}
+
+/// pod-lab swap-liveness telemetry (loop-3 Q3(b)): scans one driver-loop
+/// batch's `AiActionResult`s for `SpellCast`/`CardDrawn` events naming an
+/// object whose CURRENT name (resolved via that action's own `r.state`, not
+/// a stale/outer snapshot) is in `watch`, inserting the resolved name into
+/// `seen`. Matches on name, not `CardId`: `CardId` is assigned per
+/// physical-card-object at deck load (`deck_loading.rs`), not a stable
+/// per-name identity, while every `GameObject` already carries its own
+/// resolved `name` — no extra database lookup needed. Pure and unit-tested
+/// separately from `play_one_game`'s full game-driving loop; the caller
+/// skips calling this entirely when `watch` is empty, so a run that doesn't
+/// pass `--watch-cards` pays nothing beyond the `is_empty()` check.
+fn record_watched_cards(
+    results: &[phase_ai::auto_play::AiActionResult],
+    watch: &HashSet<String>,
+    seen: &mut HashSet<String>,
+) {
+    for r in results {
+        for event in &r.events {
+            let object_id = match event {
+                GameEvent::SpellCast { object_id, .. } => *object_id,
+                GameEvent::CardDrawn { object_id, .. } => *object_id,
+                _ => continue,
+            };
+            if let Some(obj) = r.state.objects.get(&object_id) {
+                if watch.contains(&obj.name) {
+                    seen.insert(obj.name.clone());
+                }
+            }
+        }
+    }
 }
 
 /// Runs `play` once per entry in `games`, isolating panics per game (Tier 1
@@ -904,7 +985,12 @@ fn build_seat_config(difficulty: AiDifficulty, seed: u64) -> AiConfig {
 mod tests {
     use super::*;
     use engine::ai_support::candidate_actions;
+    use engine::game::game_object::GameObject;
     use engine::types::ability::ChoiceType;
+    use engine::types::actions::GameAction;
+    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::zones::Zone;
+    use phase_ai::auto_play::AiActionResult;
     use std::sync::{Arc, Mutex};
 
     struct TempFileGuard(PathBuf);
@@ -1047,6 +1133,109 @@ mod tests {
                  under batch load"
             );
         }
+    }
+
+    /// Building-block test for `record_watched_cards` (loop-3 Q3(b)): proves
+    /// the matcher (a) recognizes both `SpellCast` and `CardDrawn` events,
+    /// (b) resolves the watched name via the object's *current* `r.state`
+    /// rather than any fixed name table, and (c) is selective — an event
+    /// naming an object outside `watch`, and an event of an unrelated
+    /// variant entirely, must both be no-ops rather than getting recorded.
+    #[test]
+    fn record_watched_cards_matches_spell_cast_and_card_drawn_by_name() {
+        let mut state = GameState::new(FormatConfig::commander(), 4, 1);
+        let cast_obj = ObjectId(100);
+        let drawn_obj = ObjectId(101);
+        let unwatched_obj = ObjectId(102);
+        state.objects.insert(
+            cast_obj,
+            GameObject::new(
+                cast_obj,
+                CardId(100),
+                PlayerId(0),
+                "Lightning Bolt".to_string(),
+                Zone::Stack,
+            ),
+        );
+        state.objects.insert(
+            drawn_obj,
+            GameObject::new(
+                drawn_obj,
+                CardId(101),
+                PlayerId(0),
+                "Sol Ring".to_string(),
+                Zone::Hand,
+            ),
+        );
+        state.objects.insert(
+            unwatched_obj,
+            GameObject::new(
+                unwatched_obj,
+                CardId(102),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+
+        let watch: HashSet<String> = ["Lightning Bolt".to_string(), "Sol Ring".to_string()]
+            .into_iter()
+            .collect();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        let results = vec![
+            AiActionResult {
+                action: GameAction::PassPriority,
+                state: state.clone(),
+                events: vec![GameEvent::SpellCast {
+                    card_id: CardId(100),
+                    controller: PlayerId(0),
+                    object_id: cast_obj,
+                }],
+                log_entries: Vec::new(),
+            },
+            AiActionResult {
+                action: GameAction::PassPriority,
+                state: state.clone(),
+                events: vec![
+                    GameEvent::CardDrawn {
+                        player_id: PlayerId(0),
+                        object_id: drawn_obj,
+                        nth_in_turn: 1,
+                        nth_in_step: 1,
+                    },
+                    // Drawn but not watched, and an unrelated event variant —
+                    // both must be ignored, not just the watched ones matched.
+                    GameEvent::CardDrawn {
+                        player_id: PlayerId(0),
+                        object_id: unwatched_obj,
+                        nth_in_turn: 2,
+                        nth_in_step: 2,
+                    },
+                    GameEvent::PriorityPassed {
+                        player_id: PlayerId(0),
+                    },
+                ],
+                log_entries: Vec::new(),
+            },
+        ];
+
+        record_watched_cards(&results, &watch, &mut seen);
+
+        assert_eq!(
+            seen,
+            ["Lightning Bolt".to_string(), "Sol Ring".to_string()]
+                .into_iter()
+                .collect::<HashSet<_>>()
+        );
+    }
+
+    #[test]
+    fn record_watched_cards_is_a_noop_on_empty_results() {
+        let watch: HashSet<String> = ["Lightning Bolt".to_string()].into_iter().collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        record_watched_cards(&[], &watch, &mut seen);
+        assert!(seen.is_empty());
     }
 
     #[test]
