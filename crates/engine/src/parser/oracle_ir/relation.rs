@@ -61,6 +61,19 @@ pub(crate) enum DocumentRelationIr {
         coerce: OracleItemId,
         punisher: OracleItemId,
     },
+    /// CR 614.15: A separate ability-word-prefixed paragraph (`override_item`)
+    /// can create a self-replacement effect for the preceding ability paragraph
+    /// (`base`). This relation binds that printed form across document items,
+    /// preserving the base item's source span and printed ability slot when
+    /// lowering folds the override into it.
+    ///
+    /// This is the cross-document-item boundary. `ReplaceMeaningKind::Instead`
+    /// remains the within-one-effect-chain form, where a clause replaces a prior
+    /// clause during one `parse_effect_chain` call.
+    SelfReplacementOverride {
+        base: OracleItemId,
+        override_item: OracleItemId,
+    },
     /// CR 607.2d: A "choose a [value]" producer linked to an ability that reads
     /// "the chosen [value]" back. One parameterized relation; `LinkedChoiceKind`
     /// distinguishes the value kind and the consumer surface that reads it.

@@ -1282,6 +1282,59 @@ fn position_of(ids: &[OracleItemId], id: OracleItemId) -> Option<usize> {
     ids.iter().position(|candidate| *candidate == id)
 }
 
+// --- CR 614.15: separate ability-word paragraph → self-replacement override ---
+
+/// Fold a self-replacement override paragraph into the preceding ability by its
+/// document ids. Both items were lowered and stamped in source order first; this
+/// pass removes the override and its parallel id entry together, then restamps
+/// the surviving ability slots so the temporary item cannot shift a later
+/// CR 707.9a `RetainPrintedAbilityFromSource` reference.
+fn apply_self_replacement_override(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    ability_ids: &mut Vec<OracleItemId>,
+) {
+    for relation in relations {
+        let DocumentRelationIr::SelfReplacementOverride {
+            base,
+            override_item,
+        } = relation
+        else {
+            continue;
+        };
+        let Some(base_pos) = position_of(ability_ids, *base) else {
+            continue;
+        };
+        let Some(override_pos) = position_of(ability_ids, *override_item) else {
+            continue;
+        };
+        if base_pos == override_pos {
+            continue;
+        }
+
+        let mut override_def = result.abilities.remove(override_pos);
+        ability_ids.remove(override_pos);
+        let base_pos = if override_pos < base_pos {
+            base_pos - 1
+        } else {
+            base_pos
+        };
+        let condition = override_def.condition.take().expect(
+            "self-replacement override relations are emitted only for conditioned abilities",
+        );
+        override_def.condition = Some(AbilityCondition::ConditionInstead {
+            inner: Box::new(condition),
+        });
+        let base = &mut result.abilities[base_pos];
+        override_def.else_ability = base.sub_ability.take();
+        base.sub_ability = Some(Box::new(override_def));
+
+        for (slot, def) in result.abilities.iter_mut().enumerate() {
+            stamp_printed_ability_slot(def, slot);
+        }
+    }
+}
+
 // --- CR 607.2d + CR 614.1c: enters-choice → chosen-dependent ETB counter ------
 
 /// Pair the "as this enters, choose a creature type/color" replacement (producer)
@@ -3056,14 +3109,18 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // its lowered definition through the parallel `_ids` tracks — the single
     // authority, replacing the former five lowered-shape post-passes.
     //
-    // PLACEMENT PIN: the two enters-choice relations run first, then the
-    // within-item `reconcile_host_bound_phase_outs` chain repair (NOT a document
-    // relation — it belongs to unit 7), then the persisted-player relation, then
-    // the swallow audit, then the two enters/attack relations — reproducing the
-    // exact order the five standalone passes ran in (choose-counter → self-chosen
-    // type → host-bound → persisted-player → swallow → etb-exile → punisher).
-    // Order is behavior-load-bearing: the swallow audit reads `result` between the
-    // player-persist and the etb-exile/punisher applications.
+    // PLACEMENT PIN: first fold a CR 614.15 self-replacement override back into
+    // its base ability, recreating the pre-lowering single-item shape and
+    // restamping printed ability slots. Then the two enters-choice relations run,
+    // followed by the within-item `reconcile_host_bound_phase_outs` chain repair
+    // (NOT a document relation — it belongs to unit 7), then the persisted-player
+    // relation, then the swallow audit, then the two enters/attack relations —
+    // reproducing the exact order the five standalone passes ran in
+    // (choose-counter → self-chosen type → host-bound → persisted-player → swallow
+    // → etb-exile → punisher). Order is behavior-load-bearing: the swallow audit
+    // reads `result` between the player-persist and the etb-exile/punisher
+    // applications.
+    apply_self_replacement_override(&mut result, &ir.relations, &mut ability_ids);
     apply_linked_choice_etb_counter(&mut result, &ir.relations, &mut replacement_ids);
     apply_linked_choice_type_statics(
         &mut result,
