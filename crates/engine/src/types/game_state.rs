@@ -5583,6 +5583,11 @@ pub struct PendingCast {
     /// through a cost-payment continuation without conflating it with cost legs.
     #[serde(default, skip_serializing_if = "ActivationTargetSelection::is_pending")]
     pub activation_target_selection: ActivationTargetSelection,
+    /// CR 601.2h + CR 602.2b: An activation cannot be cancelled once any
+    /// component of its cost has been paid, because that payment is not a
+    /// rollback-able announcement choice.
+    #[serde(default)]
+    pub activation_cost_committed: bool,
     /// CR 118.9 + CR 601.2b: When this cast is offered a once-per-turn
     /// `CastWithAlternativeCost` grant (As Foretold), the granting permanent's id.
     /// Carried across the `OptionalCostChoice` round-trip so the accept handler can
@@ -5993,6 +5998,7 @@ impl PendingCast {
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
         }
@@ -6022,6 +6028,14 @@ impl PendingCast {
                     &self.ability,
                 ),
             ));
+        }
+    }
+
+    /// CR 601.2h + CR 602.2b: Marks an announced activation as having paid an
+    /// irreversible cost component, so it can no longer be cancelled.
+    pub(crate) fn mark_activation_cost_committed(&mut self) {
+        if self.activation_ability_index.is_some() {
+            self.activation_cost_committed = true;
         }
     }
 }
@@ -21308,6 +21322,7 @@ mod tests {
                 assist_state: AssistState::NotOffered,
                 activation_residual: ActivationResidual::None,
                 activation_target_selection: ActivationTargetSelection::Pending,
+                activation_cost_committed: false,
                 alt_cost_grant_source: None,
                 activation_trigger_collection: None,
             })
@@ -21718,6 +21733,7 @@ mod tests {
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
         });

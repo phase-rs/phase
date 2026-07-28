@@ -2,10 +2,14 @@
 //! sacrifice cost.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, SacrificeCost, TargetFilter,
+    TargetRef, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 
 const GOBLIN_BOMBARDMENT: &str =
@@ -132,5 +136,88 @@ fn goblin_bombardment_self_target_sacrifice_reaches_stack_and_fizzles() {
     assert!(
         runner.state().battlefield.contains(&fodder),
         "only the self-targeted Goblin was sacrificed"
+    );
+}
+
+#[test]
+fn target_first_sacrifice_parked_at_mana_payment_cannot_be_cancelled() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Mana-Gated Bombardment", 0, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Sacrifice(SacrificeCost::count(
+                        TargetFilter::Typed(TypedFilter::creature()),
+                        1,
+                    )),
+                    // CR 107.4e: Hybrid payment is a player decision, so this
+                    // forces the activation to remain at ManaPayment after the
+                    // preceding sacrifice has committed.
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::WhiteBlue],
+                            generic: 0,
+                        },
+                    },
+                ],
+            }),
+        )
+        .id();
+    let fodder = scenario.add_creature(P0, "Committed Fodder", 1, 1).id();
+    let target = scenario.add_creature(P1, "Mana-Gated Target", 1, 1).id();
+    scenario.add_creature_from_oracle(
+        P0,
+        "Cost Trigger Witness",
+        1,
+        1,
+        "Whenever another creature dies, draw a card.",
+    );
+    let mut runner = scenario.build();
+
+    activate(&mut runner, source);
+    choose_target(&mut runner, target);
+    sacrifice(&mut runner, fodder, target);
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    assert!(
+        !runner.state().battlefield.contains(&fodder),
+        "the sacrifice cost remains paid while mana payment is pending"
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "the death trigger must remain local to the uncommitted activation"
+    );
+
+    let error = runner
+        .act(GameAction::CancelCast)
+        .expect_err("a committed activation cost must reject cancellation");
+    assert!(error.to_string().contains("after a cost is paid"));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    assert!(
+        !runner.state().battlefield.contains(&fodder),
+        "rejecting cancellation must not restore the paid sacrifice"
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "rejecting cancellation must neither leak nor duplicate the local trigger"
     );
 }

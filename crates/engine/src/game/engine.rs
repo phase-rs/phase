@@ -90,6 +90,15 @@ pub enum PublicFinalizeMode {
 /// selected contribution. Once helper payment has started or completed, its
 /// resources may have changed and cancellation cannot roll that prefix back.
 fn ensure_assist_cancellation_is_allowed(state: &GameState) -> Result<(), EngineError> {
+    if state
+        .pending_cast
+        .as_deref()
+        .is_some_and(|pending| pending.activation_cost_committed)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "Cannot cancel an activation after a cost is paid".to_string(),
+        ));
+    }
     if matches!(
         state
             .pending_cast
@@ -5036,7 +5045,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (WaitingFor::TargetSelection { player, .. }, GameAction::SelectTargets { targets }) => {
             engine_casting::handle_target_selection_select_targets(
                 state,
@@ -5060,7 +5069,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::OptionalCostChoice {
                 player,
@@ -5084,7 +5093,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::ChooseGiftRecipient {
                 player,
@@ -5092,7 +5101,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 702.47a–e: Splice — caster reveals a card to splice onto the spell
         // (re-offering for the rest), or declines to finish and proceed to targets.
         (
@@ -5117,7 +5126,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 601.2b: Defiler cycle — player decides whether to pay life for mana reduction.
         (
             WaitingFor::DefilerPayment {
@@ -5143,7 +5152,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 118.3 + CR 601.2b + CR 605.3b: Player selected objects to pay a
         // cost. The single `PayCost` state dispatches on `kind` (which action)
         // and `resume` (spell-cast vs mana-ability pipeline) to the
@@ -5555,7 +5564,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 118.3: Player selected permanents to sacrifice as cost.
         (
             WaitingFor::ActivationCostOneOfChoice {
@@ -5579,7 +5588,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 601.2b + CR 701.4a: player chose the creature type for a pre-choice
         // behold cost; record it and resume behold payment.
         (
@@ -5605,7 +5614,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // Blight: player selected creature(s) to put -1/-1 counters on as cost.
         (
             WaitingFor::BlightChoice {
@@ -5631,7 +5640,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::ChooseManaColor {
                 choice, context, ..
@@ -5807,7 +5816,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 608.2d: Player decided whether to perform an optional effect ("You may X").
         (WaitingFor::OptionalEffectChoice { .. }, GameAction::DecideOptionalEffect { accept }) => {
             engine_payment_choices::handle_optional_effect_choice(state, accept, &mut events)?
@@ -6037,7 +6046,7 @@ fn apply_action(
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => WaitingFor::Priority { player },
             }
@@ -6045,10 +6054,11 @@ fn apply_action(
         (WaitingFor::ChooseXValue { player, .. }, GameAction::CancelCast) => {
             // CR 601.2f + CR 601.2i: Caster may back out before committing to an
             // X value. Pop the stack entry placed at announcement and restore.
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => WaitingFor::Priority { player },
             }
@@ -6227,10 +6237,11 @@ fn apply_action(
             }
         }
         (WaitingFor::AssistChoosePlayer { player, .. }, GameAction::CancelCast) => {
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => WaitingFor::Priority { player },
             }
@@ -6431,7 +6442,7 @@ fn apply_action(
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => WaitingFor::Priority { player },
             }
@@ -8295,10 +8306,11 @@ fn apply_action(
         }
         // CR 601.2d: Distribute among targets (casting-time distribution).
         (WaitingFor::DistributeAmong { player, .. }, GameAction::CancelCast) => {
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => {
                     return Err(EngineError::InvalidAction(

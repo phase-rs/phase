@@ -1915,6 +1915,7 @@ mod tests {
             activation_residual: crate::types::game_state::ActivationResidual::None,
             activation_target_selection:
                 crate::types::game_state::ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
         })

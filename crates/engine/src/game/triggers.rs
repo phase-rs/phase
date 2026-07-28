@@ -676,6 +676,26 @@ impl PendingActivationTriggerCollection {
         }
     }
 
+    /// Creates an activation-local collector with the complete in-flight
+    /// ability available to source-filtered trigger predicates.
+    pub(crate) fn for_prepared_activated_ability(
+        source_id: ObjectId,
+        controller: PlayerId,
+        ability_index: usize,
+        ability: &ResolvedAbility,
+    ) -> Self {
+        Self {
+            overlay: TriggerCollectionOverlay::for_prepared_activated_ability(
+                source_id,
+                controller,
+                ability_index,
+                ability,
+            ),
+            operation_journal: Vec::new(),
+            pending_contexts: Vec::new(),
+        }
+    }
+
     /// Collect one event slice emitted while the activation is still pending.
     ///
     /// Later slices replay the earlier collector operations into a fresh staged
@@ -687,7 +707,8 @@ impl PendingActivationTriggerCollection {
         self.overlay
             .install_virtual_targeting_source(&mut staged_state);
         let operation_journal = std::mem::take(&mut self.operation_journal);
-        let mut session = TriggerCollectionSession::transactional(self.overlay, operation_journal);
+        let mut session =
+            TriggerCollectionSession::transactional(self.overlay.clone(), operation_journal);
         let contexts = collect_pending_triggers_with_collection(
             &mut staged_state,
             events,

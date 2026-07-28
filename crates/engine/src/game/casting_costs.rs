@@ -1763,6 +1763,7 @@ pub(crate) fn handle_discard_for_cost(
     let cost_event_end = events.len();
 
     if pending.activation_ability_index.is_some() {
+        pending.mark_activation_cost_committed();
         pending.activation_cost = pending
             .activation_cost
             .take()
@@ -1809,12 +1810,22 @@ fn park_cost_payment_triggers_if_paused(
     cost_event_end: usize,
     waiting_for: &WaitingFor,
 ) {
-    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
-        let cost_events: Vec<GameEvent> = events[cost_event_start..cost_event_end]
-            .iter()
-            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-            .cloned()
-            .collect();
+    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+
+    let cost_events: Vec<GameEvent> = events[cost_event_start..cost_event_end]
+        .iter()
+        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+        .cloned()
+        .collect();
+    if let Some(mut collection) = state.take_pending_activation_trigger_collection() {
+        // CR 602.2b + CR 603.3b: A target-first activation owns cost-trigger
+        // collection until its stack entry exists, even when a later payment
+        // prompt has parked the PendingCast between cost components.
+        collection.collect(state, &cost_events);
+        state.restore_pending_activation_trigger_collection(collection);
+    } else {
         crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
     }
 }
@@ -2153,6 +2164,7 @@ pub(crate) fn resume_interrupted_cost_payment(
             }
         }
         if pending.activation_ability_index.is_some() {
+            pending.mark_activation_cost_committed();
             pending.activation_cost = pending
                 .activation_cost
                 .take()
@@ -2680,13 +2692,19 @@ fn finish_sacrifice_for_cost(
     if matches!(completion, PendingSacrificeCostCompletion::SelectedNonSelf)
         && pending.activation_ability_index.is_some()
     {
+        pending.mark_activation_cost_committed();
         pending.activation_cost = pending
             .activation_cost
             .take()
             .and_then(super::casting::remove_selected_non_self_sacrifice_cost);
     }
 
-    finish_pending_cost_or_cast(state, player, pending, events)
+    let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
+    // CR 602.2b + CR 603.3b: The replacement-resumed sacrifice can itself
+    // reach a later payment prompt. Park this action's final event fragment in
+    // the same activation-local transaction as the earlier fragments.
+    park_cost_payment_triggers_if_paused(state, events, current_start, events.len(), &waiting_for);
+    Ok(waiting_for)
 }
 
 /// CR 601.2h + CR 602.2b + CR 616.1: Continue the exact unpaid suffix of a
@@ -2945,6 +2963,7 @@ pub(crate) fn handle_sacrifice_for_cost(
     );
 
     if pending.activation_ability_index.is_some() {
+        pending.mark_activation_cost_committed();
         pending.activation_cost = pending
             .activation_cost
             .take()
@@ -3046,6 +3065,7 @@ pub(crate) fn handle_unattach_for_cost(
             });
         }
     }
+    pending.mark_activation_cost_committed();
 
     // CR 601.2h: This handler paid exactly one interactive `UnattachFrom` leg.
     // Keep only the unpaid suffix so a later mana-leg root cannot replay the
@@ -3181,6 +3201,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
                 .is_some_and(|obj| obj.zone != Zone::Hand)
         })
         .collect();
+    pending.mark_activation_cost_committed();
     finish_cost_object_moves(
         state,
         player,
@@ -3287,6 +3308,8 @@ pub(crate) fn handle_remove_counter_for_cost(
                 lki: obj.1.snapshot_for_mana_spent(),
             });
     }
+
+    pending.mark_activation_cost_committed();
 
     if let Some(ability_index) = pending.activation_ability_index {
         if let Some(cost) = pending.activation_cost.take() {
@@ -3461,6 +3484,8 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
         }
     }
 
+    pending.mark_activation_cost_committed();
+
     if let Some(ability_index) = pending.activation_ability_index {
         if let Some(cost) = pending.activation_cost.take() {
             // CR 601.2h + CR 602.2b: The assigned counter payment is complete
@@ -3554,6 +3579,8 @@ pub(crate) fn handle_blight_choice(
         state.pending_cast = Some(Box::new(pending));
         return Ok(state.waiting_for.clone());
     }
+
+    pending.mark_activation_cost_committed();
 
     finish_pending_cost_or_cast(state, player, pending, events)
 }
@@ -4008,6 +4035,7 @@ fn finish_exile_selection_for_cost(
     pending.ability.add_cost_paid_object_ids_recursive(chosen);
 
     if pending.activation_ability_index.is_some() {
+        pending.mark_activation_cost_committed();
         pending.activation_cost = pending
             .activation_cost
             .take()
@@ -12969,6 +12997,7 @@ mod tests {
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
         }
@@ -18245,6 +18274,7 @@ mod tests {
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
         };
@@ -18381,6 +18411,7 @@ mod tests {
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
         };
@@ -18486,6 +18517,7 @@ mod tests {
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
         };
@@ -18580,6 +18612,7 @@ mod tests {
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
         };
@@ -18707,6 +18740,7 @@ mod tests {
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
         };
