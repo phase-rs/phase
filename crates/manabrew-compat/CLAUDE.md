@@ -4,7 +4,7 @@ This guide is the **first thing any agent working on `crates/manabrew-compat/` s
 
 ## What this crate does
 
-Translates between phase's engine types and the **ManaBrew wire protocol** (external MTG engine↔client JSON protocol, currently 2.0.0). It is a bidirectional adapter:
+Translates between phase's engine types and the **ManaBrew wire protocol** (external MTG engine↔client JSON protocol, currently 3.0.0). It is a bidirectional adapter:
 
 - **Outbound:** `WaitingFor` (engine decision point) → `PromptInput` (protocol prompt), plus `GameAction` → `AvailableActionKind`.
 - **Inbound:** `PromptOutput` (client answer) → `GameAction`.
@@ -57,7 +57,7 @@ rg -o '"(local|upstream)\.[a-z0-9-]+"' crates/manabrew-compat/src/lib.rs | sort 
 
 Compare emitted codes against declared entries. Divergence is a defect, not a backlog item.
 
-The registry is now **exhaustive** over emitted codes (83 declared; 69 emitted at live call sites, plus 14 documentary entries that describe a gap without a code path). `no_emitted_capability_code_is_undeclared` scans the production half of `lib.rs` and fails on any new undeclared code, so this no longer needs a manual audit — but re-run the command above if you doubt the test.
+The registry is now **exhaustive** over emitted codes (87 declared; 70 emitted at live call sites, plus 17 documentary entries that describe a gap or deliberate divergence without a code path). `local.serum-powder-mulligan-vendor-extension` is the intentional paired-client extension: `MulliganOutput::MulliganUseSerumPowder { card_id }` and `MulliganPutBackInput::excluded_card_id`. It replaces the former upstream-gap entry one-for-one, so the 87 / 70 / 17 totals remain correct. `no_emitted_capability_code_is_undeclared` scans the production half of `lib.rs` and fails on any new undeclared code, so this no longer needs a manual audit — but re-run the command above if you doubt the test.
 
 ### 4. A mapping claim must be exhibited by a test, not asserted in prose.
 
