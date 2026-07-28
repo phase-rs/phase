@@ -730,7 +730,7 @@ checksum = "780955b8b195a21ab8e4ac6b60dd1dbdcec1dc6c51c0617964b08c81785e12c9"
 name = "draft-core"
 version = "0.40.0"
 dependencies = [
- "engine",
+ "phase-engine",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "serde",
@@ -744,10 +744,10 @@ version = "0.40.0"
 dependencies = [
  "console_error_panic_hook",
  "draft-core",
- "engine",
  "getrandom 0.3.4",
  "js-sys",
  "phase-ai",
+ "phase-engine",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "serde",
@@ -811,37 +811,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine"
-version = "0.40.0"
-dependencies = [
- "assert_matches",
- "engine",
- "flate2",
- "im",
- "indexmap 2.14.0",
- "insta",
- "nom",
- "petgraph",
- "pretty_assertions",
- "proptest",
- "rand 0.9.4",
- "rand_chacha 0.9.0",
- "rustc-hash",
- "serde",
- "serde_json",
- "sha2",
- "smallvec",
- "strum",
- "tempfile",
- "thiserror 2.0.18",
- "toml",
- "tracing",
- "tracing-subscriber",
- "ts-rs",
- "web-time",
-]
-
-[[package]]
 name = "engine-inventory-gen"
 version = "0.40.0"
 dependencies = [
@@ -859,10 +828,10 @@ name = "engine-wasm"
 version = "0.40.0"
 dependencies = [
  "console_error_panic_hook",
- "engine",
  "getrandom 0.3.4",
  "js-sys",
  "phase-ai",
+ "phase-engine",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "seat-reducer",
@@ -1707,7 +1676,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 name = "lobby-broker"
 version = "0.40.0"
 dependencies = [
- "engine",
+ "phase-engine",
  "serde",
  "serde_json",
  "tracing",
@@ -1744,7 +1713,7 @@ checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 name = "manabrew-compat"
 version = "0.40.0"
 dependencies = [
- "engine",
+ "phase-engine",
  "pretty_assertions",
  "serde",
  "serde_json",
@@ -1840,7 +1809,7 @@ name = "mtgish-import"
 version = "0.40.0"
 dependencies = [
  "anyhow",
- "engine",
+ "phase-engine",
  "serde",
  "serde_json",
  "serde_with",
@@ -2067,7 +2036,7 @@ dependencies = [
 name = "phase-ai"
 version = "0.40.0"
 dependencies = [
- "engine",
+ "phase-engine",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "rayon",
@@ -2079,19 +2048,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "phase-engine"
+version = "0.40.0"
+dependencies = [
+ "assert_matches",
+ "flate2",
+ "im",
+ "indexmap 2.14.0",
+ "insta",
+ "nom",
+ "petgraph",
+ "phase-engine",
+ "pretty_assertions",
+ "proptest",
+ "rand 0.9.4",
+ "rand_chacha 0.9.0",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallvec",
+ "strum",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "ts-rs",
+ "web-time",
+]
+
+[[package]]
 name = "phase-server"
 version = "0.40.0"
 dependencies = [
  "axum",
  "clap",
  "draft-core",
- "engine",
  "futures-util",
  "http",
  "lobby-broker",
  "minisign-verify",
  "ngrok",
  "phase-ai",
+ "phase-engine",
  "rand 0.9.4",
  "reqwest",
  "rusqlite",
@@ -2802,8 +2802,8 @@ dependencies = [
 name = "seat-reducer"
 version = "0.40.0"
 dependencies = [
- "engine",
  "phase-ai",
+ "phase-engine",
  "serde",
  "serde_json",
 ]
@@ -2992,9 +2992,9 @@ name = "server-core"
 version = "0.40.0"
 dependencies = [
  "draft-core",
- "engine",
  "lobby-broker",
  "phase-ai",
+ "phase-engine",
  "proptest",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
