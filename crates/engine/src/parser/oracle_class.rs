@@ -16,7 +16,7 @@ use super::oracle_classifier::{
     is_effect_sentence_candidate, is_granted_static_line, is_replacement_pattern, is_static_pattern,
 };
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_effect::{lower_ability_ir, parse_effect_chain};
+use super::oracle_effect::{lower_ability_ir, parse_ability_ir_standalone, parse_effect_chain};
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::effect_chain::{
@@ -330,10 +330,25 @@ pub(crate) fn parse_class_oracle_text(
             }
 
             // Effect/spell-like lines (e.g., "You may play an additional land...")
+            //
+            // Mode-preserving hoist (Plan 05b U0-61): `parse_effect_chain(t, k)`
+            // **is** `lower_ability_ir(&parse_ability_ir_standalone(t, k))` —
+            // that is the function's body, not a claim about it
+            // (`oracle_effect/mod.rs`). So splitting it into its two halves
+            // moves *where* the lowering happens without changing *what* it
+            // produces: the node now carries the IR, and `lower_oracle_ir`
+            // performs the same `lower_ability_ir` this line used to.
+            //
+            // The gate keeps reading a LOWERED definition, as at U0-12 and
+            // U0-39: whether to emit is control flow, and `has_unimplemented`
+            // is defined over an `AbilityDefinition`, so the predicate must see
+            // the definition this site will actually emit. A second
+            // `has_unimplemented` over `EffectChainIr` would be a rival
+            // authority free to diverge from this one.
             if is_effect_sentence_candidate(&lower) {
-                let def = parse_effect_chain(line, AbilityKind::Spell);
-                if !has_unimplemented(&def) {
-                    items.push((line_index, OracleNodeIr::PreLoweredSpell(def)));
+                let ir = parse_ability_ir_standalone(line, AbilityKind::Spell);
+                if !has_unimplemented(&lower_ability_ir(&ir)) {
+                    items.push((line_index, OracleNodeIr::Spell(ir)));
                     continue;
                 }
             }
