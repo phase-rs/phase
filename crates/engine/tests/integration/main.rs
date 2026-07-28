@@ -796,6 +796,7 @@ mod purged_source_matches_filter_lki;
 mod quirion_ranger_activation;
 mod rage_reflection_double_strike_grant;
 mod refurbished_familiar;
+mod relic_of_progenitus_6446;
 mod render_silent_cant_cast;
 mod repro_pilot_crew;
 mod revealed_card_type_disjunction_518;

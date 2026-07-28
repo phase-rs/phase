@@ -19506,55 +19506,50 @@ fn lower_subject_predicate_ast(
                     clause.effect,
                     Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
                 ) {
-                    // CR 115.1a + CR 702.21a (issue #6505): distinguish a
-                    // battlefield-wide, NON-targeted resolution pick ("target
-                    // opponent exiles a creature they control", Strategic
-                    // Betrayal) from an off-battlefield or explicitly-targeted
-                    // moved-object leg. Mirror `target_choice_timing_for_clause`
-                    // in lower.rs: a battlefield-selecting ChangeZone with no
-                    // "target " token has its object CHOSEN at resolution, so it
-                    // never becomes a target and Ward on the opponent's own
-                    // creature never fires.
-                    let creature_leg_is_resolution_pick = match &clause.effect {
+                    // CR 115.1c + CR 115.10a + CR 608.2d (issues #6505 / #6446):
+                    // reuse `change_zone_target_choice_timing` so battlefield
+                    // non-"target " picks (Strategic Betrayal) AND off-battlefield
+                    // non-"target " picks (Relic of Progenitus — "exiles a card
+                    // from their graveyard") stamp Resolution. Explicit
+                    // "target cards …" legs (Memory's Journey) stay Stack.
+                    // Scan `pred_lower` only — never the subject "Target player …"
+                    // prefix, which would false-positive the `"target "` gate.
+                    let moved_object_is_resolution_pick = match &clause.effect {
                         Effect::ChangeZone { origin, target, .. }
                         | Effect::ChangeZoneAll { origin, target, .. } => {
-                            lower::change_zone_selects_battlefield_permanent(*origin, target)
-                                && !scan_contains_phrase(&pred_lower, "target ")
+                            lower::change_zone_target_choice_timing(
+                                *origin,
+                                target,
+                                clause.multi_target.is_some(),
+                                &pred_lower,
+                            ) == crate::types::ability::TargetChoiceTiming::Resolution
                         }
                         _ => false,
                     };
-                    // CR 109.4 (issue #1077): "target player exiles a card
-                    // from their graveyard" (Relic of Progenitus, Scrabbling
-                    // Claws, Merrow Bonegnawer, Graveyard Shovel, Grave
-                    // Birthing, Gravestorm) and "target player[s] ... their
-                    // [zone]" (Memory's Journey, above). The moved-object
-                    // filter's possessive "their" parses as
-                    // `Owned { controller: ScopedPlayer }` because the
-                    // zone-suffix parser is scope-agnostic. An off-battlefield
-                    // or targeted leg selects its object on the STACK — before
-                    // the resolution-time `scoped_player` stamp lands — so the
-                    // filter must be rebound to the real declared target now, or
-                    // it stays scoped to the activator instead of the targeted
-                    // player. A battlefield resolution pick (issue #6505) is
-                    // instead bound to the scoped player at resolution, so its
-                    // acting/choosing player is the target opponent, not the
-                    // caster (CR 115.10a — being affected is not choosing).
+                    // CR 115.1c / CR 115.10a / CR 608.2d (issue #6446): Relic-class
+                    // resolution picks keep `Owned{ScopedPlayer}` so the existing
+                    // stack::resolve_top scoped-player stamp binds the chooser to
+                    // the targeted player at resolution (via EffectZoneChoice).
+                    // Stack-timed legs (Memory's Journey — "target cards from
+                    // their graveyard") still rebind to `Owned{TargetPlayer}` so
+                    // the activator announces the cards as stack targets.
+                    // Without Resolution + ScopedPlayer, Relic built THREE stack
+                    // slots: TargetOnly player + companion TargetPlayer slot +
+                    // Stack ChangeZone card slot.
                     //
-                    // CR 109.4 + CR 115.10a (issue #6505, review follow-up): the
-                    // battlefield resolution-pick leg's anaphoric "they control"
-                    // lowered to the default `ControllerRef::You`
+                    // CR 115.10a (issue #6505, review follow-up): the battlefield
+                    // resolution-pick leg's anaphoric "they control" lowered to
+                    // the default `ControllerRef::You`
                     // (oracle_target::parse_controller_suffix, no scope pinned),
                     // so rewrite ONLY this moved-object leg's `You` scope to
-                    // `ScopedPlayer` here — the narrow, targeted replacement for
-                    // the removed whole-clause parse-time pin. The runtime
-                    // `scoped_player` stamp (stack::resolve_top) then binds the
-                    // chooser to the target player. Gated on the "they control"
-                    // anaphor so a "you control" caster leg (also `You`) is never
-                    // mis-rebound; the "their graveyard" leg is already
-                    // `Owned{ScopedPlayer}` (scope-agnostic) and needs no rewrite.
-                    let creature_leg_is_they_control_pick = creature_leg_is_resolution_pick
+                    // `ScopedPlayer` here. The runtime `scoped_player` stamp then
+                    // binds the chooser to the target player. Gated on the "they
+                    // control" anaphor so a "you control" caster leg (also `You`)
+                    // is never mis-rebound; Relic's "their graveyard" leg is
+                    // already `Owned{ScopedPlayer}` and needs no rewrite.
+                    let moved_object_is_they_control_pick = moved_object_is_resolution_pick
                         && scan_contains_phrase(&pred_lower, "they control");
-                    if creature_leg_is_they_control_pick {
+                    if moved_object_is_they_control_pick {
                         match &mut clause.effect {
                             Effect::ChangeZone { target, .. }
                             | Effect::ChangeZoneAll { target, .. } => {
@@ -19566,7 +19561,7 @@ fn lower_subject_predicate_ast(
                             }
                             _ => {}
                         }
-                    } else if !creature_leg_is_resolution_pick {
+                    } else if !moved_object_is_resolution_pick {
                         match &mut clause.effect {
                             Effect::ChangeZone { target, .. }
                             | Effect::ChangeZoneAll { target, .. } => {
@@ -19585,13 +19580,13 @@ fn lower_subject_predicate_ast(
                     // wrapper. Carry it onto the sub-ability so the cast
                     // surfaces N card slots.
                     sub_ability.multi_target = clause.multi_target;
-                    // CR 115.1a + CR 702.21a (issue #6505): a battlefield
-                    // resolution pick is chosen at resolution and never becomes a
-                    // target — stamp Resolution timing (the default is Stack) so
-                    // no BecomesTarget event fires and Ward on the chosen creature
-                    // stays silent. Off-battlefield/targeted legs keep the Stack
-                    // default so their stack-time selection is unchanged.
-                    if creature_leg_is_resolution_pick {
+                    // CR 115.1c + CR 115.10a + CR 608.2d (issues #6505 / #6446):
+                    // Resolution picks are chosen while applying the effect and
+                    // never become targets — stamp Resolution (default is Stack)
+                    // so companion TargetPlayer slots and card object slots are
+                    // deferred, and Ward never fires on a BF resolution pick.
+                    // Stack-timed "target cards …" legs keep the Stack default.
+                    if moved_object_is_resolution_pick {
                         sub_ability.target_choice_timing =
                             crate::types::ability::TargetChoiceTiming::Resolution;
                     }
@@ -20799,22 +20794,16 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // filter (mirroring the `Sacrifice` arm) so the card is taken from, and
         // the choice presented to, the acting (per-iteration) player.
         //
-        // CR 109.4 + CR 608.2c (issue #1077): "target player exiles a card
-        // from their graveyard" (Relic of Progenitus, Scrabbling Claws, Merrow
-        // Bonegnawer, Graveyard Shovel, Grave Birthing, Gravestorm). The
-        // possessive "their" in the predicate parses as `FilterProp::Owned {
-        // controller: ScopedPlayer }` because the zone-suffix parser is
-        // scope-agnostic (see `rebind_owned_scope`'s doc comment above). For a
-        // genuinely *targeted* subject that stale `ScopedPlayer` property
-        // survives `force_controller` untouched (it only rewrites
-        // `tf.controller`, not nested `properties`), leaving two contradictory
-        // ownership constraints — `controller: TargetPlayer` vs. `Owned:
-        // ScopedPlayer` (which falls back to the activator) — so the filter is
-        // only ever satisfiable when the activator targets themself. Rebind
-        // the nested `ScopedPlayer` refs the same way the `Bounce`/Skullwinder
-        // call site already does; this is a no-op when `effective_ctrl` is
-        // itself `ScopedPlayer` (the untargeted "each player"/Braids case),
-        // so that already-correct path is unaffected.
+        // CR 608.2c (issue #1077 / #6446): Stack-timed player-subject ChangeZones
+        // that reach this inject (not early-returned by the TargetOnly wrap) may
+        // still carry a stale `Owned{ScopedPlayer}` from the scope-agnostic
+        // zone-suffix parser. Rebind nested `ScopedPlayer` refs when the subject
+        // is a genuine stack target (`subject.target.is_some()` → TargetPlayer).
+        // Relic-class resolution picks ("exiles a card from their graveyard"
+        // without the word "target" on the card) are owned by the TargetOnly wrap
+        // — they keep `Owned{ScopedPlayer}` + Resolution timing and never reach
+        // this inject. This rebind is a no-op when `effective_ctrl` is itself
+        // `ScopedPlayer` (the untargeted "each player"/Braids case).
         Effect::ChangeZone { target, .. }
             if player_filter_as_controller_ref(&subject_filter).is_some() =>
         {

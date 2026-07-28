@@ -7730,18 +7730,15 @@ fn suffer_the_past_exiles_from_target_player_graveyard() {
 
 #[test]
 fn relic_of_progenitus_target_player_exiles_from_their_graveyard() {
-    // GitHub phase-rs/phase#1077: "target player [verb]s ... from their
-    // [zone]" is a different grammatical shape than Suffer the Past's direct
-    // "target player's graveyard" possessive above — here "target player" is
-    // an explicit target declaration, so the ability lowers to a
-    // `TargetOnly { target: Player }` wrapper around a `sub_ability` holding
-    // the actual `ChangeZone` (mirrors Memory's Journey's "shuffles ... from
-    // their graveyard" wrapping just above in `lower_subject_predicate_ast`).
-    // The zone-suffix parser treats "their" as scope-agnostic
-    // (`Owned { controller: ScopedPlayer }`); this test pins that the
-    // rebind at that wrapping site resolves it to the actual targeted
-    // player, not the activator. Same class also covers Scrabbling Claws,
-    // Merrow Bonegnawer, Graveyard Shovel, Grave Birthing, and Gravestorm.
+    // GitHub phase-rs/phase#6446 (supersedes #1077 Stack+TargetPlayer framing):
+    // "Target player exiles a card from their graveyard." The ability targets
+    // ONLY the player (CR 115.1c). The card is an untargeted resolution choice
+    // by that player (CR 115.10a + CR 608.2d) — `Owned{ScopedPlayer}` +
+    // `TargetChoiceTiming::Resolution` — so companion TargetPlayer and card
+    // object stack slots do not appear (exactly one target slot).
+    // Same class: Scrabbling Claws, Merrow Bonegnawer, Graveyard Shovel,
+    // Grave Birthing, Gravestorm. Contrast Memory's Journey ("target cards
+    // from their graveyard") which stays Stack + Owned{TargetPlayer}.
     let def = parse_effect_chain(
         "Target player exiles a card from their graveyard.",
         AbilityKind::Activated,
@@ -7761,6 +7758,11 @@ fn relic_of_progenitus_target_player_exiles_from_their_graveyard() {
         .sub_ability
         .as_ref()
         .expect("exile effect should be in sub-ability after the player target");
+    assert_eq!(
+        sub.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "GY card is chosen at resolution, not announced as a stack target"
+    );
     let Effect::ChangeZone {
         origin,
         destination,
@@ -7790,15 +7792,31 @@ fn relic_of_progenitus_target_player_exiles_from_their_graveyard() {
     );
     assert!(
         typed.properties.contains(&FilterProp::Owned {
-            controller: ControllerRef::TargetPlayer
+            controller: ControllerRef::ScopedPlayer
         }),
-        "target must be constrained to the TARGETED player's graveyard, not the activator's — got {typed:?}"
+        "must keep ScopedPlayer so the targeted player chooses at resolution — got {typed:?}"
     );
     assert!(
         !typed.properties.contains(&FilterProp::Owned {
-            controller: ControllerRef::ScopedPlayer
+            controller: ControllerRef::TargetPlayer
         }),
-        "must not retain the stale scope-agnostic ScopedPlayer binding, got {typed:?}"
+        "must not rebind to TargetPlayer (that forced activator stack targeting) — got {typed:?}"
+    );
+
+    // Exactly one stack slot (the player). Revert Resolution stamp or
+    // TargetPlayer rebind → companion + card slots → len 2 or 3.
+    let state = crate::types::game_state::GameState::new_two_player(42);
+    let resolved = crate::game::ability_utils::build_resolved_from_def(
+        &def,
+        crate::types::identifiers::ObjectId(1),
+        crate::types::player::PlayerId(0),
+    );
+    let slots = crate::game::ability_utils::build_target_slots(&state, &resolved)
+        .expect("Relic first ability must build target slots");
+    assert_eq!(
+        slots.len(),
+        1,
+        "exactly one stack target (the player); got {slots:?}"
     );
 }
 
