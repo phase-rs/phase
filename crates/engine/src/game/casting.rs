@@ -17142,8 +17142,8 @@ pub fn handle_activate_ability(
     // before any branch path that pushes this ability onto the stack.
     resolved.ability_index = Some(ability_index);
 
-    // CR 118.3: Pre-check for non-self sacrifice costs — must detour to WaitingFor
-    // before any cost payment, regardless of whether targets were auto-selected.
+    // CR 602.2b + CR 601.2b-i: announcement-only choices are resolved before
+    // entering the shared target-before-cost boundary below.
     if let Some(ref cost) = activation_cost {
         // CR 606.3: `can_activate_ability_now` gates legal-action generation,
         // but direct `GameAction::ActivateAbility` submissions must be rejected
@@ -17261,31 +17261,6 @@ pub fn handle_activate_ability(
                 state.pending_cast = Some(Box::new(pending_leg));
                 return casting_costs::enter_payment_step(state, player, None, events);
             }
-        }
-
-        if let Some((count, sac_filter)) = find_non_self_sacrifice_cost(cost) {
-            let eligible = find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
-            let (min_count, max_count) = sacrifice_cost_bounds(count, eligible.len());
-            if eligible.len() < min_count {
-                return Err(EngineError::ActionNotAllowed(
-                    "Not enough eligible permanents to sacrifice".into(),
-                ));
-            }
-            let mut pending_sac =
-                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-            pending_sac.activation_cost = Some(cost.clone());
-            pending_sac.activation_ability_index = Some(ability_index);
-            pending_sac.deferred_target_selection = true;
-            return Ok(WaitingFor::PayCost {
-                player,
-                kind: PayCostKind::Sacrifice,
-                choices: eligible,
-                count: max_count,
-                min_count,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending_sac),
-                },
-            });
         }
 
         // CR 601.2h + CR 701.9a: A resolved zero-card FromHand discard leg (e.g. Bomat
@@ -17763,12 +17738,6 @@ pub fn handle_activate_ability(
             return Ok(WaitingFor::Priority { player });
         }
 
-        let selection = begin_target_selection_for_ability(
-            state,
-            &resolved,
-            &target_slots,
-            &target_constraints,
-        )?;
         let mut pending_target = PendingCast::new(
             source_id,
             CardId(0),
@@ -17783,13 +17752,13 @@ pub fn handle_activate_ability(
         // America's Throw) reaches the `DistributeAmong` step after its costs are
         // paid. Mirrors the spell target-selection path (`pending_targets.distribute`).
         pending_target.distribute = ability_def.distribute.clone();
-        return Ok(WaitingFor::TargetSelection {
+        return super::casting_targets::begin_activated_target_selection(
+            state,
             player,
-            pending_cast: Box::new(pending_target),
+            pending_target,
             target_slots,
-            mode_labels: Vec::new(),
-            selection,
-        });
+            Vec::new(),
+        );
     }
 
     if let Some(ref cost) = ability_def.cost {

@@ -4,7 +4,8 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActivationTargetSelection, CostResume, GameState, PayCostKind, PendingCast, WaitingFor,
+    ActivationTargetSelection, CostResume, GameState, PayCostKind, PendingCast,
+    TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -26,6 +27,39 @@ use super::casting_costs::{
 };
 use super::engine::EngineError;
 use super::restrictions;
+
+/// Creates the sole interactive target-declaration boundary for an activated
+/// ability after its announcement-only choices have settled.
+///
+/// CR 602.2b + CR 601.2b-c: Modes and X are announced before targets, and
+/// costs are paid only after the target declaration has completed. Keeping the
+/// prompt construction here prevents cost-specific activation detours from
+/// accidentally moving ahead of target selection.
+pub(crate) fn begin_activated_target_selection(
+    state: &GameState,
+    player: PlayerId,
+    pending_cast: PendingCast,
+    target_slots: Vec<TargetSelectionSlot>,
+    mode_labels: Vec<Option<String>>,
+) -> Result<WaitingFor, EngineError> {
+    let selection = begin_target_selection_for_ability(
+        state,
+        &pending_cast.ability,
+        &target_slots,
+        &pending_cast.target_constraints,
+    )?;
+    let initial_player = target_slots
+        .first()
+        .and_then(|slot| slot.chooser)
+        .unwrap_or(player);
+    Ok(WaitingFor::TargetSelection {
+        player: initial_player,
+        pending_cast: Box::new(pending_cast),
+        target_slots,
+        mode_labels,
+        selection,
+    })
+}
 
 /// Handle mode selection for a modal spell.
 ///
