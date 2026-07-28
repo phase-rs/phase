@@ -355,7 +355,7 @@ impl TriggerCollectionOverlay {
 /// owned operations makes their ordering explicit and gives a future
 /// activation-local collector a single seam at which to retain or discard them.
 /// The ordinary collector applies every operation immediately.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum TriggerCollectionOperation {
     PrepareEventBatch {
         events: Vec<GameEvent>,
@@ -596,7 +596,7 @@ impl TriggerCollectionSession {
 /// event slice. Dropping it is cancellation: neither operations nor contexts
 /// escape to the live game.
 #[cfg_attr(not(test), allow(dead_code))] // Casting owns this session in the next activation step.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PendingActivationTriggerCollection {
     overlay: TriggerCollectionOverlay,
     operation_journal: Vec<TriggerCollectionOperation>,

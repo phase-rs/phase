@@ -38,10 +38,11 @@ use super::restrictions;
 pub(crate) fn begin_activated_target_selection(
     state: &GameState,
     player: PlayerId,
-    pending_cast: PendingCast,
+    mut pending_cast: PendingCast,
     target_slots: Vec<TargetSelectionSlot>,
     mode_labels: Vec<Option<String>>,
 ) -> Result<WaitingFor, EngineError> {
+    pending_cast.begin_activation_trigger_collection();
     let selection = begin_target_selection_for_ability(
         state,
         &pending_cast.ability,

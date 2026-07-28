@@ -5590,6 +5590,16 @@ pub struct PendingCast {
     /// `Unlimited` grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_cost_grant_source: Option<ObjectId>,
+    /// CR 602.2a-b + CR 603.2: Trigger consequences from a target-bearing
+    /// activation are collected while its targets and costs are announced, but
+    /// become globally visible only when the ability reaches the stack.
+    ///
+    /// The carrier is durable across interactive cost prompts and is redacted
+    /// from every per-viewer state projection; its journal is engine-private
+    /// implementation state, not public pending-cast information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) activation_trigger_collection:
+        Option<Box<crate::game::triggers::PendingActivationTriggerCollection>>,
 }
 
 fn default_origin_zone() -> Zone {
@@ -5984,12 +5994,30 @@ impl PendingCast {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             alt_cost_grant_source: None,
+            activation_trigger_collection: None,
         }
     }
 
     pub fn with_payment_mode(mut self, payment_mode: CastPaymentMode) -> Self {
         self.payment_mode = payment_mode;
         self
+    }
+
+    /// Starts the trigger transaction for an announced, target-bearing
+    /// activated ability.
+    ///
+    /// CR 602.2a-b + CR 603.2: Target declaration can make triggers fire
+    /// before costs are paid, while the activated ability does not exist on
+    /// the physical stack until the announcement completes.
+    pub(crate) fn begin_activation_trigger_collection(&mut self) {
+        if self.activation_trigger_collection.is_none() {
+            self.activation_trigger_collection = Some(Box::new(
+                crate::game::triggers::PendingActivationTriggerCollection::for_activated_ability(
+                    self.object_id,
+                    self.ability.controller,
+                ),
+            ));
+        }
     }
 }
 
@@ -21239,6 +21267,7 @@ mod tests {
                 activation_residual: ActivationResidual::None,
                 activation_target_selection: ActivationTargetSelection::Pending,
                 alt_cost_grant_source: None,
+                activation_trigger_collection: None,
             })
         }
 
@@ -21648,6 +21677,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             alt_cost_grant_source: None,
+            activation_trigger_collection: None,
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),
