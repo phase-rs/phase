@@ -1631,14 +1631,15 @@ pub(super) fn change_zone_selects_battlefield_permanent(
     matches!(target, TargetFilter::Typed(_))
 }
 
-/// CR 115.10a + CR 608.2d: shared ChangeZone / ChangeZoneAll stack-vs-resolution
-/// classifier. `fragment_lower` must be the moved-object clause / predicate only
-/// — never a subject prefix like "Target player …", which would false-positive
-/// the `"target "` scan and force Stack.
+/// CR 115.10a + CR 608.2d: shared ChangeZone stack-vs-resolution classifier.
+/// `fragment_lower` must be the moved-object clause / predicate only — never a
+/// subject prefix like "Target player …", which would false-positive the
+/// `"target "` scan and force Stack.
 ///
-/// Single authority for both `target_choice_timing_for_clause` and the
-/// `"target player" + ChangeZone` TargetOnly wrap (Strategic Betrayal #6505,
-/// Relic of Progenitus #6446).
+/// Used by `target_choice_timing_for_clause` (`ChangeZone` only — mass
+/// `ChangeZoneAll` keeps the historical Stack default there) and by the
+/// `"target player" + ChangeZone/ChangeZoneAll` TargetOnly wrap (Strategic
+/// Betrayal #6505, Relic of Progenitus #6446).
 pub(super) fn change_zone_target_choice_timing(
     origin: Option<Zone>,
     target: &TargetFilter,
@@ -1743,10 +1744,12 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
         }
     }
 
-    let (origin, target) = match &clause_ir.parsed.effect {
-        Effect::ChangeZone { origin, target, .. }
-        | Effect::ChangeZoneAll { origin, target, .. } => (*origin, target),
-        _ => return TargetChoiceTiming::Stack,
+    // Mass `ChangeZoneAll` stays Stack here (pre-#6446). The TargetOnly wrap
+    // may still stamp Resolution on ChangeZoneAll resolution-picks via the
+    // shared helper; clause-IR timing must not silently reclassify every
+    // off-BF mass move (Bomat Courier / Jace −12 snapshot regressions).
+    let Effect::ChangeZone { origin, target, .. } = &clause_ir.parsed.effect else {
+        return TargetChoiceTiming::Stack;
     };
     let lower = clause_ir
         .source
@@ -1755,7 +1758,7 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
         .to_ascii_lowercase();
     let has_multi_target =
         clause_ir.multi_target.is_some() || clause_ir.parsed.multi_target.is_some();
-    change_zone_target_choice_timing(origin, target, has_multi_target, &lower)
+    change_zone_target_choice_timing(*origin, target, has_multi_target, &lower)
 }
 
 /// CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
