@@ -29,7 +29,7 @@ use engine::types::game_state::{
 use engine::types::interaction::{
     InteractionChoice, InteractionOpportunity, InteractionOpportunityResponse,
     InteractionPresentationSurface, InteractionResponse, InteractionResponseSpec,
-    InteractionSubmission, SelectionConstraint, ViewerInteraction,
+    InteractionRoleCode, InteractionSubmission, SelectionConstraint, ViewerInteraction,
 };
 use engine::types::mana::{ManaColor as EngineManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
@@ -1359,7 +1359,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 82] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 83] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1405,8 +1405,14 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 82] = [
     UnsupportedCapability {
         code: "local.prompt-family-display-acks-unsupported",
         area: "prompts",
-        reason: "Corrected: the previous text claimed Phase has no matching WaitingFor for RevealCards. It does — WaitingFor::RevealChoice { cards, filter, optional, decline_runs_continuation } (game_state.rs). The mismatch is the response payload, not the state's existence. RevealChoice is answered by GameAction::SelectCards { cards }: a normal reveal picks exactly one card, and under `optional` an EMPTY selection is not a no-op but an explicit decline that runs the source's decline branch (CR 701.20a). RevealCardsOutput has exactly one variant, RevealCardsAcknowledged, a bare ack with no card payload — so routing RevealChoice through RevealCards would submit an empty selection every time, silently declining every optional reveal and submitting an illegal count for every mandatory one. The correct home is ChooseCards (min 0 when optional else 1, max 1); that mapping is unwritten, so RevealChoice currently falls to local.prompt-unsupported. DiceRolled is a separate case and is genuinely unreachable: none of the 127 WaitingFor variants reports a die roll, and game/effects/roll_die.rs sets no waiting_for at all — die results are applied inline, so there is no decision point to acknowledge.",
-        suggested_protocol_extension: "None needed upstream for reveals — ChooseCards already fits, and closing it is adapter work. For DiceRolled, treat it as a display event with audience and sequencing metadata rather than a prompt, since no engine pause backs it.",
+        reason: "Corrected: the previous text claimed Phase has no matching WaitingFor for RevealCards. It does — WaitingFor::RevealChoice { cards, filter, optional, decline_runs_continuation } (game_state.rs). The mismatch is the response payload, not the state's existence. RevealChoice is answered by GameAction::SelectCards { cards }: a normal reveal picks exactly one card, and under `optional` an EMPTY selection is not a no-op but an explicit decline that runs the source's decline branch (CR 701.20a). RevealCardsOutput has exactly one variant, RevealCardsAcknowledged, a bare ack with no card payload — so routing RevealChoice through RevealCards would submit an empty selection every time, silently declining every optional reveal and submitting an illegal count for every mandatory one. Re-verified: this is a FIDELITY gap, not a coverage one. RevealChoice does NOT fall to local.prompt-unsupported — it classifies as HumanResponseModel::ExactCandidates (interaction.rs), so the generic projection serves it as ChooseFromSelection: one labelled option per revealable card at min/max 1, plus a third option carrying the empty decline when `optional`, each resolving back to the SelectCards above. What is lost is presentation — every card reaches the client as its name, where ChooseCards would carry the card itself. The card family is unreachable from here because only a Select schema is reclassified as cards (card_selection_candidates) and a one-of list is not one. Both halves are exhibited by a_mandatory_reveal_renders_as_a_selection_and_answers_with_the_chosen_card and an_optional_reveal_offers_the_decline_as_an_empty_selection rather than asserted here. DiceRolled is a separate case and is genuinely unreachable: none of the 127 WaitingFor variants reports a die roll, and game/effects/roll_die.rs sets no waiting_for at all — die results are applied inline, so there is no decision point to acknowledge.",
+        suggested_protocol_extension: "None needed upstream for reveals — the prompt is already answerable, and raising it from labels to cards is local work: either a bespoke ChooseCards arm here (as DiscardChoice has, with its matching gate entry) or an engine projection that classifies the reveal as a card selection. For DiceRolled, treat it as a display event with audience and sequencing metadata rather than a prompt, since no engine pause backs it.",
+    },
+    UnsupportedCapability {
+        code: "local.targeting-intent-unsourceable",
+        area: "prompts",
+        reason: "Fidelity, not coverage: target prompts are fully answerable, but ChooseBoardTargetsInput.intent is a placeholder rather than a computed value, so a client must not read it. The field is required (no serde default) and all 25 TargetingIntent variants are effect semantics — Damage, Destroy, Sacrifice, Exile, Bounce, Mill, Discard, Counter, Tap, Untap, Copy, Buff, Debuff, Heal, LoseLife, Reveal, Draw, Fetch, GainControl, Fight, Attach, Attack, Block, Hostile, Friendly — with no neutral or unknown member, so every ChooseBoardTargets must claim one. Phase has none to give. Both producing states (WaitingFor::TargetSelection and TriggerTargetSelection) project as TargetSequenceProjection (game/interaction.rs), whose only descriptor is TargetSequenceAction — ChooseTarget | SelectObjects | SelectTargets | Retarget — which is the MECHANISM of the pick, not what the spell does to what it picks. The engine's one intent vocabulary, InteractionIntentCode (14 variants: Choose, Keep, Sacrifice, Return, Exile, Tap, Crew, Saddle, Station, RingBearer, Blight, Pay, Attack, Block), hangs off SelectionProjection for non-targeting Select states and likewise names the action taken on the objects, not a disposition toward a CR 115.1 target; nothing equivalent exists on the targeting path. Deriving intent from the pending spell's effect would be the adapter inventing game semantics, which the thin-boundary rule forbids. Consequence, stated plainly rather than hidden: build_prompt_input has exactly one ChooseBoardTargets construction site, so EVERY target prompt is advertised as Hostile — including targeting your own creature to buff or regenerate it — and the emitted hostile: false contradicts it. The asymmetry is visible inside this same DTO: TargetRefDto.intent is Option<TargetingIntent>, and target_ref_dto declines it with None for every candidate. The adapter already refuses to guess wherever refusing is expressible; the prompt-level field is the one place it cannot.",
+        suggested_protocol_extension: "Preferred: make ChooseBoardTargetsInput.intent an Option<TargetingIntent>, exactly matching TargetRefDto.intent one field away. This asks for no new concept — the protocol already models a declinable targeting intent and already spells it `#[serde(default, skip_serializing_if = \"Option::is_none\")] Option<TargetingIntent>`; the prompt-level field is simply inconsistent with it. Adding a neutral/unknown variant is the weaker fallback: it would let an engine say nothing, but it grows the semantic enum to encode absence, which the type system already expresses. Align hostile's optionality with whichever is chosen, since the two fields can currently contradict each other. Either shape is breaking for older readers (the transport envelope sets deny_unknown_fields and no family enum is non_exhaustive), so it belongs in a major bump.",
     },
     UnsupportedCapability {
         code: "local.library-arrangement-reorder-unsupported",
@@ -2138,6 +2144,30 @@ fn build_prompt_input(
                         .unwrap_or_else(|| "Choose target".to_string()),
                 ),
                 candidates: target_refs(&slot.legal_targets),
+                // PLACEHOLDERS, not computed values — declared as
+                // `local.targeting-intent-unsourceable`.
+                //
+                // `intent` is a required field and every one of
+                // `TargetingIntent`'s 25 variants is effect semantics (Damage,
+                // Destroy, Buff, Heal, ...); none means "unknown". Phase projects
+                // no effect-semantic intent for a CR 115.1 target choice — the
+                // engine's `TargetSequenceProjection` describes only the
+                // MECHANISM of the pick (`TargetSequenceAction`: ChooseTarget |
+                // SelectObjects | SelectTargets | Retarget) — and deriving one
+                // from the pending spell's effect would be this adapter
+                // inventing game semantics. So the field is filled rather than
+                // computed, and there is no value that would make it honest.
+                // Contrast the candidates just above: `TargetRefDto.intent` is
+                // an `Option`, and `target_ref_dto` declines it with `None`.
+                // That is what this field would do if the protocol let it.
+                //
+                // The two fields read as contradictory, and neither is
+                // authoritative: `hostile` is `#[serde(default)]`, so leaving it
+                // false asserts nothing, while `intent` must name a variant and
+                // only `Hostile`/`Friendly` name a disposition rather than a
+                // specific action. A client must not read either as engine-derived
+                // — in particular, targeting your own creature to buff or
+                // regenerate it is advertised here exactly as a kill spell is.
                 hostile: false,
                 intent: TargetingIntent::Hostile,
                 min_targets: if slot.optional { 0 } else { 1 },
@@ -2350,7 +2380,7 @@ fn build_prompt_input(
         WaitingFor::CombatTaxPayment { .. } => {
             unsupported_prompt(waiting_for, "local.pay-combat-cost-unsupported")
         }
-        _ => interaction_prompt(prepared),
+        _ => interaction_prompt(prepared, card_lookup),
     }
 }
 
@@ -2376,7 +2406,14 @@ fn unsupported_prompt<T>(waiting_for: &WaitingFor, code: &'static str) -> Result
 /// per-variant judgement. The schema-valued specs (sequences, numbers, amount
 /// assignments, relations) carry an unbounded response space that no single
 /// prompt family expresses; they still fail closed under a declared code.
-fn interaction_prompt(prepared: &PreparedManabrewSnapshot) -> Result<PromptInput> {
+///
+/// One projection shape leaves the labelled-option family: an unordered subset
+/// over a list of objects is a card selection, and [`card_selection_objects`]
+/// routes it to `ChooseCards` so the client renders the cards themselves.
+fn interaction_prompt(
+    prepared: &PreparedManabrewSnapshot,
+    card_lookup: &impl CardTextLookup,
+) -> Result<PromptInput> {
     let waiting_for = &prepared.state.waiting_for;
     // One opportunity per interaction slot this viewer may submit for, and a
     // viewer can be the authorized submitter for more than one semantic owner —
@@ -2458,6 +2495,19 @@ fn interaction_prompt(prepared: &PreparedManabrewSnapshot) -> Result<PromptInput
     };
     if choices.is_empty() {
         return unsupported_prompt(waiting_for, "local.prompt-unsupported");
+    }
+    // A subset over a list of objects is a card selection, which `ChooseCards`
+    // renders as the cards themselves rather than as opaque labels. The bounds
+    // are the same ones the labelled family would have carried, so nothing the
+    // engine computed is re-derived to get here.
+    if let Some(object_ids) = card_selection_objects(&opportunity.response) {
+        let ctx = CardBuildContext { card_lookup };
+        return Ok(PromptInput::ChooseCards(ChooseCardsInput {
+            presentation: presentation("Choose cards"),
+            cards: object_vec_from_slice(&prepared.state, &object_ids, &ctx)?,
+            min: min_total,
+            max: max_total,
+        }));
     }
     Ok(PromptInput::ChooseFromSelection(ChooseFromSelectionInput {
         presentation: presentation("Choose"),
@@ -2602,6 +2652,124 @@ fn interaction_number_action(state: &GameState, actor: PlayerId, value: u32) -> 
         },
     )
     .map_err(|_| illegal("numberDecision the engine refused to materialize"))
+}
+
+/// The objects a projected response is a selection *of*, when it is one.
+///
+/// `Some` identifies the decision as a non-targeting card selection — the
+/// `ChooseCards` shape — and carries the object behind each candidate, in the
+/// order the engine offered them.
+///
+/// Both halves of the classification are read from the projection, never from a
+/// `WaitingFor` list:
+///
+/// - **Not targeting.** CR 601.2c announces targets one slot at a time, and the
+///   engine projects that ordered fill as the `Sequence` schema. `Select` is the
+///   unordered subset schema, which cannot express a slot order, so a target
+///   choice never arrives in this shape.
+/// - **Cards.** Every candidate must be exactly one object and nothing else, per
+///   [`candidate_object`]. A candidate carrying a player, an extra discriminator,
+///   or a concealed object (whose object surface the engine withholds) fails the
+///   whole list back to the labelled-option family rather than rendering a
+///   partial or misleading card list.
+fn card_selection_objects(response: &InteractionOpportunityResponse) -> Option<Vec<ObjectId>> {
+    card_selection_candidates(response)?
+        .iter()
+        .map(candidate_object)
+        .collect()
+}
+
+/// The candidate list of a card selection, unresolved.
+///
+/// The half of [`card_selection_objects`] that identifies the *schema*. The
+/// response path needs the choices themselves (it answers by choice id, not by
+/// object), so the two halves are separated rather than duplicated.
+fn card_selection_candidates(
+    response: &InteractionOpportunityResponse,
+) -> Option<&[InteractionChoice]> {
+    match response {
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Select { .. },
+            candidates,
+        } => Some(candidates),
+        _ => None,
+    }
+}
+
+/// The one object a projected choice denotes, when the choice *is* that object.
+///
+/// `Summary` surfaces are skipped because they carry a classification code, not
+/// an identity. Everything else must amount to a single `Object` in the
+/// `Candidate` role: any second identity surface means the choice denotes an
+/// object *plus* something the card list cannot show, and the caller must not
+/// treat it as a card.
+fn candidate_object(choice: &InteractionChoice) -> Option<ObjectId> {
+    let mut identities = choice
+        .surfaces
+        .iter()
+        .filter(|surface| !matches!(surface, InteractionPresentationSurface::Summary { .. }));
+    let InteractionPresentationSurface::Object {
+        role: InteractionRoleCode::Candidate,
+        reference,
+        ..
+    } = identities.next()?
+    else {
+        return None;
+    };
+    if identities.next().is_some() {
+        return None;
+    }
+    // The engine writes the raw `ObjectId` here; the wire's `card-` prefix is
+    // this crate's encoding and is applied on the way out.
+    reference.parse().ok().map(ObjectId)
+}
+
+/// Answer a generically-projected card prompt.
+///
+/// Split from [`interaction_selection_action`] because `ChooseCards` answers by
+/// card id, not by position: the ids are resolved back through the very
+/// [`candidate_object`] surface the prompt rendered them from, so a card the
+/// prompt did not offer cannot be smuggled in by index arithmetic.
+///
+/// The submitted response is `Select`, matching the schema
+/// [`card_selection_objects`] required — the engine rejects a `Choose` or
+/// `Sequence` against a `Select` schema as malformed.
+fn interaction_cards_action(
+    state: &GameState,
+    actor: PlayerId,
+    chosen_card_ids: &[String],
+) -> Result<GameAction> {
+    let illegal = |kind: &'static str| AdapterError::IllegalResponseForPrompt {
+        response_kind: kind,
+    };
+    let opportunity = sole_open_opportunity(state, actor)?;
+    let Some(candidates) = card_selection_candidates(&opportunity.response) else {
+        return Err(illegal(
+            "chooseCardsDecision against an interaction that is not a card selection",
+        ));
+    };
+    // Bounds are not rechecked. The engine owns them and rejects a violating
+    // submission; a second check here would be a drifting authority.
+    let choice_ids = chosen_card_ids
+        .iter()
+        .map(|card_id| {
+            let object_id = parse_object_id(card_id)?;
+            candidates
+                .iter()
+                .find(|candidate| candidate_object(candidate) == Some(object_id))
+                .map(|candidate| candidate.id.clone())
+                .ok_or_else(|| illegal("chooseCardsDecision naming an unoffered card"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    resolve_interaction_response(
+        state,
+        actor,
+        &InteractionSubmission {
+            interaction_id: opportunity.interaction_id,
+            response: InteractionResponse::Select { choice_ids },
+        },
+    )
+    .map_err(|_| illegal("chooseCardsDecision the engine refused to materialize"))
 }
 
 /// Label one projected choice, from the strings the engine already put on it.
@@ -2979,11 +3147,21 @@ pub fn translate_response(
                 }),
             }
         }
-        // CR 701.8a: the chosen cards are the ones discarded.
         PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision { chosen_card_ids }) => {
-            Ok(GameAction::SelectCards {
-                cards: parse_object_ids(&chosen_card_ids)?,
-            })
+            match &state.waiting_for {
+                // CR 701.9b: an effect that causes a discard lets the affected
+                // player choose which cards, so the chosen cards are exactly the
+                // discarded ones. The one bespoke producer of this family, whose
+                // answer is already the card list the engine's action wants.
+                WaitingFor::DiscardChoice { .. } => Ok(GameAction::SelectCards {
+                    cards: parse_object_ids(&chosen_card_ids)?,
+                }),
+                // Every other card selection reaches the client through the
+                // projection, and its answering action is the engine's to name —
+                // `SelectCards` is one of several the `Select` schema
+                // materializes into.
+                _ => interaction_cards_action(state, context.deciding_player, &chosen_card_ids),
+            }
         }
         // CR 603.3b: `ReorderItem::id` is the trigger's index in the prompt's
         // list (see the `OrderTriggers` prompt arm), so the answer parses back
@@ -4424,7 +4602,13 @@ fn output_family_matches_waiting(
                 | WaitingFor::ExertChoice { .. }
                 | WaitingFor::UnlessPayment { .. }
         ),
-        PromptOutput::ChooseCards(_) => matches!(waiting_for, WaitingFor::DiscardChoice { .. }),
+        // Reachable both bespoke (discard, CR 701.9b) and generically, so the
+        // bespoke match stays primary and the open-prompt check carries the rest
+        // rather than a list that would rot as the engine reclassifies states.
+        PromptOutput::ChooseCards(_) => {
+            matches!(waiting_for, WaitingFor::DiscardChoice { .. })
+                || open_prompt_is_generic_cards(state, viewer)
+        }
         PromptOutput::Reorder(_) => matches!(waiting_for, WaitingFor::OrderTriggers { .. }),
         // Modeled on the wire, but this adapter emits no prompt that accepts
         // them, so no `WaitingFor` can legally receive one.
@@ -4442,19 +4626,32 @@ fn output_family_matches_waiting(
 /// Rebuilding cannot drift from the builder because it *is* the builder. One
 /// extra prompt build per answer is proportionate: this runs once per decision.
 ///
-/// The lookup yields no card text on purpose. Family selection never depends on
-/// it — the arms that need text belong to other families and fail with
-/// `MissingCardText`, which is no family at all and so gates `false`, exactly as
-/// it should.
+/// The lookup yields *empty* card text on purpose. Which family a state builds
+/// into never depends on the text, only on whether text can be had at all — so
+/// supplying an empty string keeps every state answerable here while leaking
+/// nothing. Yielding `None` instead would make `MissingCardText` swallow the
+/// card-bearing families (`ChooseCards`, mulligan, scry, reorder) into "no
+/// family", silently gating a legal answer to a card prompt as illegal.
 fn open_prompt(state: &GameState, viewer: PlayerId) -> Option<PromptInput> {
     let prepared = prepare_snapshot(state, viewer, "").ok()?;
-    build_prompt_input(&prepared, &(|_: &GameObject| -> Option<String> { None })).ok()
+    build_prompt_input(
+        &prepared,
+        &(|_: &GameObject| -> Option<String> { Some(String::new()) }),
+    )
+    .ok()
 }
 
 fn open_prompt_is_generic_selection(state: &GameState, viewer: PlayerId) -> bool {
     matches!(
         open_prompt(state, viewer),
         Some(PromptInput::ChooseFromSelection(_))
+    )
+}
+
+fn open_prompt_is_generic_cards(state: &GameState, viewer: PlayerId) -> bool {
+    matches!(
+        open_prompt(state, viewer),
+        Some(PromptInput::ChooseCards(_))
     )
 }
 
@@ -4971,8 +5168,9 @@ mod tests {
     use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
     use engine::types::counter::CounterType;
     use engine::types::game_state::{
-        MulliganDecisionEntry, MulliganDecisionPhase, PayableResource, PendingCast,
-        PendingMulliganAction, TargetSelectionProgress, TargetSelectionSlot,
+        MulliganDecisionEntry, MulliganDecisionPhase, OutsideGameChoiceEntry,
+        OutsideGameChoiceSource, PayableResource, PendingCast, PendingMulliganAction,
+        TargetSelectionProgress, TargetSelectionSlot,
     };
     use engine::types::identifiers::CardId;
     use engine::types::interaction::InteractionSessionId;
@@ -5935,9 +6133,13 @@ mod tests {
     /// `DiscardToHandSize` (CR 514.1) is the clearest case — discard exactly
     /// `count` of the cards in hand — so it pins the two things that distinguish
     /// this from the `ExactChoices` path: the count bounds reach the prompt as
-    /// `min_total`/`max_total` instead of the hardcoded 1/1, and the answer must
+    /// the family's own min/max instead of the hardcoded 1/1, and the answer must
     /// go back as `InteractionResponse::Select`, since the engine rejects a
     /// `Choose` against a `Select` schema as malformed.
+    ///
+    /// The family is `ChooseCards`, not `ChooseFromSelection`: an unordered
+    /// subset over a list of objects is a card selection, and the client is owed
+    /// the cards rather than three opaque labels.
     #[test]
     fn a_select_schema_carries_its_count_bounds_and_answers_as_a_subset() {
         let mut state = GameState::new_two_player(7);
@@ -5964,28 +6166,267 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Select schema is served by the projection");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
-            panic!("a subset choice over candidates is ChooseFromSelection, got {prompt:?}");
+        let PromptInput::ChooseCards(input) = prompt else {
+            panic!("a subset choice over objects is ChooseCards, got {prompt:?}");
         };
         assert_eq!(
-            (input.min_total, input.max_total),
+            (input.min, input.max),
             (2, 2),
             "the engine's count bounds must survive, not the one-of path's 1/1"
         );
-        assert_eq!(input.options.len(), 3, "every hand card is a candidate");
+        assert_eq!(
+            input
+                .cards
+                .iter()
+                .map(|card| card.identity.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Discard A", "Discard B", "Discard C"],
+            "every hand card is a candidate, named — not a labelled option"
+        );
 
         let action = translate_response(
             42,
-            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
-                chosen_indices: vec![0, 1],
+            PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision {
+                chosen_card_ids: vec![input.cards[0].id.clone(), input.cards[1].id.clone()],
             }),
             &prepared.prompt_context(),
             &state,
         )
         .expect("a two-card subset resolves back through the engine");
-        assert!(
-            matches!(action, GameAction::SelectCards { .. }),
-            "a discard subset answers with SelectCards, got {action:?}"
+        assert_eq!(
+            action,
+            GameAction::SelectCards {
+                cards: vec![cards[0], cards[1]],
+            },
+            "a discard subset answers with the engine-materialized SelectCards"
+        );
+    }
+
+    /// The card family is wired at all three sites, not just at the prompt.
+    ///
+    /// `ChooseRingBearer` (CR 701.54a) is chosen over a discard because its
+    /// answering action is *not* `SelectCards`: the bespoke discard arm, which
+    /// this family already had, would have answered it with the wrong action
+    /// entirely. So a green here means prompt construction, response
+    /// translation, and the gate all reached the generic path.
+    ///
+    /// The gate is exercised by construction: `translate_response` runs
+    /// `output_family_matches_waiting` first, and `ChooseRingBearer` is not in
+    /// the bespoke `matches!`, so without `open_prompt_is_generic_cards` this
+    /// legal answer is rejected as `IllegalResponseForPrompt` before any
+    /// translation runs.
+    #[test]
+    fn a_card_selection_prompts_as_cards_and_answers_the_engines_own_action() {
+        let mut state = GameState::new_two_player(7);
+        let candidates = ["Frodo Baggins", "Samwise Gamgee"]
+            .into_iter()
+            .map(|name| {
+                create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(0),
+                    name.to_string(),
+                    Zone::Battlefield,
+                )
+            })
+            .collect::<Vec<_>>();
+        state.waiting_for = WaitingFor::ChooseRingBearer {
+            player: PlayerId(0),
+            candidates: candidates.clone(),
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("ring-bearer".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("a Select schema over objects is served by the projection");
+        let PromptInput::ChooseCards(input) = prompt else {
+            panic!("a non-targeting selection over objects is ChooseCards, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min, input.max),
+            (1, 1),
+            "CR 701.54a: the Ring tempts you, so choose one creature you control"
+        );
+        assert_eq!(
+            input
+                .cards
+                .iter()
+                .map(|card| (card.id.clone(), card.identity.name.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (encode_object_id(candidates[0]), "Frodo Baggins".to_string()),
+                (
+                    encode_object_id(candidates[1]),
+                    "Samwise Gamgee".to_string()
+                ),
+            ],
+            "the candidates reach the client as cards, keyed by the wire id the answer echoes"
+        );
+
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision {
+                chosen_card_ids: vec![encode_object_id(candidates[1])],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("the echoed card id resolves back through the engine");
+        assert_eq!(
+            action,
+            GameAction::ChooseRingBearer {
+                target: candidates[1],
+            },
+            "the engine names the action; the bespoke discard arm would have said SelectCards"
+        );
+    }
+
+    /// An unoffered card is refused, and the refusal is not vacuous.
+    ///
+    /// The positive leg proves the fixture reaches the generic card path at all
+    /// — without it, a rejection could equally mean the prompt never became a
+    /// `ChooseCards` in the first place.
+    #[test]
+    fn a_card_answer_naming_an_unoffered_card_is_refused() {
+        let mut state = GameState::new_two_player(7);
+        let offered = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Frodo Baggins".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gollum".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::ChooseRingBearer {
+            player: PlayerId(0),
+            candidates: vec![offered],
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("ring-guard".to_string()))
+            .expect("valid interaction authority binding");
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+
+        // Reach-guard: the offered card really does answer this prompt.
+        assert!(translate_response(
+            42,
+            PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision {
+                chosen_card_ids: vec![encode_object_id(offered)],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .is_ok());
+
+        assert!(matches!(
+            translate_response(
+                42,
+                PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision {
+                    chosen_card_ids: vec![encode_object_id(bystander)],
+                }),
+                &prepared.prompt_context(),
+                &state,
+            ),
+            Err(AdapterError::IllegalResponseForPrompt { .. })
+        ));
+    }
+
+    /// An ordered sequence over objects is **not** reclassified as cards.
+    ///
+    /// The schema leg of the classifier, isolated: `ProliferateChoice` (CR
+    /// 701.29a) projects every eligible permanent through the same
+    /// `Object`/`Candidate` surface a card selection uses, so the candidates
+    /// alone would pass. Only the schema keeps it out — widening
+    /// [`card_selection_candidates`] to accept `Sequence` turns this red.
+    ///
+    /// The bounds and candidate count are the reach-guard: a state that failed
+    /// to build at all would produce nothing to count.
+    #[test]
+    fn an_ordered_sequence_over_objects_is_not_a_card_selection() {
+        let mut state = GameState::new_two_player(7);
+        let permanent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Bearer".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::ProliferateChoice {
+            player: PlayerId(0),
+            eligible: vec![TargetRef::Object(permanent)],
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("proliferate".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("a Sequence schema is served by the projection");
+        let PromptInput::ChooseFromSelection(input) = prompt else {
+            panic!("an ordered sequence stays in the labelled family, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min_total, input.max_total, input.options.len()),
+            (0, 1, 1),
+            "the sequence bounds and the candidate survive"
+        );
+    }
+
+    /// A subset whose candidates are not plain candidates is **not** cards.
+    ///
+    /// The surface leg, isolated: `OutsideGameChoice` (CR 400.11a / CR 406.3) is
+    /// a `Select` schema — the very schema the card classifier keys on — but its
+    /// candidates are projected in the `FaceUpExile` role, because a card
+    /// outside the game is not interchangeable with one the client can render
+    /// from the battlefield snapshot. Dropping the role test in
+    /// [`candidate_object`] turns this red.
+    #[test]
+    fn a_subset_whose_candidates_are_not_plain_objects_is_not_a_card_selection() {
+        let mut state = GameState::new_two_player(7);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Learn Source".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Lesson Card".to_string(),
+            Zone::Exile,
+        );
+        state.waiting_for = WaitingFor::OutsideGameChoice {
+            player: PlayerId(0),
+            source_id,
+            choices: vec![OutsideGameChoiceEntry {
+                source: OutsideGameChoiceSource::FaceUpExile { object_id: exiled },
+                count: 1,
+                name: "Lesson Card".to_string(),
+            }],
+            count: 1,
+            reveal: false,
+            up_to: true,
+            destination: Zone::Hand,
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("outside-game".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("a Select schema is served by the projection");
+        let PromptInput::ChooseFromSelection(input) = prompt else {
+            panic!("a non-candidate role stays in the labelled family, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min_total, input.max_total, input.options.len()),
+            (0, 1, 1),
+            "the selection bounds and the candidate survive"
         );
     }
 
@@ -6138,6 +6579,176 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A reveal is answerable today, and the answer is the reveal action.
+    ///
+    /// The exhibit behind `local.prompt-family-display-acks-unsupported`, which
+    /// is a *fidelity* entry rather than a coverage one. `RevealChoice` — the
+    /// engine's pause for a CR 701.20a reveal — classifies as
+    /// `ExactCandidates`, so the generic projection
+    /// serves it: the engine materializes one candidate per revealable card and
+    /// the adapter renders them as labelled options. Both halves of that entry
+    /// are pinned here.
+    ///
+    /// 1. The prompt is `ChooseFromSelection`, not `ChooseCards` — the residual
+    ///    gap, since only the `Select` schema is reclassified as cards
+    ///    ([`card_selection_candidates`]) and a one-of list is not one. Widening
+    ///    that classifier turns this red, which is the intended signal.
+    /// 2. Every offered option resolves to `GameAction::SelectCards` naming one
+    ///    card. That is the assertion that dies if this family is ever routed
+    ///    through `RevealCards` instead: `RevealCardsAcknowledged` is a bare ack
+    ///    with no card payload, so it could only ever submit an empty selection
+    ///    — which a mandatory reveal rejects as an illegal count.
+    ///
+    /// Every index is answered rather than a hand-picked one, so the test does
+    /// not depend on the engine's candidate ordering and cannot pass by
+    /// exercising a single degenerate option.
+    #[test]
+    fn a_mandatory_reveal_renders_as_a_selection_and_answers_with_the_chosen_card() {
+        let mut state = GameState::new_two_player(7);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Land".to_string(),
+            Zone::Hand,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Spell".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards: vec![first, second],
+            filter: TargetFilter::Any,
+            optional: false,
+            decline_runs_continuation: false,
+        };
+        bind_interaction_authority(
+            &mut state,
+            InteractionSessionId("reveal-mandatory".to_string()),
+        )
+        .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt =
+            build_prompt_input(&prepared, &lookup).expect("a reveal is served by the projection");
+        let PromptInput::ChooseFromSelection(input) = prompt else {
+            panic!("a reveal renders as labelled options, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min_total, input.max_total, input.options.len()),
+            (1, 1, 2),
+            "a mandatory reveal picks exactly one of the two offered cards"
+        );
+
+        let mut revealed: Vec<Vec<ObjectId>> = (0..input.options.len())
+            .map(|index| {
+                let action = translate_response(
+                    42,
+                    PromptOutput::ChooseFromSelection(
+                        ChooseFromSelectionOutput::SelectionDecision {
+                            chosen_indices: vec![index],
+                        },
+                    ),
+                    &prepared.prompt_context(),
+                    &state,
+                )
+                .expect("every offered option resolves back through the engine");
+                match action {
+                    GameAction::SelectCards { cards } => cards,
+                    other => panic!("a reveal is answered by SelectCards, got {other:?}"),
+                }
+            })
+            .collect();
+        revealed.sort();
+        assert_eq!(
+            revealed,
+            vec![vec![first], vec![second]],
+            "the two options must denote the two revealable cards, one card each"
+        );
+    }
+
+    /// The optional branch of the same prompt, which is what makes the
+    /// `RevealCards` family actively wrong rather than merely low-fidelity.
+    ///
+    /// For a "you may reveal" (CR 701.20a) the engine models the decline as an
+    /// empty `SelectCards` — a convention of this engine's, not something the
+    /// rule states — and offers it as its own candidate. So the option count
+    /// rises to three against the same two cards, and exactly one option
+    /// answers with an empty selection.
+    ///
+    /// Paired with the mandatory test above, this is the non-vacuity guard for
+    /// both: the two states differ only in `optional`, so neither can be passing
+    /// for a reason unrelated to the reveal. It is also the concrete cost of
+    /// routing this through `RevealCardsAcknowledged` — a payload-free ack
+    /// collapses all three options onto the one that declines.
+    #[test]
+    fn an_optional_reveal_offers_the_decline_as_an_empty_selection() {
+        let mut state = GameState::new_two_player(7);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Land".to_string(),
+            Zone::Hand,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Spell".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards: vec![first, second],
+            filter: TargetFilter::Any,
+            optional: true,
+            decline_runs_continuation: false,
+        };
+        bind_interaction_authority(
+            &mut state,
+            InteractionSessionId("reveal-optional".to_string()),
+        )
+        .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt =
+            build_prompt_input(&prepared, &lookup).expect("a reveal is served by the projection");
+        let PromptInput::ChooseFromSelection(input) = prompt else {
+            panic!("a reveal renders as labelled options, got {prompt:?}");
+        };
+        assert_eq!(
+            input.options.len(),
+            3,
+            "the decline is offered alongside the two revealable cards"
+        );
+
+        let declines = (0..input.options.len())
+            .filter(|index| {
+                translate_response(
+                    42,
+                    PromptOutput::ChooseFromSelection(
+                        ChooseFromSelectionOutput::SelectionDecision {
+                            chosen_indices: vec![*index],
+                        },
+                    ),
+                    &prepared.prompt_context(),
+                    &state,
+                )
+                .expect("every offered option resolves back through the engine")
+                    == GameAction::SelectCards { cards: vec![] }
+            })
+            .count();
+        assert_eq!(
+            declines, 1,
+            "exactly one option declines the reveal with an empty selection"
+        );
     }
 
     // ------------------------------------------------------- wire shapes ---
@@ -7786,13 +8397,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 82);
+        assert_eq!(capabilities.len(), 83);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 82, "capability codes must be unique");
+        assert_eq!(codes.len(), 83, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

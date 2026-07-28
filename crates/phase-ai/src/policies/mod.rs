@@ -18,6 +18,7 @@ mod crew_timing;
 mod cycling_discipline;
 mod devotion;
 mod downside_awareness;
+mod draw_payoff;
 pub(crate) mod effect_classify;
 mod effect_timing;
 mod equipment_priority;

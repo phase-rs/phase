@@ -11,12 +11,14 @@ use serde::Serialize;
 use super::ast::{ClauseBoundary, ContinuationAst, ParsedEffectClause};
 use super::doc::{OracleDocBuilder, OracleSourceSpan, OracleUnitSource};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
+    ActivationManaPaymentRestriction, ActivationRestriction, ControllerRef, CostReduction,
     DelayedTriggerCondition, MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr,
     RoundingMode, SubAbilityLink, TargetFilter, TargetSelectionMode, UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
+use crate::types::zones::Zone;
 
 /// Chain-level IR: the complete parsed representation of an effect chain before assembly.
 ///
@@ -121,12 +123,37 @@ impl EffectChainIr {
 /// a whole-body recognizer that must stamp a root field returns an `AbilityIr`
 /// carrying that field here, rather than a hand-built definition.
 ///
-/// **Scope is measured, not guessed.** Auditing the `return` expressions of the
-/// nine effect-side bypasses (not a field-name grep — a field set on a *nested*
-/// sub-ability reads identically to one set on the returned root) shows they set
-/// exactly `kind`, `effect`, `sub_ability`, `duration`, `player_scope`, and
-/// `sub_link`. The first five are already `ParsedEffectClause`/`ClauseIr` fields.
-/// `sub_link` is the sole residue, so it is the sole shell field.
+/// # The partition is the rules' own, not an engineering convenience
+///
+/// CR 602.1 (`MagicCompRules.txt:2514`) — *"Activated abilities have a cost and
+/// an effect. They are written as `[Cost]: [Effect.] [Activation instructions
+/// (if any).]`"* — draws exactly the seam this type sits on, and CR 113.3b
+/// (:761) repeats the tripartite form for abilities generally. So:
+///
+/// | shell field group | CR |
+/// |---|---|
+/// | `cost`, `cost_reduction` | CR 602.1a — everything before the colon (:2516) |
+/// | `activation_restrictions`, `activation_mana_payment_restriction`, `activator_filter`, `activation_zone` | CR 602.1b — activation instructions, *"not part of the ability's effect"* (:2519) |
+/// | `min_x_value` | CR 601.2b — the announced value of a variable cost (:2459) |
+/// | `ability_tag`, `cant_be_copied`, `description` | ability-level identity/provenance, not resolution steps |
+///
+/// while `EffectChainIr` holds the CR 608.2 (:2785) resolution instructions.
+/// Because the root-vs-clause axis follows a seam CR 602.1 already draws, the
+/// widening satisfies the categorical-boundary rule rather than straddling rule
+/// sections.
+///
+/// **This is 10 of `AbilityDefinition`'s 38 root fields, deliberately not a
+/// mirror of the root.** Fields excluded on purpose — `effect`, `sub_ability`,
+/// `else_ability`, `condition` — are all CR 608.2 resolution tree and are
+/// already expressible as `ClauseIr`/`ClauseDisposition`. A shell that mirrored
+/// the root would re-open the escape hatch this type exists to close.
+///
+/// # Applier semantics (see `lower_ability_ir`)
+///
+/// Every field is **defer-on-default**: an unset field leaves whatever lowering
+/// produced, so a `default()` shell is exactly today's behavior. That is what
+/// makes the widening byte-identical by construction — see the per-field docs
+/// for the one-line rule each obeys.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct AbilityShellIr {
     /// CR 608.2c: how the lowered root attaches to its parent — a resolution step
@@ -144,6 +171,147 @@ pub(crate) struct AbilityShellIr {
     /// `Default` is `ContinuationStep`, so a defaulted shell would silently
     /// *overwrite* the lowered stamp instead of deferring to it.
     pub(crate) sub_link: Option<SubAbilityLink>,
+
+    /// CR 602.1a: the activation cost — everything before the colon.
+    /// `Some(_)` overrides; `None` defers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cost: Option<AbilityCost>,
+
+    /// CR 601.2f: a cost reduction determined while computing total cost.
+    ///
+    /// Distinct from [`ShellStage::ExtractCostReduction`], which *derives* this
+    /// field by folding a node out of the chain. A site that stamps it
+    /// explicitly must NOT also run that stage — see the `ShellStage` docs.
+    /// `Some(_)` overrides; `None` defers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cost_reduction: Option<CostReduction>,
+
+    /// CR 602.1b: activation instructions restricting *when* the ability may be
+    /// activated.
+    ///
+    /// **Applied with `extend`, never `=`.** The shell is applied after lowering,
+    /// and no path inside `lower_ability_ir` writes the root's
+    /// `activation_restrictions` — verified exhaustively: `rg
+    /// activation_restrictions crates/engine/src/parser/oracle_effect/` returns
+    /// zero hits, and that directory holds the whole of `lower_ability_ir`
+    /// (`lower_effect_chain_ir`, `finalize_effect_chain`, the owner-library
+    /// anchor, and all five whole-body bypasses `parse_ability_ir` dispatches
+    /// to). The only writes reachable from there land on *nested* granted/static
+    /// definitions boxed inside an `Effect` payload, never on the root the shell
+    /// stamps. So `extend` reproduces a site that wrote `=` while additionally
+    /// being correct if lowering ever does contribute one.
+    ///
+    /// Order is the site's: the vec is applied verbatim, so a site that pushed an
+    /// implicit restriction before extending with parsed ones builds its vec in
+    /// that order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) activation_restrictions: Vec<ActivationRestriction>,
+
+    /// CR 602.1b: a restriction on which mana may pay the activation cost.
+    /// `Some(_)` overrides; `None` defers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) activation_mana_payment_restriction: Option<ActivationManaPaymentRestriction>,
+
+    /// CR 602.1b: which players may activate the ability ("Any player may
+    /// activate this ability"). `Some(_)` overrides; `None` defers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) activator_filter: Option<PlayerFilter>,
+
+    /// CR 113.6m: the zone the ability functions in. `Some(_)` overrides;
+    /// `None` defers.
+    ///
+    /// Note for later tranches: the generic activated-ability recognizer derives
+    /// this field by *reading the lowered def*
+    /// (`activation_zone_from_self_cost` / `activation_zone_from_self_effect`),
+    /// which a shell stamped before lowering cannot express. That is one of the
+    /// reasons `parse_activated_ability_definition` is scoped to its own unit
+    /// rather than to T8 — this field is here for the recognizers that know
+    /// their zone from the printed keyword (Channel, Forecast), not for that one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) activation_zone: Option<Zone>,
+
+    /// The keyword/ability-word class this ability was printed under (Boast,
+    /// Exhaust, Power-up …), so meta-referencing effects can name the class.
+    /// `Some(_)` overrides; `None` defers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ability_tag: Option<AbilityTag>,
+
+    /// CR 601.2b: the floor on an announced variable cost ("X can't be 0").
+    ///
+    /// `u32`, not `Option<u32>`, because the root field is `u32` with a `0`
+    /// default that already means "no floor". Applied with `max`, not `=`: `0`
+    /// (the shell default) can then never lower a floor lowering established,
+    /// and a site stamping `N` over a lowered `0` still yields `N`. `max` is also
+    /// exactly the semantic `raise_last_spell_min_x` will need in T9.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) min_x_value: u32,
+
+    /// CR 707.10: the stack-copy restriction printed as "This ability can't be
+    /// copied" — CR 707.10 is the rule that defines copying an activated or
+    /// triggered ability onto the stack, which is what the printed line forbids.
+    /// (Not CR 707.9a, which is the unrelated rule for copy effects that cause a
+    /// copy to *gain* an ability.)
+    ///
+    /// Applied as a monotone OR, never an assignment, so a `false` shell (the
+    /// default) cannot clear a flag lowering set. Mirrors the root field's own
+    /// `bool` rather than inventing a parallel encoding for a two-state fact the
+    /// definition already stores as a `bool`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) cant_be_copied: bool,
+
+    /// The verbatim printed text this ability was rendered from, for coverage
+    /// and UI provenance. `Some(_)` overrides; `None` defers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
+
+    /// Chain-**structure** folds to run after the field stamps, in list order.
+    ///
+    /// Ordered `Vec`, not a set of flags: see [`ShellStage`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) stages: Vec<ShellStage>,
+}
+
+/// `serde` predicate: a `min_x_value` of `0` is the "no floor" default and is
+/// skipped, so an unset shell serializes exactly as it did before the widening.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde requires the `&T` predicate shape.
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
+/// A chain-**structure** transform `lower_ability_ir` runs after the shell's
+/// field stamps, in list order.
+///
+/// # Why an ordered `Vec` and not a set of booleans
+///
+/// Both stages are folds that rewrite the `sub_ability` chain *and* write a root
+/// field, so their position relative to the field stamps is behavior-load-bearing
+/// — a plain field bag cannot express "run these two, in this order, after the
+/// stamps":
+///
+/// * [`ShellStage::ExtractCostReduction`] strips a node out of the `sub_ability`
+///   chain **and writes** `def.cost_reduction`. It must therefore not run at a
+///   site that stamped `cost_reduction` explicitly — the Power-up recognizer
+///   (`oracle.rs`, CR 702.193b) does exactly that, and running the stage there
+///   would let a chain node silently overwrite the keyword-defined reduction.
+/// * [`ShellStage::ExtractManaSpendTrigger`] early-returns unless `def.effect` is
+///   already `Effect::Mana`, so it is meaningful only *post*-lowering — it cannot
+///   be hoisted into clause assembly.
+///
+/// Variants are named for the transform, not for a call site, so the list stays
+/// a description of *what runs* rather than of *who asked*.
+// Both variants are constructed by the T8-A2 recognizers (Channel, Boast,
+// Exhaust, Forecast), each of which lists them in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum ShellStage {
+    /// CR 601.2f: fold a trailing self-referential "this ability costs {X} less
+    /// to activate" node out of the `sub_ability` chain into `cost_reduction`.
+    /// Runs `oracle::extract_cost_reduction_from_chain`.
+    ExtractCostReduction,
+    /// CR 106.6 + CR 603.3: fold a trailing "when you spend this mana …"
+    /// sub-ability into the parent mana effect's `grants`. Runs
+    /// `oracle::extract_mana_spend_trigger_from_chain`, which is a no-op unless
+    /// the lowered root effect is already `Effect::Mana`.
+    ExtractManaSpendTrigger,
 }
 
 /// An effect chain plus the root-level metadata applied around it.

@@ -53,3 +53,4 @@ crates/engine/src/parser/oracle_replacement.rs	parse_conditional_draw_replacemen
 crates/engine/src/parser/oracle_replacement.rs	parse_replacement_line_inner	constructor	1
 crates/engine/src/types/replacements.rs	from_str	event-decode	2
 crates/mtgish-import/src/convert/replacement.rs	convert_replace_would_draw	struct-literal	1
+crates/phase-ai/src/policies/tests/draw_payoff.rs	add_draw_replacement	constructor	1

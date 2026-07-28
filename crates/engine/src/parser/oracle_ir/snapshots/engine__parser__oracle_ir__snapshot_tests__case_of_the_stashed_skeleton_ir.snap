@@ -1,0 +1,249 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 111,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "When this ~ enters, create a 2/1 black Skeleton creature token and suspect it. (It has menace and can't block.)"
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "ChangesZone",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "Token",
+              "name": "Skeleton",
+              "power": {
+                "type": "Fixed",
+                "value": 2
+              },
+              "toughness": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "types": [
+                "Creature",
+                "Skeleton"
+              ],
+              "colors": [
+                "Black"
+              ],
+              "keywords": [],
+              "tapped": false,
+              "count": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "owner": {
+                "type": "Controller"
+              },
+              "enters_attacking": false
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "valid_card": {
+            "type": "SelfRef"
+          },
+          "origin": null,
+          "destination": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "phase": null,
+          "optional": false,
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": null,
+          "valid_source": null,
+          "description": "When this ~ enters, create a 2/1 black Skeleton creature token and suspect it.",
+          "constraint": null,
+          "condition": null,
+          "batched": false
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 112,
+          "end_byte": 216,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "To solve — You control no suspected Skeletons. (If unsolved, solve at the beginning of your end step.)"
+      },
+      "node": {
+        "SolveCondition": {
+          "type": "ObjectCount",
+          "filter": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature",
+              {
+                "Subtype": "Skeleton"
+              }
+            ],
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Suspected"
+              }
+            ]
+          },
+          "comparator": "EQ",
+          "threshold": 0
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 2,
+          "last_line": 2,
+          "start_byte": 217,
+          "end_byte": 350,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Solved — {1}{B}, Sacrifice this ~: Search your library for a card, put it into your hand, then shuffle. Activate only as a sorcery."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "SearchLibrary",
+            "filter": {
+              "type": "Typed",
+              "type_filters": [
+                "Card"
+              ],
+              "controller": null,
+              "properties": []
+            },
+            "count": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "reveal": false
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": {
+                  "type": "Cost",
+                  "shards": [
+                    "Black"
+                  ],
+                  "generic": 1
+                }
+              },
+              {
+                "type": "Sacrifice",
+                "target": {
+                  "type": "SelfRef"
+                },
+                "count": 1
+              }
+            ]
+          },
+          "sub_ability": {
+            "kind": "Spell",
+            "effect": {
+              "type": "ChangeZone",
+              "origin": "Library",
+              "destination": "Hand",
+              "target": {
+                "type": "Any"
+              },
+              "owner_library": false,
+              "enter_transformed": false,
+              "enter_tapped": false,
+              "enters_attacking": false
+            },
+            "cost": null,
+            "sub_ability": {
+              "kind": "Spell",
+              "effect": {
+                "type": "Shuffle",
+                "target": {
+                  "type": "Controller"
+                }
+              },
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
+            },
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "duration": null,
+          "description": "Solved — {1}{B}, Sacrifice this ~: Search your library for a card, put it into your hand, then shuffle. Activate only as a sorcery.",
+          "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "IsSolved"
+            },
+            {
+              "type": "AsSorcery"
+            }
+          ],
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    }
+  ],
+  "source_text": "When this Case enters, create a 2/1 black Skeleton creature token and suspect it. (It has menace and can't block.)\nTo solve — You control no suspected Skeletons. (If unsolved, solve at the beginning of your end step.)\nSolved — {1}{B}, Sacrifice this Case: Search your library for a card, put it into your hand, then shuffle. Activate only as a sorcery.",
+  "card_name": "Case of the Stashed Skeleton"
+}

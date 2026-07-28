@@ -1434,7 +1434,7 @@ fn collect_matching_triggers_inner(
                 definition_ref.as_ref(),
                 Some(&source_context),
                 controller,
-                event,
+                Some(event),
             ) {
                 continue;
             }
@@ -2586,7 +2586,7 @@ fn collect_latched_batched_zone_triggers(
                     Some(&latched.definition_ref),
                     Some(source_context),
                     source_context.lki.controller,
-                    event,
+                    Some(event),
                 )
                 || !latched
                     .definition
@@ -7967,13 +7967,17 @@ fn delayed_zone_change_filter_matches(
 ///
 /// `event` is the triggering event — needed by `NthSpellThisTurn` to identify
 /// the caster and count their per-player spell total (not the global count).
+/// `event` is `Some` for a real trigger evaluation and `None` for a hypothetical
+/// preflight (e.g. an AI payoff-eligibility query). In the hypothetical case the
+/// event-dependent constraints — which can only be judged against a concrete
+/// triggering event — conservatively report NOT satisfied rather than guess.
 fn check_trigger_constraint_with_ref(
     state: &GameState,
     trig_def: &TriggerDefinition,
     definition_ref: Option<&TriggerDefinitionRef>,
     source_context: Option<&TriggerSourceContext>,
     controller: PlayerId,
-    event: &GameEvent,
+    event: Option<&GameEvent>,
 ) -> bool {
     use crate::types::ability::TriggerConstraint;
 
@@ -7999,7 +8003,7 @@ fn check_trigger_constraint_with_ref(
             // CR 603.2: The trigger event only matches the first life-loss event
             // during that opponent's own turn.
             let opponent_id = match event {
-                GameEvent::LifeChanged { player_id, .. } => *player_id,
+                Some(GameEvent::LifeChanged { player_id, .. }) => *player_id,
                 _ => return false,
             };
             if opponent_id == controller || state.active_player != opponent_id {
@@ -8025,10 +8029,10 @@ fn check_trigger_constraint_with_ref(
             controller: ctrl_ref,
         } => {
             let event_source = match event {
-                GameEvent::Discarded {
+                Some(GameEvent::Discarded {
                     source_id: Some(source_id),
                     ..
-                } => *source_id,
+                }) => *source_id,
                 _ => return false,
             };
             let Some(event_source_controller) = state
@@ -8052,7 +8056,7 @@ fn check_trigger_constraint_with_ref(
         // When `filter` contains `TypeFilter::Non(Creature)`, use the noncreature counter.
         TriggerConstraint::NthSpellThisTurn { n, filter } => {
             let caster = match event {
-                GameEvent::SpellCast { controller: c, .. } => *c,
+                Some(GameEvent::SpellCast { controller: c, .. }) => *c,
                 _ => return false,
             };
             let spells = state.spells_cast_this_turn_by_player.get(&caster);
@@ -8088,7 +8092,7 @@ fn check_trigger_constraint_with_ref(
         // rather than the final per-turn count after a multi-card draw batch.
         TriggerConstraint::NthDrawThisTurn { n } => {
             let nth_in_turn = match event {
-                GameEvent::CardDrawn { nth_in_turn, .. } => *nth_in_turn,
+                Some(GameEvent::CardDrawn { nth_in_turn, .. }) => *nth_in_turn,
                 _ => return false,
             };
             nth_in_turn == *n
@@ -8107,6 +8111,58 @@ fn check_trigger_constraint_with_ref(
                 < *max
         }),
     }
+}
+
+/// CR 603.2-603.4 + CR 603.3d: could `entry`'s trigger on `source` still fire
+/// AND resolve to an effect if its triggering event happened right now? The
+/// single authority an AI policy uses to ask "is this on-battlefield payoff
+/// live?" — reusing the same constraint check the live trigger pipeline runs.
+///
+/// Conservative by construction: an intervening-if `condition` (CR 603.4, not
+/// evaluated in this preflight) and any event-dependent constraint whose
+/// triggering event is unknown at this decision point are treated as NOT
+/// established, so a payoff is never credited value it cannot actually produce.
+pub fn hypothetical_trigger_fireable(
+    state: &GameState,
+    source: &GameObject,
+    entry: &TriggerEntry,
+) -> bool {
+    let def = &entry.definition;
+    // CR 603.4 intervening-if: not preflighted here — treat a conditional
+    // trigger as not-live rather than assume it fires.
+    if def.condition.is_some() {
+        return false;
+    }
+    let definition_ref = source.trigger_definition_ref(entry);
+    // CR 603.2-603.4: the trigger's own constraint, in hypothetical (no-event)
+    // mode — the shared authority the live pipeline also uses. The source
+    // context is supplied (a current snapshot of `source`) so SOURCE-sensitive
+    // constraints like `AtClassLevel` (CR 716) read the real class level; only
+    // the triggering EVENT is withheld (`None`), so event-dependent constraints
+    // stay conservatively not-fireable.
+    let source_context = trigger_source_context_for_latch(state, source);
+    if !check_trigger_constraint_with_ref(
+        state,
+        def,
+        Some(&definition_ref),
+        Some(&source_context),
+        source.controller,
+        None,
+    ) {
+        return false;
+    }
+    // A trigger with no execute — or an unsupported execute — resolves to a
+    // `TriggerNoExecute` / `Effect::Unimplemented` no-op that produces no payoff,
+    // so it is not a live payoff (the shared support authority decides this).
+    let Some(execute) = def.execute.as_deref() else {
+        return false;
+    };
+    if !super::ability_utils::ability_definition_supported(execute) {
+        return false;
+    }
+    // CR 603.3d: a mandatory-target execute with no legal target is removed from
+    // the stack rather than producing its effect.
+    super::ability_utils::execute_targets_satisfiable(state, source, execute)
 }
 
 /// Evaluates the cast-payment facts carried either by the event subject or by
@@ -9830,7 +9886,7 @@ fn check_trigger_constraint(
             .map(|source| trigger_source_context_for_latch(state, source))
             .as_ref(),
         controller,
-        event,
+        Some(event),
     )
 }
 
@@ -16508,6 +16564,113 @@ pub mod tests {
                 Some(&phase_event),
             ),
             "opponent with three creatures vs controller with one (keeper) must satisfy intervening-if",
+        );
+    }
+
+    /// Builds and dispatches a "choose one — deal 3 to target creature; or deal
+    /// 3 to target creature" modal trigger from `source`, returning the live
+    /// dispatch disposition.
+    fn dispatch_two_mode_creature_target_modal(
+        state: &mut GameState,
+        source: ObjectId,
+        controller: PlayerId,
+    ) -> TriggerDispatchDisposition {
+        let mode = || {
+            AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Typed(
+                        TypedFilter::default().with_type(TypeFilter::Creature),
+                    ),
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+        };
+        let pending = PendingTrigger {
+            source_id: source,
+            controller,
+            condition: None,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "modal_placeholder".to_string(),
+                    description: None,
+                },
+                vec![],
+                source,
+                controller,
+            )),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: Some(GameEvent::SpellCast {
+                controller,
+                object_id: source,
+                card_id: CardId(0x98),
+            }),
+            modal: Some(ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 2,
+                ..Default::default()
+            }),
+            mode_abilities: vec![mode(), mode()],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        };
+        let context = PendingTriggerContext {
+            pending,
+            trigger_events: Vec::new(),
+            dispatch_origin: PendingTriggerDispatchOrigin::Normal,
+        };
+        let mut events_out = Vec::new();
+        dispatch_pending_trigger_context(state, context, &mut events_out)
+    }
+
+    /// CR 603.3c: a required modal trigger whose every mode needs a target and
+    /// none is available on an empty board is dropped at dispatch
+    /// (`DroppedNoLegalMode`) — the live contract the AI payoff preflight
+    /// (`execute_targets_satisfiable`) mirrors.
+    #[test]
+    fn modal_trigger_all_target_required_modes_no_targets_is_dropped() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_3C01),
+            controller,
+            "Modal Engine".to_string(),
+            Zone::Battlefield,
+        );
+        let disposition = dispatch_two_mode_creature_target_modal(&mut state, source, controller);
+        assert!(
+            matches!(disposition, TriggerDispatchDisposition::DroppedNoLegalMode),
+            "all-target-required modal with no legal target must drop, got {disposition:?}"
+        );
+    }
+
+    /// Control: with a legal creature target present, at least one mode is
+    /// choosable, so the same modal trigger is NOT dropped for lack of a legal
+    /// mode.
+    #[test]
+    fn modal_trigger_with_a_legal_target_is_not_dropped() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_3C02),
+            controller,
+            "Modal Engine".to_string(),
+            Zone::Battlefield,
+        );
+        let _creature = make_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let disposition = dispatch_two_mode_creature_target_modal(&mut state, source, controller);
+        assert!(
+            !matches!(disposition, TriggerDispatchDisposition::DroppedNoLegalMode),
+            "a legal target makes a mode choosable — must not drop, got {disposition:?}"
         );
     }
 

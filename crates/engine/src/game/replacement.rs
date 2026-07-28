@@ -2840,6 +2840,53 @@ fn draw_replacement_count(
     }
 }
 
+/// CR 614.6 + CR 614.11: does the branch being applied substitute the proposed
+/// draw with a NON-draw chain, so the original draw never happens and no
+/// `GameEvent::CardDrawn` is emitted?
+///
+/// `branch_ability` is the AST of the branch the pipeline is applying (`execute`
+/// on mandatory/accept, `decline` on decline), so an optional replacement's
+/// decline is never classified against the accept-side AST.
+///
+/// A one-shot draw replacement (Words of Worship / Wilding) carries its
+/// substitute in `runtime_execute` while `execute` is `None`, so `branch_ability`
+/// is `None` for those; a non-Draw, non-event-modifier substitute there (GainLife
+/// / Token) must still count, or the card would be drawn AND the substitute would
+/// run. Damage / Jace's WinTheGame / Abundance shapes carry theirs in `execute`,
+/// so `branch_ability` is `Some` and the `runtime_execute` leg never engages.
+///
+/// The `draw_replacement_count` guard preserves the count-modifier path
+/// (Alhammarret's Archive: count -> 2*count, CR 614.11a) — a rescaled draw is a
+/// surviving draw, not a substitution.
+///
+/// Single authority: the live pipeline (`apply_single_replacement`) calls this to
+/// decide whether to pre-zero the proposed count, and the read-only preflight
+/// (`proposed_draw_survives_replacement`) calls it to decide whether a draw can
+/// still deliver a card. Neither may re-derive this classification independently
+/// — a preflight that mirrors the pipeline instead of sharing it will drift.
+fn draw_is_substituted_away(
+    state: &GameState,
+    rid: ReplacementId,
+    repl_def: &ReplacementDefinition,
+    branch_ability: Option<&AbilityDefinition>,
+    proposed: &ProposedEvent,
+) -> bool {
+    if !matches!(proposed, ProposedEvent::Draw { .. }) {
+        return false;
+    }
+    match branch_ability {
+        Some(def) => {
+            !matches!(*def.effect, Effect::Draw { .. })
+                && !EventModifiers::has_only_event_modifier(Some(def))
+                && draw_replacement_count(state, rid, proposed).is_none()
+        }
+        None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+            !matches!(runtime.effect, Effect::Draw { .. })
+                && !EventModifiers::is_event_modifier_effect(&runtime.effect)
+        }),
+    }
+}
+
 // --- 4b. Scry ---
 
 // CR 614.6: A replacement effect applies only once to a given event. The
@@ -7909,34 +7956,14 @@ fn apply_single_replacement(
                 // draw with a non-Draw chain (Jace's WinTheGame, Abundance's
                 // reveal-until), zero the count here so `draw_applier` and
                 // `apply_draw_after_replacement` see a no-op draw — the original draw
-                // never happens (CR 614.6). Branch-aware via the `ability` binding
-                // above, so an optional replacement's decline never pre-zeros against
-                // the accept-side AST. The `draw_replacement_count` guard preserves
-                // the count-modifier path (Alhammarret's Archive: count -> 2*count).
-                if matches!(proposed, ProposedEvent::Draw { .. }) {
-                    // CR 614.6 + CR 614.11: A one-shot draw replacement
-                    // (Words of Worship/Wilding) carries its substitute in
-                    // `runtime_execute` (`execute` is `None`), so the `ability`
-                    // binding above is `None`. Inspect that slot too — a non-Draw,
-                    // non-event-modifier substitute (GainLife / Token) must still
-                    // pre-zero the draw, or the card is drawn AND the substitute
-                    // runs (double). Damage/Jace/Abundance use `execute`, so
-                    // `ability` is `Some` and this `runtime` branch never engages.
-                    let is_non_draw_substitute = match ability {
-                        Some(def) => {
-                            !matches!(*def.effect, Effect::Draw { .. })
-                                && !EventModifiers::has_only_event_modifier(Some(def))
-                                && draw_replacement_count(state, rid, &proposed).is_none()
-                        }
-                        None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
-                            !matches!(runtime.effect, Effect::Draw { .. })
-                                && !EventModifiers::is_event_modifier_effect(&runtime.effect)
-                        }),
-                    };
-                    if is_non_draw_substitute {
-                        if let ProposedEvent::Draw { count, .. } = &mut proposed {
-                            *count = 0;
-                        }
+                // never happens (CR 614.6). The classification itself lives in
+                // `draw_is_substituted_away`, which is SHARED with the read-only
+                // preflight `proposed_draw_survives_replacement`: an AI preflight
+                // therefore cannot disagree with this pipeline about whether a draw
+                // survives, because both ask the same function.
+                if draw_is_substituted_away(state, rid, repl_def, ability, &proposed) {
+                    if let ProposedEvent::Draw { count, .. } = &mut proposed {
+                        *count = 0;
                     }
                 }
                 // CR 614.6 + CR 111.1: A CreateToken replacement whose execute is
@@ -8697,12 +8724,89 @@ fn is_counter_placement_event(event: &ProposedEvent) -> bool {
         )
 }
 
-fn counter_placement_prevention_applies(state: &GameState, candidates: &[ReplacementId]) -> bool {
+/// CR 614.6: does any already-applicable candidate obligatorily replace the
+/// event away? A `QuantityModification::Prevent` definition kills the event only
+/// when it is MANDATORY — an optional one is offered to a player as an
+/// accept/decline choice (`replacement_mode_is_optional`), so it cannot be
+/// assumed to apply. `events` scopes the check to the
+/// replacement events that actually govern the proposed event, so a differently
+/// evented `Prevent` sibling on the same source can never suppress it.
+///
+/// `candidates` must come from the live applicability authority
+/// (`find_applicable_replacements`), which has already enforced the handler
+/// matcher, source/player scope, condition, and optional-decline gates. Virtual
+/// rules-source candidates carry no definition and are never preventive here.
+fn mandatory_prevention_applies(
+    state: &GameState,
+    candidates: &[ReplacementId],
+    events: &[ReplacementEvent],
+) -> bool {
     candidates.iter().any(|rid| {
         replacement_definition_for_id(state, *rid).is_some_and(|def| {
-            def.event == ReplacementEvent::AddCounter
+            events.contains(&def.event)
                 && def.quantity_modification == Some(QuantityModification::Prevent)
                 && !replacement_mode_is_optional(&def.mode)
+        })
+    })
+}
+
+fn counter_placement_prevention_applies(state: &GameState, candidates: &[ReplacementId]) -> bool {
+    mandatory_prevention_applies(state, candidates, &[ReplacementEvent::AddCounter])
+}
+
+/// CR 121.1 + CR 614.6 + CR 614.11: pure preflight — does a proposed draw survive
+/// the replacement effects currently applicable to it as a *real* draw, one that
+/// puts a card into its player's hand and emits `GameEvent::CardDrawn`?
+///
+/// Three legs of the live pipeline remove a proposed draw, and each is answered
+/// here by the same authority that owns it in the pipeline, never by a
+/// re-derived structural scan:
+/// - a mandatory `QuantityModification::Prevent` — `draw_applier` returns
+///   `ApplyResult::Prevented`, so the replaced event never happens (CR 614.6,
+///   Living Conundrum). Shared via `mandatory_prevention_applies`.
+/// - a mandatory non-Draw substitute carried in `execute` or `runtime_execute` —
+///   `apply_single_replacement` zeroes the proposed count so the original draw is
+///   a no-op and the substitute runs instead (CR 614.11: Words of Worship,
+///   Abundance's reveal-until, Jace's WinTheGame). Shared via
+///   `draw_is_substituted_away`.
+/// - a mandatory count modification that resolves to zero — `draw_applier`
+///   returns `Modified` with `count: 0`, and `apply_draw_after_replacement`
+///   emits `CardDrawn` only inside its per-delivered-card loop, so a zero-count
+///   draw emits none (CR 614.11a). Shared via `draw_replacement_count`.
+///
+/// An OPTIONAL replacement (CR 614.6: "you may") is never assumed to apply — the
+/// player is offered an accept/decline choice, so the draw is still deliverable
+/// and the payoff still stands. A count modification that resolves positive
+/// (Alhammarret's Archive: count -> 2*count) is likewise a surviving draw.
+///
+/// `find_applicable_replacements` is the live applicability authority, so an
+/// unrelated or opponent-scoped source (CR 614.1a), a false conditional
+/// (CR 614.1d), and a recognized-but-stub replacement event are already excluded
+/// before anything is classified here.
+///
+/// Read-only: it consults applicability and definition shape without running any
+/// applier, so preflights (AI candidate scoring) can call it without mutating
+/// state. Non-`Draw` events are outside its remit and always report surviving.
+pub fn proposed_draw_survives_replacement(state: &GameState, event: &ProposedEvent) -> bool {
+    if !matches!(event, ProposedEvent::Draw { .. }) {
+        return true;
+    }
+    let registry = replacement_registry();
+    let candidates = find_applicable_replacements(state, event, registry);
+    let events = replacement_event_keys_for_event(event);
+    if mandatory_prevention_applies(state, &candidates, &events) {
+        return false;
+    }
+    !candidates.iter().any(|rid| {
+        replacement_definition_for_id(state, *rid).is_some_and(|def| {
+            // CR 614.6: only a MANDATORY branch is certain to apply, and the live
+            // pipeline resolves it to `ReplacementBranch::Execute` — so `execute`
+            // is the branch AST to classify, exactly as `apply_single_replacement`
+            // binds it.
+            events.contains(&def.event)
+                && !replacement_mode_is_optional(&def.mode)
+                && (draw_is_substituted_away(state, *rid, def, def.execute.as_deref(), event)
+                    || draw_replacement_count(state, *rid, event) == Some(0))
         })
     })
 }

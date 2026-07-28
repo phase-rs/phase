@@ -1,0 +1,242 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "CounterAdded",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Token",
+          "name": "Knight",
+          "power": {
+            "type": "Fixed",
+            "value": 2
+          },
+          "toughness": {
+            "type": "Fixed",
+            "value": 2
+          },
+          "types": [
+            "Creature",
+            "Knight"
+          ],
+          "colors": [
+            "White"
+          ],
+          "keywords": [
+            "Vigilance"
+          ],
+          "tapped": false,
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "owner": {
+            "type": "Controller"
+          },
+          "enters_attacking": false
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "Chapter 1",
+      "constraint": null,
+      "condition": null,
+      "counter_filter": {
+        "counter_type": "lore",
+        "threshold": 1
+      },
+      "batched": false
+    },
+    {
+      "mode": "CounterAdded",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Token",
+          "name": "Knight",
+          "power": {
+            "type": "Fixed",
+            "value": 2
+          },
+          "toughness": {
+            "type": "Fixed",
+            "value": 2
+          },
+          "types": [
+            "Creature",
+            "Knight"
+          ],
+          "colors": [
+            "White"
+          ],
+          "keywords": [
+            "Vigilance"
+          ],
+          "tapped": false,
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "owner": {
+            "type": "Controller"
+          },
+          "enters_attacking": false
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "Chapter 2",
+      "constraint": null,
+      "condition": null,
+      "counter_filter": {
+        "counter_type": "lore",
+        "threshold": 2
+      },
+      "batched": false
+    },
+    {
+      "mode": "CounterAdded",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "PumpAll",
+          "power": {
+            "type": "Fixed",
+            "value": 2
+          },
+          "toughness": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "target": {
+            "type": "Typed",
+            "type_filters": [
+              {
+                "Subtype": "Knight"
+              }
+            ],
+            "controller": "You",
+            "properties": []
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": "UntilEndOfTurn",
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "Chapter 3",
+      "constraint": null,
+      "condition": null,
+      "counter_filter": {
+        "counter_type": "lore",
+        "threshold": 3
+      },
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "Moved",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "PutCounter",
+          "counter_type": "lore",
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "target": {
+            "type": "SelfRef"
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "mode": {
+        "type": "Mandatory"
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "description": "Saga ETB lore counter",
+      "condition": null,
+      "destination_zone": "Battlefield"
+    }
+  ],
+  "extractedKeywords": []
+}

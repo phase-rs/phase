@@ -12,8 +12,8 @@
 # real IR nodes. Every tranche that converts a producer must lower its number
 # in the same commit, which is what makes the burn-down visible in `git log`
 # on this one file.
-crates/engine/src/parser/oracle.rs         20
-crates/engine/src/parser/oracle_class.rs    6
+crates/engine/src/parser/oracle.rs         16
+crates/engine/src/parser/oracle_class.rs    5
 
 # --- infrastructure: NOT burn-down targets ----------------------------------
 # The variant declarations and their consumers. These legitimately survive

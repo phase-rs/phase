@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1348
 expression: "&ir"
 ---
 {
@@ -119,51 +118,56 @@ expression: "&ir"
         "fragment": "When ~ becomes level 2, draw two cards."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "ClassLevelGained",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Draw",
-              "count": {
-                "type": "Fixed",
-                "value": 2
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "ClassLevelGained",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "Draw",
+                  "count": {
+                    "type": "Fixed",
+                    "value": 2
+                  },
+                  "target": {
+                    "type": "Controller"
+                  }
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
               },
-              "target": {
-                "type": "Controller"
-              }
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "When ~ becomes level 2",
+              "constraint": {
+                "type": "AtClassLevel",
+                "level": 2
+              },
+              "condition": null,
+              "batched": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "When ~ becomes level 2",
-          "constraint": {
-            "type": "AtClassLevel",
-            "level": 2
-          },
-          "condition": null,
-          "batched": false
+            "source_text": "When ~ becomes level 2, draw two cards."
+          }
         }
       }
     },

@@ -1,0 +1,94 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": {
+        "Unknown": "when you do"
+      },
+      "execute": null,
+      "valid_card": null,
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "Would You Like A...? — Once each turn, you may play a historic land or cast a historic spell from the top of your library. When you do, create a Food token.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [
+    {
+      "mode": "MayLookAtTopOfLibrary",
+      "affected": {
+        "type": "Typed",
+        "type_filters": [],
+        "controller": "You",
+        "properties": []
+      },
+      "modifications": [],
+      "condition": null,
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "You may look at the top card of your library any time."
+    },
+    {
+      "mode": {
+        "TopOfLibraryCastPermission": {
+          "play_mode": "Play",
+          "frequency": "OncePerTurn",
+          "alt_cost": null
+        }
+      },
+      "affected": {
+        "type": "Or",
+        "filters": [
+          {
+            "type": "Typed",
+            "type_filters": [
+              "Land"
+            ],
+            "controller": null,
+            "properties": [
+              {
+                "type": "Historic"
+              }
+            ]
+          },
+          {
+            "type": "Typed",
+            "type_filters": [
+              "Card"
+            ],
+            "controller": null,
+            "properties": [
+              {
+                "type": "Historic"
+              }
+            ]
+          }
+        ]
+      },
+      "modifications": [],
+      "condition": null,
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "Would You Like A...? — Once each turn, you may play a historic land or cast a historic spell from the top of your library. When you do, create a Food token."
+    }
+  ],
+  "replacements": [],
+  "extractedKeywords": []
+}

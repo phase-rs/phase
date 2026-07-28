@@ -1,0 +1,223 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 77,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Whenever another creature or planeswalker you control enters, mill two cards."
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "ChangesZone",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "Mill",
+              "count": {
+                "type": "Fixed",
+                "value": 2
+              },
+              "target": {
+                "type": "Controller"
+              },
+              "destination": "Graveyard"
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "valid_card": {
+            "type": "Or",
+            "filters": [
+              {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": [
+                  {
+                    "type": "Another"
+                  }
+                ]
+              },
+              {
+                "type": "Typed",
+                "type_filters": [
+                  "Planeswalker"
+                ],
+                "controller": "You",
+                "properties": [
+                  {
+                    "type": "Another"
+                  }
+                ]
+              }
+            ]
+          },
+          "origin": null,
+          "destination": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "phase": null,
+          "optional": false,
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": null,
+          "valid_source": null,
+          "description": "Whenever another creature or planeswalker you control enters, mill two cards.",
+          "constraint": null,
+          "condition": null,
+          "batched": false
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 78,
+          "end_byte": 284,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Exhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery. (Activate each exhaust ability only once.)"
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Graveyard",
+            "destination": "Battlefield",
+            "target": {
+              "type": "Or",
+              "filters": [
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "InZone",
+                      "zone": "Graveyard"
+                    }
+                  ]
+                },
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Planeswalker"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "InZone",
+                      "zone": "Graveyard"
+                    }
+                  ]
+                }
+              ]
+            },
+            "owner_library": false,
+            "enter_transformed": false,
+            "enter_tapped": false,
+            "enters_attacking": false
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [
+                "Black"
+              ],
+              "generic": 5
+            }
+          },
+          "sub_ability": {
+            "kind": "Spell",
+            "effect": {
+              "type": "PutCounter",
+              "counter_type": "P1P1",
+              "count": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "target": {
+                "type": "Typed",
+                "type_filters": [
+                  {
+                    "Subtype": "Liliana"
+                  }
+                ],
+                "controller": null,
+                "properties": []
+              }
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "target_choice_timing": "Resolution",
+            "forward_result": false,
+            "sub_link": "SequentialSibling"
+          },
+          "duration": null,
+          "description": "Exhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery.",
+          "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "AsSorcery"
+            },
+            {
+              "type": "OnlyOnce"
+            }
+          ],
+          "ability_tag": {
+            "type": "Exhaust"
+          },
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    }
+  ],
+  "source_text": "Whenever another creature or planeswalker you control enters, mill two cards.\nExhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery. (Activate each exhaust ability only once.)",
+  "card_name": "Liliana the Repentant"
+}

@@ -20,6 +20,7 @@ use super::oracle_effect::parse_effect_chain;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_ir::static_ir::StaticIr;
+use super::oracle_ir::trigger::TriggerNodeIr;
 use super::oracle_keyword::extract_granted_keyword_list;
 use super::oracle_modal::strip_ability_word;
 use super::oracle_nom::primitives as nom_primitives;
@@ -140,7 +141,16 @@ pub(crate) fn parse_class_oracle_text(
             // Check for "When this Class becomes level N" trigger pattern
             if is_class_level_trigger(&lower, card_name) {
                 if let Some(trigger) = parse_class_level_trigger(line, card_name, section.level) {
-                    items.push((line_index, OracleNodeIr::PreLoweredTrigger(trigger)));
+                    // The `ClassLevelGained` mode, the `AtClassLevel { level }`
+                    // constraint and the `"When ~ becomes level N"` description
+                    // are all stamped by the recognizer.
+                    // `lower_trigger_node_ir` is the identity on `Assembled`, so
+                    // none of them is re-derived — in particular the description
+                    // is not overwritten with `source_text`.
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Trigger(TriggerNodeIr::from_definition(line, trigger)),
+                    ));
                     continue;
                 }
             }
