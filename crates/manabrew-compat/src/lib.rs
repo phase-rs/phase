@@ -37,6 +37,39 @@ use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
 use engine::types::{GameAction, ObjectId};
+pub use manabrew_protocol::display::DisplayEvent;
+pub use manabrew_protocol::game::{
+    CardDto, CardIdentity, CardView, ClassLevelDto, CombatAssignmentDto, DayTime, GameViewDto,
+    Mana as ManaDto, ManaColor as ManaColorDto, PlayerCounterKind as PlayerCounterKindDto,
+    PlayerDto, PlayerStatus, SagaChapterDto, StackObjectDto, StepKind, TargetingIntent, ZoneDto,
+    ZoneKind,
+};
+pub use manabrew_protocol::prompts::common::{
+    ActivatableAbilityInfo, AlternativeCostKind, AttackAssignment, AttackTargetDto,
+    AttackTargetKind, AvailableAction, AvailableActionKind, BlockAssignment,
+    CombatDamageAssignmentEntry, PaymentAction, PaymentActionKind, PaymentResourceKind,
+    PlayCardMode, PromptPresentation, TargetKind as TargetKindDto, TargetRef as TargetRefDto,
+};
+pub use manabrew_protocol::prompts::choose_attackers::AttackerOptionDto;
+pub use manabrew_protocol::prompts::choose_blockers::BlockableAttackerDto;
+pub use manabrew_protocol::prompts::scry::ScryDestination;
+pub use manabrew_protocol::prompts::{
+    ChooseActionInput, ChooseActionOutput, ChooseAttackersInput, ChooseAttackersOutput,
+    ChooseBlockersInput, ChooseBlockersOutput,
+    ChooseBoardTargetsInput, ChooseBoardTargetsOutput, ChooseBooleanInput, ChooseBooleanOutput,
+    ChooseCardsInput, ChooseCardsOutput, ChooseColorInput, ChooseColorOutput,
+    ChooseCombatDamageAssignmentInput, ChooseCombatDamageAssignmentOutput,
+    ChooseDamageAssignmentOrderInput, ChooseDamageAssignmentOrderOutput, ChooseFromSelectionInput,
+    ChooseFromSelectionOutput, ChooseNumberInput, ChooseNumberOutput, DiceRolledInput,
+    DiceRolledOutput, DiceRollEntry, GameOverInput, MulliganInput, MulliganOutput,
+    MulliganPutBackInput, MulliganPutBackOutput, PassUntil, PayManaCostInput, PayManaCostOutput,
+    PromptInput, PromptOutput, ReorderInput, ReorderItem, ReorderOutput, ResponseViolation,
+    RevealCardsInput, RevealCardsOutput, ScryInput, ScryOutput, SelectionOption,
+};
+pub use manabrew_protocol::transport::{
+    AgentPrompt, ClientToServerMessage, DirectiveInput, ProtocolError, ProtocolErrorCode,
+    StateUpdate,
+};
 use serde::{Deserialize, Serialize};
 
 /// Wire version of the pinned upstream protocol. Upstream defines the wire
@@ -44,18 +77,6 @@ use serde::{Deserialize, Serialize};
 pub const PROTOCOL_VERSION: u32 = 2;
 
 pub type Result<T> = std::result::Result<T, AdapterError>;
-
-/// Why a [`PromptOutput`] is not a legal answer to a given [`PromptInput`].
-///
-/// Distinct from [`AdapterError`]: this is the formal prompt/response contract
-/// check, and maps onto exactly two of the five wire [`ProtocolErrorCode`]s.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResponseViolation {
-    /// The output's prompt family is not the open prompt's family.
-    WrongPromptType,
-    /// The echoed action id was never advertised by the open prompt.
-    UnknownActionId(String),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterError {
@@ -235,1114 +256,6 @@ pub fn prepare_snapshot_with_prompt_id(
     })
 }
 
-/// CR 500: turn steps and phases, as the protocol enumerates them.
-///
-/// Thirteen variants against the engine's twelve `Phase`s. The extra one is
-/// `CombatFirstStrikeDamage`, and the engine's twelve is not a gap: CR 510.4
-/// gives the phase a *second* combat damage step rather than a differently
-/// named one, so one `Phase::CombatDamage` entered twice is the faithful
-/// model. The adapter still never produces this variant — see
-/// [`phase_step`] and `local.first-strike-damage-step-unproducible`.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum StepKind {
-    #[default]
-    Untap,
-    Upkeep,
-    Draw,
-    Main1,
-    CombatBegin,
-    CombatDeclareAttackers,
-    CombatDeclareBlockers,
-    CombatFirstStrikeDamage,
-    CombatDamage,
-    CombatEnd,
-    Main2,
-    EndOfTurn,
-    Cleanup,
-}
-
-/// CR 400.1: the six zones the protocol models. The engine's `Zone::Stack` has
-/// no counterpart — stack contents travel as `GameViewDto.stack`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum ZoneKind {
-    Battlefield,
-    Hand,
-    Library,
-    Graveyard,
-    Exile,
-    Command,
-}
-
-/// CR 731.1: the day/night designation. The engine models this as
-/// `Option<DayNight>`, where `None` means neither.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum DayTime {
-    #[default]
-    Neither,
-    Day,
-    Night,
-}
-
-/// A seat's standing in the game.
-///
-/// The engine records only `Player::is_eliminated` — it never persists *why* a
-/// player left — so this adapter emits `Playing` or `Lost` and **never**
-/// `Conceded`. See `local.player-concede-status-unsourceable`.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PlayerStatus {
-    #[default]
-    Playing,
-    Lost,
-    Conceded,
-}
-
-/// CR 122: player-borne counters. Named `Dto` to avoid colliding with the
-/// engine's own `PlayerCounterKind`, whose variant set differs (the engine
-/// tracks energy as a plain field, and spells `Radiation` as `Rad`).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum PlayerCounterKindDto {
-    Poison,
-    Energy,
-    Experience,
-    Radiation,
-    Ticket,
-}
-
-/// A non-mana resource tapped or released to help pay a cost.
-///
-/// Only `Convoke` is reachable from this engine (`GameAction::TapForConvoke`);
-/// there is no engine action for Delve or Improvise, and none for releasing any
-/// of the three. See `local.payment-resource-actions-missing`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PaymentResourceKind {
-    Convoke,
-    Improvise,
-    Delve,
-}
-
-/// The five conformance failure modes a conforming engine must be able to
-/// report (`conformance.mdx:28-33, :50`).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum ProtocolErrorCode {
-    StalePrompt,
-    WrongPlayer,
-    WrongPromptType,
-    UnknownActionId,
-    InvalidShape,
-}
-
-/// A wire-level rejection sent back to one client.
-///
-/// Distinct from [`AdapterError`], which is this crate's internal Rust failure
-/// type; [`protocol_error_for`] maps one onto the other.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProtocolError {
-    pub code: ProtocolErrorCode,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_id: Option<u32>,
-}
-
-/// CR 118.9 / 601.2b: alternative costs a spell may be cast for.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum AlternativeCostKind {
-    Flashback,
-    Spectacle,
-    Evoke,
-    Dash,
-    Blitz,
-    Escape,
-    Overload,
-    Madness,
-    Foretell,
-    Emerge,
-    Suspend,
-    Morph,
-    Megamorph,
-    Bestow,
-    Warp,
-    SacrificeAlt,
-    Plot,
-    Awaken,
-    Disturb,
-    Harmonize,
-    Freerunning,
-    Impending,
-    Mayhem,
-    #[serde(rename = "moreThanMeetsTheEye")]
-    MTMtE,
-    Mutate,
-    Prowl,
-    Sneak,
-    Surge,
-    WebSlinging,
-    Plotted,
-}
-
-/// How a card is being put onto the stack or the battlefield.
-///
-/// Display-only: the client echoes just `action_id`, which resolves through
-/// [`ActionTableEntry`] back to the original `GameAction`, so `mode` never
-/// round-trips. `BackFaceLand` is **unproducible** here — `GameAction::PlayLand`
-/// carries no face discriminator (the MDFC face is a separate, later
-/// `ChooseModalFace`), and inferring it from card data would be game logic in a
-/// serialization boundary.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum PlayCardMode {
-    Normal,
-    BackFaceLand,
-    RoomRightSplit,
-    Alternative { cost: AlternativeCostKind },
-    StaticAlternative,
-    ForetellExile,
-    UnlockDoor,
-}
-
-/// A client decision that is not an answer to any open prompt.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum DirectiveInput {
-    Concede,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StateUpdate {
-    pub game_view: GameViewDto,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentPrompt {
-    pub prompt_id: u32,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub deciding_player_id: String,
-    /// The full source card, not just its id — so the recipient can render it
-    /// even when the source lies outside their visible state. Built from raw
-    /// engine state; see `PreparedManabrewSnapshot::source_card_object`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_card: Option<CardDto>,
-    pub input: PromptInput,
-}
-
-/// One `(zone, owner)` bucket. Battlefield entries are bucketed by
-/// **controller** rather than owner (CR 110.2), matching upstream.
-///
-/// `count` is the truthful total and may exceed `cards.len()` when the
-/// recipient may not identify every card in the zone.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ZoneDto {
-    pub zone: ZoneKind,
-    pub owner_id: String,
-    /// Engine order. The library is top-first (the engine stores it front-first
-    /// and the top card is `library.front()`), so index 0 is the top card.
-    /// Every other zone is passed through in the engine's own order — notably
-    /// the graveyard, which the engine appends to, so index 0 is the *oldest*
-    /// card rather than the top of the pile.
-    pub cards: Vec<CardView>,
-    pub count: usize,
-}
-
-/// A card as one recipient may see it.
-///
-/// `Hidden` is for cards in a **hidden zone** whose identity the recipient may
-/// not learn (a face-down exile, CR 406.3). A face-down *battlefield* permanent
-/// is never `Hidden` — the permanent itself is public (CR 400.2 / CR 708.2), so
-/// it travels as a `Visible` entry whose identity fields are redacted while its
-/// public state (tapped, counters, damage) survives.
-// `Visible` is the dominant variant — most cards in most zones are visible —
-// and these views are built once per state update, serialized, and dropped.
-// Boxing to even out the variants would trade one `Vec` allocation for a heap
-// allocation per card, so the flat layout is deliberate.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "visibility",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum CardView {
-    Visible(CardDto),
-    Hidden { id: String },
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct GameViewDto {
-    pub game_id: String,
-    pub turn: u32,
-    pub step: StepKind,
-    pub combat_assignments: Vec<CombatAssignmentDto>,
-    pub active_player_id: String,
-    pub priority_player_id: String,
-    pub players: Vec<PlayerDto>,
-    pub zones: Vec<ZoneDto>,
-    pub stack: Vec<StackObjectDto>,
-    pub game_over: bool,
-    pub winner_id: Option<String>,
-    pub monarch_id: Option<String>,
-    pub initiative_holder_id: Option<String>,
-    pub day_time: DayTime,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CombatAssignmentDto {
-    pub blocker_id: String,
-    pub attacker_id: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PlayerDto {
-    pub id: String,
-    pub name: String,
-    pub status: PlayerStatus,
-    pub is_human: bool,
-    pub life: i32,
-    pub counters: BTreeMap<PlayerCounterKindDto, u32>,
-    pub mana_pool: BTreeMap<ManaColorDto, u32>,
-    pub commander_damage: HashMap<String, i32>,
-    pub has_city_blessing: bool,
-    pub ring_level: i32,
-    pub speed: i32,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CardIdentity {
-    pub name: String,
-    pub set_code: String,
-    pub card_number: String,
-    pub is_token: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CardDto {
-    pub id: String,
-    pub identity: CardIdentity,
-    pub color: String,
-    pub mana_cost: String,
-    pub cmc: i32,
-    pub types: Vec<String>,
-    pub subtypes: Vec<String>,
-    pub supertypes: Vec<String>,
-    pub power: Option<String>,
-    pub toughness: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_power: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_toughness: Option<i32>,
-    pub text: String,
-    pub controller_id: String,
-    pub owner_id: String,
-    pub tapped: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_crewed: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_attacking: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attacking_player_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attack_target_id: Option<String>,
-    pub keywords: Vec<String>,
-    /// Keyed by the engine's canonical `CounterType` serialization key
-    /// ("P1P1", "M1M1", "loyalty", …) — **not** its `display_phrase()` prose
-    /// form ("+1/+1"), which is for player-facing text.
-    pub counters: BTreeMap<String, u32>,
-    pub damage: i32,
-    pub summoning_sick: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_copy: bool,
-    pub is_double_faced: bool,
-    pub is_transformed: bool,
-    pub is_face_down: bool,
-    pub is_bestowed: bool,
-    pub phased_out: bool,
-    pub exerted: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_ring_bearer: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attached_to: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachment_ids: Vec<String>,
-    /// CR 712.4a / CR 730.2: the card ids merged under this top card — the
-    /// engine's `GameObject::merged_components`, covering mutate and meld.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub merged_card_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub flashback_cost: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kicker_cost: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effective_mana_cost: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub madness_cost: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_madness_exiled: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_plotted: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_warp_exiled: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub foil: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub would_die_in_combat: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct StackObjectDto {
-    pub id: String,
-    pub source_id: String,
-    pub controller_id: String,
-    pub identity: CardIdentity,
-    pub text: String,
-    pub is_permanent_spell: bool,
-    pub is_casting: bool,
-    pub targets: Vec<TargetRefDto>,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum TargetingIntent {
-    #[default]
-    Damage,
-    Destroy,
-    Sacrifice,
-    Exile,
-    Bounce,
-    Mill,
-    Discard,
-    Counter,
-    Tap,
-    Untap,
-    Copy,
-    Buff,
-    Debuff,
-    Heal,
-    LoseLife,
-    Reveal,
-    Draw,
-    Fetch,
-    GainControl,
-    Fight,
-    Attach,
-    Attack,
-    Block,
-    Hostile,
-    Friendly,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum TargetKindDto {
-    Player,
-    Card,
-    Spell,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct TargetRefDto {
-    pub kind: TargetKindDto,
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent: Option<TargetingIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oracle: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum PromptInput {
-    ChooseAction(ChooseActionInput),
-    PayManaCost(PayManaCostInput),
-    Mulligan(MulliganInput),
-    MulliganPutBack(MulliganPutBackInput),
-    ChooseAttackers(ChooseAttackersInput),
-    ChooseBlockers(ChooseBlockersInput),
-    ChooseBoardTargets(ChooseBoardTargetsInput),
-    ChooseBoolean(ChooseBooleanInput),
-    ChooseCards(ChooseCardsInput),
-    ChooseColor(ChooseColorInput),
-    ChooseCombatDamageAssignment(ChooseCombatDamageAssignmentInput),
-    ChooseDamageAssignmentOrder(ChooseDamageAssignmentOrderInput),
-    ChooseFromSelection(ChooseFromSelectionInput),
-    ChooseNumber(ChooseNumberInput),
-    RevealCards(RevealCardsInput),
-    Scry(ScryInput),
-    Reorder(ReorderInput),
-    DiceRolled(DiceRolledInput),
-    GameOver(GameOverInput),
-}
-
-/// A client's answer to an open prompt, as a **two-level** union: the outer tag
-/// names the prompt family, and the family's own output nests under `output`.
-///
-/// Wire form: `{"type":"chooseNumber","output":{"type":"numberDecision","chosenNumber":3}}`
-///
-/// The nesting is deliberate and **asymmetric with [`PromptInput`]**, which is
-/// internally tagged with no `content` and therefore *flattens*
-/// (`{"type":"chooseAction","actions":[…]}`). Adding `content` to `PromptInput`
-/// for symmetry would silently break every prompt.
-///
-/// Carrying the family in the tag is also what removes the old
-/// `state.waiting_for` sniffing: an `act` output no longer has to be guessed
-/// between priority and mana payment.
-///
-/// There is no `GameOver` arm — that prompt is terminal and takes no response.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", content = "output", rename_all = "camelCase")]
-pub enum PromptOutput {
-    Mulligan(MulliganOutput),
-    MulliganPutBack(MulliganPutBackOutput),
-    ChooseAction(ChooseActionOutput),
-    ChooseAttackers(ChooseAttackersOutput),
-    ChooseBlockers(ChooseBlockersOutput),
-    ChooseBoardTargets(ChooseBoardTargetsOutput),
-    ChooseBoolean(ChooseBooleanOutput),
-    ChooseFromSelection(ChooseFromSelectionOutput),
-    RevealCards(RevealCardsOutput),
-    Scry(ScryOutput),
-    ChooseColor(ChooseColorOutput),
-    ChooseNumber(ChooseNumberOutput),
-    ChooseDamageAssignmentOrder(ChooseDamageAssignmentOrderOutput),
-    ChooseCombatDamageAssignment(ChooseCombatDamageAssignmentOutput),
-    PayManaCost(PayManaCostOutput),
-    ChooseCards(ChooseCardsOutput),
-    Reorder(ReorderOutput),
-    DiceRolled(DiceRolledOutput),
-}
-
-/// Everything a client can send the engine.
-///
-/// This is the single client→engine union: a prompt answer, or a directive that
-/// belongs to no prompt.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ClientToServerMessage {
-    Response {
-        prompt_id: u32,
-        /// Upstream names this field `action`, not `output`.
-        action: PromptOutput,
-    },
-    Directive {
-        directive: DirectiveInput,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PromptPresentation {
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub targets: Vec<TargetRefDto>,
-}
-
-/// CR 105.1: the five colors plus colorless. Ordered/hashable because it keys
-/// `PlayerDto::mana_pool`'s `BTreeMap`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ManaColorDto {
-    #[serde(rename = "W")]
-    White,
-    #[serde(rename = "U")]
-    Blue,
-    #[serde(rename = "B")]
-    Black,
-    #[serde(rename = "R")]
-    Red,
-    #[serde(rename = "G")]
-    Green,
-    #[serde(rename = "C")]
-    Colorless,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ManaDto {
-    pub color: ManaColorDto,
-    pub amount: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivatableAbilityInfo {
-    pub card_id: String,
-    pub ability_index: usize,
-    pub description: String,
-    pub is_mana_ability: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub produced_mana: Option<Vec<ManaDto>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum AvailableActionKind {
-    Cast {
-        card_id: String,
-        mode: PlayCardMode,
-        label: String,
-    },
-    ActivateAbility(ActivatableAbilityInfo),
-    UndoMana {
-        card_id: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AvailableAction {
-    pub id: String,
-    #[serde(flatten)]
-    pub kind: AvailableActionKind,
-}
-
-/// A single move available *while paying a cost* — the mana-payment analogue of
-/// [`AvailableActionKind`].
-///
-/// `PayLife` is emitted for exactly one thing: a Phyrexian payment route that
-/// spends life (CR 107.4f), advertised from the engine's own
-/// `SubmitPhyrexianChoices` legal actions so the echoed id always resolves.
-/// `UseResource` for Delve or Improvise and every `ReleaseResource` form stay
-/// unemitted — no engine action backs them, and advertising an id the engine
-/// would then reject violates the `UnknownActionId` obligation. See
-/// `local.payment-resource-actions-missing`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum PaymentActionKind {
-    ActivateManaAbility(ActivatableAbilityInfo),
-    UndoMana {
-        card_id: String,
-    },
-    UseResource {
-        card_id: String,
-        resource: PaymentResourceKind,
-    },
-    ReleaseResource {
-        card_id: String,
-        resource: PaymentResourceKind,
-    },
-    PayLife {
-        amount: u32,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PaymentAction {
-    pub id: String,
-    #[serde(flatten)]
-    pub kind: PaymentActionKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum AttackTargetKind {
-    Player,
-    Planeswalker,
-    Battle,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AttackTargetDto {
-    pub id: String,
-    pub label: String,
-    pub kind: AttackTargetKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AttackAssignment {
-    pub attacker_id: String,
-    pub target_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BlockAssignment {
-    pub blocker_id: String,
-    pub attacker_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CombatDamageAssignmentEntry {
-    pub assignee_id: String,
-    pub damage: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseActionInput {
-    pub actions: Vec<AvailableAction>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PassUntil {
-    pub player_id: String,
-    pub phase: StepKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseActionOutput {
-    Pass {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        until: Option<PassUntil>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        exhaust_stack: bool,
-    },
-    RestoreSnapshot {
-        checkpoint_id: u64,
-    },
-    Act {
-        action_id: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PayManaCostInput {
-    pub presentation: PromptPresentation,
-    pub card_id: String,
-    pub card_name: String,
-    pub mana_cost: String,
-    pub can_confirm_from_pool: bool,
-    pub actions: Vec<PaymentAction>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum PayManaCostOutput {
-    Act {
-        action_id: String,
-    },
-    Pay {
-        #[serde(default)]
-        auto: bool,
-    },
-    Cancel,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct MulliganInput {
-    pub hand_card_ids: Vec<String>,
-    pub mulligan_count: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum MulliganOutput {
-    MulliganDecision { keep: bool },
-    MulliganUseSerumPowder { card_id: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct MulliganPutBackInput {
-    pub hand_card_ids: Vec<String>,
-    pub cards: Vec<CardDto>,
-    pub count: usize,
-    /// The earmarked Serum Powder object committed to a pending
-    /// `UseSerumPowder` continuation, if any — the client must not offer it
-    /// as selectable in the bottom-cards picker. `None` for both `Keep`
-    /// resolutions and the (unrelated) `OpeningHandBottomCards` phase.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub excluded_card_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum MulliganPutBackOutput {
-    MulliganPutBackDecision { card_ids: Vec<String> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AttackerOptionDto {
-    pub attacker_id: String,
-    pub valid_target_ids: Vec<String>,
-    pub must_attack: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseAttackersInput {
-    pub attackers: Vec<AttackerOptionDto>,
-    pub attack_targets: Vec<AttackTargetDto>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseAttackersOutput {
-    DeclareAttackers { assignments: Vec<AttackAssignment> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BlockableAttackerDto {
-    pub attacker_id: String,
-    pub valid_blocker_ids: Vec<String>,
-    pub min_blockers: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_blockers: Option<u32>,
-    pub must_be_blocked: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseBlockersInput {
-    pub attackers: Vec<BlockableAttackerDto>,
-    pub available_blocker_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseBlockersOutput {
-    DeclareBlockers { assignments: Vec<BlockAssignment> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseBoardTargetsInput {
-    pub presentation: PromptPresentation,
-    pub candidates: Vec<TargetRefDto>,
-    #[serde(default)]
-    pub hostile: bool,
-    pub intent: TargetingIntent,
-    pub min_targets: i32,
-    pub max_targets: i32,
-    pub chosen_targets: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseBoardTargetsOutput {
-    BoardTargets { chosen: Vec<TargetRefDto> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseBooleanInput {
-    pub presentation: PromptPresentation,
-    pub confirm_label: String,
-    pub deny_label: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseBooleanOutput {
-    Decision { value: bool },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseCardsInput {
-    pub presentation: PromptPresentation,
-    pub cards: Vec<CardDto>,
-    pub min: usize,
-    pub max: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseCardsOutput {
-    ChooseCardsDecision { chosen_card_ids: Vec<String> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseColorInput {
-    pub presentation: PromptPresentation,
-    pub valid_colors: Vec<String>,
-    pub amount: u32,
-    pub repeat_allowed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseColorOutput {
-    ColorDecision {
-        chosen_colors: BTreeMap<String, u32>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseCombatDamageAssignmentInput {
-    pub attacker_id: String,
-    pub blocker_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub defender_id: Option<String>,
-    pub total_damage: i32,
-    pub attacker_has_deathtouch: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseCombatDamageAssignmentOutput {
-    CombatDamageAssignmentDecision {
-        assignments: Vec<CombatDamageAssignmentEntry>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseDamageAssignmentOrderInput {
-    pub attacker_id: String,
-    pub blocker_ids: Vec<String>,
-    pub blocker_cards: Vec<CardDto>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseDamageAssignmentOrderOutput {
-    DamageAssignmentOrderDecision { ordered_blocker_ids: Vec<String> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SelectionOption {
-    pub label: String,
-    pub weight: usize,
-    pub can_repeat: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseFromSelectionInput {
-    pub presentation: PromptPresentation,
-    pub options: Vec<SelectionOption>,
-    pub min_total: usize,
-    pub max_total: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseFromSelectionOutput {
-    SelectionDecision { chosen_indices: Vec<usize> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseNumberInput {
-    pub presentation: PromptPresentation,
-    pub min: i32,
-    pub max: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseNumberOutput {
-    NumberDecision { chosen_number: Option<i32> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct RevealCardsInput {
-    pub presentation: PromptPresentation,
-    pub cards: Vec<CardDto>,
-    pub zone: ZoneKind,
-    pub owner_player_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum RevealCardsOutput {
-    RevealCardsAcknowledged,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum ScryDestination {
-    LibraryTop,
-    LibraryBottom,
-    Graveyard,
-    Exile,
-    Hand,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ScryInput {
-    pub presentation: PromptPresentation,
-    pub cards: Vec<CardDto>,
-    pub zones: Vec<ScryDestination>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ScryOutput {
-    ScryDecision { zone_card_ids: Vec<Vec<String>> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ReorderItem {
-    pub id: String,
-    pub card: CardDto,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oracle: Option<String>,
-}
-
-/// Renamed from `ReorderCardsInput`: the wire tag changed from `reorderCards`
-/// to `reorder` in v2, and the Rust name should not contradict it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ReorderInput {
-    pub presentation: PromptPresentation,
-    pub items: Vec<ReorderItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ReorderOutput {
-    ReorderDecision { ordered_ids: Vec<String> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DiceRollEntry {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub player_id: Option<String>,
-    pub natural_results: Vec<i32>,
-    pub final_results: Vec<i32>,
-    pub ignored_rolls: Vec<i32>,
-    #[serde(default)]
-    pub highlighted: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DiceRolledInput {
-    pub presentation: PromptPresentation,
-    pub sides: i32,
-    pub rolls: Vec<DiceRollEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_card_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum DiceRolledOutput {
-    DiceRolledAcknowledged,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GameOverInput {}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UnsupportedCapability {
@@ -1360,7 +273,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 83] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 84] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1884,6 +797,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 83] = [
         reason: "CR 732: the interactive loop-shortcut protocol (DeclareShortcut, RespondToShortcut, DeclineShortcut, PrecastCopyShortcut) is opt-in behind Phase's LoopDetectionMode::Interactive, which a ManaBrew client never sets — so these actions are not reachable through this adapter rather than being unmappable. Left unsupported deliberately: mapping a shortcut negotiation a client cannot opt into would advertise a play it can never legally make.",
         suggested_protocol_extension: "None needed upstream until a client can opt into interactive loop detection; CR 732.1 shortcuts are a table convention the protocol has no reason to model first.",
     },
+    UnsupportedCapability {
+        code: "upstream.serum-powder-mulligan-missing",
+        area: "mulligan",
+        reason: "Published manabrew-protocol 3.0.0 has only MulliganOutput::MulliganDecision, so it cannot carry the engine's MulliganChoice::UseSerumPowder object id. Its MulliganPutBackInput also has no excluded_card_id, so after that choice it cannot prevent the client from selecting the committed card. The adapter rejects either state instead of emitting a partial prompt.",
+        suggested_protocol_extension: "Add a MulliganOutput branch carrying the Serum Powder card id and an optional committed-card id on MulliganPutBackInput.",
+    },
 ];
 
 pub enum AvailableActionConversion {
@@ -1985,28 +904,6 @@ pub fn build_prompt(
 /// defaults (timeout / disconnect). It must never be accepted as a real answer.
 pub const RESERVED_ABSENT_PLAYER_PROMPT_ID: u32 = 0;
 
-/// A narration event broadcast to every seat. Purely informational — no
-/// response is expected.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum DisplayEvent {
-    CardPlayed {
-        card_id: String,
-        card_name: String,
-        set_code: String,
-        player_id: String,
-    },
-    TurnChanged {
-        active_player_id: String,
-        active_player_name: String,
-        turn_number: u32,
-    },
-}
-
 fn build_prompt_input(
     prepared: &PreparedManabrewSnapshot,
     card_lookup: &impl CardTextLookup,
@@ -2020,6 +917,18 @@ fn build_prompt_input(
             let entry = pending_entry_for_viewer(&prepared.state, prepared.viewer, pending)?;
             match &entry.phase {
                 MulliganDecisionPhase::Declare => {
+                    if prepared.actions.iter().any(|action| {
+                        matches!(
+                            action,
+                            GameAction::MulliganDecision {
+                                choice: engine::types::actions::MulliganChoice::UseSerumPowder { .. },
+                            }
+                        )
+                    }) {
+                        return Err(AdapterError::UnsupportedProtocolFeature {
+                            code: "upstream.serum-powder-mulligan-missing",
+                        });
+                    }
                     let hand =
                         &prepared.state.players[player_index(&prepared.state, entry.player)?].hand;
                     Ok(PromptInput::Mulligan(MulliganInput {
@@ -2028,6 +937,11 @@ fn build_prompt_input(
                     }))
                 }
                 MulliganDecisionPhase::BottomCards { count, then } => {
+                    if matches!(then, PendingMulliganAction::UseSerumPowder { .. }) {
+                        return Err(AdapterError::UnsupportedProtocolFeature {
+                            code: "upstream.serum-powder-mulligan-missing",
+                        });
+                    }
                     let cards = CardBuildContext { card_lookup };
                     let hand =
                         &prepared.state.players[player_index(&prepared.state, entry.player)?].hand;
@@ -2035,12 +949,6 @@ fn build_prompt_input(
                         hand_card_ids: hand.iter().copied().map(encode_object_id).collect(),
                         cards: objects_from_ids(&prepared.state, hand, &cards)?,
                         count: usize::from(*count),
-                        excluded_card_id: match then {
-                            PendingMulliganAction::Keep => None,
-                            PendingMulliganAction::UseSerumPowder { object_id } => {
-                                Some(encode_object_id(*object_id))
-                            }
-                        },
                     }))
                 }
             }
@@ -2053,7 +961,6 @@ fn build_prompt_input(
                 hand_card_ids: hand.iter().copied().map(encode_object_id).collect(),
                 cards: objects_from_ids(&prepared.state, hand, &cards)?,
                 count: usize::from(entry.count),
-                excluded_card_id: None,
             }))
         }
         WaitingFor::DeclareAttackers {
@@ -2792,64 +1699,6 @@ fn choice_label(choice: &InteractionChoice) -> String {
     }
 }
 
-impl PromptInput {
-    /// The formal prompt/response contract: a response is valid only if its
-    /// output family matches this prompt **and** every echoed action id was
-    /// advertised by it.
-    ///
-    /// These are two of the five conformance obligations; the other three
-    /// (stale prompt id, wrong player, unparseable shape) are enforced by
-    /// [`translate_client_message`] and by deserialization respectively.
-    pub fn validate_response(
-        &self,
-        output: &PromptOutput,
-    ) -> std::result::Result<(), ResponseViolation> {
-        match (self, output) {
-            (PromptInput::ChooseAction(input), PromptOutput::ChooseAction(out)) => match out {
-                ChooseActionOutput::Act { action_id }
-                    if !input.actions.iter().any(|a| a.id == *action_id) =>
-                {
-                    Err(ResponseViolation::UnknownActionId(action_id.clone()))
-                }
-                _ => Ok(()),
-            },
-            (PromptInput::PayManaCost(input), PromptOutput::PayManaCost(out)) => match out {
-                PayManaCostOutput::Act { action_id }
-                    if !input.actions.iter().any(|a| a.id == *action_id) =>
-                {
-                    Err(ResponseViolation::UnknownActionId(action_id.clone()))
-                }
-                _ => Ok(()),
-            },
-            (PromptInput::Mulligan(_), PromptOutput::Mulligan(_))
-            | (PromptInput::MulliganPutBack(_), PromptOutput::MulliganPutBack(_))
-            | (PromptInput::ChooseAttackers(_), PromptOutput::ChooseAttackers(_))
-            | (PromptInput::ChooseBlockers(_), PromptOutput::ChooseBlockers(_))
-            | (PromptInput::ChooseBoardTargets(_), PromptOutput::ChooseBoardTargets(_))
-            | (PromptInput::ChooseBoolean(_), PromptOutput::ChooseBoolean(_))
-            | (PromptInput::ChooseFromSelection(_), PromptOutput::ChooseFromSelection(_))
-            | (PromptInput::RevealCards(_), PromptOutput::RevealCards(_))
-            | (PromptInput::Scry(_), PromptOutput::Scry(_))
-            | (PromptInput::ChooseColor(_), PromptOutput::ChooseColor(_))
-            | (PromptInput::ChooseNumber(_), PromptOutput::ChooseNumber(_))
-            | (
-                PromptInput::ChooseDamageAssignmentOrder(_),
-                PromptOutput::ChooseDamageAssignmentOrder(_),
-            )
-            | (
-                PromptInput::ChooseCombatDamageAssignment(_),
-                PromptOutput::ChooseCombatDamageAssignment(_),
-            )
-            | (PromptInput::ChooseCards(_), PromptOutput::ChooseCards(_))
-            | (PromptInput::Reorder(_), PromptOutput::Reorder(_))
-            | (PromptInput::DiceRolled(_), PromptOutput::DiceRolled(_)) => Ok(()),
-            // Includes every `GameOver` pairing: that prompt is terminal and
-            // `PromptOutput` has no matching arm.
-            _ => Err(ResponseViolation::WrongPromptType),
-        }
-    }
-}
-
 /// Map an internal [`AdapterError`] onto the wire [`ProtocolError`] a client
 /// receives. The two stay distinct types: one is this crate's failure mode, the
 /// other is a protocol message.
@@ -2990,13 +1839,6 @@ pub fn translate_response(
                     engine::types::actions::MulliganChoice::Keep
                 } else {
                     engine::types::actions::MulliganChoice::Mulligan
-                },
-            })
-        }
-        PromptOutput::Mulligan(MulliganOutput::MulliganUseSerumPowder { card_id }) => {
-            Ok(GameAction::MulliganDecision {
-                choice: engine::types::actions::MulliganChoice::UseSerumPowder {
-                    object_id: parse_object_id(&card_id)?,
                 },
             })
         }
@@ -3267,6 +2109,7 @@ pub fn convert_available_action(
                 ability_index: *ability_index,
                 description: String::new(),
                 is_mana_ability: false,
+                is_class_level_up: None,
                 cost: None,
                 produced_mana: None,
             }),
@@ -3279,6 +2122,7 @@ pub fn convert_available_action(
                     ability_index: selection.ability_index.unwrap_or(0),
                     description: "Activate mana ability".to_string(),
                     is_mana_ability: true,
+                    is_class_level_up: None,
                     cost: None,
                     produced_mana: None,
                 }),
@@ -3435,6 +2279,7 @@ pub fn convert_available_action(
                     object_name(state, *creature_to_return)
                 ),
                 is_mana_ability: false,
+                is_class_level_up: None,
                 cost: None,
                 produced_mana: None,
             }),
@@ -3932,6 +2777,10 @@ fn build_card_dto<L: CardTextLookup>(
         base_toughness: board_state_visible
             .then_some(object.base_toughness)
             .flatten(),
+        final_chapter: None,
+        class_level: None,
+        class_levels: Vec::new(),
+        saga_chapters: Vec::new(),
         text,
         controller_id: encode_player_id(object.controller),
         owner_id: encode_player_id(object.owner),
@@ -4483,6 +3332,7 @@ pub fn convert_payment_action(action: &GameAction, id: String) -> PaymentActionC
                     ability_index: selection.ability_index.unwrap_or(0),
                     description: "Activate mana ability".to_string(),
                     is_mana_ability: true,
+                    is_class_level_up: None,
                     cost: None,
                     produced_mana: None,
                 }),
@@ -4507,6 +3357,7 @@ pub fn convert_payment_action(action: &GameAction, id: String) -> PaymentActionC
                 ability_index: *ability_index,
                 description: String::new(),
                 is_mana_ability: true,
+                is_class_level_up: None,
                 cost: None,
                 produced_mana: None,
             }),
@@ -4659,8 +3510,8 @@ fn output_family_matches_waiting(
     match output {
         PromptOutput::ChooseAction(_) => matches!(waiting_for, WaitingFor::Priority { .. }),
         PromptOutput::PayManaCost(_) => matches!(waiting_for, WaitingFor::ManaPayment { .. }),
-        // A declare-point response (keep/mulligan or use Serum Powder) is only
-        // legal while the viewer's own entry is in the `Declare` phase.
+        // A declare-point response (keep or mulligan) is only legal while the
+        // viewer's own entry is in the `Declare` phase.
         PromptOutput::Mulligan(_) => match waiting_for {
             WaitingFor::MulliganDecision { pending, .. } => {
                 pending_entry_for_viewer(state, viewer, pending)
@@ -5166,7 +4017,7 @@ fn mana_shard_symbol(shard: &ManaCostShard) -> &'static str {
 // variants would only add indirection to the payload the relay is about to
 // serialize anyway. Upstream makes the same call on its `AgentMessage`.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
