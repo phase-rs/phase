@@ -1354,6 +1354,37 @@ fn case_of_the_crimson_pulse() {
     insta::assert_json_snapshot!("case_of_the_crimson_pulse_lowered", &lowered);
 }
 
+/// CR 719.3c: the **activated** `"Solved — {cost}: {effect}"` shape, which the
+/// sibling `case_of_the_crimson_pulse` fixture above does NOT reach — its Solved
+/// clause is a triggered ability, so it never passes `find_activated_colon`.
+///
+/// Landed with T8-A1 because the §5.3 non-vacuity probe measured the gap rather
+/// than assuming it: with a `panic!` at the recognizer, **zero** of the 17844
+/// `--lib` tests fired, and the only two tests that reach it at all
+/// (`case_solve_condition`) assert on `is_solved` and use `"Solved — {T}: Add
+/// {R}."` — a fixture with **empty** parsed constraints, so it cannot observe the
+/// activation-restriction vector at all. Dropping the implicit
+/// `ActivationRestriction::IsSolved` stayed green across every one of them.
+///
+/// Case of the Stashed Skeleton is chosen because its trailing "Activate only as
+/// a sorcery." makes `strip_activated_constraints` yield a **non-empty**
+/// `constraints.restrictions`. The snapshot therefore pins both halves of the
+/// vector *and their order* — implicit `IsSolved` first (CR 719.3c), parsed
+/// `AsSorcery` second (CR 602.5d) — which is the one property of this recognizer
+/// that T8's shell conversion could silently normalize away, since the Power-up
+/// recognizer composes the same vector in the opposite order.
+#[test]
+fn case_of_the_stashed_skeleton() {
+    let (ir, lowered) = parse_two_layer(
+        "When this Case enters, create a 2/1 black Skeleton creature token and suspect it. (It has menace and can't block.)\nTo solve — You control no suspected Skeletons. (If unsolved, solve at the beginning of your end step.)\nSolved — {1}{B}, Sacrifice this Case: Search your library for a card, put it into your hand, then shuffle. Activate only as a sorcery.",
+        "Case of the Stashed Skeleton",
+        &["Enchantment"],
+        &["Case"],
+    );
+    insta::assert_json_snapshot!("case_of_the_stashed_skeleton_ir", &ir);
+    insta::assert_json_snapshot!("case_of_the_stashed_skeleton_lowered", &lowered);
+}
+
 #[test]
 fn aerial_formation() {
     let (ir, lowered) = parse_two_layer(
