@@ -19,6 +19,12 @@
 //! child (emit one sample), repro-report (margin gate over saved runs), and
 //! parent gate (spawn K children, median, compare).
 
+// pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
+// wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
+// never see it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};

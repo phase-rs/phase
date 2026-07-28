@@ -5,10 +5,16 @@
 //! AI until the game ends (or an action budget is hit). Reports per-turn
 //! life totals and the final outcome.
 //!
-//! Usage:
-//!   cargo run --release --bin ai-commander -- client/public
-//!   cargo run --release --bin ai-commander -- client/public --seed 7 --difficulty Easy
-//!   cargo run --release --bin ai-commander -- client/public --difficulty Easy \
+//! Usage (pod-lab loop-3 Q5): `--profile server-release`, not plain
+//! `--release` -- `[profile.release]` (workspace `Cargo.toml`) sets `panic =
+//! 'abort'` (it exists to keep the WASM build small), which silently defeats
+//! `run_batch_isolated`'s `catch_unwind`-based per-game panic isolation
+//! below: under `abort`, one game's panic takes the whole batch process down
+//! instead of being caught and reported. `server-release` inherits `release`
+//! but overrides `panic = 'unwind'` for exactly this reason.
+//!   cargo run --profile server-release --bin ai-commander -- client/public
+//!   cargo run --profile server-release --bin ai-commander -- client/public --seed 7 --difficulty Easy
+//!   cargo run --profile server-release --bin ai-commander -- client/public --difficulty Easy \
 //!       --difficulty-p2 VeryHard --action-cap 50000
 //!
 //! Batch mode (pod-lab simulation-acceleration plan, Tier 1 item 1): play many
@@ -20,8 +26,15 @@
 //! panic-isolated (`run_batch_isolated`) and its result is flushed to stdout
 //! immediately, so a batch survives an individual game panicking or the whole
 //! process being killed mid-batch (pod-lab enforces an external wall-clock
-//! timeout on the process).
-//!   cargo run --release --bin ai-commander -- client/public --games-file games.txt
+//! timeout on the process) -- but only under a `panic = 'unwind'` profile;
+//! see the note above.
+//!   cargo run --profile server-release --bin ai-commander -- client/public --games-file games.txt
+
+// pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
+// wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
+// never see it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
