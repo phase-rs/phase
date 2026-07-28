@@ -100,8 +100,8 @@ use crate::types::ability::{
     ChoiceType, ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard,
     ConjureSource, ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope,
     CopyRetargetPermission, CopyScale, DamageModification, DamageSource, DelayedTriggerCondition,
-    DelayedTriggerLifetime, DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope,
-    FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
+    DelayedTriggerLifetime, DieResultBranch, DoubleTarget, Duration, Effect, EffectOutcomeSignal,
+    EffectScope, FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
     KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, MultiTargetSpec,
     NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerpetualModification,
     PlayPermissionInvalidation, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
@@ -156,8 +156,8 @@ use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
-    EffectChainIr, OtherwiseKind, PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind,
-    ReplicateKind, ShellStage,
+    DieResultBranchIr, EffectChainIr, OtherwiseKind, PlayerScopeRewrite, PriorModifier,
+    ReplaceMeaningKind, ReplicateKind, ShellStage,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -26868,6 +26868,21 @@ pub(crate) enum ChainLoweringMode {
 /// that a stamp may also write. Do not reorder for elegance.
 pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     let mut def = lower_effect_chain_ir(&ir.body);
+    if !ir.die_results.is_empty() {
+        if let Some(Effect::RollDie { results, .. }) =
+            super::oracle_special::find_terminal_roll_die(&mut def)
+        {
+            *results = ir
+                .die_results
+                .iter()
+                .map(|DieResultBranchIr { min, max, effect }| DieResultBranch {
+                    min: *min,
+                    max: *max,
+                    effect: Box::new(lower_ability_ir(effect)),
+                })
+                .collect();
+        }
+    }
     finalize_effect_chain(&mut def);
     apply_owner_library_reveal_anchor_from_text(&mut def, &ir.source_text);
     // CR 608.2c: a root the chain cannot describe (it has no previous boundary).
@@ -26972,6 +26987,7 @@ pub(crate) fn parse_ability_ir(
             source_text: text.to_string(),
             body,
             shell: AbilityShellIr::default(),
+            die_results: vec![],
         };
     }
     if let Some(body) = parse_for_each_attacker_copy_blocker_ir(text, kind, ctx) {
@@ -26979,6 +26995,7 @@ pub(crate) fn parse_ability_ir(
             source_text: text.to_string(),
             body,
             shell: AbilityShellIr::default(),
+            die_results: vec![],
         };
     }
     if let ChainLoweringMode::WithContext = mode {
@@ -26987,6 +27004,7 @@ pub(crate) fn parse_ability_ir(
                 source_text: text.to_string(),
                 body,
                 shell: AbilityShellIr::default(),
+                die_results: vec![],
             };
         }
     }
@@ -27000,12 +27018,14 @@ pub(crate) fn parse_ability_ir(
                 sub_link: Some(SubAbilityLink::SequentialSibling),
                 ..AbilityShellIr::default()
             },
+            die_results: vec![],
         };
     }
     AbilityIr {
         source_text: text.to_string(),
         body: parse_effect_chain_ir(text, kind, ctx),
         shell: AbilityShellIr::default(),
+        die_results: vec![],
     }
 }
 

@@ -255,7 +255,7 @@ pub(super) fn attach_die_result_branches_to_chain(
     j
 }
 
-fn find_terminal_roll_die(def: &mut AbilityDefinition) -> Option<&mut Effect> {
+pub(crate) fn find_terminal_roll_die(def: &mut AbilityDefinition) -> Option<&mut Effect> {
     if matches!(&*def.effect, Effect::RollDie { results, .. } if results.is_empty()) {
         return Some(&mut *def.effect);
     }
