@@ -6021,6 +6021,43 @@ impl PendingCast {
     }
 }
 
+impl GameState {
+    /// Temporarily removes the activation-local trigger transaction from the
+    /// pending cast that currently owns it.
+    ///
+    /// `ManaPayment` stores its `PendingCast` in `GameState::pending_cast`;
+    /// every other interactive casting prompt embeds it in `WaitingFor`.
+    /// Keeping that routing distinction here prevents individual cost handlers
+    /// from choosing the wrong continuation carrier.
+    pub(crate) fn take_pending_activation_trigger_collection(
+        &mut self,
+    ) -> Option<Box<crate::game::triggers::PendingActivationTriggerCollection>> {
+        if let Some(pending) = self.pending_cast.as_mut() {
+            return pending.activation_trigger_collection.take();
+        }
+        self.waiting_for
+            .pending_cast_mut()?
+            .activation_trigger_collection
+            .take()
+    }
+
+    /// Restores the transaction removed by
+    /// [`Self::take_pending_activation_trigger_collection`] to the same active
+    /// casting continuation.
+    pub(crate) fn restore_pending_activation_trigger_collection(
+        &mut self,
+        collection: Box<crate::game::triggers::PendingActivationTriggerCollection>,
+    ) {
+        if let Some(pending) = self.pending_cast.as_mut() {
+            pending.activation_trigger_collection = Some(collection);
+            return;
+        }
+        if let Some(pending) = self.waiting_for.pending_cast_mut() {
+            pending.activation_trigger_collection = Some(collection);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum CollectEvidenceResume {

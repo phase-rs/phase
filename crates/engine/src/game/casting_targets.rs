@@ -357,6 +357,18 @@ pub(crate) fn handle_select_targets(
     let mut ability = pending.ability.clone();
     assign_targets_in_chain(state, &mut ability, &targets)?;
 
+    if pending.activation_ability_index.is_some() {
+        // CR 602.2b + CR 601.2c: the target event occurs when targets are
+        // declared, before a distribution choice or any activation cost.
+        super::casting::emit_targeting_events(
+            state,
+            &super::ability_utils::flatten_targets_in_chain(&ability),
+            pending.object_id,
+            pending.ability.controller,
+            events,
+        );
+    }
+
     if let Some(waiting_for) = maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
     {
         return Ok(waiting_for);
@@ -451,6 +463,18 @@ pub(crate) fn handle_choose_target(
             // Offering's final slot is opponent-chosen; without re-anchoring here the
             // inbound per-slot `player` (the opponent) would pay and stack the spell.
             let controller = pending.ability.controller;
+
+            if pending.activation_ability_index.is_some() {
+                // CR 602.2b + CR 601.2c: complete the target-declaration event
+                // before any distribution choice or activation cost.
+                super::casting::emit_targeting_events(
+                    state,
+                    &super::ability_utils::flatten_targets_in_chain(&ability),
+                    pending.object_id,
+                    controller,
+                    events,
+                );
+            }
 
             if let Some(waiting_for) =
                 maybe_pause_for_cast_distribution(state, controller, &pending, &ability)?

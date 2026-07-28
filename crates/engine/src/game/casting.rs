@@ -17141,6 +17141,7 @@ pub fn handle_activate_ability(
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking
     // before any branch path that pushes this ability onto the stack.
     resolved.ability_index = Some(ability_index);
+    let has_effect_targets = !build_target_slots(state, &resolved)?.is_empty();
 
     // CR 602.2b + CR 601.2b-i: announcement-only choices are resolved before
     // entering the shared target-before-cost boundary below.
@@ -17177,6 +17178,7 @@ pub fn handle_activate_ability(
             );
             pending_x.activation_cost = remaining;
             pending_x.activation_ability_index = Some(ability_index);
+            pending_x.deferred_target_selection = has_effect_targets;
             // CR 601.2g + CR 601.2h: if a non-self battlefield-removal sub-cost
             // (Sacrifice / battlefield Exile / ReturnToHand) is still
             // outstanding in the residual after X-announcement, mark the
@@ -17213,6 +17215,7 @@ pub fn handle_activate_ability(
             let mut pending_x = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
             pending_x.activation_cost = remaining;
             pending_x.activation_ability_index = Some(ability_index);
+            pending_x.deferred_target_selection = has_effect_targets;
             // CR 601.2f + CR 601.2h: POSITIVE signal — the residual non-mana tail
             // in `activation_cost` is still OUTSTANDING after mana payment, so
             // `push_activated_ability_to_stack` must re-surface a non-self discard
@@ -17250,9 +17253,11 @@ pub fn handle_activate_ability(
         // here — it must fall through to the general target-first path below
         // (CR 601.2c: targets are chosen before costs are paid), where the
         // mana-first `Composite` ordering keeps the post-target payment atomic.
-        let loyalty_no_targets = crate::types::ability::is_loyalty_ability_cost(cost)
-            && build_target_slots(state, &resolved)?.is_empty();
-        if find_non_self_battlefield_removal_cost(cost).is_some() || loyalty_no_targets {
+        let loyalty_no_targets =
+            crate::types::ability::is_loyalty_ability_cost(cost) && !has_effect_targets;
+        if !has_effect_targets
+            && (find_non_self_battlefield_removal_cost(cost).is_some() || loyalty_no_targets)
+        {
             if let Some((mana_cost, remaining)) = casting_costs::extract_mana_leg(cost) {
                 let mut pending_leg = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
                 pending_leg.activation_cost = remaining;
@@ -17263,120 +17268,117 @@ pub fn handle_activate_ability(
             }
         }
 
-        // CR 601.2h + CR 701.9a: A resolved zero-card FromHand discard leg (e.g. Bomat
-        // Courier's "Discard your hand" on an empty hand) is paid by doing nothing — the
-        // helper returns `Ok(None)` so we FALL THROUGH to the following cost detection
-        // rather than surfacing a dead `PayCost { count: 0 }`.
-        if let Some((count, eligible)) =
-            resolve_non_self_discard_requirement(state, player, source_id, cost)?
-        {
-            let mut pending_discard =
-                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-            pending_discard.activation_cost = Some(cost.clone());
-            pending_discard.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::PayCost {
-                player,
-                kind: PayCostKind::Discard,
-                choices: eligible,
-                count,
-                min_count: 0,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending_discard),
-                },
-            });
-        }
-
-        // CR 701.59a + CR 602.2b: Pre-check for a collect-evidence activation
-        // cost (Kylox's Voltstrider — "Collect evidence 6: This Vehicle becomes
-        // an artifact creature ..."). Collect evidence is an INTERACTIVE cost:
-        // the player chooses which graveyard cards (total mana value >= N) to
-        // exile, so it must detour to `WaitingFor::CollectEvidenceChoice` and be
-        // paid BEFORE the ability reaches the stack — exactly like the
-        // ExileAggregate / non-self exile detours. Without this detour the cost
-        // is a silent no-op in `pay_ability_cost` (it is documented there as
-        // "intercepted before reaching pay_ability_cost"), so the ability would
-        // resolve for free. CR 701.59b payability was already enforced by the
-        // `is_payable` gate above; `begin_cost_payment` re-checks it defensively.
-        // The resume (`CollectEvidenceResume::Casting`, made activation-aware)
-        // pushes the activated ability to the stack once the cards are exiled.
-        // This is the SINGLE-AUTHORITY interactive-cost dispatch: the call site
-        // never inspects cost components beyond routing to the resolver.
-        if let Some(amount) = find_collect_evidence_activation_cost(cost) {
-            let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-            pending.activation_cost = Some(cost.clone());
-            pending.activation_ability_index = Some(ability_index);
-            return super::effects::collect_evidence::begin_cost_payment(
-                state,
-                player,
-                amount,
-                pending,
-                SpellCostSource::Other,
-            );
-        }
-
-        // CR 117.1 + CR 601.2b + CR 602.2b: Pre-check for an `ExileWithAggregate`
-        // cost (Baron Helmut Zemo's Boast — "Exile any number of black cards from
-        // your graveyard with fifteen or more black mana symbols among their mana
-        // costs"). The player chooses any subset of the eligible cards whose
-        // aggregate satisfies the threshold; the handler validates the threshold
-        // and (CR 608.2c) publishes the exiled cards as the tracked set the
-        // `CastCopyOfCard` effect consumes. The effect target is `TrackedSet`
-        // (resolution-time), not a declared target, so no target-selection
-        // detour is needed.
-        if let Some((filter, function, property, comparator, value, zone)) =
-            find_exile_with_aggregate_cost(cost)
-        {
-            let eligible = super::cost_payability::eligible_exile_with_aggregate_objects(
-                state, player, source_id, filter, zone,
-            );
-            // CR 118.3: payability was pre-checked above; re-derive the maximal
-            // aggregate (exile-all) here so an unsatisfiable threshold fails fast.
-            let total =
-                super::quantity::aggregate_property_over(state, &eligible, function, property);
-            if !comparator.evaluate(total, value) {
-                return Err(EngineError::ActionNotAllowed(
-                    "Not enough eligible cards to reach the exile threshold".into(),
-                ));
+        if !has_effect_targets {
+            // CR 601.2h + CR 701.9a: A resolved zero-card FromHand discard leg (e.g. Bomat
+            // Courier's "Discard your hand" on an empty hand) is paid by doing nothing — the
+            // helper returns `Ok(None)` so we FALL THROUGH to the following cost detection
+            // rather than surfacing a dead `PayCost { count: 0 }`.
+            if let Some((count, eligible)) =
+                resolve_non_self_discard_requirement(state, player, source_id, cost)?
+            {
+                let mut pending_discard =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending_discard.activation_cost = Some(cost.clone());
+                pending_discard.activation_ability_index = Some(ability_index);
+                return Ok(WaitingFor::PayCost {
+                    player,
+                    kind: PayCostKind::Discard,
+                    choices: eligible,
+                    count,
+                    min_count: 0,
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending_discard),
+                    },
+                });
             }
-            let mut pending_agg =
-                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-            pending_agg.activation_cost = Some(cost.clone());
-            pending_agg.activation_ability_index = Some(ability_index);
-            let max_count = eligible.len();
-            return Ok(WaitingFor::PayCost {
-                player,
-                kind: PayCostKind::ExileAggregate {
-                    zone,
-                    function,
-                    property,
-                    comparator,
-                    value,
-                    filter: filter.clone(),
-                },
-                choices: eligible,
-                count: max_count,
-                // CR 601.2b: "any number" reaching the threshold — the threshold
-                // (not a fixed cardinality) is enforced by the handler. A nonzero
-                // GE/Sum threshold can never be met by the empty set, so at least
-                // one card is required; `min_count: 1` is the loose lower bound.
-                min_count: 1,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending_agg),
-                },
-            });
-        }
 
-        // CR 118.3 + CR 602.2b: Pre-check for non-self exile-from-hand/graveyard
-        // costs. Untargeted abilities can detour to `WaitingFor::ExileForCost`
-        // immediately; targeted abilities must choose their effect targets first
-        // (CR 601.2c), then `casting_targets::pay_activation_costs_after_target_selection`
-        // surfaces this same cost prompt before the ability reaches the stack.
-        if let Some((count, zone, filter)) = find_non_self_exile(cost) {
-            let has_effect_targets = {
-                let slots = build_target_slots(state, &resolved)?;
-                !slots.is_empty()
-            };
-            if !has_effect_targets {
+            // CR 701.59a + CR 602.2b: Pre-check for a collect-evidence activation
+            // cost (Kylox's Voltstrider — "Collect evidence 6: This Vehicle becomes
+            // an artifact creature ..."). Collect evidence is an INTERACTIVE cost:
+            // the player chooses which graveyard cards (total mana value >= N) to
+            // exile, so it must detour to `WaitingFor::CollectEvidenceChoice` and be
+            // paid BEFORE the ability reaches the stack — exactly like the
+            // ExileAggregate / non-self exile detours. Without this detour the cost
+            // is a silent no-op in `pay_ability_cost` (it is documented there as
+            // "intercepted before reaching pay_ability_cost"), so the ability would
+            // resolve for free. CR 701.59b payability was already enforced by the
+            // `is_payable` gate above; `begin_cost_payment` re-checks it defensively.
+            // The resume (`CollectEvidenceResume::Casting`, made activation-aware)
+            // pushes the activated ability to the stack once the cards are exiled.
+            // This is the SINGLE-AUTHORITY interactive-cost dispatch: the call site
+            // never inspects cost components beyond routing to the resolver.
+            if let Some(amount) = find_collect_evidence_activation_cost(cost) {
+                let mut pending =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending.activation_cost = Some(cost.clone());
+                pending.activation_ability_index = Some(ability_index);
+                return super::effects::collect_evidence::begin_cost_payment(
+                    state,
+                    player,
+                    amount,
+                    pending,
+                    SpellCostSource::Other,
+                );
+            }
+
+            // CR 117.1 + CR 601.2b + CR 602.2b: Pre-check for an `ExileWithAggregate`
+            // cost (Baron Helmut Zemo's Boast — "Exile any number of black cards from
+            // your graveyard with fifteen or more black mana symbols among their mana
+            // costs"). The player chooses any subset of the eligible cards whose
+            // aggregate satisfies the threshold; the handler validates the threshold
+            // and (CR 608.2c) publishes the exiled cards as the tracked set the
+            // `CastCopyOfCard` effect consumes. The effect target is `TrackedSet`
+            // (resolution-time), not a declared target, so no target-selection
+            // detour is needed.
+            if let Some((filter, function, property, comparator, value, zone)) =
+                find_exile_with_aggregate_cost(cost)
+            {
+                let eligible = super::cost_payability::eligible_exile_with_aggregate_objects(
+                    state, player, source_id, filter, zone,
+                );
+                // CR 118.3: payability was pre-checked above; re-derive the maximal
+                // aggregate (exile-all) here so an unsatisfiable threshold fails fast.
+                let total =
+                    super::quantity::aggregate_property_over(state, &eligible, function, property);
+                if !comparator.evaluate(total, value) {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Not enough eligible cards to reach the exile threshold".into(),
+                    ));
+                }
+                let mut pending_agg =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending_agg.activation_cost = Some(cost.clone());
+                pending_agg.activation_ability_index = Some(ability_index);
+                let max_count = eligible.len();
+                return Ok(WaitingFor::PayCost {
+                    player,
+                    kind: PayCostKind::ExileAggregate {
+                        zone,
+                        function,
+                        property,
+                        comparator,
+                        value,
+                        filter: filter.clone(),
+                    },
+                    choices: eligible,
+                    count: max_count,
+                    // CR 601.2b: "any number" reaching the threshold — the threshold
+                    // (not a fixed cardinality) is enforced by the handler. A nonzero
+                    // GE/Sum threshold can never be met by the empty set, so at least
+                    // one card is required; `min_count: 1` is the loose lower bound.
+                    min_count: 1,
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending_agg),
+                    },
+                });
+            }
+
+            // CR 118.3 + CR 602.2b: Pre-check for non-self exile-from-hand/graveyard
+            // costs. Untargeted abilities can detour to `WaitingFor::ExileForCost`
+            // immediately; targeted abilities must choose their effect targets first
+            // (CR 601.2c), then `casting_targets::pay_activation_costs_after_target_selection`
+            // surfaces this same cost prompt before the ability reaches the stack.
+            if let Some((count, zone, filter)) = find_non_self_exile(cost) {
                 let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
                     .expect("find_non_self_exile restricts zone to Hand or Graveyard");
                 let eligible = find_eligible_exile_for_cost_targets(
@@ -17406,226 +17408,233 @@ pub fn handle_activate_ability(
                     },
                 });
             }
-        }
 
-        // CR 702.167a/b: Pre-check for a craft materials cost — detour to
-        // `WaitingFor::PayCost { kind: ExileMaterials }` so the player selects
-        // which permanents/graveyard cards to exile across the dual-zone union.
-        // The full `Composite` cost (Mana + self-exile + materials) stays in
-        // `activation_cost`; the mana and self-exile are paid by
-        // `push_activated_ability_to_stack` after the selection completes
-        // (CR 601.2h: remaining costs paid in any order). Mirrors the non-self
-        // exile detour above.
-        if let Some((count, materials)) = find_craft_materials_cost(cost) {
-            let eligible = super::cost_payability::eligible_craft_materials(
-                state, player, source_id, materials,
-            );
-            let min_count = count.min_count();
-            let max_count = count.max_count(eligible.len());
-            if eligible.len() < min_count {
-                return Err(EngineError::ActionNotAllowed(
-                    "Not enough eligible materials to craft".into(),
-                ));
-            }
-            let mut pending_craft =
-                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-            pending_craft.activation_cost = Some(cost.clone());
-            pending_craft.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::PayCost {
-                player,
-                kind: PayCostKind::ExileMaterials {
-                    materials: materials.clone(),
-                },
-                choices: eligible,
-                count: max_count,
-                // CR 702.167a: "one or more" material costs set `min_count < count`;
-                // exact material costs set both bounds to the same value.
-                min_count,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending_craft),
-                },
-            });
-        }
-
-        // CR 118.12a: Pre-check for OneOf costs — detour to WaitingFor before any cost payment.
-        if let Some(costs) = find_one_of_cost(cost) {
-            let payable =
-                payable_one_of_activation_branches(state, player, source_id, costs, ability_index);
-            if payable.is_empty() {
-                return Err(EngineError::ActionNotAllowed(
-                    "Cannot pay activation cost".to_string(),
-                ));
-            }
-            let mut pending_one_of =
-                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-            pending_one_of.activation_cost = Some(cost.clone());
-            pending_one_of.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::ActivationCostOneOfChoice {
-                player,
-                costs: payable,
-                pending_cast: Box::new(pending_one_of),
-            });
-        }
-
-        // CR 118.3: Pre-check for ReturnToHand costs — same WaitingFor detour pattern as
-        // Sacrifice above. Ordering matters for Composite costs: Sacrifice wins if both are
-        // present, but no real cards combine them.
-        if let Some((count, filter)) = find_return_to_hand_cost(cost) {
-            let eligible = find_eligible_return_to_hand_targets(state, player, source_id, filter);
-            if eligible.len() < count as usize {
-                return Err(EngineError::ActionNotAllowed(
-                    "No eligible permanents to return".into(),
-                ));
-            }
-            let mut pending_return =
-                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-            pending_return.activation_cost = Some(cost.clone());
-            pending_return.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::PayCost {
-                player,
-                kind: PayCostKind::ReturnToHand,
-                choices: eligible,
-                count: count as usize,
-                min_count: 0,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending_return),
-                },
-            });
-        }
-
-        // CR 118.3 + CR 122.1 + CR 602.2b: Pre-check targeted
-        // remove-counter activation costs. The player chooses which matching
-        // permanent supplies the counter before automatic cost components are
-        // paid and the ability is put on the stack.
-        if let Some((count, counter_type, target, selection)) =
-            find_targeted_remove_counter_cost(cost)
-        {
-            let required_count = match selection {
-                CounterCostSelection::SingleObject => count,
-                CounterCostSelection::AmongObjects => 1,
-            };
-            let eligible = find_eligible_remove_counter_for_cost_targets(
-                state,
-                player,
-                source_id,
-                target,
-                counter_type,
-                required_count,
-            );
-            if eligible.is_empty() {
-                return Err(EngineError::ActionNotAllowed(
-                    "No eligible permanents with counters".into(),
-                ));
-            }
-            if selection == CounterCostSelection::AmongObjects {
-                let removable_count = eligible
-                    .iter()
-                    .filter_map(|object_id| state.objects.get(object_id))
-                    .map(|obj| {
-                        removable_counter_count_for_cost_selection(obj, counter_type, selection)
-                    })
-                    .fold(0, u32::saturating_add);
-                if removable_count < count {
+            // CR 702.167a/b: Pre-check for a craft materials cost — detour to
+            // `WaitingFor::PayCost { kind: ExileMaterials }` so the player selects
+            // which permanents/graveyard cards to exile across the dual-zone union.
+            // The full `Composite` cost (Mana + self-exile + materials) stays in
+            // `activation_cost`; the mana and self-exile are paid by
+            // `push_activated_ability_to_stack` after the selection completes
+            // (CR 601.2h: remaining costs paid in any order). Mirrors the non-self
+            // exile detour above.
+            if let Some((count, materials)) = find_craft_materials_cost(cost) {
+                let eligible = super::cost_payability::eligible_craft_materials(
+                    state, player, source_id, materials,
+                );
+                let min_count = count.min_count();
+                let max_count = count.max_count(eligible.len());
+                if eligible.len() < min_count {
                     return Err(EngineError::ActionNotAllowed(
-                        "Not enough eligible counters to remove".into(),
+                        "Not enough eligible materials to craft".into(),
                     ));
                 }
+                let mut pending_craft =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending_craft.activation_cost = Some(cost.clone());
+                pending_craft.activation_ability_index = Some(ability_index);
+                return Ok(WaitingFor::PayCost {
+                    player,
+                    kind: PayCostKind::ExileMaterials {
+                        materials: materials.clone(),
+                    },
+                    choices: eligible,
+                    count: max_count,
+                    // CR 702.167a: "one or more" material costs set `min_count < count`;
+                    // exact material costs set both bounds to the same value.
+                    min_count,
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending_craft),
+                    },
+                });
             }
-            let mut pending_counter =
-                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-            pending_counter.activation_cost = Some(cost.clone());
-            pending_counter.activation_ability_index = Some(ability_index);
-            let max_count = match selection {
-                CounterCostSelection::SingleObject => 1,
-                CounterCostSelection::AmongObjects => eligible.len(),
-            };
-            return Ok(WaitingFor::PayCost {
-                player,
-                kind: PayCostKind::RemoveCounter {
-                    counter_type: counter_type.clone(),
-                    count,
-                    selection,
-                },
-                choices: eligible,
-                count: max_count,
-                min_count: match selection {
-                    CounterCostSelection::SingleObject => 0,
-                    CounterCostSelection::AmongObjects => 1,
-                },
-                resume: CostResume::Spell {
-                    spell: Box::new(pending_counter),
-                },
-            });
-        }
 
-        // CR 118.3: Pre-check for tap-creatures activation costs. Non-mana
-        // activated abilities use the same WaitingFor flow as flashback tap
-        // costs; completion resumes through `finish_pending_cost_or_cast`.
-        if let Some((requirement, filter)) = find_tap_creatures_cost(cost) {
-            // CR 602.1a: Activated-ability tap costs are fixed-count today
-            // (Convoke-style). The aggregate "total power N" form is reserved for
-            // Crew/Saddle/Teamwork, which are not dispatched through this path.
-            let count = requirement.fixed_count().ok_or_else(|| {
-                EngineError::ActionNotAllowed(
-                    "Aggregate-power tap cost is not valid for this activation".into(),
-                )
-            })?;
-            let eligible =
-                find_eligible_tap_creatures_for_cost(state, player, source_id, cost, filter);
-            if eligible.len() < count as usize {
-                return Err(EngineError::ActionNotAllowed(
-                    "Not enough eligible creatures to tap".into(),
-                ));
-            }
-            let mut pending_tap =
-                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-            pending_tap.activation_cost = Some(cost.clone());
-            pending_tap.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::PayCost {
-                player,
-                kind: PayCostKind::TapCreatures { aggregate: None },
-                choices: eligible,
-                count: count as usize,
-                min_count: 0,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending_tap),
-                },
-            });
-        }
-
-        // CR 601.2c + CR 601.2h + CR 602.2b: For no-target activations, use
-        // the serialized residual dispatcher for interactive cost kinds not
-        // covered by the earlier specialized detours. Its selected-cost
-        // handlers remove exactly one leg before re-entering the payment
-        // boundary, including repeated and chosen-OneOf costs.
-        if build_target_slots(state, &resolved)?.is_empty() {
-            let mut pending_interactive =
-                PendingCast::new(source_id, CardId(0), resolved.clone(), ManaCost::NoCost);
-            pending_interactive.activation_cost = Some(cost.clone());
-            pending_interactive.activation_ability_index = Some(ability_index);
-            if let Some(waiting_for) =
-                casting_costs::surface_next_unpaid_interactive_activation_cost(
+            // CR 118.12a: Pre-check for OneOf costs — detour to WaitingFor before any cost payment.
+            if let Some(costs) = find_one_of_cost(cost) {
+                let payable = payable_one_of_activation_branches(
                     state,
                     player,
-                    &pending_interactive,
-                )?
-            {
-                return Ok(waiting_for);
+                    source_id,
+                    costs,
+                    ability_index,
+                );
+                if payable.is_empty() {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay activation cost".to_string(),
+                    ));
+                }
+                let mut pending_one_of =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending_one_of.activation_cost = Some(cost.clone());
+                pending_one_of.activation_ability_index = Some(ability_index);
+                return Ok(WaitingFor::ActivationCostOneOfChoice {
+                    player,
+                    costs: payable,
+                    pending_cast: Box::new(pending_one_of),
+                });
             }
-        }
 
-        // Waterbend cost: detour to ManaPayment with Waterbend mode.
-        if let Some(wb_cost) = find_waterbend_cost(cost) {
-            let mut pending_wb = PendingCast::new(source_id, CardId(0), resolved, wb_cost.clone());
-            pending_wb.activation_cost = Some(cost.clone());
-            pending_wb.activation_ability_index = Some(ability_index);
-            state.pending_cast = Some(Box::new(pending_wb));
-            return casting_costs::enter_payment_step(
-                state,
-                player,
-                Some(ConvokeMode::Waterbend),
-                events,
-            );
+            // CR 118.3: Pre-check for ReturnToHand costs — same WaitingFor detour pattern as
+            // Sacrifice above. Ordering matters for Composite costs: Sacrifice wins if both are
+            // present, but no real cards combine them.
+            if let Some((count, filter)) = find_return_to_hand_cost(cost) {
+                let eligible =
+                    find_eligible_return_to_hand_targets(state, player, source_id, filter);
+                if eligible.len() < count as usize {
+                    return Err(EngineError::ActionNotAllowed(
+                        "No eligible permanents to return".into(),
+                    ));
+                }
+                let mut pending_return =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending_return.activation_cost = Some(cost.clone());
+                pending_return.activation_ability_index = Some(ability_index);
+                return Ok(WaitingFor::PayCost {
+                    player,
+                    kind: PayCostKind::ReturnToHand,
+                    choices: eligible,
+                    count: count as usize,
+                    min_count: 0,
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending_return),
+                    },
+                });
+            }
+
+            // CR 118.3 + CR 122.1 + CR 602.2b: Pre-check targeted
+            // remove-counter activation costs. The player chooses which matching
+            // permanent supplies the counter before automatic cost components are
+            // paid and the ability is put on the stack.
+            if let Some((count, counter_type, target, selection)) =
+                find_targeted_remove_counter_cost(cost)
+            {
+                let required_count = match selection {
+                    CounterCostSelection::SingleObject => count,
+                    CounterCostSelection::AmongObjects => 1,
+                };
+                let eligible = find_eligible_remove_counter_for_cost_targets(
+                    state,
+                    player,
+                    source_id,
+                    target,
+                    counter_type,
+                    required_count,
+                );
+                if eligible.is_empty() {
+                    return Err(EngineError::ActionNotAllowed(
+                        "No eligible permanents with counters".into(),
+                    ));
+                }
+                if selection == CounterCostSelection::AmongObjects {
+                    let removable_count = eligible
+                        .iter()
+                        .filter_map(|object_id| state.objects.get(object_id))
+                        .map(|obj| {
+                            removable_counter_count_for_cost_selection(obj, counter_type, selection)
+                        })
+                        .fold(0, u32::saturating_add);
+                    if removable_count < count {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Not enough eligible counters to remove".into(),
+                        ));
+                    }
+                }
+                let mut pending_counter =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending_counter.activation_cost = Some(cost.clone());
+                pending_counter.activation_ability_index = Some(ability_index);
+                let max_count = match selection {
+                    CounterCostSelection::SingleObject => 1,
+                    CounterCostSelection::AmongObjects => eligible.len(),
+                };
+                return Ok(WaitingFor::PayCost {
+                    player,
+                    kind: PayCostKind::RemoveCounter {
+                        counter_type: counter_type.clone(),
+                        count,
+                        selection,
+                    },
+                    choices: eligible,
+                    count: max_count,
+                    min_count: match selection {
+                        CounterCostSelection::SingleObject => 0,
+                        CounterCostSelection::AmongObjects => 1,
+                    },
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending_counter),
+                    },
+                });
+            }
+
+            // CR 118.3: Pre-check for tap-creatures activation costs. Non-mana
+            // activated abilities use the same WaitingFor flow as flashback tap
+            // costs; completion resumes through `finish_pending_cost_or_cast`.
+            if let Some((requirement, filter)) = find_tap_creatures_cost(cost) {
+                // CR 602.1a: Activated-ability tap costs are fixed-count today
+                // (Convoke-style). The aggregate "total power N" form is reserved for
+                // Crew/Saddle/Teamwork, which are not dispatched through this path.
+                let count = requirement.fixed_count().ok_or_else(|| {
+                    EngineError::ActionNotAllowed(
+                        "Aggregate-power tap cost is not valid for this activation".into(),
+                    )
+                })?;
+                let eligible =
+                    find_eligible_tap_creatures_for_cost(state, player, source_id, cost, filter);
+                if eligible.len() < count as usize {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Not enough eligible creatures to tap".into(),
+                    ));
+                }
+                let mut pending_tap =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending_tap.activation_cost = Some(cost.clone());
+                pending_tap.activation_ability_index = Some(ability_index);
+                return Ok(WaitingFor::PayCost {
+                    player,
+                    kind: PayCostKind::TapCreatures { aggregate: None },
+                    choices: eligible,
+                    count: count as usize,
+                    min_count: 0,
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending_tap),
+                    },
+                });
+            }
+
+            // CR 601.2c + CR 601.2h + CR 602.2b: For no-target activations, use
+            // the serialized residual dispatcher for interactive cost kinds not
+            // covered by the earlier specialized detours. Its selected-cost
+            // handlers remove exactly one leg before re-entering the payment
+            // boundary, including repeated and chosen-OneOf costs.
+            {
+                let mut pending_interactive =
+                    PendingCast::new(source_id, CardId(0), resolved.clone(), ManaCost::NoCost);
+                pending_interactive.activation_cost = Some(cost.clone());
+                pending_interactive.activation_ability_index = Some(ability_index);
+                if let Some(waiting_for) =
+                    casting_costs::surface_next_unpaid_interactive_activation_cost(
+                        state,
+                        player,
+                        &pending_interactive,
+                    )?
+                {
+                    return Ok(waiting_for);
+                }
+            }
+
+            // Waterbend cost: detour to ManaPayment with Waterbend mode.
+            if let Some(wb_cost) = find_waterbend_cost(cost) {
+                let mut pending_wb =
+                    PendingCast::new(source_id, CardId(0), resolved, wb_cost.clone());
+                pending_wb.activation_cost = Some(cost.clone());
+                pending_wb.activation_ability_index = Some(ability_index);
+                state.pending_cast = Some(Box::new(pending_wb));
+                return casting_costs::enter_payment_step(
+                    state,
+                    player,
+                    Some(ConvokeMode::Waterbend),
+                    events,
+                );
+            }
         }
     }
 
@@ -17637,105 +17646,24 @@ pub fn handle_activate_ability(
         {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
-
-            if let Some(ref cost) = ability_def.cost {
-                if variable_speed_payment_range(cost, effective_speed(state, player)).is_some() {
-                    return Ok(begin_variable_speed_payment(
-                        state,
-                        player,
-                        source_id,
-                        resolved,
-                        cost.clone(),
-                        ability_index,
-                        ActivationTargetSelection::Settled,
-                    ));
-                }
-                stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
-                if let Some(waiting) = try_finalize_activation_mana_payment(
-                    state,
-                    player,
-                    source_id,
-                    ability_index,
-                    &resolved,
-                    cost,
-                    ActivationTargetSelection::Settled,
-                    events,
-                )? {
-                    return Ok(waiting);
-                }
-                if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
-                    state,
-                    player,
-                    source_id,
-                    cost,
-                    Some(ability_index),
-                    events,
-                )? {
-                    let pending = pending_activation_after_cost_pause(
-                        source_id,
-                        resolved.clone(),
-                        ability_index,
-                        remaining_cost,
-                    );
-                    if let Some(pending) =
-                        casting_costs::attach_pending_cast_to_cost_move(state, Box::new(pending))
-                    {
-                        state.pending_cast = Some(pending);
-                    }
-                    return Ok(state.waiting_for.clone());
-                }
-            }
-
-            let assigned_targets = flatten_targets_in_chain(&resolved);
-            emit_targeting_events(state, &assigned_targets, source_id, player, events);
-
-            // CR 702.170b: plot's grant targets SelfRef (a context-ref), so
-            // `build_target_slots` yields no slot and plot never takes this target
-            // branch — it is intercepted in the no-target path below. Guard the
-            // invariant: a future plot variant reaching here would silently revert
-            // to the on-stack model, so relocate the intercept if this ever fires.
-            debug_assert!(
-                !is_plot_special_action(&ability_def),
-                "plot special action reached the target branch; SelfRef should suppress its target slot"
-            );
-
-            let entry_id = ObjectId(state.next_object_id);
-            state.next_object_id += 1;
-
-            stack::push_to_stack(
+            // CR 602.2b + CR 601.2c: automatic target selection still
+            // declares targets before any activation cost is paid.
+            emit_targeting_events(
                 state,
-                StackEntry {
-                    id: entry_id,
-                    source_id,
-                    controller: player,
-                    kind: StackEntryKind::ActivatedAbility {
-                        source_id,
-                        ability: Box::new(resolved),
-                    },
-                },
-                events,
-            );
-
-            restrictions::record_ability_activation(state, source_id, ability_index);
-            // CR 117.1b: Priority permits unbounded activation. `pending_activations`
-            // is a per-priority-window AI-guard — see `GameState::pending_activations`.
-            state.pending_activations.push((source_id, ability_index));
-            events.push(GameEvent::AbilityActivated {
-                player_id: player,
+                &flatten_targets_in_chain(&resolved),
                 source_id,
-                // CR 606.2: Classify loyalty vs. normal from the source ability cost.
-                kind: super::planeswalker::activated_ability_kind(state, source_id, ability_index),
-            });
-            // CR 702.142b: Emit additional event when a boast ability is activated.
-            super::casting_targets::emit_keyword_ability_event_if_tagged(
-                state,
-                source_id,
-                ability_index,
                 player,
                 events,
             );
-            priority::clear_priority_passes(state);
-            return Ok(WaitingFor::Priority { player });
+            let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending.activation_cost = ability_def.cost.clone();
+            pending.activation_ability_index = Some(ability_index);
+            pending.target_constraints = target_constraints;
+            pending.distribute = ability_def.distribute.clone();
+            pending.begin_activation_trigger_collection();
+            return casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
+                state, player, pending, events,
+            );
         }
 
         let mut pending_target = PendingCast::new(

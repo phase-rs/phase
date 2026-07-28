@@ -1588,6 +1588,22 @@ pub(crate) fn begin_deferred_target_selection(
         let mut ability = pending.ability.clone();
         assign_targets_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
+        if pending.activation_ability_index.is_some() {
+            // CR 602.2b + CR 601.2c: automatic target declaration remains
+            // before the activation's payment boundary, including after X was
+            // announced through this deferred route.
+            super::casting::emit_targeting_events(
+                state,
+                &flatten_targets_in_chain(&pending.ability),
+                pending.object_id,
+                pending.ability.controller,
+                events,
+            );
+            pending.begin_activation_trigger_collection();
+            return finish_target_selected_activated_ability_at_payment_boundary(
+                state, player, pending, events,
+            );
+        }
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
     if let Some(targets) = auto_select_targets_for_ability(
@@ -1599,7 +1615,33 @@ pub(crate) fn begin_deferred_target_selection(
         let mut ability = pending.ability.clone();
         assign_targets_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
+        if pending.activation_ability_index.is_some() {
+            // CR 602.2b + CR 601.2c: automatic target declaration remains
+            // before the activation's payment boundary, including after X was
+            // announced through this deferred route.
+            super::casting::emit_targeting_events(
+                state,
+                &flatten_targets_in_chain(&pending.ability),
+                pending.object_id,
+                pending.ability.controller,
+                events,
+            );
+            pending.begin_activation_trigger_collection();
+            return finish_target_selected_activated_ability_at_payment_boundary(
+                state, player, pending, events,
+            );
+        }
         return finish_pending_cost_or_cast(state, player, pending, events);
+    }
+
+    if pending.activation_ability_index.is_some() {
+        return super::casting_targets::begin_activated_target_selection(
+            state,
+            player,
+            pending,
+            target_slots,
+            mode_labels,
+        );
     }
 
     let selection = begin_target_selection_for_ability(
@@ -4186,6 +4228,7 @@ pub(crate) fn finish_activated_ability_at_payment_boundary(
         pending.activation_residual,
         pending.activation_target_selection,
         pending.pending_loyalty_activation_player,
+        pending.activation_trigger_collection.clone(),
         events,
     )
 }
@@ -4383,6 +4426,7 @@ pub(super) fn push_activated_ability_to_stack(
     activation_residual: ActivationResidual,
     target_selection: ActivationTargetSelection,
     mut pending_loyalty_activation_player: Option<PlayerId>,
+    activation_trigger_collection: Option<Box<super::triggers::PendingActivationTriggerCollection>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // Pay the exact activation-cost suffix still outstanding. Interactive cost
@@ -4411,6 +4455,7 @@ pub(super) fn push_activated_ability_to_stack(
         pending_interactive.activation_ability_index = Some(ability_index);
         pending_interactive.pending_loyalty_activation_player = pending_loyalty_activation_player;
         pending_interactive.activation_target_selection = target_selection;
+        pending_interactive.activation_trigger_collection = activation_trigger_collection.clone();
         if let Some(waiting_for) =
             surface_next_unpaid_interactive_activation_cost(state, player, &pending_interactive)?
         {
@@ -4488,6 +4533,7 @@ pub(super) fn push_activated_ability_to_stack(
                 .then_some(player)
                 .or(pending_loyalty_activation_player);
             pending.activation_target_selection = target_selection;
+            pending.activation_trigger_collection = activation_trigger_collection.clone();
             if let Some(pending) = attach_pending_cast_to_cost_move(state, Box::new(pending)) {
                 state.pending_cast = Some(pending);
             }
@@ -4511,8 +4557,6 @@ pub(super) fn push_activated_ability_to_stack(
     }
 
     if matches!(target_selection, ActivationTargetSelection::Settled) {
-        let assigned_targets = flatten_targets_in_chain(&resolved);
-        emit_targeting_events(state, &assigned_targets, source_id, player, events);
         return push_ability_entry(
             state,
             player,
@@ -4520,6 +4564,7 @@ pub(super) fn push_activated_ability_to_stack(
             ability_index,
             resolved,
             pending_loyalty_activation_player,
+            activation_trigger_collection,
             events,
         );
     }
@@ -4546,6 +4591,7 @@ pub(super) fn push_activated_ability_to_stack(
             ability_index,
             resolved,
             pending_loyalty_activation_player,
+            activation_trigger_collection,
             events,
         );
     }
@@ -4570,6 +4616,7 @@ pub(super) fn push_activated_ability_to_stack(
                 ability_index,
                 resolved,
                 pending_loyalty_activation_player,
+                activation_trigger_collection,
                 events,
             );
         }
@@ -4590,12 +4637,12 @@ pub(super) fn push_activated_ability_to_stack(
                 ability_index,
                 resolved,
                 pending_loyalty_activation_player,
+                activation_trigger_collection,
                 events,
             );
         }
 
-        // Targets need interactive selection
-        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
+        // Targets need interactive selection.
         let mut pending_act = PendingCast::new(
             source_id,
             CardId(0),
@@ -4612,19 +4659,14 @@ pub(super) fn push_activated_ability_to_stack(
         pending_act.activation_cost = None;
         pending_act.activation_ability_index = Some(ability_index);
         pending_act.pending_loyalty_activation_player = pending_loyalty_activation_player;
-        // CR 601.2c + CR 602.2b: first slot's announcer (activator unless the slot
-        // is "of an opponent's choice").
-        let initial_player = target_slots
-            .first()
-            .and_then(|slot| slot.chooser)
-            .unwrap_or(player);
-        return Ok(WaitingFor::TargetSelection {
-            player: initial_player,
-            pending_cast: Box::new(pending_act),
+        pending_act.activation_trigger_collection = activation_trigger_collection;
+        return super::casting_targets::begin_activated_target_selection(
+            state,
+            player,
+            pending_act,
             target_slots,
-            mode_labels: Vec::new(),
-            selection,
-        });
+            Vec::new(),
+        );
     }
 
     emit_targeting_events(state, &assigned_targets, source_id, player, events);
@@ -4636,6 +4678,7 @@ pub(super) fn push_activated_ability_to_stack(
         ability_index,
         resolved,
         pending_loyalty_activation_player,
+        activation_trigger_collection,
         events,
     )
 }
@@ -4682,6 +4725,7 @@ fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
 }
 
 /// Final step: create stack entry and record activation.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn push_ability_entry(
     state: &mut GameState,
     player: PlayerId,
@@ -4689,6 +4733,7 @@ pub(super) fn push_ability_entry(
     ability_index: usize,
     mut resolved: ResolvedAbility,
     pending_loyalty_activation_player: Option<PlayerId>,
+    activation_trigger_collection: Option<Box<super::triggers::PendingActivationTriggerCollection>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let entry_id = ObjectId(state.next_object_id);
@@ -4741,6 +4786,20 @@ pub(super) fn push_ability_entry(
         player,
         events,
     );
+    if let Some(mut collection) = activation_trigger_collection {
+        collection.collect(state, events);
+        let mut deferred_contexts = std::mem::take(&mut state.deferred_triggers);
+        collection.commit_into(state, &mut deferred_contexts);
+        state.deferred_triggers = deferred_contexts;
+        state
+            .consumed_before_priority_trigger_events
+            .extend(events.iter().enumerate().map(|(index, event)| {
+                crate::game::triggers::ConsumedTriggerEventOccurrence {
+                    event: event.clone(),
+                    occurrence: crate::game::triggers::trigger_event_occurrence(events, index),
+                }
+            }));
+    }
     priority::clear_priority_passes(state);
 
     Ok(WaitingFor::Priority { player })
@@ -11813,6 +11872,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 pending.activation_residual,
                 pending.activation_target_selection,
                 pending.pending_loyalty_activation_player,
+                pending.activation_trigger_collection.clone(),
                 events,
             );
         }
@@ -12896,6 +12956,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             alt_cost_grant_source: None,
+            activation_trigger_collection: None,
         }
     }
 
@@ -18171,6 +18232,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             alt_cost_grant_source: None,
+            activation_trigger_collection: None,
         };
 
         let result = pay_additional_cost(
@@ -18306,6 +18368,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             alt_cost_grant_source: None,
+            activation_trigger_collection: None,
         };
 
         let mut events = Vec::new();
@@ -18410,6 +18473,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             alt_cost_grant_source: None,
+            activation_trigger_collection: None,
         };
 
         // Exactly one card is required. Selecting two must fail.
@@ -18503,6 +18567,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             alt_cost_grant_source: None,
+            activation_trigger_collection: None,
         };
 
         // `red` is not in the legal-cards list, so the cost handler must reject
@@ -18629,6 +18694,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             alt_cost_grant_source: None,
+            activation_trigger_collection: None,
         };
 
         let result = pay_additional_cost(
@@ -21617,6 +21683,7 @@ its replicate cost was paid.)\nDraw a card.";
             Some(&residual),
             ActivationResidual::XMana,
             ActivationTargetSelection::Pending,
+            None,
             None,
             &mut events,
         );

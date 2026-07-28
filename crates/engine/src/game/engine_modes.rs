@@ -227,11 +227,21 @@ fn handle_activated_mode_choice(
         if let Some(targets) = resolved_targets {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
+            // CR 602.2b + CR 601.2c: automatic target assignment is still a
+            // declaration before activation costs are paid.
+            casting::emit_targeting_events(
+                state,
+                &super::ability_utils::flatten_targets_in_chain(&resolved),
+                source_id,
+                player,
+                events,
+            );
             let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending.activation_cost = ability_cost.clone();
             pending.activation_ability_index = ability_index;
             pending.target_constraints = target_constraints;
             pending.distribute = mode_distribute;
+            pending.begin_activation_trigger_collection();
             casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
                 state, player, pending, events,
             )

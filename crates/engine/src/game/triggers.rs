@@ -7654,7 +7654,7 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
     new_events
 }
 
-fn trigger_event_occurrence(events: &[GameEvent], event_index: usize) -> usize {
+pub(crate) fn trigger_event_occurrence(events: &[GameEvent], event_index: usize) -> usize {
     let event = &events[event_index];
     events[..event_index]
         .iter()

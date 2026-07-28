@@ -739,6 +739,7 @@ mod mindblade_render_warrior_intervening_if_2867;
 mod mirror_march_copy_token_exile;
 mod mizzixs_mastery;
 mod mjolnir_hammer_double_damage;
+mod mogg_fanatic_target_before_cost;
 mod mogg_war_marshal_echo_dies_trigger;
 mod morbid_curiosity_cost_paid_mana_value_draw;
 mod morkrut_ashaya_self_sacrifice;
