@@ -22943,7 +22943,7 @@ fn unimplemented_keys(parsed: &ParsedAbilities) -> Vec<String> {
     out
 }
 
-/// CR 611.2a + CR 400.7: The impulse-cleanup sweep must stay HONESTLY
+/// CR 603.7a + CR 603.7c + CR 400.7: The impulse-cleanup sweep must stay HONESTLY
 /// unsupported. `demote_unbound_delayed_sweeps` replaces a delayed graveyard
 /// move whose swept objects were never bound to a concrete set with an
 /// `Effect::unimplemented`, because that shape provably strands the swept card

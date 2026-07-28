@@ -6693,7 +6693,7 @@ pub fn parse_oracle_text(
     parsed
 }
 
-/// CR 611.2a + CR 400.7: Post-lowering coverage-honesty net for the
+/// CR 603.7a + CR 603.7c + CR 400.7: Post-lowering coverage-honesty net for the
 /// impulse-cleanup **sweep** — a delayed graveyard move whose swept objects were
 /// never bound to a concrete set.
 ///

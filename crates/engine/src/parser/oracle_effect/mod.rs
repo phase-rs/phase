@@ -1690,7 +1690,7 @@ fn try_parse_at_next_phase_delayed_trigger(
     })
 }
 
-/// CR 611.2a + CR 400.7: Is this delayed trigger's inner chain an impulse-cleanup
+/// CR 603.7a + CR 603.7c + CR 400.7: Is this delayed trigger's inner chain an impulse-cleanup
 /// **sweep** whose swept objects are an unbound anaphor?
 ///
 /// The shape is a zone change into a graveyard whose target is still
