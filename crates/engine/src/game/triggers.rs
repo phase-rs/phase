@@ -331,6 +331,7 @@ struct VirtualTargetingSource {
 
 impl TriggerCollectionOverlay {
     /// Prepares the virtual source authority for one in-flight activation.
+    #[cfg_attr(not(test), allow(dead_code))] // Reached through the pending activation session.
     pub(crate) fn for_activated_ability(source_id: ObjectId, controller: PlayerId) -> Self {
         Self {
             virtual_targeting_source: Some(VirtualTargetingSource {
@@ -361,7 +362,7 @@ enum TriggerCollectionOperation {
     },
     RecordTriggerFired {
         constraint: Option<TriggerConstraint>,
-        source_context: Option<TriggerSourceContext>,
+        source_context: Box<Option<TriggerSourceContext>>,
         definition_ref: Option<TriggerDefinitionRef>,
         event: GameEvent,
     },
@@ -399,6 +400,7 @@ impl TriggerCollectionSession {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // Wired into casting in the next activation step.
     fn transactional(overlay: TriggerCollectionOverlay) -> Self {
         Self {
             overlay,
@@ -420,7 +422,7 @@ impl TriggerCollectionSession {
             state,
             TriggerCollectionOperation::RecordTriggerFired {
                 constraint: matched.constraint.clone(),
-                source_context: matched.pending.ability.trigger_source.clone(),
+                source_context: Box::new(matched.pending.ability.trigger_source.clone()),
                 definition_ref: matched.definition_ref.clone(),
                 event: event.clone(),
             },
@@ -510,6 +512,7 @@ impl TriggerCollectionSession {
         Self::apply_operation(state, operation)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // Consumed by the pending-activation commit boundary.
     fn commit(mut self, state: &mut GameState) {
         let Some(operation_journal) = self.operation_journal.take() else {
             return;
@@ -540,7 +543,7 @@ impl TriggerCollectionSession {
                 record_trigger_fired_with_ref(
                     state,
                     constraint.as_ref(),
-                    source_context.as_ref(),
+                    source_context.as_ref().as_ref(),
                     definition_ref.as_ref(),
                     &event,
                 );
@@ -592,12 +595,14 @@ impl TriggerCollectionSession {
 /// against a private state snapshot, retains every semantic collector operation
 /// in order, and exposes one consuming commit path. Dropping it is cancellation:
 /// neither its operations nor its pending contexts escape to the live game.
+#[cfg_attr(not(test), allow(dead_code))] // Casting owns this session in the next activation step.
 pub(crate) struct PendingActivationTriggerCollection {
     staged_state: GameState,
     session: TriggerCollectionSession,
     pending_contexts: Vec<PendingTriggerContext>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // Exercised by unit tests until casting adopts it.
 impl PendingActivationTriggerCollection {
     pub(crate) fn for_activated_ability(
         state: &GameState,
