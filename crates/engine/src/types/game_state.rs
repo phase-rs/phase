@@ -6011,10 +6011,15 @@ impl PendingCast {
     /// the physical stack until the announcement completes.
     pub(crate) fn begin_activation_trigger_collection(&mut self) {
         if self.activation_trigger_collection.is_none() {
+            let ability_index = self
+                .activation_ability_index
+                .expect("target-bearing activation session requires an ability index");
             self.activation_trigger_collection = Some(Box::new(
-                crate::game::triggers::PendingActivationTriggerCollection::for_activated_ability(
+                crate::game::triggers::PendingActivationTriggerCollection::for_prepared_activated_ability(
                     self.object_id,
                     self.ability.controller,
+                    ability_index,
+                    &self.ability,
                 ),
             ));
         }

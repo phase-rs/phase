@@ -2589,11 +2589,24 @@ fn pause_sacrifice_for_cost(
 /// pipeline cannot collect the same events again.
 fn settle_sacrifice_for_cost_events(
     state: &mut GameState,
+    pending: &mut PendingCast,
     mut deferred_cost_events: Vec<GameEvent>,
     events: &[GameEvent],
     current_start: usize,
     current_end: usize,
 ) {
+    if let Some(collection) = pending.activation_trigger_collection.as_mut() {
+        // CR 602.2b + CR 603.2: an announced target-bearing activation owns
+        // replacement-paused cost events until its stack commit. Earlier action
+        // fragments are not present in this action's event buffer, while the
+        // current fragment is collected once by the eventual stack boundary (or
+        // the next pending-action staging pass).
+        if !deferred_cost_events.is_empty() {
+            collection.collect(state, &deferred_cost_events);
+        }
+        return;
+    }
+
     deferred_cost_events.extend_from_slice(&events[current_start..current_end]);
     if !deferred_cost_events.is_empty() {
         crate::game::triggers::collect_triggers_into_deferred(state, &deferred_cost_events);
@@ -2657,6 +2670,7 @@ fn finish_sacrifice_for_cost(
     // before a later cast/activation prompt can hide this action's event span.
     settle_sacrifice_for_cost_events(
         state,
+        &mut pending,
         deferred_cost_events,
         events,
         current_start,

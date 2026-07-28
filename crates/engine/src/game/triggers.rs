@@ -318,15 +318,18 @@ impl PendingTriggerContext {
 /// pending transaction. The overlay is deliberately narrow: it can answer the
 /// controller of that one targeting source, but cannot alter object lookup,
 /// zones, or the stack.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TriggerCollectionOverlay {
     virtual_targeting_source: Option<VirtualTargetingSource>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct VirtualTargetingSource {
     source_id: ObjectId,
+    source_occurrence: Option<u64>,
     controller: PlayerId,
+    ability_index: Option<usize>,
+    ability: Option<Box<ResolvedAbility>>,
 }
 
 impl TriggerCollectionOverlay {
@@ -336,15 +339,74 @@ impl TriggerCollectionOverlay {
         Self {
             virtual_targeting_source: Some(VirtualTargetingSource {
                 source_id,
+                source_occurrence: None,
                 controller,
+                ability_index: None,
+                ability: None,
             }),
         }
     }
 
-    fn targeting_source_controller(self, source_id: ObjectId) -> Option<PlayerId> {
+    /// Captures the complete announced activated ability for source-filtered
+    /// becomes-target triggers while the real stack entry does not yet exist.
+    ///
+    /// CR 602.2b + CR 603.2: This is a read-only, transaction-local stack
+    /// projection. It preserves the source occurrence, controller, printed
+    /// ability index, and resolved tag/kind/target facts used by `StackAbility`
+    /// filters without publishing an actual stack object before costs are paid.
+    pub(crate) fn for_prepared_activated_ability(
+        source_id: ObjectId,
+        controller: PlayerId,
+        ability_index: usize,
+        ability: &ResolvedAbility,
+    ) -> Self {
+        Self {
+            virtual_targeting_source: Some(VirtualTargetingSource {
+                source_id,
+                source_occurrence: ability.source_incarnation,
+                controller,
+                ability_index: Some(ability_index),
+                ability: Some(Box::new(ability.clone())),
+            }),
+        }
+    }
+
+    fn targeting_source_controller(&self, source_id: ObjectId) -> Option<PlayerId> {
         self.virtual_targeting_source
+            .as_ref()
             .filter(|source| source.source_id == source_id)
             .map(|source| source.controller)
+    }
+
+    /// Adds an ephemeral activated-ability stack projection to a staged
+    /// collection state. Inserting at the front makes the in-flight occurrence
+    /// authoritative even if an earlier activation from the same permanent is
+    /// already physically on the stack.
+    fn install_virtual_targeting_source(&self, state: &mut GameState) {
+        let Some(source) = self.virtual_targeting_source.as_ref() else {
+            return;
+        };
+        let (Some(ability_index), Some(ability)) = (source.ability_index, source.ability.as_ref())
+        else {
+            return;
+        };
+        let mut ability = (**ability).clone();
+        debug_assert_eq!(ability.source_incarnation, source.source_occurrence);
+        ability.ability_index = Some(ability_index);
+        state.stack.insert(
+            0,
+            StackEntry {
+                // The becomes-target event identifies an activated source by
+                // source id before the physical stack object exists.
+                id: source.source_id,
+                source_id: source.source_id,
+                controller: source.controller,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: source.source_id,
+                    ability: Box::new(ability),
+                },
+            },
+        );
     }
 }
 
@@ -622,6 +684,8 @@ impl PendingActivationTriggerCollection {
     #[cfg_attr(not(test), allow(dead_code))] // Called by target/cost continuation roots next.
     pub(crate) fn collect(&mut self, state: &GameState, events: &[GameEvent]) {
         let mut staged_state = self.rebuild_staged_state(state);
+        self.overlay
+            .install_virtual_targeting_source(&mut staged_state);
         let operation_journal = std::mem::take(&mut self.operation_journal);
         let mut session = TriggerCollectionSession::transactional(self.overlay, operation_journal);
         let contexts = collect_pending_triggers_with_collection(
@@ -19301,6 +19365,81 @@ pub mod tests {
             with_overlay.stack.is_empty(),
             "collection remains non-dispatching; the future activation transaction owns commit"
         );
+    }
+
+    #[test]
+    fn prepared_activation_overlay_matches_source_filtered_stack_ability_before_commit() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(1),
+            "Prepared Ability Source".to_string(),
+            Zone::Battlefield,
+        );
+        let observer = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Ability Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Object(observer)],
+            source,
+            PlayerId(1),
+        );
+        ability.source_incarnation = Some(7);
+        ability.context.ability_tag = Some(crate::types::ability::AbilityTag::Backup);
+
+        let overlay = TriggerCollectionOverlay::for_prepared_activated_ability(
+            source,
+            PlayerId(1),
+            4,
+            &ability,
+        );
+        assert_eq!(
+            overlay
+                .virtual_targeting_source
+                .as_ref()
+                .and_then(|source| source.source_occurrence),
+            Some(7),
+            "the pending session must retain the source occurrence"
+        );
+        let mut staged = state.clone();
+        overlay.install_virtual_targeting_source(&mut staged);
+        let projected = staged.stack.front().expect("virtual ability is projected");
+        assert_eq!(projected.controller, PlayerId(1));
+        assert_eq!(
+            projected
+                .ability()
+                .and_then(|ability| ability.ability_index),
+            Some(4),
+            "the projection must preserve the printed activated-ability index"
+        );
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(TargetFilter::StackAbility {
+            controller: Some(ControllerRef::Opponent),
+            tag: Some(crate::types::ability::AbilityTag::Backup),
+            kind: Some(crate::types::ability::StackAbilityKind::Activated),
+        });
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(observer),
+            source_id: source,
+        };
+        assert!(super::trigger_matchers::match_becomes_target(
+            &event,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&staged, observer),
+            &staged,
+        ));
     }
 
     #[test]
