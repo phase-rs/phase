@@ -10,12 +10,9 @@ use super::context::PolicyContext;
 use super::registry::{
     rescale_into_critical_band, DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy,
 };
-use super::strategy_helpers::{sacrifice_cost, sacrifice_tier, SacrificeTier};
+use super::strategy_helpers::{sacrifice_cost, sacrifice_tier, SacrificeTier, SINGLE_CARD_VALUE};
 
 pub struct SacrificeValuePolicy;
-
-/// Policy scores are card-equivalent units, so drawing one card is worth 1.0.
-const SINGLE_CARD_VALUE: f64 = 1.0;
 
 /// Max expected magnitude of [`SacrificeValuePolicy::score`] — the point past
 /// which [`rescale_into_critical_band`] starts to saturate; below it, ordering

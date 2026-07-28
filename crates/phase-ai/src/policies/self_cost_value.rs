@@ -5,7 +5,32 @@
 //! stands down when off-ability deck synergy justifies the cost, then prices the
 //! cost against the ability's immediate payoff. A real cost with a trivial
 //! payoff is rejected (scoring `-inf`, so Pass wins); a cheap cost is merely
-//! deprioritized; anything with a genuine payoff is left alone.
+//! deprioritized; a payoff that can be confidently and completely priced is
+//! compared against the cost — and a payoff **certified smaller than the cost is
+//! rejected**, not discounted — and a real payoff that cannot be soundly priced
+//! (unpriceable effect, or an unmodeled rider in the chain) is left alone.
+//!
+//! This policy is the **single authority** for the cost-vs-benefit question on
+//! every self-cost activation, mana-costed sacrifice outlets included.
+//!
+//! # Why the underwater arm is categorical and not graduated
+//!
+//! An earlier revision scored the underwater case in proportion to the
+//! shortfall, on the argument that search should stay able to override it. That
+//! was **falsified by measurement** (see `policies::tests::sac_outlet_drain_repro`
+//! for the executed record). The final decision is a softmax *sample*
+//! (`search::softmax_select_pairs`) at Medium `temperature = 1.0`, repeated over
+//! ~100 priority windows per game: repricing a repeatable outlet from `+0.85` to
+//! `-0.65` cut the per-window activation probability 63.9% → 28.3%, a real 2.3×
+//! improvement, and the board drained **identically**, because P(at least one
+//! selection over that many windows) ≈ 1.0 either way.
+//!
+//! The general law, worth carrying to any policy verdict on a *repeatable*
+//! candidate: **a graduated penalty is a rate, a `Reject` is a bound, and a rate
+//! cannot enforce a bound over unbounded trials.** Only `-inf` is categorical —
+//! its softmax weight is `exp(-inf) = 0`. So a graduated "discouragement" on a
+//! trade this policy has certified as a loss means "do it eventually", which is
+//! the opposite of what the certification says.
 
 use engine::types::ability::AbilityTag;
 use engine::types::actions::GameAction;
@@ -15,8 +40,8 @@ use engine::types::player::PlayerId;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::self_cost::{
-    benefit_is_trivial, real_self_cost, self_cost_in_scope, self_counter_cost_preview,
-    synergy_justifies_self_cost, SelfCounterCostPreview,
+    appraise_benefit, real_self_cost, self_cost_in_scope, self_counter_cost_preview,
+    synergy_justifies_self_cost, BenefitAppraisal, SelfCounterCostPreview,
 };
 use crate::features::DeckFeatures;
 
@@ -93,29 +118,91 @@ impl TacticalPolicy for SelfCostValuePolicy {
 
         let cost_value =
             real_self_cost(ctx.state, ctx.ai_player, *source_id, cost, ctx.penalties());
-        let trivial = benefit_is_trivial(ctx.state, ctx.ai_player, *source_id, &ability);
 
         let cost_milli = (cost_value * 1000.0) as i64;
 
-        if trivial {
-            if cost_value >= REAL_COST_FLOOR {
-                return PolicyVerdict::reject(
-                    PolicyReason::new("self_cost_trivial_benefit")
-                        .with_fact("cost_milli", cost_milli)
-                        .with_fact("benefit", 0),
-                );
+        match appraise_benefit(
+            ctx.state,
+            ctx.ai_player,
+            *source_id,
+            &ability,
+            ctx.penalties(),
+        ) {
+            BenefitAppraisal::Trivial => {
+                if cost_value >= REAL_COST_FLOOR {
+                    return PolicyVerdict::reject(
+                        PolicyReason::new("self_cost_trivial_benefit")
+                            .with_fact("cost_milli", cost_milli)
+                            .with_fact("benefit", 0),
+                    );
+                }
+                // Trivial payoff, but the priced self-cost is below the
+                // real-loss floor: deprioritize with an auto-banded negative
+                // delta. No trivial self-cost play may resolve to
+                // `self_cost_benefit_present`, and the `self_cost_marginal`
+                // reason deliberately does NOT claim a benefit.
+                PolicyVerdict::score(
+                    -cost_value,
+                    PolicyReason::new("self_cost_marginal").with_fact("cost_milli", cost_milli),
+                )
             }
-            // Trivial payoff, but the priced self-cost is below the real-loss
-            // floor: deprioritize with an auto-banded negative delta. No trivial
-            // self-cost play may resolve to `self_cost_benefit_present`, and the
-            // `self_cost_marginal` reason deliberately does NOT claim a benefit.
-            return PolicyVerdict::score(
-                -cost_value,
-                PolicyReason::new("self_cost_marginal").with_fact("cost_milli", cost_milli),
-            );
+            BenefitAppraisal::Priced { value } => {
+                let net = value - cost_value;
+                let benefit_milli = (value * 1000.0) as i64;
+                if net >= 0.0 {
+                    // Inclusive boundary: net == 0 covers. A 0/1 creature token
+                    // prices at `max(creature_combat_value(0,1) = 1.0, 0.5) =
+                    // 1.0` against draw(1) = 1.0 — exactly 0. Cracking it is
+                    // intended; the comparison means "not a loss", and an
+                    // exact-cover crack is allowed. Neutral rather than
+                    // positive: `CardAdvantagePolicy`/`DrawPayoffPolicy` already
+                    // reward the draw on this same candidate, so a positive
+                    // delta here would double-count.
+                    //
+                    // NOTE: tap state is deliberately NOT part of this boundary.
+                    // `sacrifice_cost` prices the permanent intrinsically, so a
+                    // tapped 1/1 token still costs 2.5 and stays underwater. The
+                    // earlier tapped-discounted reading put it at exactly 0 here
+                    // and made this arm the escape hatch a whole board drained
+                    // through. Fixed at the give-up authority, not at this
+                    // boundary.
+                    PolicyVerdict::neutral(
+                        PolicyReason::new("self_cost_benefit_covers_cost")
+                            .with_fact("cost_milli", cost_milli)
+                            .with_fact("benefit_milli", benefit_milli),
+                    )
+                } else {
+                    // net < 0: a CERTIFIED losing trade — the chain was fully
+                    // priced, the quantity read, the cost bound
+                    // filter-faithfully, and every modeled justification
+                    // (synergy payoff on board, life pressure, unpriceable or
+                    // unmodeled value, counter replenishment, cycling, cEDH
+                    // bracket) already declined to stand the comparison down.
+                    //
+                    // Categorical, not graduated: under repeated softmax
+                    // sampling any finite negative is eventually selected while
+                    // fodder remains (measured — see the module docs and
+                    // `policies::tests::sac_outlet_drain_repro`), so a graduated
+                    // "discouragement" here means "do it eventually", the
+                    // opposite of what this verdict certifies.
+                    //
+                    // There is no threshold constant in the restraint: the
+                    // boundary is the sign of the net, inclusive at zero. The
+                    // magnitudes that set WHERE that sign flips
+                    // (`creature_combat_value`'s 1.5*P + T, `SINGLE_CARD_VALUE`,
+                    // `sacrifice_token_cost`, the per-life coefficient) live in
+                    // eval, which is where calibration belongs.
+                    PolicyVerdict::reject(
+                        PolicyReason::new("self_cost_benefit_underwater")
+                            .with_fact("cost_milli", cost_milli)
+                            .with_fact("benefit_milli", benefit_milli),
+                    )
+                }
+            }
+            BenefitAppraisal::Unpriced => {
+                PolicyVerdict::neutral(PolicyReason::new("self_cost_benefit_present"))
+            }
         }
-
-        PolicyVerdict::neutral(PolicyReason::new("self_cost_benefit_present"))
     }
 }
 
@@ -501,6 +588,21 @@ mod tests {
         }
     }
 
+    /// Pins the arithmetic of a verdict that carries no delta. A `Reject`
+    /// propagates to `-inf`, so the comparison it certifies is only observable
+    /// through `PolicyReason::facts` — these are `(value * 1000.0) as i64`, so
+    /// the expectations are exact, not epsilon'd.
+    fn assert_facts(verdict: &PolicyVerdict, cost_milli: i64, benefit_milli: i64) {
+        let reason = match verdict {
+            PolicyVerdict::Reject { reason } | PolicyVerdict::Score { reason, .. } => reason,
+        };
+        assert_eq!(
+            reason.facts,
+            vec![("cost_milli", cost_milli), ("benefit_milli", benefit_milli)],
+            "verdict facts"
+        );
+    }
+
     fn assert_neutral(verdict: &PolicyVerdict, kind: &str) {
         match verdict {
             PolicyVerdict::Score { delta, reason } => {
@@ -539,10 +641,22 @@ mod tests {
     }
 
     #[test]
-    fn sac_creature_for_draw_reaches_scoring_and_is_allowed() {
-        // Positive reach-guard for row 1: identical cost, real payoff (a card) →
-        // the input passed self_cost_in_scope and the benefit walk flips it to
-        // a non-reject. If benefit detection were broken this would reject.
+    fn sac_creature_for_draw_is_vetoed_underwater() {
+        // Row 1's positive reach-guard, now pinning the VETO contract:
+        // identical cost to `sac_creature_for_small_lifegain_rejected`, real
+        // payoff (a card), so the input passed `self_cost_in_scope` and the
+        // chain walk classified the draw NON-trivial — reaching `underwater` at
+        // all proves both, which is the reach-guard this test carries.
+        //
+        // The comparison: the Bear prices at `evaluate_creature_intrinsic(2,2)`
+        // = 1.5*2+2 = 5.0 against `draw(1)` = 1.0 → net -4.0, certified losing.
+        //
+        // HISTORY: before the veto this arm emitted a graduated `Score` with
+        // delta -4.0. The graduated shape was falsified by measurement (module
+        // docs) — a rate cannot bound a repeatable candidate. Reverting to a
+        // graduated score flips this to `Score` and the test goes red on shape;
+        // reverting the pricing entirely flips the kind to
+        // `self_cost_benefit_present` and it goes red on kind.
         let mut state = GameState::new_two_player(42);
         creature(&mut state, AI, "Bear", 2, 2);
         let source = source_with(
@@ -551,10 +665,9 @@ mod tests {
             &[CoreType::Land],
             activated(draw(1), sac_creature_cost()),
         );
-        assert_neutral(
-            &verdict_for(&state, source, plain_features()),
-            "self_cost_benefit_present",
-        );
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_reject(&verdict, "self_cost_benefit_underwater");
+        assert_facts(&verdict, 5000, 1000);
     }
 
     // --- Row 2: Fling-class dynamic damage NOT rejected -------------------
@@ -1476,5 +1589,363 @@ mod tests {
             Some(PolicyVerdict::Score { delta, reason })
                 if delta < 0.0 && reason.kind == "self_cost_counter_replacement_unsupported"
         ));
+    }
+
+    // --- The priced comparison: cost vs benefit ---------------------------
+    //
+    // Every test below reaches `BenefitAppraisal` through the real
+    // `SelfCostValuePolicy::verdict` entry point via `verdict_for`, past the
+    // scope gate and the synergy stand-down.
+
+    /// Chain an extra effect onto an ability as its `sub_ability`, so
+    /// `collect_chain_effects` yields both in order.
+    fn with_rider(mut ability: AbilityDefinition, rider: Effect) -> AbilityDefinition {
+        ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Activated,
+            rider,
+        )));
+        ability
+    }
+
+    /// A token-creation rider: no `effect_triviality` arm models `Effect::Token`,
+    /// so it classifies `Unmodeled`. Benefit-signed.
+    fn create_token_rider() -> Effect {
+        Effect::Token {
+            name: "Servo".to_string(),
+            power: engine::types::ability::PtValue::Fixed(1),
+            toughness: engine::types::ability::PtValue::Fixed(1),
+            types: vec!["Artifact".to_string(), "Creature".to_string()],
+            colors: Vec::new(),
+            keywords: Vec::new(),
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+        }
+    }
+
+    /// A life-loss rider: also `Unmodeled`, but drawback-signed. The pair proves
+    /// the stand-down is direction-independent.
+    fn lose_life_rider() -> Effect {
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: None,
+        }
+    }
+
+    #[test]
+    fn noncreature_token_sac_for_draw_covers_cost() {
+        // A Clue/Food/Treasure-class crack: the artifact token prices at
+        // `sacrifice_token_cost` = 0.5 against draw(1) = 1.0 → net +0.5, so the
+        // comparison must NOT deprioritize it. Source is an enchantment so it
+        // cannot itself join the artifact cheapest-match pool.
+        let mut state = GameState::new_two_player(42);
+        artifact_token(&mut state, "Clue");
+        let source = source_with(
+            &mut state,
+            "Token Cracker",
+            &[CoreType::Enchantment],
+            activated(draw(1), sac_artifact_cost()),
+        );
+        assert_neutral(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_benefit_covers_cost",
+        );
+    }
+
+    #[test]
+    fn draw_quantity_scales_the_comparison() {
+        // Same 1/1 fodder (2.5) as the underwater token case, but drawing THREE
+        // cards (3.0) clears it. The quantity must be read, not assumed to be 1
+        // — an implementation hardcoding SINGLE_CARD_VALUE reports `underwater`.
+        let mut state = GameState::new_two_player(42);
+        creature(&mut state, AI, "Squire", 1, 1);
+        let source = source_with(
+            &mut state,
+            "High Market",
+            &[CoreType::Land],
+            activated(draw(3), sac_creature_cost()),
+        );
+        assert_neutral(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_benefit_covers_cost",
+        );
+    }
+
+    #[test]
+    fn pricing_uses_cheapest_matching_fodder() {
+        // MULTI-AUTHORITY hostile fixture for the identity contract: two legal
+        // sacrifices are on board, a 1/1 token (2.5) and a Bear (5.0). draw(3)
+        // = 3.0 covers the CHEAPEST but not the dearest, so a binding that
+        // priced anything other than the cheapest live match reports
+        // `underwater` here.
+        let mut state = GameState::new_two_player(42);
+        token_creature(&mut state, "Goblin Token", 1, 1);
+        creature(&mut state, AI, "Bear", 2, 2);
+        let source = source_with(
+            &mut state,
+            "High Market",
+            &[CoreType::Land],
+            activated(draw(3), sac_creature_cost()),
+        );
+        assert_neutral(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_benefit_covers_cost",
+        );
+    }
+
+    #[test]
+    fn large_lifegain_is_vetoed_underwater() {
+        // The second pricing arm. gain_life(10) exceeds TRIVIAL_LIFEGAIN_CEILING
+        // so it classifies NON-trivial, then prices at 10 *
+        // self_cost_pay_life_per_point (0.15) = 1.5 against the Bear's 5.0 →
+        // net -3.5, certified losing. Pricing lifegain on the same per-point
+        // axis the cost side already uses is what makes this comparable at all.
+        //
+        // HISTORY: graduated delta -3.5 before the veto.
+        let mut state = GameState::new_two_player(42);
+        creature(&mut state, AI, "Bear", 2, 2);
+        let source = source_with(
+            &mut state,
+            "High Market",
+            &[CoreType::Land],
+            activated(gain_life(10), sac_creature_cost()),
+        );
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_reject(&verdict, "self_cost_benefit_underwater");
+        assert_facts(&verdict, 5000, 1500);
+    }
+
+    #[test]
+    fn large_lifegain_unpriced_under_life_pressure() {
+        // NEGATIVE SIBLING of the row above: identical fixture, AI life dropped
+        // to 4 so `ai_life_critical` holds. Life is then genuinely worth more
+        // than the per-point axis can bound, so the pricing arm declines and the
+        // comparison stands down to the pre-existing neutral — today's exact
+        // behaviour, preserved. An implementation that priced lifegain
+        // unconditionally reports `underwater` here.
+        let mut state = GameState::new_two_player(42);
+        state.players[AI.0 as usize].life = 4;
+        creature(&mut state, AI, "Bear", 2, 2);
+        let source = source_with(
+            &mut state,
+            "High Market",
+            &[CoreType::Land],
+            activated(gain_life(10), sac_creature_cost()),
+        );
+        assert_neutral(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_benefit_present",
+        );
+    }
+
+    #[test]
+    fn mixed_chain_with_unpriceable_effect_stands_down() {
+        // Aggregation guard: `Effect::Mana` is classifier-NON-trivial but has no
+        // confident price, so one unpriceable member must suppress the whole
+        // comparison rather than let a partial sum (draw 1.0 vs Bear 5.0) go
+        // underwater. Reaches the `None => Unpriced` early return.
+        let mut state = GameState::new_two_player(42);
+        creature(&mut state, AI, "Bear", 2, 2);
+        let source = source_with(
+            &mut state,
+            "High Market",
+            &[CoreType::Land],
+            with_rider(activated(draw(1), sac_creature_cost()), add_two_colorless()),
+        );
+        assert_neutral(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_benefit_present",
+        );
+    }
+
+    #[test]
+    fn unmodeled_benefit_rider_stands_down_the_comparison() {
+        // UNMODELED rider, BENEFIT direction. A rider-blind implementation
+        // prices this chain at draw(1) = 1.0 against the Bear's 5.0 and reports
+        // `underwater` with the token silently valued at 0 — understating the
+        // payoff. The sum is not a lower bound, so no conclusion is drawn.
+        let mut state = GameState::new_two_player(42);
+        creature(&mut state, AI, "Bear", 2, 2);
+        let source = source_with(
+            &mut state,
+            "High Market",
+            &[CoreType::Land],
+            with_rider(
+                activated(draw(1), sac_creature_cost()),
+                create_token_rider(),
+            ),
+        );
+        assert_neutral(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_benefit_present",
+        );
+    }
+
+    #[test]
+    fn unmodeled_drawback_rider_blocks_covers_conclusion() {
+        // UNMODELED rider, DRAWBACK direction — the paired sibling. Cheap
+        // artifact-token fodder (0.5) vs draw(1) = 1.0, so the partial sum
+        // "covers"; but the chain also loses 2 life, which the sum omits. An
+        // implementation that helpfully concluded `covers_cost` from a partial
+        // sum fails on the reason kind here. Together these two rows pin that
+        // the stand-down never consults the net's sign.
+        let mut state = GameState::new_two_player(42);
+        artifact_token(&mut state, "Clue");
+        let source = source_with(
+            &mut state,
+            "Token Cracker",
+            &[CoreType::Enchantment],
+            with_rider(activated(draw(1), sac_artifact_cost()), lose_life_rider()),
+        );
+        assert_neutral(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_benefit_present",
+        );
+    }
+
+    #[test]
+    fn underwater_veto_is_categorical_at_any_depth() {
+        // DEPTH-INVARIANCE discriminator (replaces
+        // `underwater_delta_routes_through_the_band_rescale`, whose whole
+        // discrimination — WHERE in the critical band a shortfall lands — died
+        // with the graduated arm). Sole fodder is an 8/8 non-token, untapped,
+        // keywordless: cost = creature_combat_value(8,8) = 1.5*8 + 8 = 20.0;
+        // benefit = 1.0; net = -19.0.
+        //
+        // The source MUST be a non-creature (the High Market land pattern):
+        // `sac_creature_cost()` is Typed(creature, You) with no `Another`
+        // property, so a creature-typed source would join the cheapest-match
+        // pool and silently break the 20.0 arithmetic.
+        //
+        // What this now pins: a -19.0 shortfall and the -4.0 shortfall of
+        // `sac_creature_for_draw_is_vetoed_underwater` share ONE categorical
+        // fate. Any implementation that re-introduces depth sensitivity — a band
+        // rescale, a clamp, a "only veto past N" threshold — produces a `Score`
+        // here and goes red on shape. The facts still carry the depth, so the
+        // magnitude remains observable without being actionable.
+        let mut state = GameState::new_two_player(42);
+        creature(&mut state, AI, "Colossus", 8, 8);
+        let source = source_with(
+            &mut state,
+            "High Market",
+            &[CoreType::Land],
+            activated(draw(1), sac_creature_cost()),
+        );
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_reject(&verdict, "self_cost_benefit_underwater");
+        assert_facts(&verdict, 20000, 1000);
+    }
+
+    #[test]
+    fn tapped_fodder_still_prices_at_full_body_value() {
+        // THE TAPPED-INHERITANCE DISCRIMINATOR. Sole fodder is a 1/1 creature
+        // token that is TAPPED; source is a non-creature so it cannot join the
+        // cheapest-match pool.
+        //
+        // Correct pricing: `max(evaluate_creature_intrinsic(1,1) = 2.5,
+        // sacrifice_token_cost = 0.5) = 2.5` against draw(1) = 1.0 → net -1.5 →
+        // vetoed.
+        //
+        // Revert image (this is the exact defect the unit exists to close):
+        // routing `sacrifice_cost` back through `evaluate_creature` prices the
+        // tapped token at `max(2.5 - 1.5, 0.5) = 1.0` against 1.0 → net exactly
+        // 0 → `self_cost_benefit_covers_cost`. The test then goes red on BOTH
+        // the verdict shape and the reason kind. That `covers_cost` boundary is
+        // the escape hatch a five-body board measurably drained through the
+        // moment its tokens attacked and tapped.
+        let mut state = GameState::new_two_player(42);
+        let fodder = token_creature(&mut state, "Goblin Token", 1, 1);
+        state.objects.get_mut(&fodder).unwrap().tapped = true;
+        let source = source_with(
+            &mut state,
+            "High Market",
+            &[CoreType::Land],
+            activated(draw(1), sac_creature_cost()),
+        );
+        // Reach guard: the fixture is genuinely tapped, or it proves nothing
+        // about tap inheritance.
+        assert!(state.objects[&fodder].tapped);
+
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_reject(&verdict, "self_cost_benefit_underwater");
+        assert_facts(&verdict, 2500, 1000);
+    }
+
+    #[test]
+    fn zero_power_token_crack_covers_at_the_boundary() {
+        // The INCLUSIVE boundary's positive pin, replacing the tapped-1/1
+        // example the boundary comment used to carry (that example is now false
+        // — a tapped 1/1 is underwater). A 0/1 creature token prices at
+        // `max(creature_combat_value(0,1) = 0*1.5 + 1 = 1.0, 0.5) = 1.0` against
+        // draw(1) = 1.0 → net exactly 0.
+        //
+        // Revert image: an EXCLUSIVE boundary (`net > 0.0`) vetoes this
+        // exact-cover crack and the test goes red on shape — the veto-overreach
+        // direction, paired against `tapped_fodder_still_prices_at_full_body_value`
+        // one arm over.
+        let mut state = GameState::new_two_player(42);
+        token_creature(&mut state, "Wall Token", 0, 1);
+        let source = source_with(
+            &mut state,
+            "High Market",
+            &[CoreType::Land],
+            activated(draw(1), sac_creature_cost()),
+        );
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_neutral(&verdict, "self_cost_benefit_covers_cost");
+        assert_facts(&verdict, 1000, 1000);
+    }
+
+    #[test]
+    fn one_of_free_branch_still_covers() {
+        // `OneOf` takes the payer's cheapest branch: the mana leg is out of
+        // scope and prices 0, so the priced self-cost is 0 and draw(1) covers.
+        // The comparison must not resurrect a cost the payer would never choose.
+        let mut state = GameState::new_two_player(42);
+        let cost = AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                },
+                AbilityCost::Mana {
+                    cost: engine::types::mana::ManaCost::generic(2),
+                },
+            ],
+        };
+        let source = source_with(
+            &mut state,
+            "Flexible",
+            &[CoreType::Artifact],
+            activated(draw(1), cost),
+        );
+        assert_neutral(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_benefit_covers_cost",
+        );
+    }
+
+    #[test]
+    fn token_cost_default_stays_below_single_card_value() {
+        // The invariant that keeps Clue/Food/Treasure cracking profitable under
+        // the comparison. STATED LIMITATION: this pins the shipped DEFAULT only.
+        // `sacrifice_token_cost` is a CMA-ES-tuned parameter; a retrain that
+        // pushed it to or above 1.0 would flip non-creature token cracking to
+        // `underwater` without failing any test but this one.
+        //
+        // That consequence is now STRONGER, not weaker: since the underwater arm
+        // became a categorical veto, crossing this constant does not merely
+        // deprioritize Clue cracking — it forbids it outright, at every
+        // difficulty, on every deck. This pin matters more after the veto than
+        // it did before it.
+        assert!(
+            crate::config::PolicyPenalties::default().sacrifice_token_cost
+                < crate::policies::strategy_helpers::SINGLE_CARD_VALUE,
+            "a token must stay cheaper than the card a crack draws"
+        );
     }
 }

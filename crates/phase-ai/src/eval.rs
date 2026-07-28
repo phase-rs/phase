@@ -1074,6 +1074,31 @@ pub fn evaluate_creature(state: &GameState, obj_id: ObjectId) -> f64 {
     evaluate_creature_with_bonuses(state, obj_id, &KeywordBonuses::default())
 }
 
+/// A creature's intrinsic value **as a permanent** — stats and keywords only,
+/// ignoring transient board state (tapped).
+///
+/// Give-up pricing (sacrifice / exile / bounce payments, via
+/// [`crate::policies::strategy_helpers::sacrifice_cost`]) uses this: giving up a
+/// tapped creature loses exactly as much permanent as giving up an untapped one,
+/// so the tapped discount is a category error there. Board evaluation keeps
+/// using [`evaluate_creature`], where the tapped discount is correct — a tapped
+/// body genuinely cannot block or attack this turn.
+///
+/// This is the composition [`creature_combat_value`]'s own doc prescribes
+/// ("Does *not* apply the tapped penalty — that is a board-state concern handled
+/// by the caller"): the give-up authority was the wrong caller to inherit it.
+pub fn evaluate_creature_intrinsic(state: &GameState, obj_id: ObjectId) -> f64 {
+    let Some(obj) = state.objects.get(&obj_id) else {
+        return 0.0;
+    };
+    creature_combat_value(
+        obj.power.unwrap_or(0),
+        obj.toughness.unwrap_or(0),
+        |kw| obj.has_keyword(kw),
+        &KeywordBonuses::default(),
+    )
+}
+
 /// Evaluate a creature using configurable keyword bonuses.
 pub fn evaluate_creature_with_bonuses(
     state: &GameState,
@@ -2150,8 +2175,15 @@ mod tests {
         );
     }
 
+    /// **Negative control for [`evaluate_creature_intrinsic`]** (was
+    /// `tapped_creature_scores_lower`, strengthened in place from a direction
+    /// assertion to the exact discount): board evaluation must KEEP the tapped
+    /// penalty. Its paired positive is
+    /// `evaluate_creature_intrinsic_ignores_tapped_state` below. Together they
+    /// prove the give-up fix did not leak into board evaluation — a fix applied
+    /// to `evaluate_creature` instead of at the give-up authority reads red here.
     #[test]
-    fn tapped_creature_scores_lower() {
+    fn evaluate_creature_keeps_the_tapped_discount() {
         let mut state = make_state();
         let id = add_creature(&mut state, PlayerId(0), 3, 3, vec![]);
         let untapped_score = evaluate_creature(&state, id);
@@ -2160,6 +2192,37 @@ mod tests {
         let tapped_score = evaluate_creature(&state, id);
 
         assert!(untapped_score > tapped_score);
+        assert!(
+            (untapped_score - tapped_score - KeywordBonuses::default().tapped_penalty).abs() < 1e-9,
+            "board eval must differ by exactly the tapped penalty; got {untapped_score} vs {tapped_score}"
+        );
+    }
+
+    /// The give-up primitive is **tap-invariant**: sacrificing a tapped creature
+    /// loses exactly as much permanent as sacrificing an untapped one. Paired
+    /// with `evaluate_creature_keeps_the_tapped_discount` above.
+    ///
+    /// Revert image: implementing this as a call to `evaluate_creature` makes the
+    /// two readings differ by `tapped_penalty` (1.5) and this test goes red.
+    #[test]
+    fn evaluate_creature_intrinsic_ignores_tapped_state() {
+        let mut state = make_state();
+        let id = add_creature(&mut state, PlayerId(0), 3, 3, vec![]);
+        let untapped = evaluate_creature_intrinsic(&state, id);
+
+        state.objects.get_mut(&id).unwrap().tapped = true;
+        let tapped = evaluate_creature_intrinsic(&state, id);
+
+        assert_eq!(untapped, tapped, "give-up value must not read tap state");
+        // Reach guard: the fixture must actually be a body the tapped penalty
+        // could have moved, or the equality above is vacuous.
+        assert_eq!(untapped, 3.0 * 1.5 + 3.0, "3/3 intrinsic = 1.5*P + T");
+        assert!(
+            untapped > evaluate_creature(&state, id),
+            "reach guard: board eval DOES discount the same tapped body, so the \
+             invariance above is a real property and not an artifact of an \
+             untapped fixture"
+        );
     }
 
     #[test]

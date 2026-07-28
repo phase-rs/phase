@@ -13,9 +13,17 @@ use engine::types::player::PlayerId;
 
 use crate::cast_facts::cast_facts_for_action;
 use crate::config::PolicyPenalties;
-use crate::eval::{evaluate_creature, opponent_battlefield_creature_threat_value};
+use crate::eval::{
+    evaluate_creature, evaluate_creature_intrinsic, opponent_battlefield_creature_threat_value,
+};
 
 use super::context::PolicyContext;
+
+/// Registry score-unit contract (`registry.rs`): `delta = 1.0` is one card of
+/// expected value; drawing one card is worth exactly this. Shared by
+/// `sacrifice_value` (its single-card-draw sacrifice guard) and `self_cost`
+/// (the benefit pricing arms).
+pub(crate) const SINGLE_CARD_VALUE: f64 = 1.0;
 
 pub(crate) fn is_own_main_phase(ctx: &PolicyContext<'_>) -> bool {
     engine::game::turn_control::turn_decision_maker(ctx.state) == ctx.ai_player
@@ -387,6 +395,21 @@ pub(crate) fn cmp_sacrifice(a: &(SacrificeTier, f64), b: &(SacrificeTier, f64)) 
 /// So: do not read the "single authority" sentence above as "every consumer
 /// sorts by tier". It is a statement about where the *pricing* lives. Ordering
 /// discipline is per-consumer, and there are two legitimate shapes of it.
+///
+/// **Tap state is not part of the price.** The creature branches call
+/// [`evaluate_creature_intrinsic`], not [`evaluate_creature`]: this function
+/// answers "what does the game lose if this permanent is given up?", and giving
+/// up a tapped creature loses exactly as much permanent as giving up an untapped
+/// one. `evaluate_creature`'s tapped discount answers the different, board-state
+/// question "what is this creature worth to me right now?", which is correct
+/// there and a category error here — it made a tapped 1/1 token price at
+/// `max(2.5 - 1.5, 0.5) = 1.0` against `draw(1) = 1.0`, i.e. a free board
+/// liquidation the moment the tokens attacked. If a *selection* preference for
+/// giving up already-tapped bodies is ever wanted, it belongs as an explicit
+/// term in [`cmp_sacrifice`] — the comparator layer where the land axis already
+/// lives — never smuggled back into the price. Pinned by
+/// `sacrifice_cost_is_invariant_under_tap_state` and
+/// `sacrifice_ordering_prefers_lesser_permanent_over_tapped_discount`.
 pub(crate) fn sacrifice_cost(
     state: &GameState,
     obj_id: ObjectId,
@@ -422,15 +445,55 @@ pub(crate) fn sacrifice_cost(
         // every raw-scalar consumer of this function, not just at the ordering
         // seam: `payment_cost`'s battlefield arms, `crew_or_saddle_score` and
         // `station_activation_score` (`payment_selection.rs`), `blight_value`,
-        // `free_outlet_activation`, and `self_cost`'s sacrifice leaves. None of
-        // those has a fixture, and the rule shipped without a paired-seed
-        // `scripts/ai-gate.sh` calibration. The same run also owes
-        // `SacrificeValuePolicy`'s land guard and its band rescale; take the
-        // baseline AFTER those, since the guard pushes selections toward the
-        // band ceiling and so changes what saturates.
+        // and `self_cost`'s sacrifice leaves. None of those has a fixture, and
+        // the rule shipped without a paired-seed `scripts/ai-gate.sh`
+        // calibration. The same run also owes `SacrificeValuePolicy`'s land
+        // guard and its band rescale; take the baseline AFTER those, since the
+        // guard pushes selections toward the band ceiling and so changes what
+        // saturates.
+        //
+        // APPENDED — the tapped-intrinsic change (see this function's doc): the
+        // creature branches moved from `evaluate_creature` to
+        // `evaluate_creature_intrinsic`, so every raw-scalar consumer above now
+        // reads tap-INVARIANT prices (monotonically at-or-above the old ones,
+        // since intrinsic >= tapped-discounted). Unlike the dominance rule, this
+        // change ships WITH its paired-seed `scripts/ai-gate.sh` run and with
+        // fixtures at the authority (`sacrifice_cost_is_invariant_under_tap_state`)
+        // and at the strictest consumer seam
+        // (`sacrifice_ordering_prefers_lesser_permanent_over_tapped_discount`,
+        // the CR 701.21a mandatory sacrifice).
+        //
+        // Which consumers actually change ORDER, stated precisely because the
+        // convenient claim ("only the comparator flips a choice") is false: any
+        // consumer that ranks candidates by an order-preserving function of this
+        // scalar inherits the same flip. That is `cmp_sacrifice` AND the
+        // battlefield arms of `payment_cost` — identity for `Sacrifice`,
+        // `ExilePermanent`, and the battlefield legs of `ExileMaterials` /
+        // `ExileFromManaZone` / `ExileAggregate`; positive-affine for
+        // `ReturnToHand` (0.5 + 0.5x) and `RemoveCounter` (0.5x), which preserve
+        // order just as well. `TapCreatures` (0.35x) is the one genuine
+        // exemption: only UNTAPPED creatures are legal tap-payment candidates,
+        // so no tapped body is ever in its pool to be re-ranked.
+        // `crew_or_saddle_score` / `station_activation_score` (x0.05) and
+        // `blight_value` are magnitude-only — they score, they do not select.
+        //
+        // No fixture is added for the `payment_cost` arms, deliberately: the
+        // flip there has the SAME single cause as the one pinned above, so any
+        // revert of this change reddens both
+        // `sacrifice_cost_is_invariant_under_tap_state` and
+        // `sacrifice_ordering_prefers_lesser_permanent_over_tapped_discount`,
+        // and the direction is the permanent-loss-correct one in every case. One
+        // fixture at the strictest (mandatory) seam is proportionate — that is
+        // what the single give-up authority buys.
+        //
+        // It therefore does not extend the debt above — but it does not
+        // discharge it either: the dominance rule's own fixture debt is still
+        // open. The campaign's single deferred `suite-baseline.json` refresh is
+        // owed AFTER this change lands, per the "take the baseline AFTER"
+        // prescription two paragraphs up.
         let land_value = penalties.sacrifice_land_penalty;
         return if obj.card_types.core_types.contains(&CoreType::Creature) {
-            land_value.max(evaluate_creature(state, obj_id))
+            land_value.max(evaluate_creature_intrinsic(state, obj_id))
         } else {
             land_value
         };
@@ -439,12 +502,12 @@ pub(crate) fn sacrifice_cost(
     // otherwise use flat token cost (Treasures, Maps, Clues, etc.)
     if obj.is_token {
         if obj.card_types.core_types.contains(&CoreType::Creature) {
-            return evaluate_creature(state, obj_id).max(penalties.sacrifice_token_cost);
+            return evaluate_creature_intrinsic(state, obj_id).max(penalties.sacrifice_token_cost);
         }
         return penalties.sacrifice_token_cost;
     }
     if obj.card_types.core_types.contains(&CoreType::Creature) {
-        return evaluate_creature(state, obj_id);
+        return evaluate_creature_intrinsic(state, obj_id);
     }
     // Other permanents: scale by mana value, capped strictly below the land
     // penalty so a land is never merely tied with an expensive artifact.
@@ -648,8 +711,14 @@ mod tests {
         let arbor = creature_land(&mut state, 1, 1);
         let treetop = creature_land(&mut state, 3, 3);
 
-        let small_body = evaluate_creature(&state, arbor);
-        let big_body = evaluate_creature(&state, treetop);
+        // The give-up authority prices bodies intrinsically, so the expected
+        // values must come from the same function `sacrifice_cost` consults.
+        // These fixtures are untapped, so this is value-identical to
+        // `evaluate_creature` today — it is written this way so that tapping a
+        // fixture later fails the DOMINANCE claim rather than silently
+        // re-introducing a tapped discount into the expectation.
+        let small_body = evaluate_creature_intrinsic(&state, arbor);
+        let big_body = evaluate_creature_intrinsic(&state, treetop);
 
         // Fixture premise: the two cases must straddle the land penalty, or the
         // test cannot distinguish `max` from either first-match order.
@@ -721,7 +790,8 @@ mod tests {
         );
         assert_eq!(
             sacrifice_cost(&state, bear, &penalties),
-            evaluate_creature(&state, bear)
+            evaluate_creature_intrinsic(&state, bear),
+            "a plain creature is priced by the give-up primitive, not by board eval"
         );
         assert_eq!(sacrifice_tier(&state, bear), SacrificeTier::Ordinary);
     }
@@ -736,7 +806,7 @@ mod tests {
     /// gap this closes: `cmp_sacrifice` would still order correctly if the
     /// scalar dropped below the land floor (the tier dominates), but every
     /// raw-scalar consumer — `SacrificeValuePolicy`, `payment_cost`'s
-    /// battlefield arms, `blight_value`, `free_outlet_activation`, `self_cost`
+    /// battlefield arms, `blight_value`, `self_cost`
     /// — silently reverts to land-blind pricing. That is the original defect
     /// class returning through a different door, and nothing else detects it.
     ///
@@ -862,5 +932,113 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A plain (non-land, non-token) creature body, optionally tapped.
+    fn body(state: &mut GameState, power: i32, toughness: i32, tapped: bool) -> ObjectId {
+        let card = CardId(state.next_object_id);
+        let id = create_object(state, card, AI, "Body".to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.tapped = tapped;
+        id
+    }
+
+    /// **The give-up price is tap-invariant.** Two identical 2/2s, one tapped:
+    /// sacrificing either loses exactly one 2/2 worth of permanent.
+    ///
+    /// Revert image: routing the creature branches back through
+    /// `evaluate_creature` prices the tapped copy at `5.0 - tapped_penalty` =
+    /// 3.5 against the untapped 5.0 and this test goes red on the equality.
+    ///
+    /// This is the single input every raw-scalar consumer of `sacrifice_cost`
+    /// reads (`payment_cost`'s battlefield arms, `crew_or_saddle_score`,
+    /// `station_activation_score`, `blight_value`, `SacrificeValuePolicy`,
+    /// `self_cost`'s sacrifice leaves), which is what the "single give-up
+    /// authority" buys: pinning the authority pins every consumer's input.
+    #[test]
+    fn sacrifice_cost_is_invariant_under_tap_state() {
+        let mut state = GameState::new_two_player(7);
+        let penalties = PolicyPenalties::default();
+
+        let untapped = body(&mut state, 2, 2, false);
+        let tapped = body(&mut state, 2, 2, true);
+
+        // Reach guard: the tapped flag is actually set, or the equality is
+        // vacuous (both fixtures untapped would pass under the OLD code too).
+        assert!(state.objects[&tapped].tapped);
+        assert!(!state.objects[&untapped].tapped);
+        assert!(
+            evaluate_creature(&state, tapped) < evaluate_creature(&state, untapped),
+            "reach guard: BOARD eval must still separate these two, or the \
+             fixture cannot distinguish the fix from a no-op"
+        );
+
+        assert_eq!(
+            sacrifice_cost(&state, tapped, &penalties),
+            sacrifice_cost(&state, untapped, &penalties),
+            "giving up a tapped body loses the same permanent as an untapped one"
+        );
+        assert_eq!(
+            sacrifice_cost(&state, tapped, &penalties),
+            5.0,
+            "2/2 = 1.5*P + T"
+        );
+    }
+
+    /// **The representative pin for the SELECTION consequence of the tapped
+    /// fix**, taken at the strictest such seam: the CR 701.21a mandatory
+    /// sacrifice. `pick_lowest_value_sacrifices` orders by exactly this key, so
+    /// this test pins that seam at the comparator layer without reaching into
+    /// `search.rs`.
+    ///
+    /// It is deliberately NOT the only seam where the fix flips a choice — that
+    /// convenient claim is false. Every consumer that ranks candidates by an
+    /// order-preserving function of `sacrifice_cost` inherits the identical
+    /// flip, which includes the battlefield arms of
+    /// `payment_selection::payment_cost` (`Sacrifice` is a pure identity
+    /// pass-through; `ReturnToHand` and `RemoveCounter` are positive-affine).
+    /// See the consumer breakdown in `sacrifice_cost`'s body comment for which
+    /// arms flip, which are magnitude-only, and why `TapCreatures` is exempt.
+    /// One fixture here is proportionate rather than thin: the flip everywhere
+    /// has the same single cause, so an E8 revert reddens this test and
+    /// `sacrifice_cost_is_invariant_under_tap_state` together.
+    ///
+    /// Fixture: a **tapped 2/2** (old price 3.5, intrinsic 5.0) against an
+    /// **untapped 0/4** (4.0 under both readings). The 0/4 is the lesser
+    /// permanent and must be surrendered first.
+    ///
+    /// Revert image: under the tapped-discounted price the 2/2 reads 3.5 < 4.0
+    /// and the comparator gives up the *larger* body first — `Less` becomes
+    /// `Greater` and this test goes red.
+    #[test]
+    fn sacrifice_ordering_prefers_lesser_permanent_over_tapped_discount() {
+        let mut state = GameState::new_two_player(7);
+        let penalties = PolicyPenalties::default();
+
+        let tapped_bear = body(&mut state, 2, 2, true);
+        let untapped_wall = body(&mut state, 0, 4, false);
+
+        // Fixture premise: the two must STRADDLE under the old pricing and
+        // invert under the new one, or the test cannot discriminate.
+        assert_eq!(sacrifice_cost(&state, tapped_bear, &penalties), 5.0);
+        assert_eq!(sacrifice_cost(&state, untapped_wall, &penalties), 4.0);
+        assert_eq!(
+            sacrifice_tier(&state, tapped_bear),
+            sacrifice_tier(&state, untapped_wall),
+            "reach guard: both must share a tier, or the TIER decides the \
+             comparison and the scalar is never consulted"
+        );
+
+        assert_eq!(
+            cmp_sacrifice(
+                &sacrifice_key(&state, untapped_wall, &penalties),
+                &sacrifice_key(&state, tapped_bear, &penalties),
+            ),
+            Ordering::Less,
+            "the 0/4 is the lesser permanent and is given up before the tapped 2/2"
+        );
     }
 }
