@@ -4,9 +4,9 @@ use nom::bytes::complete::tag;
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ActivationRestriction, Effect, ReplacementCondition,
-    ReplacementDefinition, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition,
+    AbilityKind, ActivationRestriction, Effect, ReplacementCondition, ReplacementDefinition,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition,
 };
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -16,8 +16,12 @@ use super::oracle_classifier::{
     is_effect_sentence_candidate, is_granted_static_line, is_replacement_pattern, is_static_pattern,
 };
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::{lower_ability_ir, parse_effect_chain};
+use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::effect_chain::{
+    AbilityIr, AbilityShellIr, EffectChainIr, PlayerScopeRewrite,
+};
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_ir::trigger::TriggerNodeIr;
@@ -112,24 +116,59 @@ pub(crate) fn parse_class_oracle_text(
     for section in &sections {
         // Generate the "{cost}: Level N" activated ability
         if let Some((level_line, cost_text, description)) = &section.level_up {
-            let cost = parse_oracle_cost(cost_text);
-            let mut def = AbilityDefinition::new(
+            // Plan 05b T8-A4, recipe R2: the hand-built definition becomes a
+            // one-clause `EffectChainIr` body plus a CR 602.1 activation shell,
+            // lowered through the single authority `lower_ability_ir`. Phase A
+            // still emits the pre-lowered node, so this is the same value the
+            // hand-built path produced; T9 swaps the payload for the IR itself.
+            //
+            // `source_text` is the whole printed level line, which is also the
+            // chain text and therefore the single clause's fragment: the clause
+            // IS the whole ability body here, so its span is the line's own
+            // `0..len` and nothing about the provenance is invented.
+            let mut body = EffectChainIr::single_clause(
+                description,
                 AbilityKind::Activated,
-                Effect::SetClassLevel {
+                parsed_clause(Effect::SetClassLevel {
                     level: section.level,
-                },
+                }),
+                None,
+                None,
+                false,
             );
-            def.cost = Some(cost);
-            def.description = Some(description.clone());
-            // CR 602.5d + CR 716.4: Level N+1 can only activate at sorcery speed
-            // and only when at level N.
-            def.activation_restrictions
-                .push(ActivationRestriction::AsSorcery);
-            def.activation_restrictions
-                .push(ActivationRestriction::ClassLevelIs {
-                    level: section.level - 1,
-                });
-            items.push((*level_line, OracleNodeIr::PreLoweredSpell(def)));
+            // The hand-built definition never ran `apply_player_scope_rewrites`,
+            // so `Preserve` — not `single_clause`'s `Apply` default — is what
+            // reproduces it. This is also T8's mandated R2 mitigation: it removes
+            // the one rewrite family that is not inert on shape alone.
+            body.player_scope_rewrite = PlayerScopeRewrite::Preserve;
+            let ir = AbilityIr {
+                source_text: description.clone(),
+                body,
+                shell: AbilityShellIr {
+                    // CR 602.1a: the activation cost, everything before the colon.
+                    cost: Some(parse_oracle_cost(cost_text)),
+                    description: Some(description.clone()),
+                    // CR 602.1b + CR 716.2a: "[Cost]: Level N" means "Activate
+                    // only if this Class is level N-1 and only as a sorcery"
+                    // (CR 602.5d supplies the sorcery-speed timing). The vec is
+                    // applied verbatim, so it is built in the order the
+                    // hand-built site pushed them — which is the REVERSE of the
+                    // order CR 716.2a states them in. That order is a
+                    // pre-existing property of this site, preserved here rather
+                    // than quietly changed inside a byte-identical conversion.
+                    activation_restrictions: vec![
+                        ActivationRestriction::AsSorcery,
+                        ActivationRestriction::ClassLevelIs {
+                            level: section.level - 1,
+                        },
+                    ],
+                    ..AbilityShellIr::default()
+                },
+            };
+            items.push((
+                *level_line,
+                OracleNodeIr::PreLoweredSpell(lower_ability_ir(&ir)),
+            ));
         }
 
         // Parse ability lines for this level section
