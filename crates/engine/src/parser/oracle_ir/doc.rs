@@ -37,6 +37,37 @@ use crate::types::ability::{
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 
+/// Lossless parser-internal representation of an unsupported ability.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct UnsupportedAbilityIr {
+    pub(crate) name: String,
+    pub(crate) fragment: String,
+    pub(crate) description: String,
+}
+
+impl UnsupportedAbilityIr {
+    pub(crate) fn unknown(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            name: "unknown".to_string(),
+            fragment: text.clone(),
+            description: text,
+        }
+    }
+
+    pub(crate) fn new(
+        name: impl Into<String>,
+        fragment: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            fragment: fragment.into(),
+            description: description.into(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Source identity
 // ---------------------------------------------------------------------------
@@ -349,17 +380,15 @@ pub(crate) enum OracleNodeIr {
     /// # Why a node and not a chain parse
     ///
     /// Two sites in the parser build this residual today and both do the same
-    /// thing: they take the line's text and produce an `Effect::Unimplemented`
-    /// whose `name` is the fixed sentinel `"unknown"` and whose `description` is
-    /// the residual text, with that same text on the definition's `description`.
-    /// **That exact `name`/`description` pair is load-bearing for coverage** —
+    /// thing: they retain the exact data used to produce an
+    /// `Effect::Unimplemented`, including the root definition description.
+    /// **That exact payload is load-bearing for coverage** —
     /// `game/coverage.rs` and the parser-gap tooling key on it. Re-deriving the
     /// residual by running the effect-chain parser over the line would produce a
     /// *different* `name` (whatever clause the chain failed inside), which is why
     /// this is a node carrying the raw text rather than a chain seeded with a
-    /// gap clause. Lowered by `oracle::lower_unsupported_node`, which delegates
-    /// to `oracle::make_unimplemented` — the same function both producers call —
-    /// so the residual has exactly one construction authority.
+    /// gap clause. Lowered by `oracle::lower_unsupported_node`, the sole
+    /// definition-construction authority for residuals.
     ///
     /// # Why it carries a CR 601.2b X floor
     ///
@@ -377,10 +406,7 @@ pub(crate) enum OracleNodeIr {
     /// an `AbilityDefinition` root field), so this is a preservation, not a
     /// widening.
     Unsupported {
-        /// The verbatim residual text. Becomes BOTH the `Effect::Unimplemented`
-        /// `description` and the definition's `description`, exactly as
-        /// `make_unimplemented` sets them.
-        text: String,
+        unsupported: UnsupportedAbilityIr,
         /// CR 601.2b: the floor on this residual's announced X ("X can't be 0").
         /// `0` means "no floor", mirroring the root field's own encoding.
         min_x_value: u32,
@@ -419,7 +445,10 @@ pub(crate) enum SpellPayloadIr<'a> {
     /// An already-lowered spell or activated-ability definition.
     Lowered(&'a AbilityDefinition),
     /// An honest unsupported spell residual that lowers to a definition.
-    Residual { text: &'a str, min_x_value: u32 },
+    Residual {
+        unsupported: &'a UnsupportedAbilityIr,
+        min_x_value: u32,
+    },
 }
 
 impl OracleNodeIr {
@@ -431,8 +460,11 @@ impl OracleNodeIr {
         match self {
             OracleNodeIr::Spell(ir) => Some(SpellPayloadIr::Ir(ir)),
             OracleNodeIr::PreLoweredSpell(def) => Some(SpellPayloadIr::Lowered(def)),
-            OracleNodeIr::Unsupported { text, min_x_value } => Some(SpellPayloadIr::Residual {
-                text,
+            OracleNodeIr::Unsupported {
+                unsupported,
+                min_x_value,
+            } => Some(SpellPayloadIr::Residual {
+                unsupported,
                 min_x_value: *min_x_value,
             }),
             OracleNodeIr::Trigger(_)

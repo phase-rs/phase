@@ -68,7 +68,7 @@ use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
     stamp_printed_ability_slot, stamp_printed_trigger_slot, OracleDocBuilder, OracleDocIr,
     OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan, OracleUnitSource,
-    PrintedAbilityIndex, PrintedTriggerIndex, SpellPayloadIr,
+    PrintedAbilityIndex, PrintedTriggerIndex, SpellPayloadIr, UnsupportedAbilityIr,
 };
 use super::oracle_ir::effect_chain::{AbilityIr, ShellStage};
 use super::oracle_ir::feature::ItemIdTracks;
@@ -664,7 +664,10 @@ fn lower_spell_node(node: &OracleNodeIr) -> Option<AbilityDefinition> {
     node.spell_payload().map(|payload| match payload {
         SpellPayloadIr::Ir(ir) => lower_ability_ir(ir),
         SpellPayloadIr::Lowered(def) => def.clone(),
-        SpellPayloadIr::Residual { text, min_x_value } => lower_unsupported_node(text, min_x_value),
+        SpellPayloadIr::Residual {
+            unsupported,
+            min_x_value,
+        } => lower_unsupported_node(unsupported, min_x_value),
     })
 }
 
@@ -1222,9 +1225,10 @@ fn item_ability(item: &OracleItemIr) -> Option<Cow<'_, AbilityDefinition>> {
     item.node.spell_payload().map(|payload| match payload {
         SpellPayloadIr::Lowered(def) => Cow::Borrowed(def),
         SpellPayloadIr::Ir(ir) => Cow::Owned(lower_ability_ir(ir)),
-        SpellPayloadIr::Residual { text, min_x_value } => {
-            Cow::Owned(lower_unsupported_node(text, min_x_value))
-        }
+        SpellPayloadIr::Residual {
+            unsupported,
+            min_x_value,
+        } => Cow::Owned(lower_unsupported_node(unsupported, min_x_value)),
     })
 }
 
@@ -3037,8 +3041,11 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
             // CR 707.9a printed ability slot, push. The residual is stamped like
             // any other ability because a "…except it has this ability" clause
             // counts printed slots, not supported ones.
-            OracleNodeIr::Unsupported { text, min_x_value } => {
-                let mut def = lower_unsupported_node(text, *min_x_value);
+            OracleNodeIr::Unsupported {
+                unsupported,
+                min_x_value,
+            } => {
+                let mut def = lower_unsupported_node(unsupported, *min_x_value);
                 stamp_printed_ability_slot(&mut def, result.abilities.len());
                 result.abilities.push(def);
                 ability_ids.push(item.id);
@@ -3783,8 +3790,8 @@ impl<'a> DocEmitter<'a> {
     /// `spells_emitted` stack), and the node lands in the same slot-accounting
     /// arm, so the residual still consumes its CR 707.9a printed ability slot.
     ///
-    /// Takes the text `String`, not a definition: the whole point of the node is
-    /// that the definition is built once, at the lowering seam, by
+    /// Takes the lossless residual payload, not a definition: the whole point of
+    /// the node is that the definition is built once, at the lowering seam, by
     /// `lower_unsupported_node`. `min_x_value` is seeded at the `0` its
     /// definition-shaped predecessor carried; a standalone "X can't be 0."
     /// annotation paragraph still raises it through `raise_last_spell_min_x`.
@@ -3792,7 +3799,7 @@ impl<'a> DocEmitter<'a> {
         self.emit_at(
             line,
             OracleNodeIr::Unsupported {
-                text,
+                unsupported: UnsupportedAbilityIr::unknown(text),
                 min_x_value: 0,
             },
         );
@@ -8307,36 +8314,29 @@ fn x_annotation_min_value(line: &str) -> u32 {
 ///
 /// Lower an `OracleNodeIr::Unsupported` residual to the definition it stands for.
 ///
-/// Delegates to `make_unimplemented` rather than rebuilding the definition, so
-/// the node and the two hand-built residual sites cannot drift: there is exactly
-/// one place the `name: "unknown"` / `description: text` pair is constructed, and
-/// the coverage tooling that keys on that pair sees the same value whichever
-/// route produced it.
+/// The only authority that constructs a residual definition. It delegates to
+/// `Effect::unimplemented` so every IR producer preserves the coverage payload
+/// without constructing an effect literal itself.
 ///
 /// CR 601.2b: the floor is applied with `max`, matching
 /// `apply_ability_shell_envelope` — the node's `0` default can then never lower a
 /// floor, and the operation composes with a later raise the same way both other
 /// spell shapes do.
-fn lower_unsupported_node(text: &str, min_x_value: u32) -> AbilityDefinition {
-    let mut def = make_unimplemented(text);
+fn lower_unsupported_node(
+    unsupported: &UnsupportedAbilityIr,
+    min_x_value: u32,
+) -> AbilityDefinition {
+    tracing::debug!(
+        oracle_text = unsupported.description,
+        "unimplemented ability line"
+    );
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented(&unsupported.name, &unsupported.fragment),
+    )
+    .description(unsupported.description.clone());
     def.min_x_value = def.min_x_value.max(min_x_value);
     def
-}
-
-/// Create an Unimplemented fallback ability.
-///
-/// Private since Plan 05b D13: with both hand-built residual sites converted to
-/// `OracleNodeIr::Unsupported`, `lower_unsupported_node` is the only caller, so
-/// the residual now has a single construction authority reachable only through
-/// the node. A new residual producer must go through the node rather than
-/// minting a definition of its own.
-fn make_unimplemented(line: &str) -> AbilityDefinition {
-    tracing::debug!(oracle_text = line, "unimplemented ability line");
-    // `Effect::unimplemented` is the single authority CLAUDE.md mandates; it
-    // expands to exactly the literal this line used to spell out
-    // (`name`, `description: Some(fragment)`), so the swap is a value identity.
-    AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("unknown", line))
-        .description(line.to_string())
 }
 
 /// Check if an AbilityDefinition (or its sub_ability chain) contains Unimplemented effects.
