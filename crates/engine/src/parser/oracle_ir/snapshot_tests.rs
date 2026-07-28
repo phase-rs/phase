@@ -1385,6 +1385,127 @@ fn case_of_the_stashed_skeleton() {
     insta::assert_json_snapshot!("case_of_the_stashed_skeleton_lowered", &lowered);
 }
 
+// ---------------------------------------------------------------------------
+// T8-A2 §5.3 remediation: the activation-restriction ORDER at the four
+// keyword-labelled activated recognizers (Channel, Boast, Exhaust, Forecast).
+//
+// The non-vacuity probe measured these sites as REACHED but their restriction
+// *order* as UNWITNESSED. With the conversion in place, swapping the parsed
+// constraints against the implicit ones — and swapping the two implicit ones
+// against each other — left all 34 reaching tests green, because every existing
+// fixture is degenerate on this axis: the reminder text that states the
+// restrictions is stripped before `strip_activated_constraints` runs, so
+// `constraints.restrictions` is empty and the existing assertions use
+// order-insensitive `.contains(..)`.
+//
+// The four fixtures below are real pool cards (verbatim Oracle text from
+// `data/card-data.json`) chosen so each pins an order the conversion could
+// otherwise normalize away. Each was watched go RED under the corresponding
+// perturbation before being committed.
+// ---------------------------------------------------------------------------
+
+/// CR 207.2c Channel, with a NON-degenerate parsed constraint.
+///
+/// Channel is the one site of the four whose restriction vector is the parsed
+/// constraints *alone* — it pushes no implicit restriction — and whose original
+/// wrote `=` under an is-empty guard rather than `extend`. The existing Channel
+/// fixtures (`boseiju_who_endures` and the two `channel_*` parser tests) all
+/// have an EMPTY `constraints.restrictions`, so none of them can observe that
+/// vector reaching the lowered definition at all.
+///
+/// Ghost-Lit Stalker's trailing "Activate only as a sorcery." (CR 602.5d) makes
+/// it non-empty on BOTH its lines, so the snapshot pins the parsed constraint
+/// surviving the shell's `extend`. Watched red by deleting the
+/// `ir.shell.activation_restrictions` assignment: `AsSorcery` disappears from
+/// the Channel ability.
+#[test]
+fn ghost_lit_stalker() {
+    let (ir, lowered) = parse_two_layer(
+        "{4}{B}, {T}: Target player discards two cards. Activate only as a sorcery.\nChannel — {5}{B}{B}, Discard this card: Target player discards four cards. Activate only as a sorcery.",
+        "Ghost-Lit Stalker",
+        &["Creature"],
+        &["Spirit"],
+    );
+    insta::assert_json_snapshot!("ghost_lit_stalker_ir", &ir);
+    insta::assert_json_snapshot!("ghost_lit_stalker_lowered", &lowered);
+}
+
+/// CR 702.177a Exhaust, with a NON-degenerate parsed constraint.
+///
+/// The only Exhaust card in the pool whose "Activate only as a sorcery."
+/// (CR 602.5d) sits OUTSIDE the reminder parentheses, so it is the only one that
+/// makes `constraints.restrictions` non-empty. That is what lets this snapshot
+/// pin the site's parsed-then-implicit order: parsed `AsSorcery` first, implicit
+/// `OnlyOnce` (CR 702.177a) second.
+///
+/// Watched red by composing the vector implicit-first instead: `OnlyOnce`
+/// relocates ahead of `AsSorcery`. `exhaust_mana_cost_parses_as_activated_with_once_per_game_restriction`
+/// and the `exhaust_keyword_once_per_permanent` integration tests all stay green
+/// under that swap, which is why this fixture is needed.
+#[test]
+fn liliana_the_repentant() {
+    let (ir, lowered) = parse_two_layer(
+        "Whenever another creature or planeswalker you control enters, mill two cards.\nExhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery. (Activate each exhaust ability only once.)",
+        "Liliana the Repentant",
+        &["Creature"],
+        &["Human", "Warlock"],
+    );
+    insta::assert_json_snapshot!("liliana_the_repentant_ir", &ir);
+    insta::assert_json_snapshot!("liliana_the_repentant_lowered", &lowered);
+}
+
+/// CR 702.142a Boast: pins the order of the two IMPLICIT restrictions.
+///
+/// No Boast card in the pool states its activation instruction outside reminder
+/// text, so the parsed-vs-implicit axis is unwitnessable here by any real card
+/// (reported as a finding rather than papered over with an invented card). What
+/// IS witnessable, and was previously unwitnessed, is the order of the two
+/// implicit restrictions relative to each other: this site pushes
+/// `OnlyOnceEachTurn` before `RequiresCondition{SourceAttackedThisTurn}`, which
+/// is the REVERSE of the order CR 702.142a states them in ("Activate only if
+/// this creature attacked this turn and only once each turn"). That inversion is
+/// pre-existing, is preserved by the conversion, and is now pinned so a later
+/// tranche cannot silently "tidy" it.
+///
+/// Watched red by swapping the two pushes.
+#[test]
+fn arni_brokenbrow() {
+    let (ir, lowered) = parse_two_layer(
+        "Haste\nBoast — {1}: You may change Arni's base power to 1 plus the greatest power among other creatures you control until end of turn. (Activate only if this creature attacked this turn and only once each turn.)",
+        "Arni Brokenbrow",
+        &["Creature"],
+        &["Human", "Berserker"],
+    );
+    insta::assert_json_snapshot!("arni_brokenbrow_ir", &ir);
+    insta::assert_json_snapshot!("arni_brokenbrow_lowered", &lowered);
+}
+
+/// CR 702.57a-b Forecast: pins the order of the two IMPLICIT restrictions.
+///
+/// As with Boast, no Forecast card states its activation instruction outside
+/// reminder text, so only the implicit-vs-implicit axis is witnessable. This
+/// site pushes `DuringYourUpkeep` before `OnlyOnceEachTurn`, matching the order
+/// CR 702.57b states them in. Before this fixture the two `forecast_*` parser
+/// tests asserted both restrictions with order-insensitive `.contains(..)`, so a
+/// swap was silent.
+///
+/// Also the only two-layer snapshot coverage Forecast has had; its two parser
+/// tests were the entire reaching set, and neither reaches the integration
+/// binary.
+///
+/// Watched red by swapping the two pushes.
+#[test]
+fn govern_the_guildless() {
+    let (ir, lowered) = parse_two_layer(
+        "Gain control of target monocolored creature.\nForecast — {1}{U}, Reveal this card from your hand: Target creature becomes the color or colors of your choice until end of turn. (Activate only during your upkeep and only once each turn.)",
+        "Govern the Guildless",
+        &["Sorcery"],
+        &[],
+    );
+    insta::assert_json_snapshot!("govern_the_guildless_ir", &ir);
+    insta::assert_json_snapshot!("govern_the_guildless_lowered", &lowered);
+}
+
 #[test]
 fn aerial_formation() {
     let (ir, lowered) = parse_two_layer(
