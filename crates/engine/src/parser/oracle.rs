@@ -2179,9 +2179,12 @@ fn push_graveyard_keyword_same_is_true_tail(
         );
     }
     if !unqualified.is_empty() {
-        emitter.ability_at(
+        // Plan 05b U0-02. The residual text is unchanged, so the coverage key
+        // (`name: "unknown"` / `description` = this string) is unchanged; only
+        // WHEN the definition is built moves, from here to `lower_oracle_ir`.
+        emitter.unsupported_at(
             item_line,
-            make_unimplemented(&format!("the same is true for {}", unqualified.join(", "))),
+            format!("the same is true for {}", unqualified.join(", ")),
         );
     }
     true
@@ -3682,6 +3685,27 @@ impl<'a> DocEmitter<'a> {
     /// `finish()`-time walk it replaced.
     fn ability_ir_at(&mut self, line: usize, ir: AbilityIr) {
         self.emit_at(line, OracleNodeIr::Spell(ir));
+    }
+    /// Emit the honest-failure residual for a line the parser could not model.
+    ///
+    /// Mirrors `ability_at`, which is what it replaces: no peek mirror to
+    /// maintain (the ability peek is pop-aware, read from the builder's
+    /// `spells_emitted` stack), and the node lands in the same slot-accounting
+    /// arm, so the residual still consumes its CR 707.9a printed ability slot.
+    ///
+    /// Takes the text `String`, not a definition: the whole point of the node is
+    /// that the definition is built once, at the lowering seam, by
+    /// `lower_unsupported_node`. `min_x_value` is seeded at the `0` its
+    /// definition-shaped predecessor carried; a standalone "X can't be 0."
+    /// annotation paragraph still raises it through `raise_last_spell_min_x`.
+    fn unsupported_at(&mut self, line: usize, text: String) {
+        self.emit_at(
+            line,
+            OracleNodeIr::Unsupported {
+                text,
+                min_x_value: 0,
+            },
+        );
     }
     fn trigger_at(&mut self, line: usize, def: TriggerDefinition) {
         self.last_trigger = Some(def.clone());
@@ -8228,16 +8252,19 @@ fn lower_unsupported_node(text: &str, min_x_value: u32) -> AbilityDefinition {
 }
 
 /// Create an Unimplemented fallback ability.
-pub(super) fn make_unimplemented(line: &str) -> AbilityDefinition {
+///
+/// Private since Plan 05b D13: with both hand-built residual sites converted to
+/// `OracleNodeIr::Unsupported`, `lower_unsupported_node` is the only caller, so
+/// the residual now has a single construction authority reachable only through
+/// the node. A new residual producer must go through the node rather than
+/// minting a definition of its own.
+fn make_unimplemented(line: &str) -> AbilityDefinition {
     tracing::debug!(oracle_text = line, "unimplemented ability line");
-    AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Unimplemented {
-            name: "unknown".to_string(),
-            description: Some(line.to_string()),
-        },
-    )
-    .description(line.to_string())
+    // `Effect::unimplemented` is the single authority CLAUDE.md mandates; it
+    // expands to exactly the literal this line used to spell out
+    // (`name`, `description: Some(fragment)`), so the swap is a value identity.
+    AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("unknown", line))
+        .description(line.to_string())
 }
 
 /// Check if an AbilityDefinition (or its sub_ability chain) contains Unimplemented effects.

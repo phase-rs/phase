@@ -376,10 +376,6 @@ pub(crate) enum OracleNodeIr {
     /// The pre-lowered spell shape this replaces already carried the field (it is
     /// an `AbilityDefinition` root field), so this is a preservation, not a
     /// widening.
-    // Producers arrive in the next commit, which deletes this allow rather than
-    // moving it. Landing the variant with zero producers is what makes the
-    // infrastructure byte-identical by construction.
-    #[allow(dead_code)]
     Unsupported {
         /// The verbatim residual text. Becomes BOTH the `Effect::Unimplemented`
         /// `description` and the definition's `description`, exactly as
