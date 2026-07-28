@@ -17,7 +17,11 @@ use crate::types::statics::StaticMode;
 
 use super::oracle_cost::{parse_or_separated_mana_costs, parse_single_cost};
 use super::oracle_effect::imperative::try_parse_die_result_line;
-use super::oracle_effect::{capitalize, parse_effect_chain};
+use super::oracle_effect::{
+    capitalize, lower_ability_ir, parse_ability_ir_standalone, parse_effect_chain,
+};
+use super::oracle_ir::ast::parsed_clause;
+use super::oracle_ir::effect_chain::{AbilityIr, AbilityShellIr, DieResultBranchIr, EffectChainIr};
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleResult;
@@ -265,7 +269,8 @@ pub(crate) fn find_terminal_roll_die(def: &mut AbilityDefinition) -> Option<&mut
     None
 }
 
-/// CR 706: Try to parse a die roll table starting at line `i`.
+/// CR 706.3b: The die-roll instruction and its associated results table are
+/// part of one ability, so this consumes the table lines into the header's IR.
 /// CR 706.2: Also extracts an optional "and add/subtract X" modifier
 /// from the header line so the resolver can shift the natural result before
 /// branch lookup (Deck of Many Things, Diviner's Portent, Gale's Redirection).
@@ -289,11 +294,10 @@ pub(super) fn try_parse_die_roll_table(
         }
         if let Some((min, max, effect_text)) = try_parse_die_result_line(&table_line) {
             let effect_text = strip_die_table_flavor_label(effect_text);
-            let branch_def = parse_effect_chain(effect_text, kind);
-            branches.push(DieResultBranch {
+            branches.push(DieResultBranchIr {
                 min,
                 max,
-                effect: Box::new(branch_def),
+                effect: Box::new(parse_ability_ir_standalone(effect_text, kind)),
             });
             has_branches = true;
             j += 1;
@@ -302,18 +306,29 @@ pub(super) fn try_parse_die_roll_table(
         }
     }
 
-    let mut def = AbilityDefinition::new(
-        kind,
-        Effect::RollDie {
-            // CR 706.1: result-table rolls are single-die ("roll a d20 ...").
-            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-            sides,
-            results: branches,
-            modifier,
+    let ir = AbilityIr {
+        source_text: line.to_string(),
+        body: EffectChainIr::single_clause(
+            line,
+            kind,
+            parsed_clause(Effect::RollDie {
+                // CR 706.1: result-table rolls are single-die ("roll a d20 ...").
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                sides,
+                results: vec![],
+                modifier,
+            }),
+            None,
+            None,
+            false,
+        ),
+        shell: AbilityShellIr {
+            description: Some(line.to_string()),
+            ..AbilityShellIr::default()
         },
-    );
-    def.description = Some(line.to_string());
-    Some((def, if has_branches { j } else { i + 1 }))
+        die_results: branches,
+    };
+    Some((lower_ability_ir(&ir), if has_branches { j } else { i + 1 }))
 }
 
 /// CR 706.1a + CR 706.2: Parse the header line of a die-roll table, returning
