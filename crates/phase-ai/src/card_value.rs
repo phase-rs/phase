@@ -16,7 +16,15 @@
 //!
 //! **Which discard seams are tiered.** [`keep_tier`] reaches exactly one
 //! `deterministic_choice` arm: the CR 514.1 cleanup discard
-//! (`WaitingFor::DiscardToHandSize`). The battlefield sacrifice seam is scored
+//! (`WaitingFor::DiscardToHandSize`). It has one further consumer, which is a
+//! policy rather than a `deterministic_choice` arm: the CR 601.2f sacrifice-cost
+//! cast gate (`policies::sacrifice_cost_mana_gate`), which reads the tier of
+//! *battlefield* objects. That does not collide with the sentence below, because
+//! the two answer different questions about the same battlefield permanent:
+//! `strategy_helpers::sacrifice_cost` / `SacrificeTier` decide **which fodder is
+//! surrendered first** once a sacrifice is happening, while [`keep_tier`] decides
+//! **whether to commit to the cast at all**. The battlefield sacrifice *ordering*
+//! seam is scored
 //! by `strategy_helpers::sacrifice_cost` instead — a separate authority, shared
 //! with `SacrificeValuePolicy` — and ordered by `strategy_helpers::cmp_sacrifice`,
 //! which is this module's `cmp_keep` idiom applied to that seam. The effect-driven
@@ -98,6 +106,27 @@ pub(crate) enum KeepTier {
 /// mana production is a spell effect, not an ability, so `is_mana_ability` does
 /// not see them. Extending to that class needs an effect-shape predicate that
 /// does not exist yet.
+///
+/// **Zone-agnostic as implemented**, and deliberately so: the test is structural
+/// (`core_types.contains(&CoreType::Land)`, else `abilities.iter().any(is_mana_ability)`)
+/// and reads the same on a card in hand as on a permanent on the battlefield. The
+/// *consequence* of the classification differs by zone, though, and CR 305.2 is
+/// why: a player can normally play only one land per turn, so a **battlefield**
+/// land that is sacrificed costs a whole future turn's land drop to replace,
+/// whereas a land in hand is merely undeployed. The sacrifice-cost cast gate
+/// relies on that reading.
+///
+/// **Known divergence, recorded rather than fixed here.** This function promotes
+/// on `is_mana_ability` (CR 605.1a), while `plan::controlled_mana_sources` — which
+/// produces the very `mana_behind` deficit [`keep_tier`] measures against — counts
+/// only `zone_eval::is_intrinsic_mana_source`, which excludes one-shot
+/// self-sacrificing sources (Treasure, Gold, Lotus Petal). A Treasure therefore
+/// classifies `Accelerant` and *raises* the deficit that promotes it, but can
+/// never lower it. Consumers that must not be misled by that — the sacrifice-cost
+/// cast gate is the first — compose an `is_intrinsic_mana_source` conjunct of
+/// their own. The predicate here is **not** changed to match: that is a behaviour
+/// change to the cleanup-discard seam with its own AI-gate baseline, and it
+/// belongs to this module's owner, not to a consumer.
 pub(crate) fn mana_role(state: &GameState, obj_id: ObjectId) -> ManaRole {
     let Some(obj) = state.objects.get(&obj_id) else {
         return ManaRole::None;
@@ -111,7 +140,10 @@ pub(crate) fn mana_role(state: &GameState, obj_id: ObjectId) -> ManaRole {
     ManaRole::None
 }
 
-/// CR 514.1 + CR 701.9a (cleanup discard): which card the AI surrenders first.
+/// Which mana sources the plan still needs, and therefore which card the AI
+/// surrenders first. Consumed by the CR 514.1 + CR 701.9a cleanup discard
+/// (`WaitingFor::DiscardToHandSize`) and by the CR 601.2f sacrifice-cost cast
+/// gate (`policies::sacrifice_cost_mana_gate`).
 /// A mana source is promoted only while the plan says the player is behind on
 /// **its own** development axis — the land schedule for a land, the mana
 /// schedule for an accelerant (see [`ManaRole`]) — and demoted only while that

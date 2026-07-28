@@ -2297,7 +2297,9 @@ fn rotate_pv_to_front(ranked: &mut Vec<RankedCandidate>, pv: &GameAction) {
 }
 
 /// Build AI context from the player's deck pool, or a neutral default if unavailable.
-fn build_ai_context_with_session(
+/// `pub(crate)` so `crate::test_support::context_with_plans` — the single shared
+/// builder for plan-carrying test contexts — can reach it.
+pub(crate) fn build_ai_context_with_session(
     state: &GameState,
     player: PlayerId,
     config: &AiConfig,
@@ -3232,6 +3234,7 @@ mod tests {
     use crate::config::{create_config, AiDifficulty, Platform};
     use crate::policies::context::PolicyContext;
     use crate::session::SessionCache;
+    use crate::test_support::{context_with_plans, default_deck_plan, ramp_deck_plan};
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -7119,61 +7122,6 @@ mod tests {
                 .copied()
                 .collect(),
         }
-    }
-
-    /// The plan a plain midrange deck derives — land target **6**.
-    ///
-    /// REACHABILITY REQUIREMENT: every `AiSession::plan` entry written **on a
-    /// production path** is produced by `derive_snapshot` (`session.rs`:
-    /// `from_game`, `from_single_deck`, `ensure_player_features`), so a
-    /// hand-built `PlanSnapshot` pins behaviour at a land target production
-    /// cannot present. These two constructors are the only reachable shapes: a
-    /// `wants_ramp_curve` deck targets 7, every other deck targets 6.
-    ///
-    /// Scoped precisely, because the unqualified claim is false. **Tests write
-    /// `session.plan` directly** — `context_with_plans` below, and
-    /// `sole_planned_cycling_land_waits_but_remains_finite` (both now insert
-    /// derived snapshots). Two hand-built snapshots remain, in
-    /// `plan_aware_bottoming_cuts_surplus_lands_to_plan_target` and
-    /// `plan_aware_bottoming_protects_feature_payoff_names`; they feed
-    /// `plan_aware_bottom_cards`, a different consumer that reads a fixed
-    /// schedule index rather than a target, and one of them deliberately passes
-    /// an all-zero `PlanSnapshot::default()` to exercise the degenerate case.
-    /// `PlanSnapshot::default()` is also a *production* fallback at those two
-    /// bottoming call sites, so an all-zero schedule is itself reachable there.
-    /// What this requirement actually says is: **every fixture that reaches
-    /// `PlanState::realize`, i.e. the keep-tier / discard family, is derived.**
-    fn default_deck_plan() -> PlanSnapshot {
-        crate::plan::derive_snapshot(&crate::features::DeckFeatures::default())
-    }
-
-    /// The plan a ramp deck derives — land target **7**, the only other
-    /// reachable target.
-    fn ramp_deck_plan() -> PlanSnapshot {
-        crate::plan::derive_snapshot(&crate::features::DeckFeatures {
-            mana_ramp: crate::features::ManaRampFeature {
-                dork_count: 8,
-                commitment: 0.96,
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-    }
-
-    /// Build a context whose session carries a real derived plan per player.
-    /// `ai_player` is the seat the search optimizes for — deliberately a
-    /// separate parameter from the plan keys.
-    fn context_with_plans(
-        state: &GameState,
-        ai_player: PlayerId,
-        config: &AiConfig,
-        plans: &[(PlayerId, PlanSnapshot)],
-    ) -> AiContext {
-        let mut session = AiSession::default();
-        for (player, plan) in plans {
-            session.plan.insert(*player, plan.clone());
-        }
-        build_ai_context_with_session(state, ai_player, config, Arc::new(session))
     }
 
     fn selected_card(action: Option<GameAction>) -> ObjectId {

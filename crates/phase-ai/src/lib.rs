@@ -29,6 +29,8 @@ pub mod session;
 pub mod strategy_profile;
 pub mod synergy;
 pub mod tactical_gate;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod threat_profile;
 pub mod tribute_eval;
 pub mod zone_eval;
