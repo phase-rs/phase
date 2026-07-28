@@ -138,6 +138,61 @@ fn questing_beast() {
 }
 
 // ---------------------------------------------------------------------------
+// CR 615.1a prevention spells — the instant/sorcery prevention recognizer
+// ---------------------------------------------------------------------------
+//
+// CR 615.1a: "Effects that use the word 'prevent' are prevention effects."
+// That sentence *is* this recognizer's admission test: it claims an
+// instant/sorcery line containing both "prevent" and "damage" (excluding the
+// CR 614.15 ability-word self-replacement printings) and lowers the whole line
+// as a resolving spell chain rather than a standing replacement definition.
+//
+// **Why these two fixtures exist.** 153 cards in the pool reach that site and,
+// before Plan 05b T9a, NOT ONE of them was snapshotted — the only spell path
+// that lowered a whole ability body without `finalize_effect_chain`, the
+// owner-library reveal anchor, and the `WithContext` whole-body recognizer set
+// was also the one with no two-layer guard. T9a routed it through
+// `lower_ability_ir` (via `ability_ir_at`) and measured a zero full-pool delta;
+// these pin that result so T9b's payload swap — which lands on this exact
+// recognizer — cannot move it silently.
+//
+// Both texts are verbatim MTGJSON, not paraphrases: a paraphrase can take a
+// different parser branch and go green while the real card stays broken.
+
+/// The canonical single-clause prevention spell — the whole card is the
+/// prevention sentence, so the chain has exactly one clause and no `sub_ability`.
+#[test]
+fn fog_prevention_spell() {
+    let (ir, lowered) = parse_two_layer(
+        "Prevent all combat damage that would be dealt this turn.",
+        "Fog",
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!("fog_ir", &ir);
+    insta::assert_json_snapshot!("fog_lowered", &lowered);
+}
+
+/// The multi-clause case the recognizer was written for. The site's own comment
+/// cites this shape verbatim — "preserve any preceding clauses ('You gain 1 life
+/// for each ...')" — because the prevention marker sits in the SECOND sentence,
+/// so a replacement classifier reaching the line first would drop the life gain.
+/// This is the fixture that exercises chain assembly and `lower_ability_ir`'s
+/// pinned chain → finalize → anchor → `sub_link` order, rather than a
+/// degenerate one-clause body that would take the same path either way.
+#[test]
+fn blunt_the_assault_prevention_spell_preserves_preceding_clause() {
+    let (ir, lowered) = parse_two_layer(
+        "You gain 1 life for each creature on the battlefield. Prevent all combat damage that would be dealt this turn.",
+        "Blunt the Assault",
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!("blunt_the_assault_ir", &ir);
+    insta::assert_json_snapshot!("blunt_the_assault_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
 // Casting restrictions / permissions
 // ---------------------------------------------------------------------------
 
