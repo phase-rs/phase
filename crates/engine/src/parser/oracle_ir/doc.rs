@@ -416,12 +416,17 @@ impl OracleNodeIr {
     /// CR 601.2b: the floor on this spell node's announced X ("X can't be 0"),
     /// whichever shape holds it — `None` for every non-spell node.
     ///
-    /// Both spell shapes store the floor as a `u32` whose `0` means "no floor",
-    /// but at different layers: a pre-lowered definition carries the resolved
-    /// root field, while an `AbilityIr` carries the shell's pre-lowering stamp.
-    /// They are interchangeable for raising a floor because
-    /// `apply_ability_shell_envelope` applies the shell's value onto the lowered
-    /// root with `max` — so `max`-ing either one yields `max(lowered, v)`.
+    /// All three spell shapes store the floor as a `u32` whose `0` means "no
+    /// floor", but at three different layers: a pre-lowered definition carries
+    /// the resolved root field, an `AbilityIr` carries the shell's pre-lowering
+    /// stamp, and the residual carries it on the node itself (it holds text, not
+    /// a definition, so there is no root or shell to put it on until
+    /// `lower_unsupported_node` builds one).
+    ///
+    /// All three are interchangeable for raising a floor because every path
+    /// applies its value with `max` — `apply_ability_shell_envelope` for the
+    /// shell, `lower_unsupported_node` for the residual — so `max`-ing any of
+    /// them yields `max(lowered, v)`.
     ///
     /// Exposed as a `&mut u32` rather than a `mutate(f)` closure so the caller
     /// cannot express anything but a floor change. The general closure mutator
@@ -1078,9 +1083,10 @@ enum PrintedItemKind {
 /// `slot`, the item's position among the card's printed abilities.
 ///
 /// The lowering-seam entry point (`lower_oracle_ir`, `oracle.rs`). It takes the
-/// definition rather than the node because both spell node shapes converge on
-/// one here: the pre-lowered shape lends its definition and `Spell` has just
-/// been lowered by `lower_ability_ir`, and CR 707.9a does not distinguish them —
+/// definition rather than the node because all three spell node shapes converge
+/// on one here: the pre-lowered shape lends its definition, `Spell` has just
+/// been lowered by `lower_ability_ir`, and the residual has just been built by
+/// `lower_unsupported_node`. CR 707.9a does not distinguish them —
 /// a printed ability occupies its printed slot however the parser represented it.
 pub(crate) fn stamp_printed_ability_slot(def: &mut AbilityDefinition, slot: usize) {
     stamp_retained_printed_slot(def, slot, PrintedItemKind::Ability);

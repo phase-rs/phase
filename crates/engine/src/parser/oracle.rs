@@ -1217,8 +1217,13 @@ fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
 /// `TriggerDefinition` — `TriggerNodeIr::Assembled` carries one directly. There
 /// is no equivalent layer to push this obligation onto: a spell node's IR
 /// payload is an `AbilityIr`, not an enum of definition-owning representations,
-/// so both shapes are named here. `_ => None` is safe for the same reason it is
-/// safe there: every remaining variant is genuinely `None`.
+/// so all three shapes are named here. `_ => None` is safe for the same reason
+/// it is safe there: every remaining variant is genuinely `None`.
+///
+/// The wildcard is nonetheless a hazard for the NEXT spell-shaped variant: it
+/// absorbs one silently, and this reader is an `and_then` target, so the result
+/// is a behavior change with no compile error. Deleting it is tracked with the
+/// pre-lowered variants' eventual removal, which rewrites these arms anyway.
 ///
 /// Lowering is the same `lower_ability_ir` call `lower_oracle_ir` (the `Spell`
 /// arm) will make for the same item, so a relation predicate sees exactly the
@@ -3913,7 +3918,7 @@ impl<'a> DocEmitter<'a> {
             source, mut node, ..
         } = item;
         let floor = node.spell_min_x_mut().expect(
-            "`spells_emitted` holds only spell nodes, and both spell shapes carry an X floor",
+            "`spells_emitted` holds only spell nodes, and all three spell shapes carry an X floor",
         );
         *floor = (*floor).max(min_x_value);
         self.reemit_node(&source, node);
@@ -6240,12 +6245,12 @@ pub(crate) fn parse_oracle_ir(
                             node: base_node,
                             ..
                         } = base_item;
-                        // Both spell node shapes, via the shared reader:
+                        // All three spell node shapes, via the shared reader:
                         // `pop_last_spell` pops `spells_emitted`, which `emit`
-                        // fills from either shape with no variant filter.
+                        // fills from any of them with no variant filter.
                         let Some(mut base) = lower_spell_node(&base_node) else {
                             unreachable!(
-                                "`spells_emitted` holds only spell nodes, and both spell shapes lower"
+                                "`spells_emitted` holds only spell nodes, and all three spell shapes lower"
                             );
                         };
                         // Save the base ability's continuation chain in else_ability
