@@ -637,6 +637,16 @@ fn lower_spell_node(node: &OracleNodeIr) -> Option<AbilityDefinition> {
     match node {
         OracleNodeIr::Spell(ability_ir) => Some(lower_ability_ir(ability_ir)),
         OracleNodeIr::PreLoweredSpell(definition) => Some(definition.clone()),
+        // The residual is a spell shape, so it must answer here. The `_` arm
+        // below would have silently made it `None`, and this reader feeds
+        // `last_ability_definition()` — the mid-loop peek behind
+        // `parsed_result_recently_granted_flashback` and the cross-line
+        // "instead" fold's `previous_spell`. A `None` there is not a compile
+        // error; it is a behavior change on a DIFFERENT card from the converted
+        // one, which per-card byte-identity cannot catch.
+        OracleNodeIr::Unsupported { text, min_x_value } => {
+            Some(lower_unsupported_node(text, *min_x_value))
+        }
         _ => None,
     }
 }
@@ -1192,6 +1202,11 @@ fn item_ability(item: &OracleItemIr) -> Option<Cow<'_, AbilityDefinition>> {
     match &item.node {
         OracleNodeIr::PreLoweredSpell(def) => Some(Cow::Borrowed(def)),
         OracleNodeIr::Spell(ability_ir) => Some(Cow::Owned(lower_ability_ir(ability_ir))),
+        // Third spell shape, owned for the same reason the IR-native one is: the
+        // residual node holds text, not a definition, so one is built here.
+        OracleNodeIr::Unsupported { text, min_x_value } => {
+            Some(Cow::Owned(lower_unsupported_node(text, *min_x_value)))
+        }
         _ => None,
     }
 }
@@ -2940,6 +2955,16 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         match &item.node {
             OracleNodeIr::Spell(ability_ir) => {
                 let mut def = lower_ability_ir(ability_ir);
+                stamp_printed_ability_slot(&mut def, result.abilities.len());
+                result.abilities.push(def);
+                ability_ids.push(item.id);
+            }
+            // Same three steps as the two arms around it: lower, stamp the
+            // CR 707.9a printed ability slot, push. The residual is stamped like
+            // any other ability because a "…except it has this ability" clause
+            // counts printed slots, not supported ones.
+            OracleNodeIr::Unsupported { text, min_x_value } => {
+                let mut def = lower_unsupported_node(text, *min_x_value);
                 stamp_printed_ability_slot(&mut def, result.abilities.len());
                 result.abilities.push(def);
                 ability_ids.push(item.id);
@@ -8184,6 +8209,24 @@ fn x_annotation_min_value(line: &str) -> u32 {
 
 /// Primary nom-based dispatcher for Oracle text lines.
 ///
+/// Lower an `OracleNodeIr::Unsupported` residual to the definition it stands for.
+///
+/// Delegates to `make_unimplemented` rather than rebuilding the definition, so
+/// the node and the two hand-built residual sites cannot drift: there is exactly
+/// one place the `name: "unknown"` / `description: text` pair is constructed, and
+/// the coverage tooling that keys on that pair sees the same value whichever
+/// route produced it.
+///
+/// CR 601.2b: the floor is applied with `max`, matching
+/// `apply_ability_shell_envelope` — the node's `0` default can then never lower a
+/// floor, and the operation composes with a later raise the same way both other
+/// spell shapes do.
+fn lower_unsupported_node(text: &str, min_x_value: u32) -> AbilityDefinition {
+    let mut def = make_unimplemented(text);
+    def.min_x_value = def.min_x_value.max(min_x_value);
+    def
+}
+
 /// Create an Unimplemented fallback ability.
 pub(super) fn make_unimplemented(line: &str) -> AbilityDefinition {
     tracing::debug!(oracle_text = line, "unimplemented ability line");

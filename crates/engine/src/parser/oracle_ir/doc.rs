@@ -343,6 +343,53 @@ pub(crate) enum OracleNodeIr {
     /// Strive per-target surcharge.
     StriveCost(ManaCost),
 
+    /// A printed line no recognizer claimed — the shared honest-failure
+    /// residual, in IR form.
+    ///
+    /// # Why a node and not a chain parse
+    ///
+    /// Two sites in the parser build this residual today and both do the same
+    /// thing: they take the line's text and produce an `Effect::Unimplemented`
+    /// whose `name` is the fixed sentinel `"unknown"` and whose `description` is
+    /// the residual text, with that same text on the definition's `description`.
+    /// **That exact `name`/`description` pair is load-bearing for coverage** —
+    /// `game/coverage.rs` and the parser-gap tooling key on it. Re-deriving the
+    /// residual by running the effect-chain parser over the line would produce a
+    /// *different* `name` (whatever clause the chain failed inside), which is why
+    /// this is a node carrying the raw text rather than a chain seeded with a
+    /// gap clause. Lowered by `oracle::lower_unsupported_node`, which delegates
+    /// to `oracle::make_unimplemented` — the same function both producers call —
+    /// so the residual has exactly one construction authority.
+    ///
+    /// # Why it carries a CR 601.2b X floor
+    ///
+    /// The residual is a *spell* for every accounting purpose: it is emitted
+    /// through the ability channel, it occupies a CR 707.9a printed ability slot,
+    /// and it lands on the `spells_emitted` stack. That makes it reachable by
+    /// `DocEmitter::raise_last_spell_min_x`, whose `spell_min_x_mut().expect(..)`
+    /// is sound only while **every** node on that stack can name where its floor
+    /// lives. Carrying `min_x_value` keeps that invariant total. Omitting it
+    /// would not merely lose a floor — it would turn a compile-time-guaranteed
+    /// `Some` into a runtime panic on a structurally reachable path, which is the
+    /// failure mode the exhaustive matches over this enum exist to prevent.
+    ///
+    /// The pre-lowered spell shape this replaces already carried the field (it is
+    /// an `AbilityDefinition` root field), so this is a preservation, not a
+    /// widening.
+    // Producers arrive in the next commit, which deletes this allow rather than
+    // moving it. Landing the variant with zero producers is what makes the
+    // infrastructure byte-identical by construction.
+    #[allow(dead_code)]
+    Unsupported {
+        /// The verbatim residual text. Becomes BOTH the `Effect::Unimplemented`
+        /// `description` and the definition's `description`, exactly as
+        /// `make_unimplemented` sets them.
+        text: String,
+        /// CR 601.2b: the floor on this residual's announced X ("X can't be 0").
+        /// `0` means "no floor", mirroring the root field's own encoding.
+        min_x_value: u32,
+    },
+
     // -----------------------------------------------------------------------
     // PLAN-05 DEBT — pre-lowered escape hatches.
     //
@@ -392,6 +439,11 @@ impl OracleNodeIr {
         match self {
             OracleNodeIr::Spell(ir) => Some(&mut ir.shell.min_x_value),
             OracleNodeIr::PreLoweredSpell(def) => Some(&mut def.min_x_value),
+            // The residual is a spell for slot accounting, so it is reachable
+            // here and must name its floor. `lower_unsupported_node` applies it
+            // with `max`, so raising it here composes the same way the other two
+            // shapes do.
+            OracleNodeIr::Unsupported { min_x_value, .. } => Some(min_x_value),
             OracleNodeIr::Trigger(_)
             | OracleNodeIr::Static(_)
             | OracleNodeIr::Replacement(_)
@@ -861,7 +913,14 @@ impl OracleDocBuilder {
             // Pushing IS the increment: `ability_index()` reads `spells_emitted.len()`.
             // Reached only after the duplicate/conflict/fragment early-returns above,
             // so a rejected `emit` mutates neither counter.
-            OracleNodeIr::Spell(_) | OracleNodeIr::PreLoweredSpell(_) => {
+            // The residual joins this arm because it lowers to an
+            // `AbilityDefinition` pushed onto `result.abilities` exactly like the
+            // other two spell shapes — so it consumes a printed ability slot, and
+            // omitting it would shift every ability printed after an unrecognized
+            // line one CR 707.9a slot low.
+            OracleNodeIr::Spell(_)
+            | OracleNodeIr::PreLoweredSpell(_)
+            | OracleNodeIr::Unsupported { .. } => {
                 self.spells_emitted.push(slot.id);
             }
             OracleNodeIr::Trigger(_) | OracleNodeIr::PreLoweredTrigger(_) => {

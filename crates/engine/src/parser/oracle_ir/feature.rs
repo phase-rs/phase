@@ -465,7 +465,12 @@ pub(crate) fn scope_to_unit(
             }
             OracleNodeIr::CastingRestriction(r) => scoped.casting_restrictions.push(r.clone()),
             OracleNodeIr::CastingOption(o) => scoped.casting_options.push(o.clone()),
-            OracleNodeIr::Spell(_)
+            // The residual contributes through the ability id track above, like
+            // every other spell shape: it lowers into `result.abilities`, so the
+            // `pick` over `tracks.abilities` already attributes it to this unit.
+            // Adding it here as well would double-count it as unit evidence.
+            OracleNodeIr::Unsupported { .. }
+            | OracleNodeIr::Spell(_)
             | OracleNodeIr::Trigger(_)
             | OracleNodeIr::Static(_)
             | OracleNodeIr::Replacement(_)
