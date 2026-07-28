@@ -24452,7 +24452,10 @@ fn gollum_scheming_guide_guess_sequence_has_no_unimplemented() {
                 && matches!(
                     node.effect.as_ref(),
                     Effect::Choose {
-                        choice_type: ChoiceType::Opponent { restriction: None },
+                        choice_type: ChoiceType::Opponent {
+                            restriction: None,
+                            ..
+                        },
                         persist: false,
                         ..
                     }
@@ -24665,7 +24668,10 @@ fn committed_choice_guess_chooses_single_opponent_before_guess() {
         matches!(
             choose_opponent.effect.as_ref(),
             Effect::Choose {
-                choice_type: ChoiceType::Opponent { restriction: None },
+                choice_type: ChoiceType::Opponent {
+                    restriction: None,
+                    ..
+                },
                 persist: false,
                 ..
             }
@@ -39190,6 +39196,7 @@ fn the_master_most_life_villainous_choice() {
             choice_type:
                 ChoiceType::Opponent {
                     restriction: Some(restriction),
+                    ..
                 },
             persist,
             ..

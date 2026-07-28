@@ -613,6 +613,7 @@ mod issue_6092_ability_block_reason;
 mod issue_6102_ragavan_exile_cast;
 mod issue_6157_gold_token_auto_mana_payment;
 mod issue_629_fractured_sanity_cycling;
+mod issue_6381_benevolent_offering_repeat_opponent;
 mod issue_6403_moonmist_mass_transform;
 mod issue_6416_extra_turn_resume_order;
 mod issue_6431_lava_dart_flashback_control_turn;

@@ -5633,7 +5633,7 @@ pub(super) fn handle_resolution_choice(
             // single GameState slot cleared after every drain.
             if matches!(
                 choice_type,
-                ChoiceType::Player | ChoiceType::Opponent { .. }
+                ChoiceType::Player { .. } | ChoiceType::Opponent { .. }
             ) {
                 if let Ok(pid) = choice.parse::<u8>() {
                     if let Some(frame) = state.active_ability_continuation_frame_mut() {

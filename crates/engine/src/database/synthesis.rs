@@ -9712,7 +9712,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         protector_replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
-                choice_type: ChoiceType::Opponent { restriction: None },
+                choice_type: ChoiceType::opponent(),
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
@@ -9841,7 +9841,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
     let choose_stage = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
-            choice_type: ChoiceType::Opponent { restriction: None },
+            choice_type: ChoiceType::opponent(),
             persist: true,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
         },

@@ -1906,7 +1906,7 @@ fn choose_opponent_then_draw() -> ResolvedAbility {
         target: TargetFilter::Controller,
     });
     ra(Effect::Choose {
-        choice_type: ChoiceType::Opponent { restriction: None },
+        choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::default(),
     })

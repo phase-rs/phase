@@ -1863,7 +1863,7 @@ fn ability_chain_has_player_choice(def: &AbilityDefinition) -> bool {
     matches!(
         def.effect.as_ref(),
         Effect::Choose {
-            choice_type: ChoiceType::Player | ChoiceType::Opponent { .. },
+            choice_type: ChoiceType::Player { .. } | ChoiceType::Opponent { .. },
             ..
         }
     ) || def
@@ -1948,7 +1948,7 @@ fn filter_references_source_chosen_player(filter: &TargetFilter) -> bool {
 /// sub-ability chain) to `persist: true` so its choice is stored durably.
 fn persist_player_choice_in_ability(def: &mut AbilityDefinition) {
     if let Effect::Choose {
-        choice_type: ChoiceType::Player | ChoiceType::Opponent { .. },
+        choice_type: ChoiceType::Player { .. } | ChoiceType::Opponent { .. },
         persist,
         ..
     } = def.effect.as_mut()

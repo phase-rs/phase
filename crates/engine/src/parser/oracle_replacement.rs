@@ -2111,7 +2111,7 @@ fn front_opponent_choice_for_nontargeted_look(reveal: &Effect) -> Option<(Effect
     // observable outcome.
     let choose_opponent = Effect::Choose {
         // CR 608.2d + CR 102.3: the controller chooses one opponent.
-        choice_type: ChoiceType::Opponent { restriction: None },
+        choice_type: ChoiceType::opponent(),
         persist: true,
         // Same controller-choice selection mode as the fronted card-name choice.
         selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -14669,7 +14669,10 @@ mod tests {
             matches!(
                 &*execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::Opponent { restriction: None },
+                    choice_type: ChoiceType::Opponent {
+                        restriction: None,
+                        ..
+                    },
                     persist: true,
                     ..
                 }
@@ -14780,7 +14783,10 @@ mod tests {
             matches!(
                 &*mid.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::Opponent { restriction: None },
+                    choice_type: ChoiceType::Opponent {
+                        restriction: None,
+                        ..
+                    },
                     persist: true,
                     ..
                 }

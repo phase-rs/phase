@@ -1871,8 +1871,8 @@ fn build_replacement_exec(
         A::ChooseAPlayer(players) => {
             let choice_type = match crate::convert::filter::players_to_controller(players.as_ref())
             {
-                Ok(ControllerRef::Opponent) => ChoiceType::Opponent { restriction: None },
-                _ => ChoiceType::Player,
+                Ok(ControllerRef::Opponent) => ChoiceType::opponent(),
+                _ => ChoiceType::player(),
             };
             Effect::Choose {
                 choice_type,
