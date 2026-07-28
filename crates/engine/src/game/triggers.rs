@@ -7,8 +7,8 @@ use crate::types::ability::{
     ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect, ModalChoice,
     ObjectScope, OriginConstraint, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RenownSubject,
     ResolvedAbility, SacrificeCost, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
-    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
-    TriggerGrantProducerKey, TypeFilter, TypedFilter,
+    TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+    TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -344,6 +344,208 @@ impl TriggerCollectionOverlay {
         self.virtual_targeting_source
             .filter(|source| source.source_id == source_id)
             .map(|source| source.controller)
+    }
+}
+
+/// One stateful consequence of collecting triggered abilities.
+///
+/// Trigger matching is mostly observational, but CR 603 collection also updates
+/// per-turn trigger ledgers and event-observation facts. Keeping those writes as
+/// owned operations makes their ordering explicit and gives a future
+/// activation-local collector a single seam at which to retain or discard them.
+/// The ordinary collector applies every operation immediately.
+enum TriggerCollectionOperation {
+    PrepareEventBatch {
+        events: Vec<GameEvent>,
+    },
+    RecordTriggerFired {
+        constraint: Option<TriggerConstraint>,
+        source_context: Option<TriggerSourceContext>,
+        definition_ref: Option<TriggerDefinitionRef>,
+        event: GameEvent,
+    },
+    RecordBatchedZoneChanges {
+        definition_ref: TriggerDefinitionRef,
+        turn_zone_change_indices: Vec<usize>,
+    },
+    AllocateTimestamp,
+    RecordCombatDamageCastingPermission {
+        controller: PlayerId,
+        grants_freerunning: bool,
+        creature_types: Vec<String>,
+    },
+    MarkSpeedTriggerUsed {
+        player: PlayerId,
+    },
+}
+
+/// Applies trigger-collection mutations in their collection order.
+///
+/// This session intentionally owns no game-state borrow. Matching still reads
+/// the live state between operations, exactly as it did before this extraction;
+/// only the mutation authority is centralized. A later transactional caller can
+/// replace immediate application with an activation-local operation journal
+/// without changing any trigger-matching path.
+struct TriggerCollectionSession {
+    overlay: TriggerCollectionOverlay,
+}
+
+impl TriggerCollectionSession {
+    fn new(overlay: TriggerCollectionOverlay) -> Self {
+        Self { overlay }
+    }
+
+    fn prepare(&self, state: &mut GameState, events: &[GameEvent]) {
+        let _ = self.apply(
+            state,
+            TriggerCollectionOperation::PrepareEventBatch {
+                events: events.to_vec(),
+            },
+        );
+    }
+
+    fn record_match(&self, state: &mut GameState, matched: &MatchedTrigger, event: &GameEvent) {
+        let _ = self.apply(
+            state,
+            TriggerCollectionOperation::RecordTriggerFired {
+                constraint: matched.constraint.clone(),
+                source_context: matched.pending.ability.trigger_source.clone(),
+                definition_ref: matched.definition_ref.clone(),
+                event: event.clone(),
+            },
+        );
+
+        if !matched.batched || !batched_zone_change_batch(&matched.trigger_events) {
+            return;
+        }
+        let Some(definition_ref) = matched.definition_ref.clone() else {
+            return;
+        };
+        let turn_zone_change_indices = matched
+            .trigger_events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => Some(record.turn_zone_change_index),
+                _ => None,
+            })
+            .collect();
+        let _ = self.apply(
+            state,
+            TriggerCollectionOperation::RecordBatchedZoneChanges {
+                definition_ref,
+                turn_zone_change_indices,
+            },
+        );
+    }
+
+    fn mark_speed_trigger_used(&self, state: &mut GameState, player: PlayerId) {
+        let _ = self.apply(
+            state,
+            TriggerCollectionOperation::MarkSpeedTriggerUsed { player },
+        );
+    }
+
+    fn next_timestamp(&self, state: &mut GameState) -> u64 {
+        self.apply(state, TriggerCollectionOperation::AllocateTimestamp)
+            .expect("timestamp allocation must return the allocated timestamp")
+    }
+
+    fn record_combat_damage_casting_permission(
+        &self,
+        state: &mut GameState,
+        controller: PlayerId,
+        grants_freerunning: bool,
+        creature_types: Vec<String>,
+    ) {
+        let _ = self.apply(
+            state,
+            TriggerCollectionOperation::RecordCombatDamageCastingPermission {
+                controller,
+                grants_freerunning,
+                creature_types,
+            },
+        );
+    }
+
+    fn targeting_source_controller(
+        &self,
+        state: &GameState,
+        source_id: ObjectId,
+    ) -> Option<PlayerId> {
+        self.overlay
+            .targeting_source_controller(source_id)
+            .or_else(|| {
+                state.stack.iter().rev().find_map(|entry| {
+                    (entry.id == source_id || entry.source_id == source_id)
+                        .then_some(entry.controller)
+                })
+            })
+            .or_else(|| {
+                state
+                    .objects
+                    .get(&source_id)
+                    .map(|source| source.controller)
+            })
+    }
+
+    fn apply(&self, state: &mut GameState, operation: TriggerCollectionOperation) -> Option<u64> {
+        match operation {
+            TriggerCollectionOperation::PrepareEventBatch { events } => {
+                super::layers::flush_layers(state);
+                reconcile_off_zone_keyword_triggers(state);
+                observe_object_taps(state, &events);
+                observe_object_counter_placements(state, &events);
+                None
+            }
+            TriggerCollectionOperation::RecordTriggerFired {
+                constraint,
+                source_context,
+                definition_ref,
+                event,
+            } => {
+                record_trigger_fired_with_ref(
+                    state,
+                    constraint.as_ref(),
+                    source_context.as_ref(),
+                    definition_ref.as_ref(),
+                    &event,
+                );
+                None
+            }
+            TriggerCollectionOperation::RecordBatchedZoneChanges {
+                definition_ref,
+                turn_zone_change_indices,
+            } => {
+                for turn_zone_change_index in turn_zone_change_indices {
+                    state
+                        .batched_zone_change_trigger_fired
+                        .insert((definition_ref.clone(), turn_zone_change_index));
+                }
+                None
+            }
+            TriggerCollectionOperation::AllocateTimestamp => Some(state.next_timestamp()),
+            TriggerCollectionOperation::RecordCombatDamageCastingPermission {
+                controller,
+                grants_freerunning,
+                creature_types,
+            } => {
+                if grants_freerunning {
+                    state
+                        .assassin_or_commander_dealt_combat_damage_this_turn
+                        .insert(controller);
+                }
+                state.creature_types_dealt_combat_damage_this_turn.extend(
+                    creature_types
+                        .into_iter()
+                        .map(|creature_type| (controller, creature_type)),
+                );
+                None
+            }
+            TriggerCollectionOperation::MarkSpeedTriggerUsed { player } => {
+                mark_speed_trigger_used(state, player);
+                None
+            }
+        }
     }
 }
 
@@ -2772,6 +2974,7 @@ fn collect_pending_triggers_with_collection(
     collection: LogicalZoneTriggerCollection<'_>,
     overlay: TriggerCollectionOverlay,
 ) -> Vec<PendingTriggerContext> {
+    let session = TriggerCollectionSession::new(overlay);
     // CR 603.6a + CR 611.2e: Continuous effects (including statics that grant
     // triggered abilities to a class — sliver-lord pattern) apply the moment
     // the affected permanent is on the battlefield. The newcomers must be
@@ -2780,8 +2983,6 @@ fn collect_pending_triggers_with_collection(
     // battlefield. Flushing pending layer evaluation here guarantees
     // `obj.trigger_definitions` and `obj.keywords` reflect all active
     // continuous effects before this pass scans for matching triggers.
-    super::layers::flush_layers(state);
-    reconcile_off_zone_keyword_triggers(state);
     // CR 701.26 + CR 603.4: Observe every `PermanentTapped` event in this batch and
     // bump the per-object tap-count ledger BEFORE any trigger condition is checked,
     // so a "first time it became tapped this turn" intervening-if
@@ -2789,14 +2990,13 @@ fn collect_pending_triggers_with_collection(
     // `collect_pending_triggers` is the single chokepoint all trigger collection
     // funnels through (combat declaration, mana taps, cost taps, crew), so combat +
     // effect + crew taps all count here regardless of which producer emitted them.
-    observe_object_taps(state, events);
     // CR 122.1 + CR 603.4: Bump the per-object counter-placement OCCURRENCE ledger
     // for this batch (deduped across a multi-KIND placement) BEFORE any trigger
     // condition is checked, so a "first time counters have been put on it this
     // turn" intervening-if (`FirstTimeObjectCountersAddedThisTurn`) reads
     // occurrence-count == 1 for the placement that just fired. Same chokepoint as
     // the tap ledger, so effect, ETB, and ability counter placements all count.
-    observe_object_counter_placements(state, events);
+    session.prepare(state, events);
     let mut pending: Vec<PendingTriggerContext> = Vec::new();
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
@@ -2955,14 +3155,7 @@ fn collect_pending_triggers_with_collection(
                 if audit_trigger_index {
                     production_matched.insert((obj_id, matched.trig_idx));
                 }
-                record_trigger_fired_with_ref(
-                    state,
-                    matched.constraint.as_ref(),
-                    matched.pending.ability.trigger_source.as_ref(),
-                    matched.definition_ref.as_ref(),
-                    event,
-                );
-                record_matched_batched_zone_change_replay(state, &matched);
+                session.record_match(state, &matched, event);
                 if matched.batched {
                     batched_this_pass.insert((obj_id, matched.trig_idx));
                 }
@@ -3216,24 +3409,8 @@ fn collect_pending_triggers_with_collection(
                         // Prefer the prepared activation's virtual authority.
                         // A committed spell/ability still resolves through its
                         // physical stack entry, then the live source fallback.
-                        let source_controller = overlay
-                            .targeting_source_controller(*targeting_source_id)
-                            .or_else(|| {
-                                state
-                                    .stack
-                                    .iter()
-                                    .find(|entry| {
-                                        entry.id == *targeting_source_id
-                                            || entry.source_id == *targeting_source_id
-                                    })
-                                    .map(|entry| entry.controller)
-                            })
-                            .or_else(|| {
-                                state
-                                    .objects
-                                    .get(targeting_source_id)
-                                    .map(|obj| obj.controller)
-                            });
+                        let source_controller =
+                            session.targeting_source_controller(state, *targeting_source_id);
 
                         // CR 702.21a + CR 611.3 + CR 613.11: An active
                         // `SuppressTriggers { events ∋ BecomesTargeted }` static
@@ -3385,14 +3562,7 @@ fn collect_pending_triggers_with_collection(
                 };
             if !matched_triggers.is_empty() {
                 for matched in matched_triggers {
-                    record_trigger_fired_with_ref(
-                        state,
-                        matched.constraint.as_ref(),
-                        matched.pending.ability.trigger_source.as_ref(),
-                        matched.definition_ref.as_ref(),
-                        event,
-                    );
-                    record_matched_batched_zone_change_replay(state, &matched);
+                    session.record_match(state, &matched, event);
                     if matched.batched {
                         batched_this_pass.insert((*moved_id, matched.trig_idx));
                     }
@@ -3437,14 +3607,7 @@ fn collect_pending_triggers_with_collection(
                     )
                 };
                 for matched in matched_triggers {
-                    record_trigger_fired_with_ref(
-                        state,
-                        matched.constraint.as_ref(),
-                        matched.pending.ability.trigger_source.as_ref(),
-                        matched.definition_ref.as_ref(),
-                        event,
-                    );
-                    record_matched_batched_zone_change_replay(state, &matched);
+                    session.record_match(state, &matched, event);
                     if matched.batched {
                         batched_this_pass.insert((*exploiter, matched.trig_idx));
                     }
@@ -3544,14 +3707,7 @@ fn collect_pending_triggers_with_collection(
                     }
                 }
                 for matched in matched_triggers {
-                    record_trigger_fired_with_ref(
-                        state,
-                        matched.constraint.as_ref(),
-                        matched.pending.ability.trigger_source.as_ref(),
-                        matched.definition_ref.as_ref(),
-                        event,
-                    );
-                    record_matched_batched_zone_change_replay(state, &matched);
+                    session.record_match(state, &matched, event);
                     if matched.batched {
                         batched_this_pass.insert((observer_id, matched.trig_idx));
                     }
@@ -3608,14 +3764,7 @@ fn collect_pending_triggers_with_collection(
                 };
 
                 for matched in matched_triggers {
-                    record_trigger_fired_with_ref(
-                        state,
-                        matched.constraint.as_ref(),
-                        matched.pending.ability.trigger_source.as_ref(),
-                        matched.definition_ref.as_ref(),
-                        event,
-                    );
-                    record_matched_batched_zone_change_replay(state, &matched);
+                    session.record_match(state, &matched, event);
                     if matched.batched {
                         batched_this_pass.insert((obj_id, matched.trig_idx));
                     }
@@ -3692,7 +3841,7 @@ fn collect_pending_triggers_with_collection(
                     // synthesized trigger is only collected from SpellCast,
                     // which is only emitted for an actual cast, so cast-ness is
                     // already implied by the trigger event itself.
-                    let timestamp = state.next_timestamp() as u32;
+                    let timestamp = session.next_timestamp(state) as u32;
                     pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: *cast_obj_id,
                         controller: *caster,
@@ -3754,7 +3903,7 @@ fn collect_pending_triggers_with_collection(
                 if let Some(source_context) = &cast_source_context {
                     cascade_ability.set_trigger_source_recursive(source_context.clone());
                 }
-                let timestamp = state.next_timestamp() as u32;
+                let timestamp = session.next_timestamp(state) as u32;
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
                     controller,
@@ -3814,7 +3963,7 @@ fn collect_pending_triggers_with_collection(
                 if let Some(source_context) = &cast_source_context {
                     ripple_ability.set_trigger_source_recursive(source_context.clone());
                 }
-                let timestamp = state.next_timestamp() as u32;
+                let timestamp = session.next_timestamp(state) as u32;
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
                     controller: ripple_controller,
@@ -3929,7 +4078,7 @@ fn collect_pending_triggers_with_collection(
                 if let Some(source_context) = &cast_source_context {
                     casualty_ability.set_trigger_source_recursive(source_context.clone());
                 }
-                let timestamp = state.next_timestamp() as u32;
+                let timestamp = session.next_timestamp(state) as u32;
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
                     controller: dynamically_granted_casualty_instances.1,
@@ -4006,7 +4155,7 @@ fn collect_pending_triggers_with_collection(
                 if let Some(source_context) = &cast_source_context {
                     conspire_ability.set_trigger_source_recursive(source_context.clone());
                 }
-                let timestamp = state.next_timestamp() as u32;
+                let timestamp = session.next_timestamp(state) as u32;
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
                     controller: dynamically_granted_conspire_instances.1,
@@ -4078,7 +4227,7 @@ fn collect_pending_triggers_with_collection(
                     if let Some(source_context) = &cast_source_context {
                         replicate_ability.set_trigger_source_recursive(source_context.clone());
                     }
-                    let timestamp = state.next_timestamp() as u32;
+                    let timestamp = session.next_timestamp(state) as u32;
                     pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: *cast_obj_id,
                         controller,
@@ -4136,7 +4285,7 @@ fn collect_pending_triggers_with_collection(
                 if let Some(source_context) = &cast_source_context {
                     demonstrate_ability.set_trigger_source_recursive(source_context.clone());
                 }
-                let timestamp = state.next_timestamp() as u32;
+                let timestamp = session.next_timestamp(state) as u32;
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
                     controller: dynamically_granted_demonstrate_instances.1,
@@ -4256,21 +4405,15 @@ fn collect_pending_triggers_with_collection(
                 // creature types AT DAMAGE TIME (LKI) before any later mutation.
                 let controller = source_obj.controller;
                 let source_subtypes = source_obj.card_types.subtypes.clone();
-                if is_assassin_creature || is_commander {
-                    state
-                        .assassin_or_commander_dealt_combat_damage_this_turn
-                        .insert(controller);
-                }
                 // CR 702.76a: record this source's creature types under its
                 // controller so Prowl can later check "had any of this spell's
                 // creature types". A source with no subtypes contributes nothing.
-                if !source_subtypes.is_empty() {
-                    state.creature_types_dealt_combat_damage_this_turn.extend(
-                        source_subtypes
-                            .into_iter()
-                            .map(|creature_type| (controller, creature_type)),
-                    );
-                }
+                session.record_combat_damage_casting_permission(
+                    state,
+                    controller,
+                    is_assassin_creature || is_commander,
+                    source_subtypes,
+                );
             }
         }
 
@@ -4404,7 +4547,7 @@ fn collect_pending_triggers_with_collection(
                     subject_match_count: None,
                     die_result: None,
                 }));
-                mark_speed_trigger_used(state, trigger_controller);
+                session.mark_speed_trigger_used(state, trigger_controller);
             }
         }
 
@@ -19557,6 +19700,48 @@ pub mod tests {
         observe_object_taps(&mut state, &events);
         assert_eq!(state.object_tap_count_this_turn.get(&a).copied(), Some(2));
         assert_eq!(state.object_tap_count_this_turn.get(&b).copied(), Some(1));
+    }
+
+    /// CR 701.26 + CR 122.1 + CR 603.4: the collector session owns the
+    /// pre-match event-observation write. It preserves the tap ledger's
+    /// per-event count while deduplicating counter placements per object in one
+    /// emitted event batch.
+    #[test]
+    fn trigger_collection_session_applies_event_observation_operation() {
+        let mut state = setup();
+        let tapped = ObjectId(71);
+        let countered = ObjectId(72);
+        let events = vec![
+            GameEvent::PermanentTapped {
+                object_id: tapped,
+                caused_by: None,
+            },
+            GameEvent::PermanentTapped {
+                object_id: tapped,
+                caused_by: None,
+            },
+            GameEvent::CounterAdded {
+                object_id: countered,
+                counter_type: CounterType::Lore,
+                count: 1,
+            },
+            GameEvent::CounterAdded {
+                object_id: countered,
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+            },
+        ];
+
+        TriggerCollectionSession::new(TriggerCollectionOverlay::default())
+            .prepare(&mut state, &events);
+
+        assert_eq!(state.object_tap_count_this_turn.get(&tapped), Some(&2));
+        assert_eq!(
+            state
+                .object_counter_placement_count_this_turn
+                .get(&countered),
+            Some(&1),
+        );
     }
 
     /// CR 120.1 + CR 108.3: `DamagedPlayerIsEventSourceOwner` holds only when the
