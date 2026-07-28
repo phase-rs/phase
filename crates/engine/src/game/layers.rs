@@ -270,9 +270,9 @@ pub fn prune_until_next_upkeep_effects(state: &mut GameState, active_player: Pla
                 player: PlayerScope::Controller
             }
         ) && e.controller == active_player;
-        // CR 503.1 + CR 603.7b: definite-article "the next upkeep" is
-        // turn-AGNOSTIC — it expires at the FIRST upkeep step to occur,
-        // ungated by `active_player`.
+        // CR 611.2a: definite-article "the next upkeep" states a step without
+        // naming whose it is, so the deadline is turn-AGNOSTIC — it expires at
+        // the FIRST upkeep step to occur, ungated by `active_player`.
         let turn_agnostic = matches!(
             e.duration,
             Duration::UntilNextStepOf {
@@ -610,8 +610,9 @@ pub fn prune_upkeep_step_casting_permissions(state: &mut GameState, active_playe
                 granted_to: Some(g),
                 ..
             } => *g != active_player,
-            // CR 603.7b: the turn-AGNOSTIC form expires at the first upkeep
-            // step, so it is not keyed on `active_player` at all.
+            // CR 611.2a: the turn-AGNOSTIC stated duration names no player, so
+            // it expires at the first upkeep step and is not keyed on
+            // `active_player` at all.
             CastingPermission::PlayFromExile {
                 duration:
                     Duration::UntilNextStepOf {
@@ -694,9 +695,10 @@ pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: Playe
 /// for permanents controlled by the active player. Called during the untap step
 /// AFTER enforcing the CantUntap restriction (so the permanent skips exactly one untap).
 ///
-/// CR 603.7b: the turn-AGNOSTIC `PlayerScope::AnyTurn` form ("the next untap
-/// step") expires at the FIRST untap step to occur, so it is dropped without
-/// consulting the affected object's controller. Handling it here keeps every
+/// CR 611.2a: the turn-AGNOSTIC `PlayerScope::AnyTurn` form ("the next untap
+/// step") states a step without naming whose it is, so it expires at the FIRST
+/// untap step to occur and is dropped without consulting the affected object's
+/// controller. Handling it here keeps every
 /// `(step, player)` pair `oracle_nom::duration::parse_until_next_step` can emit
 /// enforced, mirroring the two-scope handling in
 /// `prune_until_next_end_step_effects` / `prune_until_next_upkeep_effects`.
@@ -15604,9 +15606,9 @@ mod tests {
         );
     }
 
-    /// CR 500.4 + CR 603.7b: the turn-AGNOSTIC upkeep deadline ("the next
-    /// upkeep") expires at the FIRST upkeep step to occur, whoever's turn it
-    /// is. Mirrors the `AnyTurn` arm of `prune_until_next_end_step_effects`;
+    /// CR 611.2a + CR 500.4: the turn-AGNOSTIC upkeep deadline ("the next
+    /// upkeep") states a step without naming whose it is, so it expires at the
+    /// FIRST upkeep step to occur, whoever's turn it is. Mirrors the `AnyTurn` arm of `prune_until_next_end_step_effects`;
     /// without it the grammar could emit a shape nothing prunes.
     #[test]
     fn until_next_upkeep_turn_agnostic_expires_at_any_players_upkeep() {
@@ -15676,7 +15678,7 @@ mod tests {
         );
     }
 
-    /// CR 502.3 + CR 603.7b: turn-agnostic sibling of the test above — an
+    /// CR 611.2a + CR 502.3: turn-agnostic sibling of the test above — an
     /// `AnyTurn` untap deadline is not keyed on any controller, so it expires at
     /// the first untap step even though the affected object belongs to the
     /// non-active player.

@@ -194,14 +194,21 @@ enum StepDeadlinePossessor {
     /// "its controller's" / "their controller's" — the controller of the object
     /// the effect is applied to (CR 109.4).
     ObjectController,
-    /// "the" — no possessor; the first occurrence of the step, whoever's turn
-    /// it is (CR 603.7b).
+    /// "the" — no possessor. CR 611.2a: the effect lasts as long as *stated*,
+    /// and this phrasing states a step without naming whose it is, so the
+    /// deadline is the first occurrence of that step, whoever's turn it is.
     AnyTurn,
 }
 
-/// CR 500.4: map a written `(possessor, step)` pair onto the [`PlayerScope`] the
-/// step's expiry authority actually implements, or `None` when no authority
-/// implements that pairing.
+/// CR 611.2a + CR 500.4: map a written `(possessor, step)` pair onto the
+/// [`PlayerScope`] the step's expiry authority actually implements, or `None`
+/// when no authority implements that pairing.
+///
+/// CR 611.2a fixes *what* the duration is — the effect lasts as long as the
+/// spell or ability states — and CR 500.4 fixes *when* it ends: as the named
+/// step begins. The per-step rules below (CR 502.3 / CR 503.1 / CR 513.1) are
+/// descriptive context identifying which step each prune owns; they are not the
+/// authority for the expiry itself.
 ///
 /// The pairing is **not** free, because `PlayerScope::Controller` is resolved
 /// against two different players by the three prunes:
@@ -224,14 +231,17 @@ fn step_deadline_scope(possessor: StepDeadlinePossessor, step: Phase) -> Option<
             Some(PlayerScope::Controller)
         }
         (StepDeadlinePossessor::ObjectController, Phase::Untap) => Some(PlayerScope::Controller),
-        // CR 603.7b: the turn-agnostic form is keyed on no player at all, and
-        // all three prunes drop it at the first occurrence of the step.
+        // CR 611.2a: the stated duration names no player, so it is keyed on
+        // none — all three prunes drop it at the first occurrence of the step
+        // (CR 500.4).
         (StepDeadlinePossessor::AnyTurn, _) => Some(PlayerScope::AnyTurn),
         _ => None,
     }
 }
 
-/// CR 109.4 + CR 109.5 + CR 603.7b: the possessor axis of a step deadline.
+/// CR 109.4 + CR 109.5 + CR 611.2a: the possessor axis of a step deadline —
+/// object controller, ability controller, or (per the stated-duration reading
+/// of CR 611.2a) none at all.
 ///
 /// Ordered longest-discriminant-first: "their controller's" must be tried
 /// before the bare "their" pronoun, or the pronoun arm shadows it and leaves an
@@ -792,7 +802,8 @@ mod tests {
     /// phrasings that previously had their own hardcoded arms bit-identical —
     /// possessive "your next end step" (Rocco, Street Chef) stays
     /// `Controller`, definite-article "the next end step" (Niko, Light of
-    /// Hope) stays turn-agnostic `AnyTurn` (CR 603.7b).
+    /// Hope) stays turn-agnostic `AnyTurn` (CR 611.2a: the stated duration
+    /// names a step but no player).
     #[test]
     fn test_parse_duration_end_step_possessor_axis_unchanged() {
         for (text, player) in [
@@ -861,7 +872,8 @@ mod tests {
     }
 
     /// The turn-agnostic possessor pairs with every step in the closed set,
-    /// because no prune keys `PlayerScope::AnyTurn` on a player (CR 603.7b).
+    /// because no prune keys `PlayerScope::AnyTurn` on a player — CR 611.2a's
+    /// stated duration names the step without naming whose it is.
     #[test]
     fn test_parse_duration_turn_agnostic_possessor_pairs_with_every_step() {
         for (text, step) in [
