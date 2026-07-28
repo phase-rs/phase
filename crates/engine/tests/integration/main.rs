@@ -616,6 +616,7 @@ mod issue_629_fractured_sanity_cycling;
 mod issue_6403_moonmist_mass_transform;
 mod issue_6405_aang_multicolor_cost_reduction;
 mod issue_6416_extra_turn_resume_order;
+mod issue_6431_lava_dart_flashback_control_turn;
 mod issue_6498_portent_of_calamity;
 mod issue_6499_flickering_ward_protection_exemption;
 mod issue_6500_loreseekers_stone_hand_cost;
