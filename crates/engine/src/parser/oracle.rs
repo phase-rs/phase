@@ -68,7 +68,7 @@ use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
     stamp_printed_ability_slot, stamp_printed_trigger_slot, OracleDocBuilder, OracleDocIr,
     OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan, OracleUnitSource,
-    PrintedAbilityIndex, PrintedTriggerIndex,
+    PrintedAbilityIndex, PrintedTriggerIndex, SpellPayloadIr,
 };
 use super::oracle_ir::effect_chain::{AbilityIr, ShellStage};
 use super::oracle_ir::feature::ItemIdTracks;
@@ -661,21 +661,11 @@ fn parse_begin_game_counter_clause(
 }
 
 fn lower_spell_node(node: &OracleNodeIr) -> Option<AbilityDefinition> {
-    match node {
-        OracleNodeIr::Spell(ability_ir) => Some(lower_ability_ir(ability_ir)),
-        OracleNodeIr::PreLoweredSpell(definition) => Some(definition.clone()),
-        // The residual is a spell shape, so it must answer here. The `_` arm
-        // below would have silently made it `None`, and this reader feeds
-        // `last_ability_definition()` — the mid-loop peek behind
-        // `parsed_result_recently_granted_flashback` and the cross-line
-        // "instead" fold's `previous_spell`. A `None` there is not a compile
-        // error; it is a behavior change on a DIFFERENT card from the converted
-        // one, which per-card byte-identity cannot catch.
-        OracleNodeIr::Unsupported { text, min_x_value } => {
-            Some(lower_unsupported_node(text, *min_x_value))
-        }
-        _ => None,
-    }
+    node.spell_payload().map(|payload| match payload {
+        SpellPayloadIr::Ir(ir) => lower_ability_ir(ir),
+        SpellPayloadIr::Lowered(def) => def.clone(),
+        SpellPayloadIr::Residual { text, min_x_value } => lower_unsupported_node(text, min_x_value),
+    })
 }
 
 fn parsed_result_recently_granted_flashback(emitter: &DocEmitter<'_>) -> bool {
@@ -1211,19 +1201,17 @@ fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
 /// `AbilityDefinition` would clone the first case at all seven call sites, most
 /// of which scan every item on the card.
 ///
-/// This is where the trigger side's reasoning stops applying.
-/// `item_trigger` keeps a borrow and pushes exhaustiveness down onto
-/// `TriggerNodeIr::definition()`, because both of its shapes own a
-/// `TriggerDefinition` — `TriggerNodeIr::Assembled` carries one directly. There
-/// is no equivalent layer to push this obligation onto: a spell node's IR
-/// payload is an `AbilityIr`, not an enum of definition-owning representations,
-/// so all three shapes are named here. `_ => None` is safe for the same reason
-/// it is safe there: every remaining variant is genuinely `None`.
+/// `OracleNodeIr::spell_payload()` supplies the spell-side equivalent of
+/// `TriggerNodeIr::definition()`: it is exhaustive over `OracleNodeIr` and
+/// returns the three spell payload representations. This reader then matches
+/// that closed representation without a wildcard, so a fourth spell payload
+/// must be handled here and in `lower_spell_node` at compile time.
 ///
-/// The wildcard is nonetheless a hazard for the NEXT spell-shaped variant: it
-/// absorbs one silently, and this reader is an `and_then` target, so the result
-/// is a behavior change with no compile error. Deleting it is tracked with the
-/// pre-lowered variants' eventual removal, which rewrites these arms anyway.
+/// `item_trigger` still keeps a borrow and pushes its own exhaustiveness down
+/// onto `TriggerNodeIr::definition()`, because both of its shapes own a
+/// `TriggerDefinition`. The spell layer differs only in its representations:
+/// the IR-native and residual payloads must be lowered into owned definitions,
+/// while the already-lowered payload can lend its definition.
 ///
 /// Lowering is the same `lower_ability_ir` call `lower_oracle_ir` (the `Spell`
 /// arm) will make for the same item, so a relation predicate sees exactly the
@@ -1231,16 +1219,13 @@ fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
 /// exception that cannot matter: the CR 707.9a printed slot, which lowering
 /// stamps afterwards and no relation predicate reads.
 fn item_ability(item: &OracleItemIr) -> Option<Cow<'_, AbilityDefinition>> {
-    match &item.node {
-        OracleNodeIr::PreLoweredSpell(def) => Some(Cow::Borrowed(def)),
-        OracleNodeIr::Spell(ability_ir) => Some(Cow::Owned(lower_ability_ir(ability_ir))),
-        // Third spell shape, owned for the same reason the IR-native one is: the
-        // residual node holds text, not a definition, so one is built here.
-        OracleNodeIr::Unsupported { text, min_x_value } => {
-            Some(Cow::Owned(lower_unsupported_node(text, *min_x_value)))
+    item.node.spell_payload().map(|payload| match payload {
+        SpellPayloadIr::Lowered(def) => Cow::Borrowed(def),
+        SpellPayloadIr::Ir(ir) => Cow::Owned(lower_ability_ir(ir)),
+        SpellPayloadIr::Residual { text, min_x_value } => {
+            Cow::Owned(lower_unsupported_node(text, min_x_value))
         }
-        _ => None,
-    }
+    })
 }
 
 /// CR 607.2d: the trigger side of document-relation discovery.

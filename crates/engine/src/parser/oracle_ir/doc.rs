@@ -412,7 +412,45 @@ pub(crate) enum OracleNodeIr {
     PreLoweredSpell(AbilityDefinition),
 }
 
+/// Borrowed representation of the three spell payload shapes.
+pub(crate) enum SpellPayloadIr<'a> {
+    /// An IR-native spell or activated-ability body.
+    Ir(&'a AbilityIr),
+    /// An already-lowered spell or activated-ability definition.
+    Lowered(&'a AbilityDefinition),
+    /// An honest unsupported spell residual that lowers to a definition.
+    Residual { text: &'a str, min_x_value: u32 },
+}
+
 impl OracleNodeIr {
+    /// Returns this node's spell payload, if it has one.
+    ///
+    /// Exhaustive over the enum on purpose: a future spell payload must enter
+    /// this layer before a reader can lower or borrow it.
+    pub(crate) fn spell_payload(&self) -> Option<SpellPayloadIr<'_>> {
+        match self {
+            OracleNodeIr::Spell(ir) => Some(SpellPayloadIr::Ir(ir)),
+            OracleNodeIr::PreLoweredSpell(def) => Some(SpellPayloadIr::Lowered(def)),
+            OracleNodeIr::Unsupported { text, min_x_value } => Some(SpellPayloadIr::Residual {
+                text,
+                min_x_value: *min_x_value,
+            }),
+            OracleNodeIr::Trigger(_)
+            | OracleNodeIr::Static(_)
+            | OracleNodeIr::Replacement(_)
+            | OracleNodeIr::Keyword(_)
+            | OracleNodeIr::Modal(_)
+            | OracleNodeIr::AdditionalCost(_)
+            | OracleNodeIr::CastingRestriction(_)
+            | OracleNodeIr::CastingOption(_)
+            | OracleNodeIr::SolveCondition(_)
+            | OracleNodeIr::StriveCost(_)
+            | OracleNodeIr::PreLoweredTrigger(_)
+            | OracleNodeIr::PreLoweredStatic(_)
+            | OracleNodeIr::PreLoweredReplacement(_) => None,
+        }
+    }
+
     /// CR 601.2b: the floor on this spell node's announced X ("X can't be 0"),
     /// whichever shape holds it — `None` for every non-spell node.
     ///
