@@ -207,7 +207,11 @@ pub fn run_suite(db: &CardDatabase, options: &SuiteOptions) -> Result<SuiteRepor
     let mut harvest_sink = match &options.harvest_output {
         Some(path) => {
             let meta = harvest::HarvestMeta {
-                schema: 1,
+                // schema 2 adds the `mana_development_offset` control column.
+                // Provenance only — the trainer reads columns by name and never
+                // inspects this field; the mixed-corpus protection is the
+                // `defaulted_rows` warning in `scripts/train_eval_weights.py`.
+                schema: 2,
                 git_sha: options.git_sha.clone(),
                 card_data_hash: options.card_data_hash.clone(),
                 difficulty: format!("{:?}", options.difficulty),

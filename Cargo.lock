@@ -2086,6 +2086,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "strum",
  "tracing",
  "tracing-subscriber",
  "web-time",

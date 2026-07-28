@@ -60,8 +60,11 @@ MAX_WEIGHT_SCALE = 2.5
 
 # Self-play harvest features. Names are exactly the EvalWeights struct fields, so
 # each fitted coefficient maps DIRECTLY onto its weight (no proxy map). All 9 are
-# fitted; `energy_offset` is a fixed-coefficient control fed to the regression and
-# then discarded (matching the engine's post-weighting energy offset).
+# fitted; `energy_offset` and `mana_development_offset` are two fixed-coefficient
+# controls fed to the regression and then discarded (matching the engine's
+# post-weighting offsets). Feeding them in keeps their explanatory power off the
+# correlated fitted features rather than biasing `hand_size` / `zone_quality` /
+# `card_advantage`.
 SELFPLAY_FEATURE_NAMES = [
     "life",
     "board_presence",
@@ -73,7 +76,7 @@ SELFPLAY_FEATURE_NAMES = [
     "zone_quality",
     "synergy",
 ]
-SELFPLAY_CONTROL = "energy_offset"
+SELFPLAY_CONTROLS = ["energy_offset", "mana_development_offset"]
 
 # Smoke thresholds under --allow-tiny-corpus (vs the production 1000 / 100).
 TINY_GLOBAL_MIN = 10
@@ -457,8 +460,12 @@ def load_selfplay_corpus(
     """Read JSONL harvest shards, skip meta lines, bucket rows by turn phase.
 
     Returns (phase_features, phase_labels, meta, files, seeds) where
-    phase_features values are (N, 10) arrays (9 fitted features + the
-    `energy_offset` control) and phase_labels values are (N,) arrays of 0/1.
+    phase_features values are (N, 11) arrays (9 fitted features + the two
+    fixed-coefficient controls) and phase_labels values are (N,) arrays of 0/1.
+
+    Pre-schema-2 shards carry no `mana_development_offset` column. Controls are
+    read leniently and zero-filled, with a loud warning naming the affected row
+    count; fitted features stay strict and still raise KeyError.
     """
     files = sorted(glob.glob(glob_pattern))
     if not files:
@@ -473,7 +480,7 @@ def load_selfplay_corpus(
     meta: dict = {}
     seeds: set = set()
     total = 0
-    columns = SELFPLAY_FEATURE_NAMES + [SELFPLAY_CONTROL]
+    defaulted_rows = 0
 
     for path in files:
         with open(path) as handle:
@@ -489,10 +496,25 @@ def load_selfplay_corpus(
                     continue
                 feats = obj["features"]
                 phase = turn_phase(int(obj["turn"]))
-                phase_feat[phase].append([float(feats[name]) for name in columns])
+                # Fitted features are STRICT — a missing one must still raise
+                # KeyError. Only the controls are lenient, so a pre-schema-2 shard
+                # loads instead of aborting the retrain.
+                row = [float(feats[name]) for name in SELFPLAY_FEATURE_NAMES]
+                if any(name not in feats for name in SELFPLAY_CONTROLS):
+                    defaulted_rows += 1
+                row += [float(feats.get(name, 0.0)) for name in SELFPLAY_CONTROLS]
+                phase_feat[phase].append(row)
                 phase_lab[phase].append(1 if obj["won"] else 0)
                 seeds.add(int(obj["seed"]))
                 total += 1
+
+    if defaulted_rows:
+        print(
+            f"WARNING: {defaulted_rows}/{total} rows lacked a control column "
+            "(pre-schema-2 shards); those rows contribute 0.0 for the missing "
+            "control, which partially confounds the fit.",
+            file=sys.stderr,
+        )
 
     phase_features = {}
     phase_labels = {}
@@ -558,18 +580,19 @@ def train_selfplay_model(
 def extract_selfplay_weights(model: LogisticRegression, phase_name: str) -> tuple[dict, dict]:
     """Map self-play coefficients DIRECTLY onto weight names (no proxy map).
 
-    The `energy_offset` control coefficient is recorded but discarded — it is a
-    fixed serve-time offset, not a fitted weight. Remaining coefficients are
+    The `energy_offset` and `mana_development_offset` control coefficients are
+    recorded but discarded — both are fixed serve-time offsets, not fitted
+    weights. Remaining coefficients are
     `abs()`-ed and scaled so the max maps to MAX_WEIGHT_SCALE. HAND_TUNED is NOT
     applied: self-play measures every weight.
     """
-    columns = SELFPLAY_FEATURE_NAMES + [SELFPLAY_CONTROL]
+    columns = SELFPLAY_FEATURE_NAMES + SELFPLAY_CONTROLS
     raw_coefs = {name: round(float(coef), 6) for name, coef in zip(columns, model.coef_[0])}
 
     print(f"  {phase_name} raw coefficients:", file=sys.stderr)
     for name, coef in raw_coefs.items():
         sign = "+" if coef >= 0 else ""
-        tag = " (control, discarded)" if name == SELFPLAY_CONTROL else ""
+        tag = " (control, discarded)" if name in SELFPLAY_CONTROLS else ""
         print(f"    {name}: {sign}{coef}{tag}", file=sys.stderr)
 
     fitted = {name: raw_coefs[name] for name in SELFPLAY_FEATURE_NAMES}
@@ -647,7 +670,7 @@ def run_selfplay(args) -> None:
         "base_seeds": sorted(seeds),
         "total_sample_count": total_samples,
         "feature_names": SELFPLAY_FEATURE_NAMES,
-        "control_feature": SELFPLAY_CONTROL,
+        "control_features": SELFPLAY_CONTROLS,
         "turn_boundaries": {
             "early": f"turns 1-{EARLY_MAX}",
             "mid": f"turns {EARLY_MAX + 1}-{MID_MAX}",

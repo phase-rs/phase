@@ -70,3 +70,7 @@ test = false
 [dev-dependencies]
 # cfg(test) modules place objects with the raw zone API (sealed in production builds).
 engine = { path = "../engine", features = ["test-support"] }
+# `DeckArchetype::iter()` in the mana-development floor test — exhaustiveness comes
+# from the enum, not a hand-written array, so a sixth archetype cannot escape the
+# floor guarantee. Test-only: the derive is `cfg_attr(test, ..)`-gated.
+strum = { version = "0.27", features = ["derive"] }
