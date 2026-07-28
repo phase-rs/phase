@@ -4828,21 +4828,18 @@ fn parse_whenever_you_cast_enters_with(
     .parse(rest)
     .ok()?;
 
-    // Optional trailing "where X is [quantity]" clause.
+    // Optional trailing "where X is [quantity]" clause. Delegate to
+    // `parse_enters_with_where_x_suffix` — the single authority for this tail
+    // grammar, already shared with the self-ETB `parse_enters_with_counters`
+    // path — so composite/offset quantities ("its mana value minus 4"; CR
+    // 107.1 arithmetic over a CR 202.3 mana-value reference) resolve here too,
+    // not just atomic `QuantityRef`s. The previous atomic-only
+    // `parse_quantity_ref` call silently failed (via `?`) on any composite
+    // expression, misrouting the whole ability to the generic self-ETB
+    // fallback (Runadi, Behemoth Caller — issue #6492).
     let count_expr = match fixed_count {
         Some(n) => QuantityExpr::Fixed { value: n as i32 },
-        None => {
-            // Expect ", where x is " then a quantity ref.
-            let (rest, _) = alt((
-                tag::<_, _, OracleError<'_>>(", where x is "),
-                tag(", where X is "),
-            ))
-            .parse(rest)
-            .ok()?;
-            let qty_text = rest.trim_end_matches('.').trim();
-            let qty = crate::parser::oracle_quantity::parse_quantity_ref(qty_text)?;
-            QuantityExpr::Ref { qty }
-        }
+        None => parse_enters_with_where_x_suffix(rest)?,
     };
 
     let put_counter = AbilityDefinition::new(
@@ -19668,6 +19665,81 @@ mod tests {
     fn plain_whenever_you_cast_is_not_replacement() {
         let text = "Whenever you cast a creature spell, draw a card.";
         assert!(parse_replacement_line(text, "Filler").is_none());
+    }
+
+    /// CR 614.1c + CR 202.3 + CR 107.1: Runadi, Behemoth Caller's first ability
+    /// ("Whenever you cast a creature spell with mana value 5 or greater, that
+    /// creature enters with X additional +1/+1 counters on it, where X is its
+    /// mana value minus 4.") parses into a `ChangeZone` replacement scoped to
+    /// the entering creature (not Runadi herself — issue #6492 regression),
+    /// with a composite offset quantity over that creature's own mana value.
+    #[test]
+    fn parses_runadi_behemoth_caller_replacement() {
+        let text = "Whenever you cast a creature spell with mana value 5 or greater, that creature enters with X additional +1/+1 counters on it, where X is its mana value minus 4.";
+        let def = parse_replacement_line(text, "Runadi, Behemoth Caller")
+            .expect("Runadi's first ability should parse as a replacement");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+
+        // valid_card: creature with mana value >= 5, controlled by Runadi's
+        // controller — NOT SelfRef (the pre-fix regression).
+        let TargetFilter::Typed(ref tf) = def.valid_card.as_ref().expect("valid_card set") else {
+            panic!("expected Typed filter, got {:?}", def.valid_card);
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 5 },
+                }
+            )),
+            "valid_card must gate on mana value >= 5, got {:?}",
+            tf.properties
+        );
+
+        // execute: PutCounter { target: SelfRef, count: Offset(its mana value, -4) }.
+        let exec = def.execute.as_ref().expect("execute set");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*exec.effect
+        else {
+            panic!("expected PutCounter, got {:?}", exec.effect);
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert_eq!(target, &TargetFilter::SelfRef);
+        assert_eq!(
+            count,
+            &QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: crate::types::ability::ObjectScope::Recipient,
+                    },
+                }),
+                offset: -4,
+            },
+            "count must be the entering creature's own mana value minus 4, not a \
+             garbage literal or Runadi's own mana value"
+        );
+    }
+
+    /// Regression: an unparseable composite quantity in the "where X is" clause
+    /// must still fail closed (return `None`, falling through to the generic
+    /// self-ETB fallback) rather than silently absorbing the condition text as
+    /// a garbage counter-type literal — the exact failure mode issue #6492
+    /// reported before the fix.
+    #[test]
+    fn whenever_you_cast_enters_with_garbage_quantity_fails_closed() {
+        let text = "Whenever you cast a creature spell with mana value 5 or greater, that creature enters with X additional +1/+1 counters on it, where X is its unrecognized nonsense value minus 4.";
+        assert!(
+            parse_whenever_you_cast_enters_with(&text.to_lowercase(), text).is_none(),
+            "an unparseable quantity clause must fail this combinator closed, not \
+             succeed with a wrong AST"
+        );
     }
 
     /// Regression: "Whenever you cast" with a fixed additional counter amount

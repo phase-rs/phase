@@ -4628,6 +4628,17 @@ fn object_for_scope<'a>(
                     _ => None,
                 })
             })
+            // CR 614.12 + CR 613.4c: in an ETB-scoped replacement ("that
+            // creature enters with ... counters on it, where X is its mana
+            // value/power/toughness ..."), the recipient IS the entering
+            // object, not the static replacement source. `ctx.entering`
+            // carries that identity (mirrors `QuantityContext::self_object`,
+            // the same convention `CastManaObjectScope::SelfObject` uses for
+            // Wildgrowth Archaic's "it"). Outside ETB-replacement contexts
+            // `ctx.entering` is always `None` (only ETB-counter extraction
+            // sets it), so this fallback is inert for every layer-evaluation
+            // `Recipient` caller (Blessing of the Nephilim, Civic Saber).
+            .or_else(|| ctx.entering.and_then(|id| state.objects.get(&id)))
             .or_else(|| source_object_for_context(state, ctx.source, ctx.trigger_source.as_ref())),
         // CR 603.4: an intervening-if condition is checked at trigger detection
         // (current_trigger_event is None then) and re-checked on resolution.
@@ -4692,6 +4703,8 @@ fn object_id_for_scope(
                     _ => None,
                 })
             })
+            // CR 614.12 + CR 613.4c: see the parallel arm in `object_for_scope`.
+            .or(ctx.entering)
             .or_else(|| {
                 source_object_for_context(state, ctx.source, ctx.trigger_source.as_ref())
                     .map(|object| object.id)
