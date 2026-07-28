@@ -255,6 +255,7 @@ fn queue_room_trigger(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        announced_modal_choice: None,
     };
 
     // CR 603.2 + CR 309.4c: Dispatch through the standard

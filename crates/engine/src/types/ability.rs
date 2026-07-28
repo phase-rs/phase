@@ -16857,6 +16857,29 @@ pub struct ModalChoice {
     pub dynamic_max_choices: Option<QuantityExpr>,
 }
 
+/// CR 603.3c + CR 700.2b: The mode choice **announced** for a modal ability as it
+/// is put on the stack — the effective [`ModalChoice`] (dynamic cap already
+/// resolved) paired with the mode indices that cannot be chosen.
+///
+/// CR 603.3c and CR 700.2b both bind a modal triggered ability's mode legality to
+/// the moment the ability is put on the stack: "if one of the modes would be
+/// illegal (due to an inability to choose legal targets, for example), that mode
+/// can't be chosen". This engine necessarily splits that one announcement across
+/// a pause — the entry is pushed, then the controller is prompted — so the answer
+/// is bound into a single value, produced once by
+/// `ability_utils::resolve_legal_modal_choice` and carried on
+/// `PendingTrigger::announced_modal_choice`, rather than left as a loose
+/// `(ModalChoice, Vec<usize>)` pair that each half re-derives for itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnouncedModalChoice {
+    /// The effective modal header the controller chooses against.
+    pub modal: ModalChoice,
+    /// Mode indices that cannot be chosen — CR 700.2d repeat constraints and
+    /// CR 115.1 target-legality failures. Ascending and deduplicated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable_modes: Vec<usize>,
+}
+
 /// Selection constraints attached to a modal choice header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]

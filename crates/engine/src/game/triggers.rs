@@ -3,12 +3,12 @@ use std::collections::HashSet;
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
-    BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute, CommanderOwnership,
-    ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect, ModalChoice,
-    ObjectScope, OriginConstraint, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RenownSubject,
-    ResolvedAbility, SacrificeCost, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
-    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
-    TriggerGrantProducerKey, TypeFilter, TypedFilter,
+    AnnouncedModalChoice, BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
+    CommanderOwnership, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect,
+    ModalChoice, ObjectScope, OriginConstraint, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
+    RenownSubject, ResolvedAbility, SacrificeCost, TargetFilter, TargetRef, TributeOutcome,
+    TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+    TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -86,6 +86,32 @@ pub struct PendingTrigger {
     pub modal: Option<ModalChoice>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_abilities: Vec<AbilityDefinition>,
+    /// CR 603.3c + CR 700.2b: The mode choice `dispatch_pending_trigger_context`
+    /// announced as this ability was put on the stack — set only on the modal
+    /// dispatch path, and only after `resolve_legal_modal_choice` confirmed a
+    /// legal choice exists.
+    ///
+    /// Both rules fix mode legality *at the moment the ability is put on the
+    /// stack*: "if one of the modes would be illegal (due to an inability to
+    /// choose legal targets, for example), that mode can't be chosen". The
+    /// engine raises the controller's prompt in a later re-entry
+    /// (`begin_pending_trigger_target_selection`), and the game state can move
+    /// in between — an effect earlier in the same simultaneous cascade may
+    /// remove a mode's only legal target, exactly as the target path documents.
+    /// Re-deriving legality at prompt time would answer that later state, so the
+    /// announcement travels with the trigger instead.
+    ///
+    /// `None` for every non-modal trigger and for any trigger parked by a path
+    /// that never announced modes; the prompt then asks the same
+    /// `resolve_legal_modal_choice` authority itself rather than re-implementing
+    /// the choice.
+    ///
+    /// Boxed per the stack budget in [`crate::types::game_state_size`]: it embeds
+    /// a whole [`ModalChoice`] and is populated only on the modal dispatch path —
+    /// exactly the "large, rarely-populated field" that module says to box rather
+    /// than widen a ceiling for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_modal_choice: Option<Box<AnnouncedModalChoice>>,
     /// Human-readable trigger description from the Oracle text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -1715,6 +1741,7 @@ fn collect_matching_triggers_inner(
                         },
                         subject_match_count,
                         die_result: None,
+                        announced_modal_choice: None,
                     },
                     trigger_events,
                     batched: trig_def.batched,
@@ -2729,6 +2756,7 @@ fn collect_latched_batched_zone_triggers(
                 }),
                 subject_match_count,
                 die_result: None,
+                announced_modal_choice: None,
             },
             trigger_events,
             batched: true,
@@ -3001,6 +3029,7 @@ fn collect_pending_triggers_with_collection(
                             may_trigger_origin: None,
                             subject_match_count: None,
                             die_result: None,
+                            announced_modal_choice: None,
                         }));
                     }
                 }
@@ -3048,6 +3077,7 @@ fn collect_pending_triggers_with_collection(
                             may_trigger_origin: None,
                             subject_match_count: None,
                             die_result: None,
+                            announced_modal_choice: None,
                         }));
                     }
                 }
@@ -3091,6 +3121,7 @@ fn collect_pending_triggers_with_collection(
                             }),
                             subject_match_count: None,
                             die_result: None,
+                            announced_modal_choice: None,
                         }));
                     }
                 }
@@ -3136,6 +3167,7 @@ fn collect_pending_triggers_with_collection(
                         may_trigger_origin: None,
                         subject_match_count: None,
                         die_result: None,
+                        announced_modal_choice: None,
                     }));
                 }
             }
@@ -3182,6 +3214,7 @@ fn collect_pending_triggers_with_collection(
                             }),
                             subject_match_count: None,
                             die_result: None,
+                            announced_modal_choice: None,
                         }));
                     }
                 }
@@ -3267,6 +3300,7 @@ fn collect_pending_triggers_with_collection(
                                         may_trigger_origin: None,
                                         subject_match_count: None,
                                         die_result: None,
+                                        announced_modal_choice: None,
                                     }));
                                 }
                             }
@@ -3680,6 +3714,7 @@ fn collect_pending_triggers_with_collection(
                         may_trigger_origin: None,
                         subject_match_count: None,
                         die_result: None,
+                        announced_modal_choice: None,
                     }));
                 }
             }
@@ -3742,6 +3777,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    announced_modal_choice: None,
                 }));
             }
 
@@ -3802,6 +3838,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    announced_modal_choice: None,
                 }));
             }
 
@@ -3923,6 +3960,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    announced_modal_choice: None,
                 }));
             }
 
@@ -3994,6 +4032,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    announced_modal_choice: None,
                 }));
             }
 
@@ -4066,6 +4105,7 @@ fn collect_pending_triggers_with_collection(
                         may_trigger_origin: None,
                         subject_match_count: None,
                         die_result: None,
+                        announced_modal_choice: None,
                     }));
                 }
             }
@@ -4124,6 +4164,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    announced_modal_choice: None,
                 }));
             }
         }
@@ -4156,6 +4197,7 @@ fn collect_pending_triggers_with_collection(
                         may_trigger_origin: None,
                         subject_match_count: None,
                         die_result: None,
+                        announced_modal_choice: None,
                     }));
                 }
             }
@@ -4191,6 +4233,7 @@ fn collect_pending_triggers_with_collection(
                         may_trigger_origin: None,
                         subject_match_count: None,
                         die_result: None,
+                        announced_modal_choice: None,
                     }));
                 }
             }
@@ -4286,6 +4329,7 @@ fn collect_pending_triggers_with_collection(
                             may_trigger_origin: None,
                             subject_match_count: None,
                             die_result: None,
+                            announced_modal_choice: None,
                         }));
                     }
                 }
@@ -4330,6 +4374,7 @@ fn collect_pending_triggers_with_collection(
                             may_trigger_origin: None,
                             subject_match_count: None,
                             die_result: None,
+                            announced_modal_choice: None,
                         }));
                     }
                 }
@@ -4375,6 +4420,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    announced_modal_choice: None,
                 }));
                 mark_speed_trigger_used(state, trigger_controller);
             }
@@ -4422,6 +4468,7 @@ fn collect_pending_triggers_with_collection(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    announced_modal_choice: None,
                 }));
             }
         }
@@ -4665,6 +4712,7 @@ fn ring_pending_trigger(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        announced_modal_choice: None,
     })
 }
 
@@ -6547,14 +6595,24 @@ fn dispatch_pending_trigger_context(
                 &trigger.mode_abilities,
             );
             restore_trigger_event_context(state, context_snapshot);
-            let Some((modal_for_player, unavailable_modes)) = legal_choice else {
+            let Some(announced) = legal_choice else {
                 // CR 603.3c: No legal mode; drop the trigger entirely.
                 return TriggerDispatchDisposition::DroppedNoLegalMode;
             };
+            let AnnouncedModalChoice {
+                modal: modal_for_player,
+                unavailable_modes,
+            } = announced.clone();
             let mode_abilities = trigger.mode_abilities.clone();
             let controller = trigger.controller;
             let source_id = trigger.source_id;
-            let pending_for_state = trigger.clone();
+            // CR 603.3c + CR 700.2b: the announcement is complete HERE — this is
+            // the moment the ability is put on the stack, and it is the moment
+            // both rules bind mode legality to. Carry it on the parked trigger so
+            // the controller's prompt surfaces this answer instead of a fresh
+            // derivation against whatever state exists when the prompt is raised.
+            let mut pending_for_state = trigger.clone();
+            pending_for_state.announced_modal_choice = Some(Box::new(announced));
             let entry_id = push_pending_trigger_to_stack_with_event_batch(
                 state,
                 trigger,
@@ -7294,6 +7352,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    announced_modal_choice: None,
                 });
             }
         }
@@ -7412,6 +7471,7 @@ fn delayed_trigger_to_context(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        announced_modal_choice: None,
     })
 }
 
@@ -11329,6 +11389,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         }));
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: controller,
@@ -15993,6 +16054,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         };
 
         let mut events = Vec::new();
@@ -16072,6 +16134,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         };
 
         let draw_trig = parse_trigger_line(DRAW_ETB, "Curiosity Crafter");
@@ -16095,6 +16158,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         };
 
         dispatch_collected_triggers(
@@ -16572,6 +16636,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         };
         let context = PendingTriggerContext {
             pending,
@@ -16624,6 +16689,93 @@ pub mod tests {
             !matches!(disposition, TriggerDispatchDisposition::DroppedNoLegalMode),
             "a legal target makes a mode choosable — must not drop, got {disposition:?}"
         );
+    }
+
+    /// CR 603.3c + CR 700.2b: mode legality is fixed WHEN THE ABILITY IS PUT ON
+    /// THE STACK — "if one of the modes would be illegal (due to an inability to
+    /// choose legal targets, for example), that mode can't be chosen". The
+    /// controller's prompt is raised in a later re-entry
+    /// (`begin_pending_trigger_target_selection`), and the board can move in
+    /// between: the target path in that same function documents the case where
+    /// "an effect earlier in the SAME simultaneous cascade removed the only legal
+    /// target". This test makes that window explicit — the sole legal target for
+    /// both modes leaves the battlefield after the announcement — and pins that
+    /// the prompt still offers the ANNOUNCED choice.
+    ///
+    /// Discriminating, and verified so by experiment: with the carried
+    /// announcement bypassed, this test fails with `got None` — re-deriving mode
+    /// legality at prompt time finds no legal target for either mode, so it drops
+    /// the trigger and never raises a prompt at all. That is the defect, not just
+    /// a duplicated derivation: the controller loses a mode choice CR 700.2b
+    /// already granted them. The ability may still be removed afterwards, but by
+    /// CR 603.3d once a chosen mode has no legal target — the rule that actually
+    /// governs that removal.
+    #[test]
+    fn mode_prompt_surfaces_the_announcement_not_a_later_re_derivation() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_3C03),
+            controller,
+            "Modal Engine".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = make_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        // Announcement: the Bear is a legal target, so both modes are choosable.
+        let disposition = dispatch_two_mode_creature_target_modal(&mut state, source, controller);
+        assert!(
+            matches!(disposition, TriggerDispatchDisposition::Paused),
+            "a choosable modal trigger must park for its mode prompt, got {disposition:?}"
+        );
+        let announced = state
+            .pending_trigger
+            .as_ref()
+            .and_then(|pending| pending.announced_modal_choice.clone())
+            .expect("dispatch must carry the announced mode choice on the parked trigger");
+        assert!(
+            announced.unavailable_modes.is_empty(),
+            "with the Bear present both modes were announced as choosable, got {:?}",
+            announced.unavailable_modes
+        );
+
+        // The only legal target leaves the battlefield BEFORE the prompt is
+        // raised — the simultaneous-cascade window the target path documents.
+        // Uses the real zone primitive: `create_object` registers battlefield
+        // membership in a separate zone list, so mutating `GameObject::zone`
+        // alone would leave the creature targetable and make this test vacuous.
+        let mut zone_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, creature, Zone::Graveyard, &mut zone_events);
+        assert!(
+            !crate::game::targeting::zone_object_ids(&state, Zone::Battlefield).contains(&creature),
+            "the injected drift must actually remove the Bear from the battlefield, \
+             otherwise this test cannot tell a re-derivation from the announcement"
+        );
+
+        let waiting = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+            .expect("raising the mode prompt must not error");
+        match waiting {
+            Some(crate::types::game_state::WaitingFor::AbilityModeChoice {
+                modal,
+                unavailable_modes,
+                ..
+            }) => {
+                assert_eq!(
+                    unavailable_modes, announced.unavailable_modes,
+                    "the prompt must offer the announced unavailable set (CR 700.2b), \
+                     not one re-derived after the target left"
+                );
+                assert_eq!(
+                    modal.max_choices, announced.modal.max_choices,
+                    "the prompt must offer the announced cap"
+                );
+            }
+            other => panic!(
+                "the announced mode choice must still be prompted (CR 603.3c); a \
+                 re-derivation would have dropped the trigger instead, got {other:?}"
+            ),
+        }
     }
 
     #[test]
@@ -26974,6 +27126,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         })
     }
 
@@ -27091,6 +27244,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         })
     }
 
@@ -27308,6 +27462,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         })
     }
 
@@ -29633,6 +29788,7 @@ pub mod tests {
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                announced_modal_choice: None,
             },
             &mut Vec::new(),
         );
@@ -29881,6 +30037,7 @@ pub mod tests {
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                announced_modal_choice: None,
             },
             &mut Vec::new(),
         );
@@ -29983,6 +30140,7 @@ pub mod tests {
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                announced_modal_choice: None,
             },
             &mut Vec::new(),
         );
@@ -30175,6 +30333,7 @@ pub mod tests {
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                announced_modal_choice: None,
             },
             &mut Vec::new(),
         );
@@ -30265,6 +30424,7 @@ pub mod tests {
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                announced_modal_choice: None,
             },
             &mut Vec::new(),
         );

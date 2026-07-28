@@ -948,6 +948,7 @@ fn do_eliminate(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    announced_modal_choice: None,
                 },
                 events,
             );

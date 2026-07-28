@@ -332,6 +332,7 @@ fn setup_breeches_runtime(seed: u64) -> (GameState, ObjectId, ObjectId) {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         },
         &mut events,
     );

@@ -169,6 +169,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        announced_modal_choice: None,
     };
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;

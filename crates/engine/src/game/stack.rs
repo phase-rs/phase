@@ -4639,6 +4639,7 @@ mod tests {
             may_trigger_origin: Some(MayTriggerOrigin::Printed { trigger_index: 0 }),
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         }));
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),

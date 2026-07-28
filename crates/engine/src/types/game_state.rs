@@ -22027,6 +22027,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: PendingTrigger = serde_json::from_str(&json).unwrap();
@@ -22093,6 +22094,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         }));
 
         let json = serde_json::to_string(&state).unwrap();

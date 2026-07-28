@@ -491,6 +491,7 @@ fn deferred_scheme_trigger_blocks_abandon() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        announced_modal_choice: None,
     };
     state.deferred_triggers.push(DeferredTrigger {
         pending,

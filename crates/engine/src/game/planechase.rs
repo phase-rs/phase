@@ -211,6 +211,7 @@ fn queue_planeswalk_trigger(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        announced_modal_choice: None,
     };
     crate::game::triggers::dispatch_synthetic_trigger(state, pending, events);
 }

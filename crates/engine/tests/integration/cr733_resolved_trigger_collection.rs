@@ -58,6 +58,7 @@ fn pending_context(source_id: ObjectId) -> PendingTriggerContext {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         },
         trigger_events: Vec::new(),
         dispatch_origin: PendingTriggerDispatchOrigin::Normal,

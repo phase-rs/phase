@@ -120,6 +120,7 @@ fn populated_state() -> GameState {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        announced_modal_choice: None,
     }));
     // Populated so the `#[serde(skip)]` assertion in
     // `boxing_introduces_no_wrapper_level_in_the_wire_shape` discriminates. With

@@ -30,7 +30,7 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::{
     begin_target_selection_for_ability, build_target_slots, cap_distribution_target_slots,
-    compute_unavailable_modes, has_legal_target_assignment_for_ability, modal_choice_for_player,
+    has_legal_target_assignment_for_ability,
 };
 use super::casting;
 use super::casting_costs;
@@ -7279,6 +7279,7 @@ fn apply_action(
                 may_trigger_origin: None,
                 subject_match_count: None,
                 die_result: None,
+                announced_modal_choice: None,
             };
             super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
 
@@ -8615,49 +8616,59 @@ pub(super) fn begin_pending_trigger_target_selection(
             };
             let subject_match_count = trigger.subject_match_count;
             let modal = modal.clone();
-            // CR 603.3c + CR 603.3d: a triggered modal's mode choice is announced as
-            // the ability is put on the stack, by the same process as casting a spell
-            // (CR 601.2c-d). The triggering event must be live for the ENTIRE choice,
-            // including the "choose up to X" dynamic cap resolved by
-            // modal_choice_for_player -- push the event window BEFORE cap resolution,
-            // not just around target-legality filtering, so event-context quantity
-            // refs (e.g. EventContextSourceModesChosen, Riku of Many Paths) resolve
-            // against the triggering spell rather than an unset event.
-            let context_snapshot = super::triggers::push_trigger_event_context(
-                state,
-                trigger_event.as_ref(),
-                &trigger_events,
-                subject_match_count,
-            );
-            let modal = modal_choice_for_player(
-                state,
-                player,
-                source_id,
-                &modal,
-                &crate::types::ability::SpellContext::default(),
-            );
-            let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
-            super::ability_utils::filter_modes_by_target_legality(
-                state,
-                source_id,
-                player,
-                &mode_abilities,
-                &modal,
-                &mut unavailable_modes,
-            );
-            super::triggers::restore_trigger_event_context(state, context_snapshot);
-            let Some(modal) = super::ability_utils::modal_choice_with_target_assignment_limit(
-                state,
-                source_id,
-                player,
-                &modal,
-                &mode_abilities,
-                &unavailable_modes,
-            ) else {
-                super::stack::pop_uncommitted_pending_trigger_entry(state);
-                state.pending_trigger = None;
-                return Ok(None);
+            // CR 603.3c + CR 700.2b: this prompt SURFACES the mode choice that was
+            // announced when the ability was put on the stack — it does not make a
+            // second one. Both rules bind mode legality to that earlier moment, and
+            // the game state can move in between (an effect earlier in the same
+            // simultaneous cascade may remove a mode's only legal target, exactly
+            // as the target path below documents), so the announcement carried on
+            // the pending trigger is authoritative over anything re-derived here.
+            //
+            // Only a trigger parked without an announcement falls back — and it
+            // falls back to `resolve_legal_modal_choice`, the same single authority
+            // that produced the announcement and that the AI payoff preflight
+            // asks. This step must never re-implement the mode-choice sequence
+            // (dynamic cap → non-target unavailability → per-mode target legality →
+            // cross-mode assignment cap → CR 603.3c no-legal-mode verdict): a
+            // second copy is free to drift from the announcement, and it is the
+            // prompt that the controller is bound by.
+            let announced = match trigger.announced_modal_choice.clone() {
+                Some(announced) => *announced,
+                None => {
+                    // CR 603.3d: the triggering event must be live for the ENTIRE
+                    // choice, including the "choose up to X" dynamic cap -- push the
+                    // event window BEFORE the authority runs, so event-context
+                    // quantity refs (e.g. EventContextSourceModesChosen, Riku of
+                    // Many Paths) resolve against the triggering spell rather than
+                    // an unset event, exactly as the announcement path does.
+                    let context_snapshot = super::triggers::push_trigger_event_context(
+                        state,
+                        trigger_event.as_ref(),
+                        &trigger_events,
+                        subject_match_count,
+                    );
+                    let resolved = super::ability_utils::resolve_legal_modal_choice(
+                        state,
+                        source_id,
+                        player,
+                        &modal,
+                        &mode_abilities,
+                    );
+                    super::triggers::restore_trigger_event_context(state, context_snapshot);
+                    let Some(resolved) = resolved else {
+                        // CR 603.3c: no legal mode can be chosen — the ability is
+                        // removed from the stack rather than resolving.
+                        super::stack::pop_uncommitted_pending_trigger_entry(state);
+                        state.pending_trigger = None;
+                        return Ok(None);
+                    };
+                    resolved
+                }
             };
+            let crate::types::ability::AnnouncedModalChoice {
+                modal,
+                unavailable_modes,
+            } = announced;
 
             // CR 700.2b (override) + CR 701.9b (analogous): "choose ... at
             // random" modal triggers (Cult of Skaro) are resolved inline by

@@ -287,6 +287,7 @@ fn recast_trigger(
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            announced_modal_choice: None,
         },
         trigger_events: vec![event.clone()],
         dispatch_origin: PendingTriggerDispatchOrigin::Normal,

@@ -2188,6 +2188,7 @@ fn try_begin_reflexive_target_selection_inner(
             // into the later fresh-`apply()` target-assign.
             subject_match_count: freeze_reflexive_event_count(state, controller, source_id),
             die_result: state.die_result_this_resolution,
+            announced_modal_choice: None,
         };
         let trigger_events =
             crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
@@ -2280,6 +2281,7 @@ fn try_begin_reflexive_target_selection_inner(
         // creating ability so the reflexive entry can re-stamp it when it
         // resolves as its own stack object.
         die_result: state.die_result_this_resolution,
+        announced_modal_choice: None,
     };
     let trigger_events = crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
     let pending_for_state = pending.clone();

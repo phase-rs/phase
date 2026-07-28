@@ -948,6 +948,7 @@ fn ctx(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result,
+        announced_modal_choice: None,
     })
 }
 
@@ -1410,6 +1411,7 @@ fn ctx_c(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        announced_modal_choice: None,
     })
 }
 

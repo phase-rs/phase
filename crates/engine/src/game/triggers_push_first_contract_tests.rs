@@ -420,6 +420,7 @@ fn push_first_no_legal_modes_modal_trigger_dropped_silently() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        announced_modal_choice: None,
     };
 
     let stack_before = state.stack.len();
@@ -530,6 +531,7 @@ fn random_modal_trigger_resolves_without_prompting() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        announced_modal_choice: None,
     };
 
     let stack_before = state.stack.len();

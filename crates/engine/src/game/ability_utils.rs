@@ -2,12 +2,12 @@
 use crate::types::ability::TapStateChange;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-    CardTypeSetSource, CastManaSpentMetric, CombatRelationSubject, ControllerRef,
-    CounterMoveSelection, DamageSource, Effect, EffectScope, FilterProp, GameRestriction,
-    ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope,
-    SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition,
-    TypeFilter, TypedFilter,
+    AnnouncedModalChoice, CardTypeSetSource, CastManaSpentMetric, CombatRelationSubject,
+    ControllerRef, CounterMoveSelection, DamageSource, Effect, EffectScope, FilterProp,
+    GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    ResolvedAbility, RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -973,19 +973,24 @@ pub fn modal_choice_with_target_assignment_limit(
 /// filter ([`filter_modes_by_target_legality`], CR 115.1), and finally the
 /// cross-mode assignment cap ([`modal_choice_with_target_assignment_limit`]).
 ///
-/// Returns the resolved [`ModalChoice`] plus the unavailable-mode indices, or
+/// Returns the [`AnnouncedModalChoice`] the controller chooses against, or
 /// `None` when no legal mode can be chosen — the case in which a triggered
-/// ability is removed from the stack instead of resolving (CR 603.3c). Both the
-/// live trigger dispatch and the hypothetical payoff preflight
-/// ([`execute_targets_satisfiable`]) call it, so an AI eligibility query can
-/// never disagree with what the runtime will actually do.
+/// ability is removed from the stack instead of resolving (CR 603.3c).
+///
+/// Every consumer of a triggered modal's legal-mode set goes through here:
+/// the live dispatch announcement (`dispatch_pending_trigger_context`), the mode
+/// prompt that surfaces that announcement
+/// (`begin_pending_trigger_target_selection`), and the hypothetical payoff
+/// preflight ([`execute_targets_satisfiable`]). No caller re-derives the choice,
+/// so neither the prompt nor an AI eligibility query can disagree with what the
+/// runtime announced.
 pub fn resolve_legal_modal_choice(
     state: &GameState,
     source_id: ObjectId,
     controller: PlayerId,
     modal: &ModalChoice,
     mode_abilities: &[AbilityDefinition],
-) -> Option<(ModalChoice, Vec<usize>)> {
+) -> Option<AnnouncedModalChoice> {
     let modal_for_player = modal_choice_for_player(
         state,
         controller,
@@ -1015,7 +1020,10 @@ pub fn resolve_legal_modal_choice(
     if unavailable_modes.len() >= modal_for_player.mode_count {
         return None;
     }
-    Some((modal_for_player, unavailable_modes))
+    Some(AnnouncedModalChoice {
+        modal: modal_for_player,
+        unavailable_modes,
+    })
 }
 
 fn modal_indices_have_legal_target_assignment(
