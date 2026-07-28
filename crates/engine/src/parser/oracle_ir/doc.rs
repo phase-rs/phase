@@ -311,6 +311,22 @@ pub(crate) enum OracleNodeIr {
     /// Unit 3b replaces this payload with `AbilityIr { source, body, shell }` so
     /// the activation metadata the router currently applies around the chain
     /// becomes typed IR rather than a pre-lowered `AbilityDefinition`.
+    ///
+    /// PLAN-05 DEBT (2026-07-28, Plan 05b T9a): no producer, on purpose and
+    /// temporarily. The one site that constructed this variant (`oracle.rs`, the
+    /// instant/sorcery prevention recognizer, U0-39) was the only spell path
+    /// lowering a whole ability body without `finalize_effect_chain`, the
+    /// owner-library reveal anchor, and the `WithContext` whole-body recognizer
+    /// set, because it lowered through `lower_effect_chain_ir` rather than
+    /// `lower_ability_ir`. T9a routed it through `ability_ir_at` like every other
+    /// phase-A producer, which is precisely the precondition `ability_ir_at`'s
+    /// doc block names for phase B. T9b re-constructs this variant for **all**
+    /// spell producers at once by swapping the payload to `AbilityIr` and
+    /// flipping `ability_ir_at`'s body — so the allow is deleted there, not
+    /// carried. Kept (rather than removed) because the readers, the two
+    /// exhaustive `doc.rs` matches, and the `finish()` slot accounting are the
+    /// surface T9b lands on.
+    #[allow(dead_code)]
     Spell(EffectChainIr),
     /// Triggered ability.
     Trigger(TriggerNodeIr),

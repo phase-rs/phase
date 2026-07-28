@@ -59,7 +59,7 @@ use super::oracle_dispatch::dispatch_line_nom;
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     lower_ability_ir, lower_effect_chain_ir, parse_ability_ir_with_context,
-    parse_additional_cost_instead_condition_fragment, parse_effect_chain, parse_effect_chain_ir,
+    parse_additional_cost_instead_condition_fragment, parse_effect_chain,
     parse_effect_chain_with_context, rewrite_condition_keyword,
     try_parse_temporal_delayed_trigger_ability,
 };
@@ -5556,9 +5556,26 @@ pub(crate) fn parse_oracle_ir(
         {
             ctx.subject = None;
             ctx.actor = None;
-            let effect_ir = parse_effect_chain_ir(&line, AbilityKind::Spell, &mut ctx);
-            if !has_unimplemented(&lower_effect_chain_ir(&effect_ir)) {
-                emitter.emit_at(item_line, OracleNodeIr::Spell(effect_ir));
+            // Routed through `parse_ability_ir_with_context` + `ability_ir_at`,
+            // i.e. `lower_ability_ir`, which is what `parse_effect_chain_with_context`
+            // has always been. #6123 converted this site to the raw pair
+            // `parse_effect_chain_ir` + `lower_effect_chain_ir` while hoisting the
+            // Class-H replacement producers, which silently dropped three things the
+            // entry point had been supplying: `finalize_effect_chain`, the
+            // owner-library reveal anchor, and the `WithContext` whole-body
+            // recognizer set. That made this the only spell path in the parser
+            // lowering a whole ability body without them. Restored here.
+            //
+            // The guard runs on `lower_ability_ir(&ir)` for the same reason the
+            // effect fallback below does: whether to emit at all is control flow,
+            // and `has_unimplemented` reads a lowered root, so the predicate must
+            // see the definition this site will actually emit. `lower_ability_ir`
+            // is a pure `&AbilityIr -> AbilityDefinition`, so lowering here and
+            // again in `ability_ir_at` repeats one computation rather than
+            // performing two different ones.
+            let ir = parse_ability_ir_with_context(&line, AbilityKind::Spell, &mut ctx);
+            if !has_unimplemented(&lower_ability_ir(&ir)) {
+                emitter.ability_ir_at(item_line, ir);
                 i += 1;
                 continue;
             }
