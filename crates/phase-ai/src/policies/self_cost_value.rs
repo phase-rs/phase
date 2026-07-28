@@ -246,11 +246,13 @@ mod tests {
     use crate::session::AiSession;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::bracket_estimate::CommanderBracketTier;
+    use engine::game::effects::draw::can_draw_at_least_one;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
-        ManaContribution, ManaProduction, ObjectScope, QuantityExpr, QuantityModification,
-        QuantityRef, ReplacementDefinition, SacrificeCost, StaticDefinition, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef,
+        DrawReplacementScope, Effect, ManaContribution, ManaProduction, ObjectScope, QuantityExpr,
+        QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
+        ReplacementMode, ReplacementPlayerScope, SacrificeCost, StaticDefinition, TargetFilter,
         TypeFilter, TypedFilter,
     };
     use engine::types::card_type::CoreType;
@@ -258,8 +260,10 @@ mod tests {
     use engine::types::game_state::{GameState, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::{Keyword, KeywordKind};
+    use engine::types::phase::Phase;
     use engine::types::player::PlayerId;
     use engine::types::replacements::ReplacementEvent;
+    use engine::types::statics::{ProhibitionScope, StaticMode};
     use engine::types::zones::Zone;
     use std::sync::Arc;
 
@@ -400,6 +404,91 @@ mod tests {
                 ReplacementDefinition::new(ReplacementEvent::AddCounter)
                     .quantity_modification(modification),
             );
+    }
+
+    /// `GameState::new_two_player(42)` — the state every row in this module
+    /// builds on — **with a real AI library**.
+    ///
+    /// `new_two_player` seeds NO library, and a draw from an empty library
+    /// delivers no card (CR 704.5b), so a draw fixture built on the bare
+    /// constructor prices its payoff at zero for the empty-library reason no
+    /// matter what else the fixture says. Every row whose claim depends on a
+    /// draw being WORTH something must start here, or it certifies something
+    /// other than what its comment says. Three cards — more than any fixture's
+    /// draw count — so library size is never the discriminator.
+    fn state_with_library() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(next_id()),
+                AI,
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
+        }
+        state
+    }
+
+    /// Notion Thief on the OPPONENT's battlefield: "If an opponent would draw a
+    /// card except the first one they draw in each of their draw steps, instead
+    /// that player skips that draw and you draw a card."
+    ///
+    /// Rebuilt VERBATIM from the parsed shape in `data/card-data.json`
+    /// (`.["notion thief"].replacements[0]`): `event: Draw`, `mode: Mandatory`,
+    /// `valid_player: Opponent`, `condition: ExceptFirstDrawInDrawStep`,
+    /// `draw_scope: IndividualDraw`, and an `execute` whose head effect is the
+    /// `Unimplemented("draw")` gap node carrying the `Draw{1, Controller}`
+    /// sub-ability. That `Unimplemented` head is LOAD-BEARING — it is what makes
+    /// the branch a non-Draw substitution for
+    /// `replacement::draw_is_substituted_away`, and the engine is runtime-proven
+    /// correct on this card (`notion_thief_opponent_draw_redirect.rs`). It is
+    /// reproduced, never "fixed", and is built through the single authority
+    /// `Effect::unimplemented` rather than a hand-written literal.
+    ///
+    /// The condition is a LIVE gate, not a decoration: it exempts the active
+    /// player's first draw of their own draw step, so the caller must be in the
+    /// main phase — which is where the reported drain happened — for the
+    /// replacement to apply at all.
+    fn opposing_notion_thief(state: &mut GameState) -> ObjectId {
+        state.phase = Phase::PreCombatMain;
+        let id = create_object(
+            state,
+            CardId(next_id()),
+            OPP,
+            "Notion Thief".to_string(),
+            Zone::Battlefield,
+        );
+        let mut execute =
+            AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("draw", "draw"));
+        execute.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            draw(1),
+        )));
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(DrawReplacementScope::IndividualDraw)
+            .execute(execute)
+            .condition(ReplacementCondition::ExceptFirstDrawInDrawStep);
+        replacement.valid_player = Some(ReplacementPlayerScope::Opponent);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.replacement_definitions.push(replacement);
+        id
+    }
+
+    /// A draw-restricting static (Spirit of the Labyrinth / Narset shape) on an
+    /// OPPONENT permanent, scoped to all players so it covers the AI.
+    fn add_draw_restricting_static(state: &mut GameState, mode: StaticMode) {
+        let id = create_object(
+            state,
+            CardId(next_id()),
+            OPP,
+            "Draw Hoser".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.static_definitions.push(StaticDefinition::new(mode));
     }
 
     // --- state / context helpers -----------------------------------------
@@ -546,6 +635,26 @@ mod tests {
         source_id: ObjectId,
         features: DeckFeatures,
     ) -> PolicyVerdict {
+        let config = AiConfig::default();
+        let context = context_for(&config, features);
+        verdict_for_in(&context, &config, state, source_id)
+    }
+
+    fn context_for(config: &AiConfig, features: DeckFeatures) -> AiContext {
+        let mut session = AiSession::empty();
+        session.features.insert(AI, features);
+        let mut context = AiContext::empty(&config.weights);
+        context.session = Arc::new(session);
+        context.player = AI;
+        context
+    }
+
+    fn verdict_for_in(
+        context: &AiContext,
+        config: &AiConfig,
+        state: &GameState,
+        source_id: ObjectId,
+    ) -> PolicyVerdict {
         let candidate = CandidateAction {
             action: GameAction::ActivateAbility {
                 source_id,
@@ -557,19 +666,13 @@ mod tests {
             waiting_for: WaitingFor::Priority { player: AI },
             candidates: Vec::new(),
         };
-        let config = AiConfig::default();
-        let mut session = AiSession::empty();
-        session.features.insert(AI, features);
-        let mut context = AiContext::empty(&config.weights);
-        context.session = Arc::new(session);
-        context.player = AI;
         let ctx = PolicyContext {
             state,
             decision: &decision,
             candidate: &candidate,
             ai_player: AI,
-            config: &config,
-            context: &context,
+            config,
+            context,
             cast_facts: None,
             search_depth: crate::policies::context::SearchDepth::Root,
         };
@@ -657,7 +760,11 @@ mod tests {
         // graduated score flips this to `Score` and the test goes red on shape;
         // reverting the pricing entirely flips the kind to
         // `self_cost_benefit_present` and it goes red on kind.
-        let mut state = GameState::new_two_player(42);
+        //
+        // The library is seeded because the 1000 is the whole claim: on the bare
+        // constructor's empty library the draw would price 0 and this row would
+        // certify the empty-library rule instead of the arithmetic it names.
+        let mut state = state_with_library();
         creature(&mut state, AI, "Bear", 2, 2);
         let source = source_with(
             &mut state,
@@ -1642,8 +1749,11 @@ mod tests {
         // A Clue/Food/Treasure-class crack: the artifact token prices at
         // `sacrifice_token_cost` = 0.5 against draw(1) = 1.0 → net +0.5, so the
         // comparison must NOT deprioritize it. Source is an enchantment so it
-        // cannot itself join the artifact cheapest-match pool.
-        let mut state = GameState::new_two_player(42);
+        // cannot itself join the artifact cheapest-match pool. The draw is
+        // DELIVERABLE (seeded library, no suppressor), which is what makes the
+        // 1.0 real — see `thief_suppressed_draw_is_vetoed_underwater` for the
+        // same board with the payoff removed by an opponent.
+        let mut state = state_with_library();
         artifact_token(&mut state, "Clue");
         let source = source_with(
             &mut state,
@@ -1651,10 +1761,12 @@ mod tests {
             &[CoreType::Enchantment],
             activated(draw(1), sac_artifact_cost()),
         );
-        assert_neutral(
-            &verdict_for(&state, source, plain_features()),
-            "self_cost_benefit_covers_cost",
-        );
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_neutral(&verdict, "self_cost_benefit_covers_cost");
+        // Facts pinned so this row is an EXACT negative control for
+        // `thief_suppressed_draw_is_vetoed_underwater`: same 500 cost, and the
+        // 1000 benefit that the thief takes away.
+        assert_facts(&verdict, 500, 1000);
     }
 
     #[test]
@@ -1662,7 +1774,7 @@ mod tests {
         // Same 1/1 fodder (2.5) as the underwater token case, but drawing THREE
         // cards (3.0) clears it. The quantity must be read, not assumed to be 1
         // — an implementation hardcoding SINGLE_CARD_VALUE reports `underwater`.
-        let mut state = GameState::new_two_player(42);
+        let mut state = state_with_library();
         creature(&mut state, AI, "Squire", 1, 1);
         let source = source_with(
             &mut state,
@@ -1683,7 +1795,7 @@ mod tests {
         // = 3.0 covers the CHEAPEST but not the dearest, so a binding that
         // priced anything other than the cheapest live match reports
         // `underwater` here.
-        let mut state = GameState::new_two_player(42);
+        let mut state = state_with_library();
         token_creature(&mut state, "Goblin Token", 1, 1);
         creature(&mut state, AI, "Bear", 2, 2);
         let source = source_with(
@@ -1749,7 +1861,11 @@ mod tests {
         // confident price, so one unpriceable member must suppress the whole
         // comparison rather than let a partial sum (draw 1.0 vs Bear 5.0) go
         // underwater. Reaches the `None => Unpriced` early return.
-        let mut state = GameState::new_two_player(42);
+        //
+        // The library is seeded so the named partial sum (draw 1.0) is the real
+        // one: the stand-down must be caused by the unpriceable member, not by a
+        // payoff that was worth nothing anyway.
+        let mut state = state_with_library();
         creature(&mut state, AI, "Bear", 2, 2);
         let source = source_with(
             &mut state,
@@ -1769,7 +1885,9 @@ mod tests {
         // prices this chain at draw(1) = 1.0 against the Bear's 5.0 and reports
         // `underwater` with the token silently valued at 0 — understating the
         // payoff. The sum is not a lower bound, so no conclusion is drawn.
-        let mut state = GameState::new_two_player(42);
+        // Library seeded so the "prices this chain at draw(1) = 1.0" story is
+        // literally true of this fixture.
+        let mut state = state_with_library();
         creature(&mut state, AI, "Bear", 2, 2);
         let source = source_with(
             &mut state,
@@ -1794,7 +1912,13 @@ mod tests {
         // implementation that helpfully concluded `covers_cost` from a partial
         // sum fails on the reason kind here. Together these two rows pin that
         // the stand-down never consults the net's sign.
-        let mut state = GameState::new_two_player(42);
+        //
+        // Library seeded: the "partial sum covers" half of that discrimination
+        // story is only true when the draw is DELIVERABLE. On the bare
+        // constructor's empty library the partial sum is 0.0 vs 0.5 —
+        // underwater — and this row would keep passing while telling a false
+        // story about why.
+        let mut state = state_with_library();
         artifact_token(&mut state, "Clue");
         let source = source_with(
             &mut state,
@@ -1828,7 +1952,7 @@ mod tests {
         // rescale, a clamp, a "only veto past N" threshold — produces a `Score`
         // here and goes red on shape. The facts still carry the depth, so the
         // magnitude remains observable without being actionable.
-        let mut state = GameState::new_two_player(42);
+        let mut state = state_with_library();
         creature(&mut state, AI, "Colossus", 8, 8);
         let source = source_with(
             &mut state,
@@ -1858,7 +1982,7 @@ mod tests {
         // the verdict shape and the reason kind. That `covers_cost` boundary is
         // the escape hatch a five-body board measurably drained through the
         // moment its tokens attacked and tapped.
-        let mut state = GameState::new_two_player(42);
+        let mut state = state_with_library();
         let fodder = token_creature(&mut state, "Goblin Token", 1, 1);
         state.objects.get_mut(&fodder).unwrap().tapped = true;
         let source = source_with(
@@ -1888,7 +2012,7 @@ mod tests {
         // exact-cover crack and the test goes red on shape — the veto-overreach
         // direction, paired against `tapped_fodder_still_prices_at_full_body_value`
         // one arm over.
-        let mut state = GameState::new_two_player(42);
+        let mut state = state_with_library();
         token_creature(&mut state, "Wall Token", 0, 1);
         let source = source_with(
             &mut state,
@@ -1906,7 +2030,12 @@ mod tests {
         // `OneOf` takes the payer's cheapest branch: the mana leg is out of
         // scope and prices 0, so the priced self-cost is 0 and draw(1) covers.
         // The comparison must not resurrect a cost the payer would never choose.
-        let mut state = GameState::new_two_player(42);
+        //
+        // Library seeded so the covering side is a real 1.0 against 0.0. Without
+        // it this row would read 0.0 vs 0.0 and still pass — the free-branch
+        // claim would be certified by "nothing for nothing", which is the
+        // degenerate world, not the one under test.
+        let mut state = state_with_library();
         let cost = AbilityCost::OneOf {
             costs: vec![
                 AbilityCost::PayLife {
@@ -1923,10 +2052,27 @@ mod tests {
             &[CoreType::Artifact],
             activated(draw(1), cost),
         );
-        assert_neutral(
-            &verdict_for(&state, source, plain_features()),
-            "self_cost_benefit_covers_cost",
-        );
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_neutral(&verdict, "self_cost_benefit_covers_cost");
+        // Facts pinned so this row is an EXACT test of the free branch, and so
+        // the library seeding above cannot silently disarm it.
+        //
+        // The mutant this row exists to catch is `real_self_cost`'s `OneOf` arm
+        // folding with `max` or `sum` instead of `min` (`self_cost.rs`). Under
+        // that mutant the PayLife branch prices 3 * 0.15 = 0.45, which sits
+        // BELOW `SINGLE_CARD_VALUE`, so against the seeded 1.0 benefit the net
+        // is +0.55 and the verdict is still `covers_cost` — a kind-only
+        // assertion stays green and the mutant escapes. Pinning
+        // `cost_milli == 0` catches it, and is strictly better than raising the
+        // PayLife amount because no `max`/`sum` fold can produce a zero.
+        //
+        // GENERAL RULE for anyone adding a row here: raising the benefit side
+        // (e.g. by seeding a library) moves a row TOWARD `covers_cost`, so it is
+        // safe only for rows that pin facts, or that decide before any price is
+        // consulted (`BenefitAppraisal::Unpriced`) — a row asserting
+        // `covers_cost` on kind alone is moved toward its own assertion, i.e.
+        // away from failure, and silently stops discriminating.
+        assert_facts(&verdict, 0, 1000);
     }
 
     #[test]
@@ -1947,5 +2093,342 @@ mod tests {
                 < crate::policies::strategy_helpers::SINGLE_CARD_VALUE,
             "a token must stay cheaper than the card a crack draws"
         );
+    }
+
+    // --- draw deliverability: a draw the pipeline removes buys nothing ------
+
+    #[test]
+    fn opposing_notion_thief_is_visible_to_the_draw_preflight() {
+        // FIXTURE REACH PROBE — the non-vacuity guard every row below stands
+        // on. A hand-built replacement that never reaches
+        // `find_applicable_replacements` would make every "suppressed" row
+        // below pass for the empty-library reason instead, so the fixture is
+        // proven to move the engine's own predicate BEFORE any policy verdict
+        // is consulted. Both directions are asserted in one state: seeded
+        // library + no thief ⇒ deliverable; add the thief ⇒ not deliverable.
+        let mut state = state_with_library();
+        state.phase = Phase::PreCombatMain;
+        assert!(
+            can_draw_at_least_one(&state, AI),
+            "positive control: a seeded library with no suppressor must deliver"
+        );
+        opposing_notion_thief(&mut state);
+        assert!(
+            !can_draw_at_least_one(&state, AI),
+            "an opponent's Notion Thief must remove the AI's draw"
+        );
+    }
+
+    #[test]
+    fn thief_suppressed_draw_is_vetoed_underwater() {
+        // THE REPORTED BUG, at the seam that decides it. Same Clue board as
+        // `noncreature_token_sac_for_draw_covers_cost` — the paired negative
+        // control, identical in every respect except the thief — so the ONLY
+        // difference between "crack it" and "never crack it" is an opponent's
+        // permanent that takes the card.
+        //
+        // Each activation costs a permanent and {1}{B}, draws the AI nothing,
+        // and hands an opponent a card (CR 614.6: the replaced draw never
+        // happens). Priced honestly the trade is 0.0 against 0.5 → net -0.5 →
+        // categorical veto.
+        //
+        // Revert image: restore the unconditional `count * SINGLE_CARD_VALUE`
+        // and this reads neutral `self_cost_benefit_covers_cost` with
+        // `benefit_milli` 1000 — red on the verdict SHAPE, on the reason KIND,
+        // and on the FACTS. That green-on-a-lie state is exactly what this test
+        // was watched passing in, pre-fix, before the arm was changed.
+        //
+        // Reach: `opposing_notion_thief_is_visible_to_the_draw_preflight` proves
+        // the fixture actually moves `can_draw_at_least_one`, so the zero here
+        // cannot be the empty-library confound.
+        let mut state = state_with_library();
+        artifact_token(&mut state, "Clue");
+        opposing_notion_thief(&mut state);
+        let source = source_with(
+            &mut state,
+            "Token Cracker",
+            &[CoreType::Enchantment],
+            activated(draw(1), sac_artifact_cost()),
+        );
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_reject(&verdict, "self_cost_benefit_underwater");
+        assert_facts(&verdict, 500, 0);
+    }
+
+    #[test]
+    fn draw_price_follows_the_suppressor_leaving_within_one_state() {
+        // LIVENESS / NON-LATCHING. The deliverability gate is a LIVE predicate,
+        // recomputed on every scoring pass and deliberately never snapshotted,
+        // latched, or memoized. Every other row here builds a fresh
+        // `GameState`, so none of them can observe the SAME source's price
+        // CHANGE — this row is the only place that property is pinned.
+        //
+        // THIS TEST EXISTS TO MAKE A MEMOIZATION OF `can_draw_at_least_one`
+        // FAIL LOUDLY. Caching it per turn, per game, or process-global is the
+        // obvious perf follow-up — that is exactly the set the two red-watch
+        // legs demonstrated, and it is the set that can produce the failure
+        // described below. A memo scoped to a single DECISION is NOT caught:
+        // `verdict_for_in` rebuilds `CandidateAction`/`AiDecisionContext`/
+        // `PolicyContext` per call, and the house parks search memos on
+        // `PlannerServices` (planner/mod.rs:474, `eval_cache` and
+        // `transposition_table`), which this row never constructs. That scope
+        // is harmless here: it is discarded between decisions, so it cannot
+        // outlive the suppressor's departure. `AiContext` is in that same
+        // harmless class in production — `PlannerServices` owns one per
+        // decision (planner/mod.rs:478) — but this row shares one across BOTH
+        // verdicts, so a memo parked there IS caught. `AiSession`, `GameState`
+        // and process-global are caught for the same reason.
+        //
+        // ONE HOME ESCAPES, recorded rather than papered over: a memo field on
+        // `SelfCostValuePolicy` ITSELF. This row calls
+        // `SelfCostValuePolicy.verdict(&ctx)` on a fresh value per call, while
+        // production reaches the policy through `PolicyRegistry::shared()` — a
+        // `OnceLock` static (registry.rs:433-434) holding
+        // `Box::new(SelfCostValuePolicy)` (:388) — so the policy value is
+        // process-global there and reborn here. Policy-instance state is an
+        // established pattern in this registry (`ComboLinePolicy::new()`),
+        // though none is interior-mutable today. A future interior-mutable memo
+        // on this struct would slip past this row; catching it would need a row
+        // that scores through `PolicyRegistry::shared()`.
+        // Nothing else in the suite would go red: the
+        // end-to-end arm's `suppressed_activations == 0` becomes only MORE true
+        // under a latch, and the thiefless control has no suppressor to lose.
+        // The AI would silently keep pricing its cracks at 0.0 after the thief
+        // died and decline correct play for the rest of the duration.
+        //
+        // The suppressor is removed from the LIVE state and the SAME source is
+        // re-verdicted, so a stale value has nowhere to hide.
+        let mut state = state_with_library();
+        artifact_token(&mut state, "Clue");
+        let thief = opposing_notion_thief(&mut state);
+        let source = source_with(
+            &mut state,
+            "Token Cracker",
+            &[CoreType::Enchantment],
+            activated(draw(1), sac_artifact_cost()),
+        );
+
+        let config = AiConfig::default();
+        let context = context_for(&config, plain_features());
+
+        // Suppressed: the draw buys nothing, exactly as the row above.
+        assert_facts(&verdict_for_in(&context, &config, &state, source), 500, 0);
+
+        // The thief dies. The zone gate that decides whether a replacement is
+        // even a candidate reads `obj.zone`
+        // (`replacement.rs::object_replacement_candidate_applies`,
+        // `zones_to_scan.contains(&obj.zone)`), NOT `state.battlefield` — so
+        // retaining the id out of the battlefield vector alone would leave the
+        // replacement live and make this row a no-op. Both are updated.
+        state.battlefield.retain(|&id| id != thief);
+        state.objects.get_mut(&thief).unwrap().zone = Zone::Graveyard;
+
+        // Same source, same state: the price must FOLLOW the board.
+        let revived = verdict_for_in(&context, &config, &state, source);
+        assert_neutral(&revived, "self_cost_benefit_covers_cost");
+        assert_facts(&revived, 500, 1000);
+    }
+
+    #[test]
+    fn empty_library_draw_buys_nothing() {
+        // CR 704.5b: drawing from an empty library delivers no card (it records
+        // an attempted draw and loses the game at the next SBA check), so the
+        // same Clue crack buys nothing. A DIFFERENT leg of
+        // `can_draw_at_least_one` from the thief row — `select_cards_to_draw`,
+        // not the replacement pipeline — reaching the same zero, which is what
+        // makes the gate a class fix rather than a Notion Thief special case.
+        // Deliberately built on the BARE constructor: this is the one row whose
+        // subject IS the empty library.
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        artifact_token(&mut state, "Clue");
+        let source = source_with(
+            &mut state,
+            "Token Cracker",
+            &[CoreType::Enchantment],
+            activated(draw(1), sac_artifact_cost()),
+        );
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_reject(&verdict, "self_cost_benefit_underwater");
+        assert_facts(&verdict, 500, 0);
+    }
+
+    #[test]
+    fn cant_draw_static_makes_the_crack_underwater() {
+        // The STATICS authority (`allowed_draw_count`), a third leg to the same
+        // zero — an opponent's Spirit of the Labyrinth-class permanent, not a
+        // replacement and not an empty library.
+        let mut state = state_with_library();
+        state.phase = Phase::PreCombatMain;
+        artifact_token(&mut state, "Clue");
+        add_draw_restricting_static(
+            &mut state,
+            StaticMode::CantDraw {
+                who: ProhibitionScope::AllPlayers,
+            },
+        );
+        let source = source_with(
+            &mut state,
+            "Token Cracker",
+            &[CoreType::Enchantment],
+            activated(draw(1), sac_artifact_cost()),
+        );
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_reject(&verdict, "self_cost_benefit_underwater");
+        assert_facts(&verdict, 500, 0);
+    }
+
+    #[test]
+    fn per_turn_draw_limit_suppresses_only_once_exhausted() {
+        // THE LIMIT AND ITS HOSTILE SIBLING, one fixture two states: the same
+        // `PerTurnDrawLimit { max: 1 }` reads suppressing or harmless purely
+        // from `cards_drawn_this_turn`. A gate that treated the mere PRESENCE of
+        // a draw-limiting static as suppression passes the (a) leg and fails the
+        // (b) leg — which is why both are here.
+        //
+        // CR 121.2 boundary, disclosed rather than tested: the price is binary,
+        // so with headroom 1 a `draw(3)` would still price 3.0. Over-pricing is
+        // the conservative direction (it can let a marginal crack through, never
+        // forbid a paying one).
+        for (drawn_this_turn, expect_veto) in [(1_u32, true), (0_u32, false)] {
+            let mut state = state_with_library();
+            state.phase = Phase::PreCombatMain;
+            artifact_token(&mut state, "Clue");
+            add_draw_restricting_static(
+                &mut state,
+                StaticMode::PerTurnDrawLimit {
+                    who: ProhibitionScope::AllPlayers,
+                    max: 1,
+                },
+            );
+            state.players[AI.0 as usize].cards_drawn_this_turn = drawn_this_turn;
+            let source = source_with(
+                &mut state,
+                "Token Cracker",
+                &[CoreType::Enchantment],
+                activated(draw(1), sac_artifact_cost()),
+            );
+            let verdict = verdict_for(&state, source, plain_features());
+            if expect_veto {
+                assert_reject(&verdict, "self_cost_benefit_underwater");
+                assert_facts(&verdict, 500, 0);
+            } else {
+                assert_neutral(&verdict, "self_cost_benefit_covers_cost");
+                assert_facts(&verdict, 500, 1000);
+            }
+        }
+    }
+
+    #[test]
+    fn optional_thief_mode_still_prices_the_draw() {
+        // CR 614.6: an OPTIONAL replacement is an accept/decline choice, so it
+        // can never be ASSUMED to apply — the draw is still deliverable and the
+        // crack still pays. The over-suppression guard: a gate hardened to "any
+        // Draw replacement present ⇒ zero" vetoes this and goes red.
+        //
+        // Multi-authority row: identical source, identical player scope,
+        // identical substitute — only the MODE differs from
+        // `thief_suppressed_draw_is_vetoed_underwater`.
+        let mut state = state_with_library();
+        artifact_token(&mut state, "Clue");
+        let thief = opposing_notion_thief(&mut state);
+        state
+            .objects
+            .get_mut(&thief)
+            .unwrap()
+            .replacement_definitions[0]
+            .mode = ReplacementMode::Optional { decline: None };
+        let source = source_with(
+            &mut state,
+            "Token Cracker",
+            &[CoreType::Enchantment],
+            activated(draw(1), sac_artifact_cost()),
+        );
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_neutral(&verdict, "self_cost_benefit_covers_cost");
+        assert_facts(&verdict, 500, 1000);
+    }
+
+    #[test]
+    fn opponent_self_scoped_substitution_leaves_the_ai_draw_alone() {
+        // The PLAYER-SCOPE authority. Same opponent, same mandatory non-Draw
+        // substitution, but scoped to its own controller's draws (the Chains of
+        // Mephistopheles shape, `valid_player: None` ⇒ source player only)
+        // rather than to opponents. The AI's draw is untouched, so the crack
+        // still pays.
+        //
+        // This is the row that proves the gate inherits the engine's LIVE
+        // applicability decision instead of scanning definitions by event: an
+        // implementation that asked "is there a mandatory non-Draw Draw
+        // replacement anywhere on the board?" vetoes here and goes red.
+        let mut state = state_with_library();
+        artifact_token(&mut state, "Clue");
+        let thief = opposing_notion_thief(&mut state);
+        state
+            .objects
+            .get_mut(&thief)
+            .unwrap()
+            .replacement_definitions[0]
+            .valid_player = None;
+        let source = source_with(
+            &mut state,
+            "Token Cracker",
+            &[CoreType::Enchantment],
+            activated(draw(1), sac_artifact_cost()),
+        );
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_neutral(&verdict, "self_cost_benefit_covers_cost");
+        assert_facts(&verdict, 500, 1000);
+    }
+
+    #[test]
+    fn suppressed_draw_beside_an_unmodeled_rider_still_stands_down() {
+        // COMPOSITION GUARD 1. The zero must not be allowed to manufacture a
+        // conclusion the module's own conservatism forbids: an unmodeled rider
+        // beside the dead draw still yields `Unpriced` → neutral stand-down, not
+        // a veto. The hostile version of
+        // `unmodeled_benefit_rider_stands_down_the_comparison` (same row with
+        // the draw alive), because a zeroed payoff makes the underwater
+        // conclusion look MORE attractive, not less.
+        let mut state = state_with_library();
+        artifact_token(&mut state, "Clue");
+        opposing_notion_thief(&mut state);
+        let source = source_with(
+            &mut state,
+            "Token Cracker",
+            &[CoreType::Enchantment],
+            with_rider(
+                activated(draw(1), sac_artifact_cost()),
+                create_token_rider(),
+            ),
+        );
+        assert_neutral(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_benefit_present",
+        );
+    }
+
+    #[test]
+    fn a_dead_draw_does_not_zero_its_priced_chain_mates() {
+        // COMPOSITION GUARD 2. Pricing is PER EFFECT: the suppressed draw goes
+        // to 0.0, but the lifegain beside it keeps its own price (10 *
+        // self_cost_pay_life_per_point 0.15 = 1.5), so 1.5 against the Clue's
+        // 0.5 still covers.
+        //
+        // Revert image, and the reason this row exists: an implementation that
+        // took the "the draw is dead" fact and zeroed the whole CHAIN reports
+        // `underwater` here and goes red on shape, kind, and facts.
+        let mut state = state_with_library();
+        artifact_token(&mut state, "Clue");
+        opposing_notion_thief(&mut state);
+        let source = source_with(
+            &mut state,
+            "Token Cracker",
+            &[CoreType::Enchantment],
+            with_rider(activated(draw(1), sac_artifact_cost()), gain_life(10)),
+        );
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_neutral(&verdict, "self_cost_benefit_covers_cost");
+        assert_facts(&verdict, 500, 1500);
     }
 }

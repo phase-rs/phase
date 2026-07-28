@@ -9,7 +9,8 @@
 //! action loop (`auto_play::run_ai_actions`) at a main-phase priority window and
 //! counts how many of the AI's own permanents end up in the graveyard.
 //!
-//! Three fodder classes, each measured with search ON and OFF:
+//! Three fodder classes — what the crack COSTS — each measured with search ON
+//! and OFF:
 //!
 //! | fodder | cheapest `Another` match | vs `draw(1)` | expected |
 //! |---|---|---|---|
@@ -17,14 +18,25 @@
 //! | 3/3 non-token bodies | **7.5** | 1.0 | net −6.5 → **veto** |
 //! | Clues (non-creature artifact tokens) | `sacrifice_token_cost` = **0.5** | 1.0 | net +0.5 → **covers** |
 //!
-//! The Clue class is the **positive control**: a veto that leaked into the
-//! covering class reads 0 activations there. It also tests the
+//! and a second, orthogonal axis — whether the crack BUYS anything
+//! ([`DrawSuppression`]). A Clue crack pays for itself while the draw lands and
+//! buys literally nothing once an opponent's Notion Thief takes the card
+//! (CR 614.6), so the same 0.5 cost sits on both sides of the decision
+//! depending on a permanent the AI does not control:
+//!
+//! | fodder | suppression | cost | payoff | expected |
+//! |---|---|---|---|---|
+//! | Clues | none | 0.5 | 1.0 | net +0.5 → **covers** |
+//! | Clues | opposing Notion Thief | 0.5 | **0.0** | net −0.5 → **veto** |
+//!
+//! The unsuppressed Clue class is the **positive control**: a veto that leaked
+//! into the covering class reads 0 activations there. It also tests the
 //! fodder-exhaustion → commander boundary for the first time — after all five
 //! Clues are cracked, the cheapest remaining `Another` match is the 4/4
 //! commander at intrinsic 10.0 → net −9.0 → vetoed, so the drain stops at the
 //! **economics boundary** rather than at fodder exhaustion.
 //!
-//! # OBSERVED, post-fix — all six arms, one test-runner cycle
+//! # OBSERVED, post-fix — all eight arms, one test-runner cycle
 //!
 //! | fodder | search | offered | activations | creatures | fodder left | commander |
 //! |---|---|---|---|---|---|---|
@@ -34,12 +46,64 @@
 //! | 3/3 non-token | off | 1 | **0** | 7 → 7 | 5 / 5 | safe |
 //! | Clues | on | 1 | **≥ 5** | 2 → 2 | **0 / 5** | safe |
 //! | Clues | off | 1 | **≥ 5** | 2 → 2 | **0 / 5** | safe |
+//! | Clues + opposing thief | on | 1 | **0 suppressed** (raw count not claimed) | 2 → 2 | not claimed | safe |
+//! | Clues + opposing thief | off | 1 | **0 suppressed** (raw count not claimed) | 2 → 2 | not claimed | safe |
 //!
 //! The Clue rows' `≥ 5` is *derived, not asserted*: nothing else on that board
 //! sacrifices a permanent, so `fodder_left` falling 5 → 0 means at least five
 //! outlet activations. It is recorded rather than asserted because the arm is
 //! saturated (see the saturation table below) — `fodder_left == 0` IS asserted,
 //! as the reach guard that makes the commander-boundary claim non-vacuous.
+//!
+//! The thief rows may crack Clues, and that is CORRECT: the suppressor does
+//! leave the battlefield partway through the run (measured), and every crack
+//! after that buys a real card. The asserted quantity there is therefore
+//! `suppressed_activations` — cracks taken while the engine says the payoff will
+//! not arrive AND the opposing suppressor is still on the battlefield — never
+//! the raw count, which is left unclaimed precisely because it mixes the two
+//! worlds. Pre-fix that number was **5 of 5**; post-fix it is **0**, with
+//! `suppressed_windows >= 1` proving the opportunity was there.
+//!
+//! Both halves of that conjunct are load-bearing. A dead payoff on its own is
+//! also what an empty library (CR 704.5b) or a `CantDraw` static produces, so
+//! measuring it alone would let this arm keep its name while quietly certifying
+//! "the AI declines to draw off an empty library" — MEASURED, on a probe build
+//! with the AI library shrunk 30 -> 1 so the dead payoff has a NON-thief cause:
+//! with no thief at all the payoff-only predicate counted 8 suppressed windows
+//! while the conjunct counted 0, and on the thief board both counted 23.
+//!
+//! Read those four numbers precisely, because they are not all the same kind of
+//! claim. The **8** is the measured content: a dead payoff really does arise on
+//! this fixture family from a non-thief cause. The thiefless **0** is
+//! STRUCTURAL, not evidence — `suppression=None` leaves `suppressor` as `None`,
+//! so the conjunct is 0 by construction whatever the run does. But the
+//! thief-board **23 == 23** IS a measurement, and it is the one that keeps this
+//! probe honest: adding a conjunct can only remove windows, so the conjunct
+//! reading 23 rather than 0 is what shows `suppressor_live` is not identically
+//! false on a thief board — a mis-wired id or a wrong field would have read 0.
+//! Divergence was possible (the suppressor does leave mid-run, measured above),
+//! so equality is an observation, not a forced identity. What the probe does
+//! NOT establish is the stronger claim "drops every false positive and no true
+//! positive" in general; it establishes non-vacuity on this board.
+//!
+//! They are also NOT this arm's window counts. Both were taken under the
+//! shrunk library. Under the shipped 30-card configuration the same thief board
+//! measures `suppressed_windows` 57 (search on) / 61 (search off) — so the reach
+//! guard is now non-vacuous on the tree that SHIPS, not merely on a probe build.
+//! What moved the number is INFERRED, not re-measured: most likely the shrunk
+//! library, since `build_board` seeds the AI library at one site shared by both
+//! arms (so a 30 -> 1 probe edit necessarily applied to both), the run ended on
+//! game-over rather than the 200-action cap at 126/132 actions, and Notion
+//! Thief's `ExceptFirstDrawInDrawStep` exemption means the AI still consumes one
+//! library card per turn while the thief is live — decking out early and
+//! truncating the count. Nobody re-ran the shrunk library on the shipped tree to
+//! reproduce 23. What IS measured is the NON-cause: a probe asserted the old
+//! `battlefield`-vector predicate against an `obj.zone == Battlefield` one on
+//! EVERY decision state of both runs and never fired, so the authority swap is
+//! excluded. Note the shipped predicate is now the wider
+//! `Battlefield | Command`, which that probe never ran; the two coincide here
+//! only because nothing on this fixture ever occupies `Zone::Command`, argued
+//! at the predicate itself rather than assumed here.
 //!
 //! Read the two blocks together: the veto is exact-zero on both underwater
 //! classes in both search regimes, the covering class runs to completion, and
@@ -53,6 +117,25 @@
 //! | 1/1 tokens | off | 1 | **5** | 7 → 2 |
 //! | 3/3 non-token | on | 1 | **0** | 7 → 7 |
 //! | 3/3 non-token | off | 1 | **0** | 7 → 7 |
+//!
+//! # HISTORY — the suppressed-payoff baseline, measured on THIS fixture
+//!
+//! Measured with the deliverability gate in `effect_benefit_value` temporarily
+//! reverted (the arm priced every draw at a full card, thief or no thief):
+//!
+//! | fodder | suppression | search | offered | activations | **suppressed** | AI hand |
+//! |---|---|---|---|---|---|---|
+//! | Clues | opposing thief | on | 1 | 5 | **5** | 0 → 2 |
+//! | Clues | opposing thief | off | 1 | 5 | **5** | 0 → 1 |
+//!
+//! i.e. pre-fix the AI cracked every Clue it had while an opponent's Notion
+//! Thief was live and the engine had already certified the draw would not
+//! arrive — in both search regimes, buying nothing with any of them. Post-fix
+//! that count is 0: the Clues are only spent once the suppressor is gone and the
+//! card actually lands. **The instrument is `suppressed_activations`, not the
+//! raw count**: an earlier draft of this arm asserted `activations == 0`, and
+//! that assertion is simply false about correct play, because the suppressor
+//! leaves the battlefield partway through the run.
 //!
 //! The pre-fix root-verdict diff (kept because it names the defect that was
 //! removed): `FreeOutletActivationPolicy` scored the token board **+0.5**
@@ -99,6 +182,7 @@
 //! |---|---|---|
 //! | Tokens ×2, RealBodies ×2 | **exact categorical zero** | a vetoed candidate has softmax weight exactly 0, so 0 is a *prediction*, not a ceiling. Any single activation falsifies it. |
 //! | Clues ×2 | **direction only** (`>= 1`) | the fixture is SATURATED — it holds 5 fodder against ~100 windows, so its ceiling is the fodder count, not a behavioural equilibrium. No per-window rate or magnitude may be asserted from it. |
+//! | Clues + opposing thief ×2 | **exact categorical zero, on `suppressed_activations` only** | same board, same saturation — but the CLAIM is a zero, and a zero cannot saturate. A vetoed candidate has softmax weight exactly 0, so one suppressed crack falsifies the arm. It may claim nothing about the raw activation count: the suppressor leaves mid-run and the cracks after that are correct. Paired non-vacuity probe: `suppressed_windows >= 1`. |
 //!
 //! Microscopic caveat on the "weight 0 ⇒ never sampled" claim, stated rather
 //! than left implicit: `softmax_select_pairs` draws `threshold = rng * total`,
@@ -118,18 +202,22 @@ use std::sync::Arc;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
+use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, FilterProp, QuantityExpr, SacrificeCost,
-    TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, DrawReplacementScope, Effect, FilterProp,
+    QuantityExpr, ReplacementCondition, ReplacementDefinition, ReplacementPlayerScope,
+    SacrificeCost, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 use crate::auto_play::run_ai_actions;
@@ -306,11 +394,54 @@ enum Fodder {
     Clues,
 }
 
+/// Whether an OPPONENT is taking the outlet's payoff away.
+///
+/// The second axis of the board, orthogonal to [`Fodder`]: `Fodder` sets what
+/// the crack COSTS, this sets whether it BUYS anything. The Clue class is the
+/// only one where they interact visibly — a Clue crack pays for itself while the
+/// draw lands, and buys literally nothing once an opponent's Notion Thief takes
+/// the card, which is the reported bug.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrawSuppression {
+    None,
+    /// Notion Thief on the OPPONENT's battlefield (CR 614.6): the AI's draw is
+    /// replaced by "that player skips that draw and you draw a card", so each
+    /// activation costs a permanent and `{1}{B}`, draws the AI nothing, and
+    /// hands the opponent a card.
+    OpposingNotionThief,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Measurement {
     /// Non-vacuity probe: how many outlet activations the ENGINE offered.
     offered: usize,
     activations: usize,
+    /// Outlet activations taken in a window where the engine certified the
+    /// payoff would NOT arrive (`can_draw_at_least_one == false`) AND the
+    /// opponent's suppressor was on the battlefield — both asked of the state
+    /// the AI actually decided in.
+    ///
+    /// THE quantity a draw-suppression arm must measure, and the reason a raw
+    /// `activations` count is not it. The suppressor can leave the battlefield
+    /// mid-run — MEASURED: this fixture's thief did, in both search regimes —
+    /// and every crack after that is CORRECT play, so an arm asserting
+    /// `activations == 0` would be asserting that the AI must not do the right
+    /// thing. This counter is blind to those and counts only the cracks made
+    /// into a live suppressor.
+    ///
+    /// The suppressor conjunct is load-bearing, not belt-and-braces: a dead
+    /// payoff alone is also produced by an empty library and by any `CantDraw`
+    /// static, so without it this counter would name one cause and measure
+    /// another. See the derivation at its computation site.
+    suppressed_activations: usize,
+    /// AI priority windows that had a live suppressor AND fodder still to crack
+    /// — the opportunities to make the mistake.
+    ///
+    /// NON-VACUITY PROBE for [`Self::suppressed_activations`]: a zero there is
+    /// only a claim about behaviour if the AI was actually offered the chance to
+    /// make the mistake. Zero windows means the fixture never reached the
+    /// condition under test.
+    suppressed_windows: usize,
     before_creatures: usize,
     after_creatures: usize,
     before_hand: usize,
@@ -346,8 +477,12 @@ struct Measurement {
 /// policy priors (`SelfCostValuePolicy` among them); with search ON the beam's
 /// eval/board term and the in-search `SacrificeValuePolicy` prior also
 /// participate.
-fn run_outlet_repro(fodder: Fodder, search_enabled: bool) -> Measurement {
-    let (mut state, baron, commander) = build_board(fodder);
+fn run_outlet_repro(
+    fodder: Fodder,
+    suppression: DrawSuppression,
+    search_enabled: bool,
+) -> Measurement {
+    let (mut state, baron, commander, suppressor) = build_board(fodder, suppression);
     state.waiting_for = engine::types::game_state::WaitingFor::Priority { player: AI };
 
     let before_creatures = ai_creature_count(&state);
@@ -378,22 +513,115 @@ fn run_outlet_repro(fodder: Fodder, search_enabled: bool) -> Measurement {
     let session = AiSession::arc_from_game(&state);
     let mut rng = SmallRng::seed_from_u64(9);
 
+    // The pre-run state, kept so every action's PRE-state is available below:
+    // `run_ai_actions` mutates `state` in place, so after the call `state` is
+    // the final state and `results[i - 1].state` is action `i`'s pre-state — for
+    // `i == 0` there would otherwise be nothing to look at.
+    let initial = state.clone();
     let run = run_ai_actions(&mut state, &ai_players, &configs, &mut rng, &session);
 
-    let activations = run
-        .results
-        .iter()
-        .filter(|r| {
-            matches!(
-                r.action,
-                GameAction::ActivateAbility { source_id, .. } if source_id == baron
-            )
-        })
-        .count();
+    let pre_state = |i: usize| -> &GameState {
+        if i == 0 {
+            &initial
+        } else {
+            &run.results[i - 1].state
+        }
+    };
+    let is_outlet = |action: &GameAction| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == baron);
+
+    let mut activations = 0;
+    let mut suppressed_activations = 0;
+    let mut suppressed_windows = 0;
+    for (i, r) in run.results.iter().enumerate() {
+        let pre = pre_state(i);
+        // CR 614.6 / CR 704.5b: the engine's own verdict on whether the outlet's
+        // draw would put a card in the AI's hand, asked of the state the AI
+        // actually decided in.
+        //
+        // `payoff_dead` alone is a WEAKER property than this arm's name claims:
+        // it is equally true when the AI's library has run out (CR 704.5b) or
+        // under any future `CantDraw` on the board. Shrink the AI library,
+        // lengthen the run, or make the thief enter later and every window's
+        // `payoff_dead` would start coming from the empty library instead —
+        // `suppressed_windows >= 1` and `suppressed_activations == 0` would both
+        // still pass while the arm silently certified only "the AI declines to
+        // draw off an empty library". The conjunct below pins the cause to the
+        // OPPONENT'S SUPPRESSOR, which is what this arm is named for.
+        //
+        // This is a PER-WINDOW conjunct, and is deliberately NOT the deleted
+        // `suppressors_left` final-state guard: the thief legitimately leaves
+        // mid-run and cracks after it leaves are CORRECT play, so as an
+        // end-of-run measure it was wrong and was removed. Asked of each
+        // decision's own pre-state it is exactly right. Do not "simplify" it
+        // back into a final-state count.
+        // Zone set mirrors the production candidacy gate:
+        // `object_replacement_candidate_applies` (replacement.rs:6168) tests
+        // `zones_to_scan.contains(&obj.zone)` with
+        // `zones_to_scan = [Zone::Battlefield, Zone::Command]` (:6210-6212), so
+        // reading Battlefield alone would be NARROWER than the authority this
+        // conjunct claims to mirror — and narrower under-counts
+        // `suppressed_activations`, which is asserted == 0.
+        //
+        // Direction of the residual gap ON THE ZONE/LIMINAL AXIS: this
+        // predicate is equal-or-BROADER than production, never narrower.
+        // Production's zone term is
+        // `!is_liminal_source && zones_to_scan.contains(&obj.zone)`, and the
+        // `!is_liminal_source` conjunct narrows PRODUCTION, not this. The other
+        // liminal path — resolving the subject through `state.liminal_entries`
+        // before `state.objects` — is structurally unreachable for the event
+        // this mirrors: `liminal_entry_ref` returns `Some` only for `TokenEntry`
+        // and `ZoneChange { to: Zone::Battlefield }`, and `_ => None` covers
+        // `ProposedEvent::Draw`.
+        //
+        // The universal is scoped to that axis deliberately. Candidacy is a
+        // DISJUNCTION, and one other disjunct is live for a Draw:
+        // `is_applicable_dredge` (replacement.rs, `object_replacement_candidate_applies`)
+        // matches `ProposedEvent::Draw` explicitly and requires
+        // `obj.zone == Zone::Graveyard`, so for a graveyard object carrying a
+        // dredge value PRODUCTION is broader and this predicate narrower — the
+        // direction the paragraph above rules out. Inert here: no object in this
+        // fixture has a dredge value.
+        //
+        // Broader is the safe direction for the `suppressed_activations == 0`
+        // assertion below, and the WEAKENING direction for its paired
+        // `suppressed_windows >= 1` reach guard, which the same predicate gates.
+        // (Both are cited by name rather than line: this block's line citations
+        // have gone stale three rounds running, each time because an edit to the
+        // block moved the targets it cites.) Measured delta on this fixture:
+        // ZERO. Nothing here ever occupies `Zone::Command`, and the reason is
+        // the FORMAT, not the board — `build_board` does set `is_commander` on
+        // the AI's creature, but it builds through `FormatConfig::standard()`,
+        // which sets `command_zone: false`, so `check_commander_zone_return`
+        // (sba.rs) returns before selecting anything. The window guard measures
+        // 57/61 against a threshold of 1. Re-check this if a fixture ever
+        // enables `command_zone`, or otherwise puts a replacement source in the
+        // command zone.
+        let suppressor_live = suppressor.is_some_and(|id| {
+            pre.objects
+                .get(&id)
+                .is_some_and(|object| matches!(object.zone, Zone::Battlefield | Zone::Command))
+        });
+        let payoff_dead = !can_draw_at_least_one(pre, AI);
+        let suppressed = payoff_dead && suppressor_live;
+        if suppressed
+            && matches!(pre.waiting_for, WaitingFor::Priority { player } if player == AI)
+            && ai_fodder_count(pre, baron, commander) > 0
+        {
+            suppressed_windows += 1;
+        }
+        if is_outlet(&r.action) {
+            activations += 1;
+            if suppressed {
+                suppressed_activations += 1;
+            }
+        }
+    }
 
     let measurement = Measurement {
         offered,
         activations,
+        suppressed_activations,
+        suppressed_windows,
         before_creatures,
         after_creatures: ai_creature_count(&state),
         before_hand,
@@ -403,15 +631,27 @@ fn run_outlet_repro(fodder: Fodder, search_enabled: bool) -> Measurement {
         actions_taken: run.results.len(),
     };
 
-    eprintln!("REPRO: fodder={fodder:?} search={search_enabled} {measurement:?}");
+    eprintln!(
+        "REPRO: fodder={fodder:?} suppression={suppression:?} search={search_enabled} \
+         {measurement:?}"
+    );
 
     measurement
 }
 
 /// The board under test: the outlet, a commander, five expendable bodies of the
-/// requested kind, twelve Swamps, and real libraries for both seats.
-/// Returns `(state, outlet_id, commander_id)`.
-fn build_board(fodder: Fodder) -> (GameState, ObjectId, ObjectId) {
+/// requested kind, twelve Swamps, real libraries for both seats, and — under
+/// [`DrawSuppression::OpposingNotionThief`] — an opposing thief taking the
+/// payoff. Returns `(state, outlet_id, commander_id, suppressor_id)`.
+///
+/// The suppressor id is `Option` rather than a sentinel because the suppression
+/// axis genuinely has a "no such object" case
+/// ([`DrawSuppression::None`]) — the `Option` IS the axis, so a caller cannot
+/// ask whether the suppressor is live without first handling its absence.
+fn build_board(
+    fodder: Fodder,
+    suppression: DrawSuppression,
+) -> (GameState, ObjectId, ObjectId, Option<ObjectId>) {
     let mut ids = Ids::new();
     let mut state = GameState::new_two_player(4242);
     state.phase = Phase::PreCombatMain;
@@ -469,7 +709,78 @@ fn build_board(fodder: Fodder) -> (GameState, ObjectId, ObjectId) {
         );
     }
 
-    (state, baron, commander)
+    let suppressor = match suppression {
+        DrawSuppression::None => None,
+        DrawSuppression::OpposingNotionThief => {
+            Some(add_opposing_notion_thief(&mut state, &mut ids))
+        }
+    };
+
+    (state, baron, commander, suppressor)
+}
+
+/// Notion Thief under the OPPONENT: "If an opponent would draw a card except the
+/// first one they draw in each of their draw steps, instead that player skips
+/// that draw and you draw a card."
+///
+/// Rebuilt VERBATIM from the parsed shape in `data/card-data.json`
+/// (`.["notion thief"].replacements[0]`): `event: Draw`, `mode: Mandatory`,
+/// `valid_player: Opponent`, `condition: ExceptFirstDrawInDrawStep`,
+/// `draw_scope: IndividualDraw`, and an `execute` whose head is the
+/// `Unimplemented("draw")` gap node carrying the `Draw{1, Controller}`
+/// sub-ability. That head is LOAD-BEARING — it is what makes the branch a
+/// non-Draw substitution — and the engine is runtime-proven correct on this card
+/// (`crates/engine/tests/integration/notion_thief_opponent_draw_redirect.rs`),
+/// so it is reproduced here, never "fixed". Built through the single authority
+/// `Effect::unimplemented`, not a hand-written literal.
+///
+/// The board runs in `PreCombatMain` (set by `build_board`), so the
+/// `ExceptFirstDrawInDrawStep` condition — which exempts only the active
+/// player's FIRST draw of their own draw step — never exempts these draws.
+///
+/// SCAFFOLDING, stated because it is a deliberate deviation from the printed
+/// card: the body is granted indestructible. The printed 3/1 does not survive
+/// this fixture's combat — MEASURED: it died in both search regimes, and every
+/// activation the AI then made was made with `can_draw_at_least_one == true`,
+/// i.e. correct play against a board that no longer had a thief on it. An arm
+/// whose suppressor dies halfway is not an instrument for a suppression fix. The
+/// body is not what this arm measures; the replacement is, and that is
+/// reproduced verbatim.
+///
+/// Indestructible is necessary but NOT sufficient, and the fixture does not
+/// pretend otherwise: even indestructible the thief leaves before the run ends.
+/// That is why the enforcement is `Measurement::suppressed_activations` — a
+/// per-decision measure — rather than any final-state count of suppressors.
+fn add_opposing_notion_thief(state: &mut GameState, ids: &mut Ids) -> ObjectId {
+    let id = create_object(
+        state,
+        ids.next(),
+        OPP,
+        "Notion Thief".to_string(),
+        Zone::Battlefield,
+    );
+    let mut execute =
+        AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("draw", "draw"));
+    execute.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )));
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
+        .draw_scope(DrawReplacementScope::IndividualDraw)
+        .execute(execute)
+        .condition(ReplacementCondition::ExceptFirstDrawInDrawStep);
+    replacement.valid_player = Some(ReplacementPlayerScope::Opponent);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.power = Some(3);
+    obj.toughness = Some(1);
+    obj.summoning_sick = false;
+    obj.keywords.push(Keyword::Indestructible);
+    obj.replacement_definitions.push(replacement);
+    id
 }
 
 #[test]
@@ -497,12 +808,49 @@ fn cost_vs_benefit_has_exactly_one_authority() {
     // the fodder actually attacks and taps). Division of labor, stated so the
     // gap is not mistaken for an oversight.
     // Kind discrimination cannot be faked by delta-0 equality.
-    for (fodder, expectation) in [
-        (Fodder::Tokens, Expectation::Veto { cost_milli: 2500 }),
-        (Fodder::RealBodies, Expectation::Veto { cost_milli: 7500 }),
-        (Fodder::Clues, Expectation::Covers { cost_milli: 500 }),
+    for (fodder, suppression, expectation) in [
+        (
+            Fodder::Tokens,
+            DrawSuppression::None,
+            Expectation::Veto {
+                cost_milli: 2500,
+                benefit_milli: 1000,
+            },
+        ),
+        (
+            Fodder::RealBodies,
+            DrawSuppression::None,
+            Expectation::Veto {
+                cost_milli: 7500,
+                benefit_milli: 1000,
+            },
+        ),
+        (
+            Fodder::Clues,
+            DrawSuppression::None,
+            Expectation::Covers {
+                cost_milli: 500,
+                benefit_milli: 1000,
+            },
+        ),
+        // The suppressed row: same Clue board, same 0.5 cost, payoff taken by an
+        // opponent (CR 614.6) — so the SAME crack the row above certifies as
+        // covering is certified losing here, by the same single authority. This
+        // is the deterministic half of
+        // `the_covers_class_stops_when_an_opponent_takes_the_payoff`: it pins
+        // the VERDICT independently of the softmax, so a runtime arm that moves
+        // for some other reason cannot be mistaken for a pricing failure (or
+        // vice versa).
+        (
+            Fodder::Clues,
+            DrawSuppression::OpposingNotionThief,
+            Expectation::Veto {
+                cost_milli: 500,
+                benefit_milli: 0,
+            },
+        ),
     ] {
-        let (mut state, baron, _commander) = build_board(fodder);
+        let (mut state, baron, _commander, _suppressor) = build_board(fodder, suppression);
         state.waiting_for = engine::types::game_state::WaitingFor::Priority { player: AI };
 
         // Reach-guard: the ability index is PROVEN, not assumed.
@@ -592,7 +940,10 @@ fn cost_vs_benefit_has_exactly_one_authority() {
             .unwrap_or_else(|| panic!("SelfCostValue must price the outlet ({fodder:?})"));
         match (expectation, self_cost) {
             (
-                Expectation::Veto { cost_milli },
+                Expectation::Veto {
+                    cost_milli,
+                    benefit_milli,
+                },
                 crate::policies::registry::PolicyVerdict::Reject { reason },
             ) => {
                 assert_eq!(
@@ -601,12 +952,15 @@ fn cost_vs_benefit_has_exactly_one_authority() {
                 );
                 assert_eq!(
                     reason.facts,
-                    vec![("cost_milli", cost_milli), ("benefit_milli", 1000)],
-                    "{fodder:?}: the veto must carry the comparison it certifies"
+                    vec![("cost_milli", cost_milli), ("benefit_milli", benefit_milli)],
+                    "{fodder:?}/{suppression:?}: the veto must carry the comparison it certifies"
                 );
             }
             (
-                Expectation::Covers { cost_milli },
+                Expectation::Covers {
+                    cost_milli,
+                    benefit_milli,
+                },
                 crate::policies::registry::PolicyVerdict::Score { delta, reason },
             ) => {
                 assert_eq!(
@@ -616,7 +970,7 @@ fn cost_vs_benefit_has_exactly_one_authority() {
                 assert_eq!(*delta, 0.0, "{fodder:?}: covers is neutral, not a bonus");
                 assert_eq!(
                     reason.facts,
-                    vec![("cost_milli", cost_milli), ("benefit_milli", 1000)],
+                    vec![("cost_milli", cost_milli), ("benefit_milli", benefit_milli)],
                 );
             }
             (expected, got) => panic!(
@@ -634,9 +988,9 @@ fn cost_vs_benefit_has_exactly_one_authority() {
 #[derive(Debug, Clone, Copy)]
 enum Expectation {
     /// A certified-losing trade: `Reject`, kind `self_cost_benefit_underwater`.
-    Veto { cost_milli: i64 },
+    Veto { cost_milli: i64, benefit_milli: i64 },
     /// A trade that pays for itself: neutral `self_cost_benefit_covers_cost`.
-    Covers { cost_milli: i64 },
+    Covers { cost_milli: i64, benefit_milli: i64 },
 }
 
 /// Measure BOTH search states before asserting either, so one state's failure
@@ -644,10 +998,18 @@ enum Expectation {
 /// OFF the decision is made purely by the root policy priors; with search ON the
 /// beam's eval and the in-search priors also participate. A restraint that only
 /// holds in one of the two states is not a restraint.
-fn measure_both_search_states(fodder: Fodder) -> Vec<(bool, Measurement)> {
+fn measure_both_search_states(
+    fodder: Fodder,
+    suppression: DrawSuppression,
+) -> Vec<(bool, Measurement)> {
     [true, false]
         .into_iter()
-        .map(|search_enabled| (search_enabled, run_outlet_repro(fodder, search_enabled)))
+        .map(|search_enabled| {
+            (
+                search_enabled,
+                run_outlet_repro(fodder, suppression, search_enabled),
+            )
+        })
         .collect()
 }
 
@@ -679,7 +1041,7 @@ fn token_fodder_board_is_never_drained_with_or_without_search() {
     // weight exactly 0, so any single activation falsifies the veto's mechanics
     // (or reveals a third path to the outlet) — see the saturation table in the
     // module docs.
-    for (search_enabled, m) in measure_both_search_states(Fodder::Tokens) {
+    for (search_enabled, m) in measure_both_search_states(Fodder::Tokens, DrawSuppression::None) {
         assert_offered(search_enabled, &m);
         assert_eq!(
             m.activations, 0,
@@ -713,7 +1075,8 @@ fn a_real_bodied_board_declines_the_outlet_with_or_without_search() {
     // with search ON it measured 6 activations and a SACRIFICED COMMANDER, while
     // the search-OFF root argmax declined. That is the measurement that proved a
     // finite negative is not a bound under repeated softmax sampling.
-    for (search_enabled, m) in measure_both_search_states(Fodder::RealBodies) {
+    for (search_enabled, m) in measure_both_search_states(Fodder::RealBodies, DrawSuppression::None)
+    {
         assert_offered(search_enabled, &m);
         assert_eq!(
             m.activations, 0,
@@ -756,7 +1119,7 @@ fn the_covers_class_still_activates_with_or_without_search() {
     // stops because the ECONOMICS say stop, not because it ran out of things to
     // eat. In the measured pre-veto world this exact scenario consumed the
     // commander on its 6th activation.
-    for (search_enabled, m) in measure_both_search_states(Fodder::Clues) {
+    for (search_enabled, m) in measure_both_search_states(Fodder::Clues, DrawSuppression::None) {
         assert_offered(search_enabled, &m);
         assert!(
             m.activations >= 1,
@@ -812,6 +1175,75 @@ fn the_covers_class_still_activates_with_or_without_search() {
         assert!(
             !m.commander_gone,
             "the commander must survive fodder exhaustion (search={search_enabled})"
+        );
+    }
+}
+
+#[test]
+fn the_covers_class_stops_when_an_opponent_takes_the_payoff() {
+    // THE REPORTED BUG, end to end. Same Clue board as
+    // `the_covers_class_still_activates_with_or_without_search` — its live
+    // positive control, identical in every respect except the thief — so the
+    // only difference between "crack all five" and "crack none" is an opponent
+    // permanent that takes the card (CR 614.6: the replaced draw never happens).
+    // Cracking here costs a permanent and {1}{B} per activation, draws the AI
+    // nothing, and hands an opponent a card.
+    //
+    // WHAT IS ASSERTED, and why it is NOT the raw activation count. The measured
+    // quantity is `suppressed_activations` — cracks made in a window where the
+    // engine certified the payoff would not arrive. A raw `activations == 0`
+    // would be WRONG here: the thief is a creature on a board that plays real
+    // combat and it does leave, and once it is gone cracking Clues for cards is
+    // CORRECT play. That is measurement, not speculation — the first draft of
+    // this arm asserted `activations == 0`, went red at 5, and per-activation
+    // instrumentation showed all 5 taken with `can_draw_at_least_one == true`,
+    // i.e. after the suppressor was gone.
+    //
+    // MEASURED, both directions, on this exact fixture (not predicted):
+    //   * pre-fix, gate reverted: **5 of 5** activations were made into a LIVE
+    //     suppressor, in both search regimes (AI hand ended at 2 with search on,
+    //     1 with it off);
+    //   * post-fix: **0**, below. The raw activation count is deliberately NOT
+    //     asserted — it mixes suppressed windows with the correct-play windows
+    //     after the suppressor leaves.
+    //
+    // CLAIM CLASS — and why this arm escapes the saturation ceiling that binds
+    // its thief-less control: that control may claim DIRECTION ONLY (`>= 1`,
+    // 5 fodder against ~100 windows). This arm claims **exact categorical
+    // zero**, which per the same binding table is a PREDICTION, not a ceiling —
+    // a vetoed candidate has softmax weight exactly 0, so any single suppressed
+    // activation falsifies it. Saturation cannot manufacture that pass.
+    for (search_enabled, m) in
+        measure_both_search_states(Fodder::Clues, DrawSuppression::OpposingNotionThief)
+    {
+        assert_offered(search_enabled, &m);
+        // NON-VACUITY PROBE. The zero below is a statement about behaviour only
+        // if the AI was actually offered the chance to make the mistake: its own
+        // priority, fodder still on board, and the engine saying the payoff is
+        // dead. Zero such windows would mean the fixture never reached the
+        // condition under test.
+        assert!(
+            m.suppressed_windows >= 1,
+            "reach guard (search={search_enabled}): the run must contain at \
+             least one window with live suppression AND fodder left, or the \
+             zero below is vacuous. Got {}.",
+            m.suppressed_windows
+        );
+        assert_eq!(
+            m.suppressed_activations, 0,
+            "a crack whose payoff the engine says will not arrive must never be \
+             taken (search={search_enabled}); {} of {} activations were made \
+             into a live suppressor",
+            m.suppressed_activations, m.activations
+        );
+        assert_eq!(
+            m.after_creatures, m.before_creatures,
+            "no body may be surrendered (search={search_enabled}): {}->{}",
+            m.before_creatures, m.after_creatures
+        );
+        assert!(
+            !m.commander_gone,
+            "the commander must survive (search={search_enabled})"
         );
     }
 }

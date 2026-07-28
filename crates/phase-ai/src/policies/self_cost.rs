@@ -12,7 +12,19 @@
 //! shapes on the `AbilityCost` tree, (2) prices the self-inflicted cost, and
 //! (3) decides whether the ability's immediate payoff is trivial, and prices
 //! the payoffs it can price confidently (draws, out-of-pressure lifegain) for
-//! the net-value comparison. It is deliberately conservative: anything whose
+//! the net-value comparison — a draw **the AI itself takes**
+//! (`Draw{Controller}`) is priced at ZERO when the engine certifies that no card
+//! will arrive at all (a `CantDraw`/draw-limit static, the replacement pipeline,
+//! or an empty library), and at its nominal count otherwise. Two scope limits
+//! that this sentence must not be read past: it is a
+//! deliverable/not-deliverable gate, NOT a count-accurate one (see the
+//! disclosure on `effect_benefit_value`'s `Draw` arm for the two legs that still
+//! over-price a partially-delivered draw), and it reaches `Controller` draws
+//! ONLY — every other draw target falls to the `_ => None` arm and is
+//! `Unpriced`, so a payoff like "each player draws a card" is stood down rather
+//! than gated.
+//!
+//! It is deliberately conservative: anything whose
 //! payoff scales or is ambiguous — mana production, land search, large or
 //! power-derived damage, beneficial counters — is treated as non-trivial, so
 //! ramp, fixing, burn finishers, and counter payoffs are never suppressed.
@@ -34,6 +46,7 @@
 
 use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::game::effects::counters::{preview_counter_addition, CounterAdditionPreview};
+use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::players;
@@ -395,12 +408,52 @@ fn effect_benefit_value(
         // library into their hand. ... It may also be done as part of a cost or
         // effect of a spell or ability." One drawn card is exactly one unit of
         // the registry's score contract (`registry.rs`: delta 1.0 == one card).
+        //
+        // CR 614.6 + CR 614.11: a draw the live pipeline REMOVES — mandatorily
+        // prevented, substituted away by a non-Draw chain (Notion Thief,
+        // Hullbreacher, Chains of Mephistopheles), or count-modified to zero —
+        // "never happens"; a `CantDraw` static, an exhausted `PerTurnDrawLimit`,
+        // or an empty library (CR 704.5b, where a mere zero is if anything an
+        // UNDER-penalty) likewise delivers no card. Such a draw buys exactly
+        // nothing, so it is priced 0.0 — priced, NOT `None`: `None` is
+        // `BenefitAppraisal::Unpriced`, which stands the whole comparison down
+        // and ALLOWS the activation, the opposite of what the engine has just
+        // certified. The zero is not a heuristic: `can_draw_at_least_one`
+        // delegates every leg to the authority the live pipeline itself uses
+        // (`proposed_draw_survives_replacement`), and an OPTIONAL replacement is
+        // never assumed to apply, so a deliverable draw is never under-priced.
+        //
+        // Deliberately binary, not count-aware. `can_draw_at_least_one` asks
+        // only whether ONE card arrives, so two legs still price the full
+        // nominal count of a draw the engine will only partially deliver:
+        //   1. Draw-limit headroom shorter than the count: with a
+        //      `PerTurnDrawLimit` headroom of 1 a `draw(3)` still prices 3.0
+        //      (CR 121.2 performs it as three individual draws, only one of
+        //      which is permitted).
+        //   2. LIBRARY shorter than the count — strictly the worse leg. The
+        //      preflight probes with count 1, so a 1-card library against a
+        //      `draw(3)` reports deliverable and prices 3.0; one card arrives
+        //      and the two failed draw attempts LOSE the game at the next SBA
+        //      check (CR 704.5b). `select_cards_to_draw` is explicit that a
+        //      partial draw (`count > library.len()`) yields only what is
+        //      available, so this is a certified loss the net comparison cannot
+        //      see — not merely an over-price.
+        // Both legs are PRE-EXISTING (this arm priced 3.0 before the
+        // deliverability gate existed) and are DISCLOSED, not fixed, here.
+        // Over-pricing is the conservative direction for this module's charter
+        // — it can let a marginal crack through, never forbid a paying one —
+        // but note that over-pricing a benefit is under-vetoing, so neither leg
+        // should be read as harmless. Pricing them correctly needs a new `pub`
+        // engine authority ("how many of N will actually arrive"), which is
+        // tracked as its own unit rather than built for one consumer here.
         Effect::Draw {
             count,
             target: TargetFilter::Controller,
-        } => Some(
-            resolve_quantity(state, count, ai_player, source_id).max(0) as f64 * SINGLE_CARD_VALUE,
-        ),
+        } => Some(if can_draw_at_least_one(state, ai_player) {
+            resolve_quantity(state, count, ai_player, source_id).max(0) as f64 * SINGLE_CARD_VALUE
+        } else {
+            0.0
+        }),
         // Lifegain to the controller, life not a pressured resource: priced on
         // the same per-point axis as paying life. Under life pressure the value
         // is genuinely larger and hard to bound — stand down (`None`),
