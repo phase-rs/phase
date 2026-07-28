@@ -14,7 +14,7 @@ use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
-use crate::zone_eval::is_intrinsic_mana_source;
+use crate::eval::board_stats;
 
 /// Tempo classification of a deck — a coarse strategic axis used by the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -73,22 +73,19 @@ pub(crate) fn controlled_lands(state: &GameState, player: PlayerId) -> usize {
 /// self-sacrificing sources (Treasure, Gold, Lotus Petal) per CR 701.21.
 ///
 /// **Counts permanents, not pips** — a Sol Ring counts once though it produces
-/// two mana. That is the campaign-wide convention (`eval::mana_source_count`
+/// two mana. That is the campaign-wide convention (`BoardStats::mana_sources`
 /// states it in the same words), and the resulting bias is one-directional and
 /// safe: a deck full of multi-mana rocks reads slightly *behind* rather than
 /// slightly ahead, so the realization can only be over-protective of mana
 /// sources, never wrongly willing to pitch one.
 ///
-/// `eval::mana_source_count` is byte-identical to this body but private to
-/// `eval.rs`, which belongs to another unit's in-flight scope; this is the
-/// dedup site when that lands.
+/// The count **is** `BoardStats::mana_sources`, by delegation. This body was a
+/// deliberate byte-identical copy of the then-private `eval::mana_source_count`,
+/// left with an instruction to dedup here once `eval.rs`'s in-flight unit
+/// landed; Unit 5 landed it, deleted that function, and honored the instruction.
 pub(crate) fn controlled_mana_sources(state: &GameState, player: PlayerId) -> usize {
-    state
-        .battlefield
-        .iter()
-        .filter_map(|id| state.objects.get(id))
-        .filter(|obj| obj.controller == player && is_intrinsic_mana_source(obj))
-        .count()
+    // `BoardStats::mana_sources` increments from zero — never negative, the cast is lossless.
+    board_stats(state, player).mana_sources as usize
 }
 
 impl PlanSnapshot {

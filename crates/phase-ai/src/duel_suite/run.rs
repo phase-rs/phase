@@ -207,11 +207,19 @@ pub fn run_suite(db: &CardDatabase, options: &SuiteOptions) -> Result<SuiteRepor
     let mut harvest_sink = match &options.harvest_output {
         Some(path) => {
             let meta = harvest::HarvestMeta {
-                // schema 2 adds the `mana_development_offset` control column.
+                // schema 2 added the `mana_development_offset` control column as
+                // a SELF-ONLY absolute count; schema 3 keeps the column name and
+                // changes its semantics to a signed self-minus-opponent
+                // DIFFERENTIAL (Unit 5).
+                //
                 // Provenance only — the trainer reads columns by name and never
-                // inspects this field; the mixed-corpus protection is the
-                // `defaulted_rows` warning in `scripts/train_eval_weights.py`.
-                schema: 2,
+                // inspects this field. Because the column keeps its NAME across
+                // this change, `scripts/train_eval_weights.py`'s `defaulted_rows`
+                // warning does NOT fire on a mixed pre/post corpus, so this bump
+                // lets a human reading a shard's meta line tell which semantics
+                // that shard carries — it is not a pooling guard. A column rename
+                // or a trainer-side minimum-schema check is the real repair.
+                schema: 3,
                 git_sha: options.git_sha.clone(),
                 card_data_hash: options.card_data_hash.clone(),
                 difficulty: format!("{:?}", options.difficulty),

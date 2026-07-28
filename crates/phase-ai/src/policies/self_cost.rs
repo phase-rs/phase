@@ -551,7 +551,7 @@ fn ai_life_critical(state: &GameState, ai_player: PlayerId) -> bool {
     let ai_life = state.players[ai_player.0 as usize].life;
     let opp_total_power: i32 = players::opponents(state, ai_player)
         .iter()
-        .map(|&opp| board_stats(state, opp).1)
+        .map(|&opp| board_stats(state, opp).power)
         .sum();
     ai_life <= 5 || ai_life <= opp_total_power
 }

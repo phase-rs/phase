@@ -226,9 +226,12 @@ pub struct EvalFeatures {
     /// Fixed-coefficient energy offset (`energy × 0.1`). Added after weighting, so
     /// excluded from `weighted_total`.
     pub energy_offset: f64,
-    /// Fixed-coefficient mana-development offset
-    /// (`MANA_DEVELOPMENT_COEFF × min(sources, MANA_SOURCE_TARGET)`). Added after
-    /// weighting, so excluded from `weighted_total`.
+    /// Fixed-coefficient mana-development offset — a signed DIFFERENTIAL as of
+    /// Unit 5 (`MANA_DEVELOPMENT_COEFF × clamp(self_sources − opponent_aggregate,
+    /// −MANA_SOURCE_TARGET, +MANA_SOURCE_TARGET)`; opponent sources are
+    /// threat-weighted at `opponents.len() >= 2` and averaged at ≤ 1, mirroring
+    /// `card_advantage_breakdown`). NEGATIVE when opponents are ahead on mana.
+    /// Added after weighting, so excluded from `weighted_total`.
     pub mana_development_offset: f64,
 }
 
@@ -254,8 +257,11 @@ pub fn strategic_intent(state: &GameState, player: PlayerId) -> StrategicIntent 
         return StrategicIntent::PreserveAdvantage;
     }
 
-    let (_, my_power, _, _) = board_stats(state, player);
-    let total_opp_power: i32 = opponents.iter().map(|&opp| board_stats(state, opp).1).sum();
+    let my_power = board_stats(state, player).power;
+    let total_opp_power: i32 = opponents
+        .iter()
+        .map(|&opp| board_stats(state, opp).power)
+        .sum();
     let min_opp_life = opponents
         .iter()
         .map(|&opp| state.players[opp.0 as usize].life)
@@ -328,7 +334,8 @@ pub fn threat_level_projected(
 
     // Board presence: creature count from current state; power from projected
     // state when available (catches growth velocity in the strategic signal).
-    let (creatures, base_power, _toughness, _nc) = board_stats(state, target);
+    let target_stats = board_stats(state, target);
+    let (creatures, base_power) = (target_stats.creatures, target_stats.power);
     let power = projection
         .map(|p| projected_power(&p.state, target))
         .unwrap_or(base_power);
@@ -429,6 +436,13 @@ pub fn evaluate_features(state: &GameState, player: PlayerId) -> Result<EvalFeat
     let mut features = EvalFeatures::default();
     let opp_count = opponents.len().max(1) as f64;
 
+    // Both branches below assign these exactly once: the evaluator's own board
+    // accounting, and the branch's own aggregation of opponent mana sources
+    // (threat-weighted at >= 2 opponents, averaged at <= 1). They feed the
+    // mana-development differential after the branch.
+    let my_stats: BoardStats;
+    let opp_sources: f64;
+
     // For multiplayer (3+), use threat-weighted opponent scoring
     if opponents.len() >= 2 {
         // Compute threat levels and use them as weights
@@ -444,31 +458,34 @@ pub fn evaluate_features(state: &GameState, player: PlayerId) -> Result<EvalFeat
         let mut weighted_opp_toughness = 0.0;
         let mut weighted_opp_hand = 0.0;
         let mut weighted_opp_nc = 0.0;
+        let mut weighted_opp_sources = 0.0;
 
         for &(opp, threat) in &threats {
             let w = threat / total_threat;
             let o = &state.players[opp.0 as usize];
-            let (opp_creatures, opp_power, opp_toughness, opp_nc) = board_stats(state, opp);
+            let opp_stats = board_stats(state, opp);
             weighted_opp_life += o.life as f64 * w;
-            weighted_opp_creatures += opp_creatures as f64 * w;
-            weighted_opp_power += opp_power as f64 * w;
-            weighted_opp_toughness += opp_toughness as f64 * w;
+            weighted_opp_creatures += opp_stats.creatures as f64 * w;
+            weighted_opp_power += opp_stats.power as f64 * w;
+            weighted_opp_toughness += opp_stats.toughness as f64 * w;
             weighted_opp_hand += o.hand.len() as f64 * w;
-            weighted_opp_nc += opp_nc as f64 * w;
+            weighted_opp_nc += opp_stats.non_creatures as f64 * w;
+            weighted_opp_sources += opp_stats.mana_sources as f64 * w;
         }
 
         // Life differential (against threat-weighted opponent)
         features.life = p.life as f64 - weighted_opp_life;
 
-        let (my_creatures, my_power, my_toughness, my_nc) = board_stats(state, player);
-        features.board_presence = my_creatures as f64 - weighted_opp_creatures;
-        features.board_power = my_power as f64 - weighted_opp_power;
-        features.board_toughness = my_toughness as f64 - weighted_opp_toughness;
+        my_stats = board_stats(state, player);
+        opp_sources = weighted_opp_sources;
+        features.board_presence = my_stats.creatures as f64 - weighted_opp_creatures;
+        features.board_power = my_stats.power as f64 - weighted_opp_power;
+        features.board_toughness = my_stats.toughness as f64 - weighted_opp_toughness;
         features.hand_size = p.hand.len() as f64 - weighted_opp_hand;
-        features.card_advantage_breakdown = my_nc as f64 - weighted_opp_nc;
+        features.card_advantage_breakdown = my_stats.non_creatures as f64 - weighted_opp_nc;
 
-        if p.life as f64 > weighted_opp_life && my_power > 0 {
-            features.aggression = my_power as f64;
+        if p.life as f64 > weighted_opp_life && my_stats.power > 0 {
+            features.aggression = my_stats.power as f64;
         }
     } else {
         // 2-player path: original logic (no threat weighting overhead)
@@ -478,33 +495,41 @@ pub fn evaluate_features(state: &GameState, player: PlayerId) -> Result<EvalFeat
         let mut total_opp_toughness = 0;
         let mut total_opp_hand_size = 0;
         let mut total_opp_nc = 0;
+        let mut total_opp_sources = 0;
         for &opp in &opponents {
             let o = &state.players[opp.0 as usize];
             total_opp_life += o.life;
-            let (opp_creatures, opp_power, opp_toughness, opp_nc) = board_stats(state, opp);
-            total_opp_creatures += opp_creatures;
-            total_opp_power += opp_power;
-            total_opp_toughness += opp_toughness;
+            let opp_stats = board_stats(state, opp);
+            total_opp_creatures += opp_stats.creatures;
+            total_opp_power += opp_stats.power;
+            total_opp_toughness += opp_stats.toughness;
             total_opp_hand_size += o.hand.len();
-            total_opp_nc += opp_nc;
+            total_opp_nc += opp_stats.non_creatures;
+            total_opp_sources += opp_stats.mana_sources;
         }
 
         let avg_opp_life = total_opp_life as f64 / opp_count;
         features.life = p.life as f64 - avg_opp_life;
 
-        let (my_creatures, my_power, my_toughness, my_nc) = board_stats(state, player);
-        features.board_presence = (my_creatures - total_opp_creatures) as f64;
-        features.board_power = (my_power - total_opp_power) as f64;
-        features.board_toughness = (my_toughness - total_opp_toughness) as f64;
+        my_stats = board_stats(state, player);
+        features.board_presence = (my_stats.creatures - total_opp_creatures) as f64;
+        features.board_power = (my_stats.power - total_opp_power) as f64;
+        features.board_toughness = (my_stats.toughness - total_opp_toughness) as f64;
 
         let avg_opp_hand = total_opp_hand_size as f64 / opp_count;
         features.hand_size = p.hand.len() as f64 - avg_opp_hand;
 
         let avg_opp_nc = total_opp_nc as f64 / opp_count;
-        features.card_advantage_breakdown = my_nc as f64 - avg_opp_nc;
+        features.card_advantage_breakdown = my_stats.non_creatures as f64 - avg_opp_nc;
 
-        if p.life as f64 > avg_opp_life && my_power > 0 {
-            features.aggression = my_power as f64;
+        // Mirrors `card_advantage_breakdown` above — an AVERAGE, not a raw total
+        // (§6.4): at exactly one opponent the two agree, and the distinction
+        // makes a degenerate state behave like `card_advantage` rather than like
+        // `board_presence`.
+        opp_sources = total_opp_sources as f64 / opp_count;
+
+        if p.life as f64 > avg_opp_life && my_stats.power > 0 {
+            features.aggression = my_stats.power as f64;
         }
     }
 
@@ -514,12 +539,20 @@ pub fn evaluate_features(state: &GameState, player: PlayerId) -> Result<EvalFeat
     // on `EvalFeatures` separately rather than folded into a weighted feature.
     features.energy_offset = p.energy as f64 * 0.1;
 
-    // CR 106.1: mana is the primary resource. `board_stats` credits a land in
-    // neither bucket while the same card in hand is worth `w.hand_size`, so
-    // without this term the weighted delta of the controller's own land drop is
-    // strictly negative. Fixed-coefficient offset applied AFTER weighting, exactly
-    // like the energy offset above.
-    features.mana_development_offset = mana_development_offset(mana_source_count(state, player));
+    // CR 106.1: mana is the primary resource, and the trainer fits it as its own
+    // column. `scripts/train_eval_weights.py` regresses `land_diff` alongside
+    // `creature_count_diff` and `non_creature_diff` and then DISCARDS it, so no
+    // fitted weight covers mana development and `board_stats` credits a land in
+    // neither exclusive bucket. This is the serve-side reconstruction of that
+    // discarded column — a DIFFERENTIAL, as the trainer fits it and as every other
+    // feature here is, aggregated exactly like `card_advantage_breakdown` above.
+    //
+    // CR 305.1 + CR 305.2: playing a land is a once-per-turn special action, so a
+    // missed drop is permanently lost — the marginal must strictly exceed the
+    // land-drop cost. Fixed-coefficient offset applied AFTER weighting, exactly
+    // like the energy offset above; excluded from `weighted_total`.
+    features.mana_development_offset =
+        mana_development_offset(f64::from(my_stats.mana_sources) - opp_sources);
 
     Ok(features)
 }
@@ -572,11 +605,51 @@ fn projected_power(state: &GameState, player: PlayerId) -> i32 {
         .sum()
 }
 
-pub fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) {
+/// Per-player battlefield accounting, one pass.
+///
+/// Replaces a `(i32, i32, i32, i32)` tuple whose elements were read positionally
+/// at ten call sites.
+pub struct BoardStats {
+    /// Creature permanents controlled by the player. Feeds `board_presence`
+    /// (17Lands `creature_count_diff`) and `threat_level_projected`.
+    pub creatures: i32,
+    pub power: i32,
+    pub toughness: i32,
+    /// Non-creature, non-land permanents. Feeds `card_advantage_breakdown`
+    /// (17Lands `non_creature_diff`).
+    pub non_creatures: i32,
+    /// CR 106.1: standing mana sources — `zone_eval::is_intrinsic_mana_source`.
+    /// Counts permanents, not pips — a two-mana rock counts once.
+    ///
+    /// **Deliberately NOT a fourth exclusive class.** `mana_sources` cross-cuts
+    /// the creature / non-creature-non-land / land partition above, for two
+    /// INDEPENDENT reasons — only the first of which is a rules fact:
+    ///
+    /// 1. **Multiple card types (CR 205.2b).** "Some objects have more than one
+    ///    card type (for example, an artifact creature). Such objects satisfy
+    ///    the criteria for any effect that applies to any of their card types."
+    ///    A Dryad Arbor is a `Land Creature`, so it is counted once in
+    ///    `creatures` AND once here. The partition's `else if` structurally
+    ///    cannot express that, and 205.2b is why it should not try.
+    /// 2. **A mana ability on a single-type object.** A Llanowar Elves is a
+    ///    `Creature` only; a Signet is an `Artifact` only. Each is counted in
+    ///    its own exclusive bucket AND here, because `is_intrinsic_mana_source`'s
+    ///    second disjunct inspects ABILITIES, not card types. **This carries no
+    ///    CR number** — it is an AI board-accounting choice about what counts as
+    ///    a mana source, not a rules requirement, and 205.2b does not reach it.
+    ///
+    /// CR 701.21: one-shot self-sacrificing sources (Treasure, Gold, Lotus
+    /// Petal) do NOT count — see `zone_eval::is_intrinsic_mana_source`.
+    /// Cracking one must not read as losing a mana source.
+    pub mana_sources: i32,
+}
+
+pub fn board_stats(state: &GameState, player: PlayerId) -> BoardStats {
     let mut creatures = 0;
     let mut total_power = 0;
     let mut total_toughness = 0;
     let mut non_creatures = 0;
+    let mut mana_sources = 0;
 
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
@@ -589,15 +662,26 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) 
                     // Non-creature, non-land permanents (enchantments, artifacts, planeswalkers)
                     non_creatures += 1;
                 }
+                // Cross-cuts the partition above: see `BoardStats::mana_sources`.
+                // A creature-land is counted in BOTH `creatures` and here.
+                if zone_eval::is_intrinsic_mana_source(obj) {
+                    mana_sources += 1;
+                }
             }
         }
     }
 
-    (creatures, total_power, total_toughness, non_creatures)
+    BoardStats {
+        creatures,
+        power: total_power,
+        toughness: total_toughness,
+        non_creatures,
+        mana_sources,
+    }
 }
 
-/// Marginal value of one controlled mana source, in the same units as the
-/// weighted feature sum.
+/// Marginal value of one unit of mana-source differential, in the same units as
+/// the weighted feature sum.
 ///
 /// Sized to strictly exceed the worst-case weighted cost of a land drop across
 /// every shipped archetype and turn phase. That cost is dominated by
@@ -611,8 +695,8 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) 
 /// land-drop cost, headroom is NOT uniform: it ranges from 14.4% (Combo) to
 /// ~771% (Aggro), because serve-time `hand_size` spans 8.3x across archetypes
 /// (0.75 Aggro .. 6.25 Combo). In card-equivalent terms (`policies::registry`:
-/// `delta = 1.0` is one card) one mana source is worth ~1.2 cards to Combo and
-/// ~10 cards to Aggro. This is an accepted consequence of the fixed-coefficient
+/// `delta = 1.0` is one card) one unit of differential is worth ~1.2 cards to
+/// Combo and ~10 cards to Aggro. This is an accepted consequence of the fixed-coefficient
 /// design; the archetype-relative alternative was considered and rejected.
 ///
 /// `mana_development_floor_holds_for_every_archetype_and_phase` recomputes this
@@ -624,13 +708,21 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) 
 ///
 /// This constant carries no archetype term and is applied *after* weighting
 /// (`evaluate_state_breakdown`), so no `ArchetypeMultipliers` entry can scale it:
-/// **every archetype receives exactly +7.5 per source.** Only the counterweight
+/// **every archetype receives exactly +7.5 per unit of differential.** Only the counterweight
 /// differs, and it differs enormously, so read Control and Aggro as the measured
 /// *bounds* of one uniform effect rather than as "the archetypes that invert".
 /// Margins for a 2-mana renewable rock versus a comparable 2-mana 3/3 body, late
 /// phase, at the eval layer (`rock − body`; positive = the rock is preferred).
 /// The "with it" column is a real measurement from `tests/ai_quality.rs`, not a
 /// prediction; the "without" column is that value less the coefficient.
+///
+/// **Re-measured under Unit 5's differential and UNCHANGED.** `rock_vs_body_fixture`
+/// gives P0 two basic lands and gives P1 nothing on the battlefield, so the
+/// opponent source count is live and **zero**: the differential equals the
+/// evaluator's own count and the arithmetic is identical to the absolute form.
+/// The numbers below are from a fresh run, not carried forward — a disclosed
+/// measurement is re-taken whenever the function producing it changes, and an
+/// unchanged number is only trustworthy if someone actually re-ran it.
 ///
 /// | Archetype | Without the offset | With it | Standing coverage |
 /// |---|---|---|---|
@@ -650,11 +742,12 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) 
 ///
 /// # The premium applies symmetrically to LOSING a source
 ///
-/// `mana_source_count` is recomputed live from the battlefield, so a source that
-/// leaves takes its +7.5 with it. Where that can actually change a decision is
+/// `BoardStats::mana_sources` is recomputed live from the battlefield, so a
+/// source that leaves moves the differential by one and takes its `C` with it.
+/// Where that can actually change a decision is
 /// narrower than "any board loss", so name the mechanism rather than the
 /// situation. The offset has exactly two consumers: `evaluate_state_breakdown`
-/// (`:553`, whence `EvaluationBreakdown::total` feeds
+/// (whence `EvaluationBreakdown::total` feeds
 /// `PlannerServices::evaluate_with_strategy`) and `FeatureRow::extract` (a
 /// harvested control column the trainer discards). It can therefore move a
 /// choice ONLY through the search leaf eval, i.e. only when
@@ -727,8 +820,8 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) 
 ///   single-permanent form (`engine::ai_support::candidates`).
 ///   `deterministic_choice` has no arm for the variant, so those candidates
 ///   reach scoring, and each gives up exactly one permanent — so a pair of them
-///   differs by one `mana_source_count` whenever exactly one of the two is a
-///   source, which is where this offset discriminates.
+///   differs by one `BoardStats::mana_sources` whenever exactly one of the two
+///   is a source, which is where this offset discriminates.
 ///   `WardSacrificeChoice`'s other two branches are excluded, and the exclusion
 ///   is structural rather than a matter of degree: the aggregate-power
 ///   (`min_total_power`) form maps a single deterministic
@@ -755,7 +848,7 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) 
 ///   `PayCost { ScaledMana }` / `IfYouDo` / `Untap`.
 ///   **The permanents are not given up.** Its candidates do reach
 ///   scoring, but every one of them leaves the board population identical, so
-///   `mana_source_count` is equal across them and this offset cannot
+///   `BoardStats::mana_sources` is equal across them and this offset cannot
 ///   discriminate. (`Untap` downstream does not change that: the count is a
 ///   development measure that ignores tapped state — see
 ///   `zone_eval::is_intrinsic_mana_source`.)
@@ -790,7 +883,12 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) 
 /// which permanent left, the one that kept the dork scores higher. It becomes an
 /// observable *decision* only where a scored candidate pair actually differs by
 /// one source — per the routing, the ward-cost sacrifice and the optional
-/// (`up_to`) residue. It is **not** a claim about blocks, and **not** a claim
+/// (`up_to`) residue — **plus, now that the term is a differential, any pair
+/// that differs in an *opponent's* source count (removal of an opponent's mana
+/// source, a countered ramp spell, an opponent's simulated land drop), and — in
+/// the `opponents.len() >= 2` branch only — any pair that differs merely in an
+/// opponent's *threat weight*, with no source changing hands at all. See the
+/// threat-weight channel section below.** It is **not** a claim about blocks, and **not** a claim
 /// about the ordinary sacrifice prompt; both are decided elsewhere, by
 /// `combat_ai::choose_blockers_with_profile` and by `sacrifice_key` respectively.
 /// An earlier revision of this block asserted the block case outright ("the AI
@@ -799,76 +897,124 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) 
 /// time it was written. This is the same accepted consequence as
 /// the acquisition inversion, disclosed separately because it is a different
 /// decision class with a different counterweight.
+///
+/// # The threat-weight channel — an ACCEPTED, SIGN-INVERTING cost (Unit 5)
+///
+/// New with the differential, and disclosed rather than fixed. In the
+/// threat-weighted branch the opponent aggregate is `Σ wᵢ·sourcesᵢ` with
+///
+/// ```text
+/// wᵢ           = threat_level(state, player, oppᵢ) / total_threat
+/// threat_level = board_score·0.4 + life_ratio·0.2 + hand_score·0.15 + cmd_threat·0.25
+/// ```
+///
+/// **So any candidate that changes an opponent's threat level moves this term
+/// with no mana source changing hands at all.** The normalisation is the
+/// exposed surface and it is **sign-inverting**: lowering a *mana-rich* seat's
+/// threat shifts weight onto *mana-poor* seats and lowers the aggregate, which
+/// *raises* the evaluator's mana score; lowering a *mana-poor* seat's threat
+/// does the reverse, so the AI is *penalized* for removing a threat from the
+/// mana-poor seat.
+///
+/// Worked example — evaluator p0, two opponents, p1 with 8 sources and p2 with
+/// 2, both at threat `0.4`. Killing a 4/4 moves that seat's `board_score` by
+/// `−(1·0.3 + 4·0.7)/10 = −0.31`, i.e. `Δthreat = −0.124`:
+///
+/// | Step | `w₁ / w₂` | `opp_agg` | Δ offset |
+/// |---|---|---|---|
+/// | before | .5000 / .5000 | 5.0000 | — |
+/// | kill the 4/4 on the **8-source** seat | .40828 / .59172 | 4.4497 | **+4.13** |
+/// | kill the same 4/4 on the **2-source** seat | .59172 / .40828 | 5.5503 | **−4.13** |
+///
+/// Three facts bound the severity, and the first is a genuine defence:
+///
+/// 1. **`card_advantage_breakdown` already has the identical channel** — it is
+///    the other `board_stats`-derived count, threat-weighted by the same `wᵢ`.
+///    This is the house pattern, not a new exposure.
+/// 2. **The magnitudes differ.** `card_advantage`'s channel is scaled by the
+///    fitted weight `w.card_advantage` (≈ 0.778 at midrange/late); this one is
+///    scaled by `C = 7.5`, which carries **no weight of its own** because it is
+///    applied after weighting — exactly 3× the largest fitted weight in the file.
+/// 3. **The spread is wider.** The per-opponent mana-source spread in Commander
+///    (2 vs 12) exceeds the non-creature-permanent spread, so the same weight
+///    perturbation moves more.
+///
+/// **Branch guard: `opponents.len() >= 2`.** Two-player games are entirely
+/// unaffected — the ≤ 1-opponent branch averages and has no weights to move.
+/// That is also why `cargo ai-gate` cannot see this channel: `MatchupSpec` has
+/// exactly two seats.
+///
+/// Pinned by `threat_reweighting_moves_the_mana_term_without_a_source_changing_hands`,
+/// which asserts the sign inversion, its symmetry, and a magnitude floor at a
+/// fixture whose inputs it also asserts. Recorded as accepted-cost rider **R8**;
+/// **D4** ruled to keep the threat weights rather than switch to a plain mean,
+/// because a plain mean would make this the only differently-aggregated feature
+/// in the file. The named root fix is rider **R5** (teach `threat_level` about
+/// mana development), which is circular with the aggregate it would feed and is
+/// genuinely larger than this unit.
 const MANA_DEVELOPMENT_COEFF: f64 = 7.5;
 
-/// Source count past which an additional mana source is worth nothing. Below it
-/// the marginal is flat; at and above it the offset is constant, so the AI
-/// cannot farm value by flooding.
+/// Differential past which an additional mana source is worth nothing. Below it
+/// the marginal is flat; at and above it the offset is constant, so a LEAD
+/// cannot be farmed — but see "Saturation is now RELATIVE" below: at equal
+/// counts an additional source still earns the full coefficient.
 ///
-/// 12 covers modern Tron (7 lands) and reaches the **top** of a typical Commander
-/// board of 8–12 sources including rocks — it is the upper end of that band, not
-/// its middle. Ceiling is `MANA_DEVELOPMENT_COEFF * 12 = 90.0` against
-/// `WIN_SCORE = 10000.0`, so terminal scores are never approached.
+/// Ceiling is `MANA_DEVELOPMENT_COEFF * 12 = 90.0` against
+/// `WIN_SCORE = 10000.0`, so terminal scores are never approached — unchanged
+/// from the absolute form. Under Unit 5, `12` bounds a **lead**, not a board: a
+/// 12-source *differential* is past any realistic Commander asymmetry, where the
+/// same 12 as an absolute count sat at the top of an ordinary 8–12 source board.
 ///
-/// # The reported bug RETURNS IN FULL at and above this cap
+/// # Saturation is now RELATIVE, and the above-cap regression is closed
 ///
-/// State plainly what the cap does, because "flooding earns nothing" reads as
-/// neutrality and it is not neutral. Past the target the marginal is exactly
-/// `0.0`, but **the land-drop cost is unchanged** — the card still leaves hand
-/// (`w.hand_size`, up to 6.25 for Combo/late), still loses its `zone_quality`
-/// hand-castability contribution, and still dilutes `synergy`, for a binding total
-/// of **6.5545**. So at `sources >= 12` the weighted delta of the controller's own
-/// land drop is strictly negative again and `PlayLand` once more scores below
-/// `PassPriority`: the exact symptom this unit exists to fix, restored.
+/// The bound now applies to the **differential**, not to an absolute count.
+/// Marginal is exactly `C` for `|d| < S` and exactly `0.0` beyond, so unilateral
+/// development still cannot be farmed — but a land drop at 12-vs-12 sources
+/// moves `d` from 0 to 1 and earns the full `C`, which is the above-cap
+/// regression Unit 1 disclosed here and this unit closed.
 ///
-/// This is reachable, not theoretical: Commander from roughly turn 10, with 12
-/// lands/rocks on the battlefield and **two or more** lands in hand (two, so
-/// `search::prefer_land_drop`'s single-land shortcut declines and the decision
-/// actually reaches scoring). Closing it is the root fix — this coefficient
-/// deliberately does not attempt it, because raising or removing the cap trades
-/// the flooding defect back in.
+/// **What remains open:** a *mutual* saturation. If one player's source count
+/// exceeds the other's by more than `S`, the marginal is `0.0` again and the land
+/// drop scores negative for the leader. That requires a **13-source lead**, which
+/// is far rarer than the absolute-form cap it replaces (which triggered at 12
+/// sources *absolute*, i.e. ordinary turn-10 Commander). Recorded as rider R6.
 ///
-/// `mana_development_floor_holds_for_every_archetype_and_phase` pins **both**
-/// poles: `marginal > cost` below the cap, and `marginal < cost` at and above it.
-/// The above-cap assertion is deliberately an assertion rather than prose so the
-/// successor unit inherits a failing record when it fixes this, instead of having
-/// to rediscover it.
+/// `mana_development_floor_holds_for_every_archetype_and_phase` pins the
+/// land-drop floor at the former cap: at 12 self sources against 12 opponent
+/// sources the differential moves `0 → 1`, so the marginal is the full `C` and
+/// strictly exceeds the land-drop cost for every archetype × phase. That is the
+/// regime Unit 1 left broken, and the test re-anchors its INPUT to it rather
+/// than pinning an above-cap failing record.
 const MANA_SOURCE_TARGET: i32 = 12;
 
-/// Count of *renewable* mana sources `player` controls on the battlefield.
+/// Fixed-coefficient value of a mana-source DIFFERENTIAL.
 ///
-/// CR 106.1: mana is the primary resource. Counts permanents, not pips — a
-/// two-mana rock counts once. Never called for an opponent **on any production
-/// path** (every non-test caller passes the evaluating player), so this adds
-/// exactly one battlefield pass per evaluation. Note this is a property of the
-/// call sites, not an invariant the compiler enforces: existing unit tests do
-/// evaluate for `PlayerId(1)`, and that is fine — it simply costs a second pass.
+/// CR 106.1: mana is the primary resource. CR 305.1 + CR 305.2: playing a land
+/// is a once-per-turn special action, so a missed drop is a permanently lost
+/// increment — every unit of differential up to the target must be worth
+/// strictly more than the card it came from.
 ///
-/// CR 701.21: one-shot self-sacrificing sources (Treasure, Gold, Lotus Petal)
-/// do NOT count — see `zone_eval::is_intrinsic_mana_source`. Cracking one must
-/// not read as losing a mana source.
-fn mana_source_count(state: &GameState, player: PlayerId) -> i32 {
-    state
-        .battlefield
-        .iter()
-        .filter_map(|id| state.objects.get(id))
-        .filter(|obj| obj.controller == player && zone_eval::is_intrinsic_mana_source(obj))
-        .count() as i32
-}
-
-/// Fixed-coefficient value of controlling `sources` mana sources.
+/// `f(d) = C · clamp(d, -S, S)`. Marginal is exactly `C` for `|d| < S` and
+/// exactly `0.0` beyond, so unilateral development still saturates and cannot be
+/// farmed — but it saturates on the RELATIVE axis. That is what closes the
+/// above-cap regression Unit 1 disclosed: at 12-vs-12 sources a land drop moves
+/// `d` from 0 to 1 and earns the full `C`, where the absolute form earned 0.
 ///
-/// CR 305.1 + CR 305.2: playing a land is a once-per-turn special action, so a
-/// missed drop is a permanently lost increment — every source up to the target
-/// must be worth strictly more than the card it came from. Beyond the target the
-/// marginal is exactly zero, so flooding earns nothing — and, stated without
-/// euphemism, the land drop therefore scores strictly *negative* again above the
-/// cap and the reported bug returns. See `MANA_SOURCE_TARGET` for the full
-/// disclosure and the assertion that pins it.
+/// SIGNED, unlike Unit 1's absolute form: an opponent ahead on mana yields a
+/// negative term, floor `-C·S`. Across candidates that differ only in the
+/// evaluator's OWN permanents, the entire opponent aggregate — source counts
+/// and threat weights alike — is constant and cancels exactly (pinned by
+/// `mana_development_differential_cancels_across_same_node_candidates`, whose
+/// fixture is exactly such a self-only pair). A candidate that changes an
+/// opponent's source count (land destruction, a countered ramp spell, an
+/// opponent's simulated land drop) moves the term at that same node — the
+/// intended effect. Range is `±90.0` against `WIN_SCORE = 10000.0`, so terminal
+/// scores are never approached — unchanged from the absolute form.
 ///
-/// `f(n) = C · min(n, S)`. Marginal of the k-th source is `C` for `k <= S` and
-/// exactly `0.0` for `k > S`. With `C = 7.5`, `S = 12`: `f(0) = 0`,
-/// `f(12) = f(20) = 90.0`.
+/// A candidate can also move the term with NO mana source changing hands, by
+/// changing an opponent's *threat weight* — see `MANA_DEVELOPMENT_COEFF`'s
+/// "threat-weight channel" section and
+/// `threat_reweighting_moves_the_mana_term_without_a_source_changing_hands`.
 ///
 /// A strictly-diminishing curve was considered and rejected: to keep the
 /// marginal above the 6.55 floor at `k = S` it would have to start at roughly
@@ -881,8 +1027,12 @@ fn mana_source_count(state: &GameState, player: PlayerId) -> i32 {
 /// the per-archetype maximum of `castable_bonus × 0.3 × m[6]`). Directionally
 /// correct and accepted uncompensated; compensating would require this term to
 /// read tapped state, which is the defect it exists to avoid.
-fn mana_development_offset(sources: i32) -> f64 {
-    MANA_DEVELOPMENT_COEFF * f64::from(sources.clamp(0, MANA_SOURCE_TARGET))
+fn mana_development_offset(differential: f64) -> f64 {
+    MANA_DEVELOPMENT_COEFF
+        * differential.clamp(
+            -f64::from(MANA_SOURCE_TARGET),
+            f64::from(MANA_SOURCE_TARGET),
+        )
 }
 
 /// Configurable keyword bonuses for creature evaluation.
@@ -1103,44 +1253,87 @@ mod tests {
         id
     }
 
-    /// Row 2: the curve is monotone, flat-marginal up to the target, then exactly
-    /// zero. The flat-tail equality is the discriminator an unclamped linear
-    /// implementation fails while still passing monotonicity.
+    /// Row 2: the curve is monotone and flat-marginal inside the band on BOTH
+    /// signs, then exactly zero past either pole.
+    ///
+    /// `f(-1) == -C` is the load-bearing assertion. Unit 1's version of this test
+    /// asserted `f(-1) == 0.0` with the comment "`clamp` floors at 0, so a
+    /// nonsensical count is inert"; under Unit 5 a negative argument is not
+    /// nonsensical — it is the opponent being ahead on mana. `clamp(d, 0.0, S)`,
+    /// the natural half-migration and the single most likely implementation
+    /// error, satisfies every other assertion in this test and fails exactly
+    /// there. The flat-tail equalities remain the discriminator an unclamped
+    /// linear implementation fails while still passing monotonicity.
     #[test]
     fn mana_development_offset_is_flat_then_saturates() {
-        assert_eq!(mana_development_offset(0), 0.0);
-        // Negative pole: `clamp` floors at 0, so a nonsensical count is inert.
-        assert_eq!(mana_development_offset(-1), 0.0);
+        assert_eq!(mana_development_offset(0.0), 0.0);
+        // Negative pole: an opponent one source ahead is worth exactly -C.
+        assert_eq!(mana_development_offset(-1.0), -MANA_DEVELOPMENT_COEFF);
 
-        for k in 1..=MANA_SOURCE_TARGET {
-            let marginal = mana_development_offset(k) - mana_development_offset(k - 1);
+        // Flat marginal everywhere inside the band, on both sides of zero.
+        for k in (-MANA_SOURCE_TARGET + 1)..=MANA_SOURCE_TARGET {
+            let marginal =
+                mana_development_offset(f64::from(k)) - mana_development_offset(f64::from(k - 1));
             assert!(
                 (marginal - MANA_DEVELOPMENT_COEFF).abs() < 1e-9,
-                "marginal of source {k} must be exactly the coefficient, got {marginal}"
+                "marginal at differential {k} must be exactly the coefficient, got {marginal}"
             );
         }
+        // Saturated past BOTH poles.
         for k in (MANA_SOURCE_TARGET + 1)..=(MANA_SOURCE_TARGET + 8) {
-            let marginal = mana_development_offset(k) - mana_development_offset(k - 1);
-            assert_eq!(marginal, 0.0, "marginal past the target must be exactly 0");
+            let marginal =
+                mana_development_offset(f64::from(k)) - mana_development_offset(f64::from(k - 1));
+            assert_eq!(
+                marginal, 0.0,
+                "marginal past the positive target must be exactly 0"
+            );
+            let mirrored =
+                mana_development_offset(f64::from(-k + 1)) - mana_development_offset(f64::from(-k));
+            assert_eq!(
+                mirrored, 0.0,
+                "marginal past the negative target must be exactly 0"
+            );
         }
 
-        // Monotone non-decreasing across the whole range.
-        for k in 0..=(MANA_SOURCE_TARGET + 8) {
-            assert!(mana_development_offset(k + 1) >= mana_development_offset(k));
+        // Monotone non-decreasing, and antisymmetric, across the whole signed range.
+        for k in (-MANA_SOURCE_TARGET - 8)..=(MANA_SOURCE_TARGET + 8) {
+            assert!(
+                mana_development_offset(f64::from(k + 1)) >= mana_development_offset(f64::from(k))
+            );
+            assert!(
+                (mana_development_offset(f64::from(-k)) + mana_development_offset(f64::from(k)))
+                    .abs()
+                    < 1e-9,
+                "f(-d) must be exactly -f(d) at d={k}"
+            );
         }
 
-        // Flat-tail discriminator: an unclamped `COEFF * n` passes every
-        // monotonicity assertion above and fails exactly here.
+        // Flat-tail discriminator, now mirrored: an unclamped `COEFF * d` passes
+        // every monotonicity assertion above and fails exactly here.
         assert_eq!(
-            mana_development_offset(MANA_SOURCE_TARGET),
-            mana_development_offset(MANA_SOURCE_TARGET + 8)
+            mana_development_offset(f64::from(MANA_SOURCE_TARGET)),
+            mana_development_offset(f64::from(MANA_SOURCE_TARGET + 8))
+        );
+        assert_eq!(
+            mana_development_offset(f64::from(-MANA_SOURCE_TARGET)),
+            mana_development_offset(f64::from(-MANA_SOURCE_TARGET - 8))
         );
     }
 
-    /// Row 3: the floor holds at every source count, for every archetype, in every
-    /// phase — computed from the LIVE weight table, never from literals, so a
-    /// retrain or a multiplier edit that invalidates `MANA_DEVELOPMENT_COEFF`
-    /// fails here loudly instead of silently reverting the land-drop bug.
+    /// Row 3: the floor holds at every differential inside the band — and, as of
+    /// Unit 5, AT THE FORMER CAP — for every archetype, in every phase, computed
+    /// from the LIVE weight table, never from literals, so a retrain or a
+    /// multiplier edit that invalidates `MANA_DEVELOPMENT_COEFF` fails here
+    /// loudly instead of silently reverting the land-drop bug.
+    ///
+    /// Unit 1's version of this test fed an ABSOLUTE source count to a function
+    /// that now takes a DIFFERENTIAL, and pinned an above-cap failing record
+    /// (`worst_above_cap_deficit ∈ 6.55..6.56`) for its successor to inherit.
+    /// Unit 5 re-anchors the INPUT rather than relaxing the assertion — a
+    /// category error no compiler catches, because both are numbers — and the
+    /// record plus `MANA_SOURCE_TARGET`'s "RETURNS IN FULL" disclosure are
+    /// deleted together, as Unit 1's own instruction required, earned by the
+    /// `deficit <= 0.0` assertion below rather than by an automatic red.
     ///
     /// This is the coverage `ai-gate` structurally cannot provide: `MatchupSpec`
     /// has exactly two seats, so the suite never reaches the Commander regime.
@@ -1174,7 +1367,7 @@ mod tests {
         const SYNERGY_DILUTION_BOUND: f64 = 1.8 * 0.2929;
 
         let learned = EvalWeightSet::learned();
-        let mut worst_above_cap_deficit = f64::NEG_INFINITY;
+        let mut worst_land_drop_deficit_at_the_former_cap = f64::NEG_INFINITY;
         for (phase_name, base) in [
             ("early", &learned.early),
             ("mid", &learned.mid),
@@ -1194,64 +1387,87 @@ mod tests {
                     + (zw.hand_card_base + zw.castable_bonus) * w.zone_quality
                     + SYNERGY_DILUTION_BOUND * w.synergy;
                 for k in 1..=MANA_SOURCE_TARGET {
-                    let marginal = mana_development_offset(k) - mana_development_offset(k - 1);
+                    let marginal = mana_development_offset(f64::from(k))
+                        - mana_development_offset(f64::from(k - 1));
                     assert!(
                         marginal > cost,
                         "{phase_name}/{archetype:?} k={k}: marginal {marginal} <= land-drop cost {cost}"
                     );
                 }
-                // Upper pole: the guarantee deliberately STOPS at the target, and
-                // what lies past it is pinned rather than merely implied.
-                let past = mana_development_offset(MANA_SOURCE_TARGET + 1)
-                    - mana_development_offset(MANA_SOURCE_TARGET);
-                assert_eq!(past, 0.0);
-                // ABOVE THE CAP THE GUARANTEE INVERTS. The marginal is 0 while the
-                // land-drop cost is untouched, so `PlayLand` scores strictly below
-                // `PassPriority` again — the reported bug, returning in full at
-                // >= 12 sources (see `MANA_SOURCE_TARGET`). Asserted so the
-                // successor unit that fixes it inherits a failing record here
-                // instead of rediscovering the limitation.
+
+                // THE FORMER CAP, RE-ANCHORED. Unit 1's absolute form scored a
+                // land drop at 12 sources against a marginal of exactly 0.0 —
+                // "the former cap" below means 12 sources ABSOLUTE, the regime it
+                // left broken. Under the differential the same board is 12-vs-12,
+                // so the drop moves `d` from 0 to 1: deep INSIDE the band, above
+                // no cap, and worth the full coefficient.
+                let differential_marginal =
+                    mana_development_offset(1.0) - mana_development_offset(0.0);
+                let deficit = cost - differential_marginal;
                 assert!(
-                    past < cost,
-                    "{phase_name}/{archetype:?}: above the cap the marginal {past} \
-                     must be BELOW the land-drop cost {cost} — if this ever fails, \
-                     the above-cap regression has been closed and both this \
-                     assertion and `MANA_SOURCE_TARGET`'s disclosure must be updated"
+                    deficit <= 0.0,
+                    "{phase_name}/{archetype:?}: at the former cap (12 sources \
+                     absolute, i.e. 12-vs-12) the land drop's marginal \
+                     {differential_marginal} must still exceed the land-drop cost \
+                     {cost} — this is the above-cap regression Unit 5 closed"
                 );
-                worst_above_cap_deficit = worst_above_cap_deficit.max(cost - past);
+
+                // NARRATIVE CONTROL, NOT A DISCRIMINATOR — say so, so nobody
+                // later reads it as coverage. `absolute_marginal` is built from
+                // `C`, `S` and `min`: constants only. It is 0.0 no matter what
+                // `mana_development_offset` does, so this assertion CANNOT fail on
+                // an implementation defect. It exists to record, executably and
+                // beside the claim, what the OLD rule scored at this input — which
+                // is what earns the deletion of Unit 1's above-cap record below.
+                // The discriminating assertion in this test is `deficit <= 0.0`
+                // above, which calls the production function for every archetype
+                // and phase.
+                let absolute_marginal = MANA_DEVELOPMENT_COEFF
+                    * f64::from((MANA_SOURCE_TARGET + 1).min(MANA_SOURCE_TARGET))
+                    - MANA_DEVELOPMENT_COEFF
+                        * f64::from(MANA_SOURCE_TARGET.min(MANA_SOURCE_TARGET));
+                assert_eq!(absolute_marginal, 0.0);
+                assert!(absolute_marginal < cost); // the old rule LOST `cost` per drop
+                assert!(differential_marginal > cost); // the new rule GAINS the difference
+
+                worst_land_drop_deficit_at_the_former_cap =
+                    worst_land_drop_deficit_at_the_former_cap.max(deficit);
             }
         }
 
-        // The above-cap regression, pinned as a NUMBER rather than as prose.
+        // The closed regression, pinned as a NUMBER rather than as prose: the
+        // worst-case land-drop deficit at the former cap, across every archetype
+        // and phase. Negative means the drop is profitable everywhere.
         //
-        // The `past < cost` assertion inside the loop states the direction, but it
-        // is close to tautological: `past` is 0 by the clamp and `cost` is a sum of
-        // positive weights, so nothing realistic falsifies it. This does the work.
-        // `worst_above_cap_deficit` is how much score the controller LOSES per land
-        // drop once at or above `MANA_SOURCE_TARGET`, at the binding
-        // archetype/phase — the exact quantity `MANA_SOURCE_TARGET`'s disclosure
-        // quotes as 6.5545.
-        //
-        // It is falsifiable and load-bearing in both directions:
-        // - a retrain or multiplier edit that moves `hand_size` / `zone_quality` /
-        //   `synergy` moves this number, and the disclosure that quotes it goes
-        //   stale silently — this catches that;
-        // - a successor unit that closes the above-cap gap drives it to <= 0, which
-        //   is the failing record this exists to hand them.
+        // Load-bearing in both directions: a retrain or multiplier edit that moves
+        // `hand_size` / `zone_quality` / `synergy` raises `cost` and drives this
+        // toward zero, and if it ever goes positive the land-drop floor has been
+        // reintroduced at the very regime Unit 5 fixed.
         assert!(
-            (6.55..6.56).contains(&worst_above_cap_deficit),
-            "above the cap, every land drop costs the controller \
-             {worst_above_cap_deficit} with NOTHING credited back — the reported \
-             bug in full. `MANA_SOURCE_TARGET`'s disclosure quotes 6.5545; if this \
-             has moved, the weights changed and that disclosure is now stale. If it \
-             has gone <= 0 the regression is FIXED: delete this assertion and the \
-             disclosure together."
+            worst_land_drop_deficit_at_the_former_cap <= 0.0,
+            "at the former cap the worst-case land drop must still be profitable; \
+             worst deficit was {worst_land_drop_deficit_at_the_former_cap} — if this \
+             has gone positive, the weights moved and the land-drop floor no longer \
+             holds at 12-vs-12"
         );
     }
 
     /// Row 11: the offset binds to `controller`, not `owner`, and is recomputed
     /// live rather than latched. Reassigning control of a land must move the whole
-    /// offset across — an implementation reading `owner` fails both assertions.
+    /// offset across — an implementation reading `owner` fails every assertion.
+    ///
+    /// CR 110.2: "A permanent's controller is, by default, the player under whose
+    /// control it entered the battlefield" — a property distinct from ownership,
+    /// which is what `board_stats`'s `obj.controller == player` guard reads.
+    ///
+    /// **The DOUBLED SWING is the differential's signature (Unit 5).** Under Unit
+    /// 1's self-only absolute form the non-controller scored `0.0`, because the
+    /// term took no opponent input at all. Under the differential a control change
+    /// moves the credit twice — `−1` from the loser and `+1` to the gainer — so
+    /// each seat swings by `2·C = 15.0`, from `+C` to `−C`. The two `== 0.0`
+    /// assertions Unit 1 wrote here are exactly the ones that had to change, and
+    /// they are asserted at `−MANA_DEVELOPMENT_COEFF` rather than deleted, because
+    /// the losing seat's negative reading IS the new behaviour.
     #[test]
     fn mana_development_follows_controller_not_owner() {
         let mut state = make_state();
@@ -1260,7 +1476,7 @@ mod tests {
         let before_p0 = evaluate_features(&state, PlayerId(0)).unwrap();
         let before_p1 = evaluate_features(&state, PlayerId(1)).unwrap();
         assert_eq!(before_p0.mana_development_offset, MANA_DEVELOPMENT_COEFF);
-        assert_eq!(before_p1.mana_development_offset, 0.0);
+        assert_eq!(before_p1.mana_development_offset, -MANA_DEVELOPMENT_COEFF);
 
         // Control changes; ownership does NOT.
         let obj = state.objects.get_mut(&land_id).unwrap();
@@ -1269,34 +1485,85 @@ mod tests {
 
         let after_p0 = evaluate_features(&state, PlayerId(0)).unwrap();
         let after_p1 = evaluate_features(&state, PlayerId(1)).unwrap();
-        assert_eq!(after_p0.mana_development_offset, 0.0);
+        assert_eq!(after_p0.mana_development_offset, -MANA_DEVELOPMENT_COEFF);
         assert_eq!(after_p1.mana_development_offset, MANA_DEVELOPMENT_COEFF);
+
+        // The swing is 2·C on BOTH seats — one source changing hands moves the
+        // differential by two, which the absolute form structurally could not do.
+        assert_eq!(
+            before_p0.mana_development_offset - after_p0.mana_development_offset,
+            2.0 * MANA_DEVELOPMENT_COEFF
+        );
+        assert_eq!(
+            after_p1.mana_development_offset - before_p1.mana_development_offset,
+            2.0 * MANA_DEVELOPMENT_COEFF
+        );
     }
 
-    /// Row 12: the offset is SELF-ONLY. Opponent sources must not perturb it — a
-    /// (self − opponent) differential implementation fails this.
+    /// Row 12: opponent sources MOVE the offset — the contract Unit 1 wrote this
+    /// test to forbid, REVERSED by Unit 5 under maintainer decision D2.
+    ///
+    /// Unit 1's docstring read: *"Row 12: the offset is SELF-ONLY. Opponent
+    /// sources must not perturb it — a (self − opponent) differential
+    /// implementation fails this."* That is precisely the implementation Unit 5
+    /// ships (Option E), so the contract is superseded rather than drifted, and
+    /// the reversal is recorded here so it is auditable rather than looking like
+    /// an accident. The FIXTURE is kept: it is the only row where the opponent
+    /// side moves while the self side is held fixed at a nonzero value, so it is
+    /// what separates "reads opponent sources" from "reads the difference."
+    ///
+    /// Two-player `make_state`, so `opponents.len() == 1` → the AVERAGED branch
+    /// with `opp_count == 1`:
+    ///
+    /// | State | self | opponent aggregate | `d` | offset |
+    /// |---|---|---|---|---|
+    /// | 1 p0 land | 1 | 0 / 1 = 0.0 | +1.0 | `+C` |
+    /// | + 1 p1 land | 1 | 1 / 1 = 1.0 | 0.0 | `0.0` |
+    /// | + 5 p1 lands | 1 | 5 / 1 = 5.0 | −4.0 | `−4·C` |
     #[test]
-    fn mana_development_ignores_opponent_sources() {
+    fn mana_development_tracks_opponent_sources() {
         let mut state = make_state();
         add_land(&mut state, PlayerId(0), false);
         let baseline = evaluate_features(&state, PlayerId(0))
             .unwrap()
             .mana_development_offset;
+        // Unit 1's reach guard, kept — and now doing MORE work than it did: it
+        // proves the self side is live before the opponent side is perturbed, so
+        // a total-collapse implementation (offset always 0) cannot reach the
+        // assertions below.
         assert!(baseline > 0.0, "reach-guard: evaluator must have a source");
+        assert_eq!(baseline, MANA_DEVELOPMENT_COEFF, "self side, exact");
 
-        for _ in 0..5 {
+        // The sign crossing. One opponent source against one of ours is dead
+        // level — and this catches a `clamp(d, 0.0, S)` half-migration at a
+        // SECOND, production-path seam rather than only at the pure-function one.
+        add_land(&mut state, PlayerId(1), false);
+        let level = evaluate_features(&state, PlayerId(0))
+            .unwrap()
+            .mana_development_offset;
+        assert_eq!(level, 0.0, "1 − 1 = 0: the sign-crossing point");
+
+        for _ in 0..4 {
             add_land(&mut state, PlayerId(1), false);
         }
         let after = evaluate_features(&state, PlayerId(0))
             .unwrap()
             .mana_development_offset;
+        // Exact, not banded: this one value pins the sign crossing, the
+        // per-source magnitude `−C`, and the averaged-branch divisor at once.
         assert_eq!(
-            baseline, after,
-            "opponent sources must leave the self-only offset byte-identical"
+            after,
+            -4.0 * MANA_DEVELOPMENT_COEFF,
+            "5 opponent sources against 1 of ours is a differential of −4"
         );
     }
 
-    /// Row 4d + row 5 + row 6, at the `mana_source_count` seam.
+    /// Row 4d + row 5 + row 6, at the `BoardStats::mana_sources` seam.
+    ///
+    /// MOVED from the deleted `mana_source_count` by Unit 5, with the same
+    /// fixtures and the same expectations: this is the row that proves folding
+    /// the count into `board_stats` did not silently change the counted
+    /// population.
     ///
     /// - a permanent carrying BOTH a renewable and a self-sacrificing mana ability
     ///   counts ONCE (the `.any()` per-ability filter; an all-abilities filter
@@ -1305,7 +1572,7 @@ mod tests {
     /// - a pure one-shot (Treasure-shaped) source counts ZERO.
     /// - tapped state is ignored: development must not collapse on tap-out.
     #[test]
-    fn mana_source_count_classifies_by_renewability_not_tapped_state() {
+    fn board_stats_counts_mana_sources_by_renewability_not_tapped_state() {
         // Crystal-Vein-shaped NONLAND: one renewable + one self-sac ability.
         let mut both = make_state();
         add_artifact_with(
@@ -1314,7 +1581,7 @@ mod tests {
             vec![renewable_mana_ability(), self_sac_mana_ability()],
         );
         assert_eq!(
-            mana_source_count(&both, PlayerId(0)),
+            board_stats(&both, PlayerId(0)).mana_sources,
             1,
             "at least ONE renewable ability makes the permanent a source; \
              an all-abilities filter wrongly returns 0"
@@ -1323,13 +1590,13 @@ mod tests {
         // Rocks count without any land present.
         let mut rock = make_state();
         add_artifact_with(&mut rock, PlayerId(0), vec![renewable_mana_ability()]);
-        assert_eq!(mana_source_count(&rock, PlayerId(0)), 1);
+        assert_eq!(board_stats(&rock, PlayerId(0)).mana_sources, 1);
 
         // A pure one-shot source is NOT development.
         let mut treasure = make_state();
         add_artifact_with(&mut treasure, PlayerId(0), vec![self_sac_mana_ability()]);
         assert_eq!(
-            mana_source_count(&treasure, PlayerId(0)),
+            board_stats(&treasure, PlayerId(0)).mana_sources,
             0,
             "cracking a Treasure must not read as losing a mana source"
         );
@@ -1337,13 +1604,13 @@ mod tests {
         // A vanilla permanent with no mana ability is not a source.
         let mut vanilla = make_state();
         add_creature(&mut vanilla, PlayerId(0), 2, 2, vec![]);
-        assert_eq!(mana_source_count(&vanilla, PlayerId(0)), 0);
+        assert_eq!(board_stats(&vanilla, PlayerId(0)).mana_sources, 0);
 
         // Development ignores tapped state while availability does not.
         let mut tapped = make_state();
         add_land(&mut tapped, PlayerId(0), true);
         assert_eq!(
-            mana_source_count(&tapped, PlayerId(0)),
+            board_stats(&tapped, PlayerId(0)).mana_sources,
             1,
             "a tapped land is still part of the manabase"
         );
@@ -1351,6 +1618,439 @@ mod tests {
             crate::zone_eval::available_mana(&tapped, PlayerId(0)),
             0,
             "…while `available_mana` correctly reports zero available"
+        );
+    }
+
+    /// Row 8: `mana_sources` CROSS-CUTS the creature / non-creature-non-land
+    /// partition rather than being a fourth exclusive class.
+    ///
+    /// CR 205.2b: "Some objects have more than one card type… Such objects
+    /// satisfy the criteria for any effect that applies to any of their card
+    /// types." A Dryad Arbor is a `Land Creature`, so it is counted once in
+    /// `creatures` AND once in `mana_sources`. The three hostile siblings are
+    /// what make that a matrix rather than a single reading: a plain land is a
+    /// source and not a creature; a mana dork is both by a different mechanism
+    /// (an ABILITY, not a second card type — that half carries no CR number); a
+    /// vanilla creature is a creature and not a source.
+    #[test]
+    fn creature_land_counts_as_a_creature_and_as_a_mana_source() {
+        // Dryad-Arbor-shaped: `Land Creature`, 1/1.
+        let mut arbor = make_state();
+        let id = add_creature(&mut arbor, PlayerId(0), 1, 1, vec![]);
+        arbor
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let stats = board_stats(&arbor, PlayerId(0));
+        assert_eq!(stats.creatures, 1, "a creature-land IS a creature");
+        assert_eq!(
+            stats.non_creatures, 0,
+            "the `else if` arm must not also claim it"
+        );
+        assert_eq!(stats.power, 1);
+        assert_eq!(
+            stats.mana_sources, 1,
+            "…and it is ADDITIONALLY a mana source (CR 205.2b)"
+        );
+
+        // Hostile sibling 1 — a plain land: source, not creature.
+        let mut land = make_state();
+        add_land(&mut land, PlayerId(0), false);
+        let stats = board_stats(&land, PlayerId(0));
+        assert_eq!(stats.creatures, 0);
+        assert_eq!(stats.mana_sources, 1);
+
+        // Hostile sibling 2 — a mana dork: Creature with a renewable ability and
+        // NO Land type. Both counts, by the ability disjunct rather than 205.2b.
+        let mut dork = make_state();
+        let id = add_creature(&mut dork, PlayerId(0), 1, 1, vec![]);
+        {
+            let obj = dork.objects.get_mut(&id).unwrap();
+            let list = std::sync::Arc::make_mut(&mut obj.abilities);
+            list.push(renewable_mana_ability());
+        }
+        let stats = board_stats(&dork, PlayerId(0));
+        assert_eq!(stats.creatures, 1);
+        assert_eq!(stats.mana_sources, 1);
+
+        // Hostile sibling 3 — a vanilla creature: creature, not a source.
+        let mut vanilla = make_state();
+        add_creature(&mut vanilla, PlayerId(0), 2, 2, vec![]);
+        let stats = board_stats(&vanilla, PlayerId(0));
+        assert_eq!(stats.creatures, 1);
+        assert_eq!(stats.mana_sources, 0);
+    }
+
+    /// Row 3 at the SCORE layer: a land drop at 12-vs-12 sources — the regime
+    /// Unit 1's absolute form scored at exactly zero marginal — now raises the
+    /// total score. This is the reported symptom, measured end to end through
+    /// `evaluate_state_breakdown` rather than at the pure-function seam.
+    ///
+    /// **The MOVE is load-bearing.** The land is taken out of hand and put onto
+    /// the battlefield, not inserted onto the battlefield: a battlefield-only
+    /// insertion pays no `w.hand_size` cost, and the co-assertion below would then
+    /// evaluate to `==` on every run instead of discriminating.
+    #[test]
+    fn land_drop_at_the_former_cap_raises_the_score() {
+        let mut state = make_state();
+        for _ in 0..12 {
+            add_land(&mut state, PlayerId(0), false);
+            add_land(&mut state, PlayerId(1), false);
+        }
+        // The land that will be dropped, in hand. Bind the `CardId` before the
+        // `&mut state` borrow — an explicit `&mut` in a free-function argument
+        // list is not a two-phase borrow (E0503).
+        let card_id = CardId(state.next_object_id);
+        let hand_land = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Land".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&hand_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let weights = EvalWeightSet::learned().mid;
+        // Reach guard: the state must be non-terminal, or the `Err(WIN_SCORE)`
+        // short-circuit would make every assertion below vacuous.
+        let before_features =
+            evaluate_features(&state, PlayerId(0)).expect("reach-guard: non-terminal state");
+        let before = evaluate_state_breakdown(&state, PlayerId(0), &weights)
+            .expect("reach-guard: non-terminal state")
+            .total();
+        assert_eq!(
+            board_stats(&state, PlayerId(0)).mana_sources,
+            12,
+            "fixture: the evaluator sits exactly at the former cap"
+        );
+        assert_eq!(board_stats(&state, PlayerId(1)).mana_sources, 12);
+        assert_eq!(
+            before_features.mana_development_offset, 0.0,
+            "12-vs-12 is a zero differential"
+        );
+
+        // THE DROP — hand to battlefield, through the engine's own primitive.
+        let mut events = Vec::new();
+        engine::game::zones::move_to_zone(&mut state, hand_land, Zone::Battlefield, &mut events);
+
+        let after_features = evaluate_features(&state, PlayerId(0)).unwrap();
+        let after = evaluate_state_breakdown(&state, PlayerId(0), &weights)
+            .unwrap()
+            .total();
+        assert_eq!(board_stats(&state, PlayerId(0)).mana_sources, 13);
+        assert!(
+            after > before,
+            "the land drop must raise the score at the former cap: {before} -> {after}"
+        );
+
+        // CO-ASSERTION — the discriminator, recomputed every run. Under Unit 1's
+        // absolute form `C·min(sources, S)` both 12 and 13 clamp to 90.0, so the
+        // offset delta is 0 while the `w.hand_size` cost is still paid: the SAME
+        // fixture inverts.
+        let absolute =
+            |sources: i32| MANA_DEVELOPMENT_COEFF * f64::from(sources.clamp(0, MANA_SOURCE_TARGET));
+        let before_abs = before - before_features.mana_development_offset + absolute(12);
+        let after_abs = after - after_features.mana_development_offset + absolute(13);
+        assert!(
+            after_abs < before_abs,
+            "under the absolute form the same drop must LOWER the score \
+             ({before_abs} -> {after_abs}) — if this passes as `>=`, the co-assertion \
+             has stopped discriminating and the fixture drifted"
+        );
+    }
+
+    /// Row 5: across candidates differing **only in the evaluator's own
+    /// permanents**, the entire opponent aggregate — source counts and threat
+    /// weights alike — is constant and cancels exactly.
+    ///
+    /// **Scope, stated precisely.** This pins cancellation for SELF-ONLY
+    /// candidate pairs. It says nothing about candidates that touch an opponent:
+    /// an opponent-source change is the intended live surface, and a
+    /// threat-weight change is
+    /// `threat_reweighting_moves_the_mana_term_without_a_source_changing_hands`.
+    ///
+    /// Run at BOTH cardinalities, because in the weighted branch cancellation is
+    /// a structural claim (`threat_level_projected` reads only the target's own
+    /// stats — see `threat_level_ignores_evaluator_own_board`) rather than an
+    /// arithmetic one.
+    #[test]
+    fn mana_development_differential_cancels_across_same_node_candidates() {
+        // (player_count, p0 lands, one land count per opponent) -> offset
+        let offset = |players: u8, p0_lands: usize, opp_lands: usize| -> f64 {
+            let mut state = GameState::new(
+                engine::types::format::FormatConfig::free_for_all(),
+                players,
+                42,
+            );
+            for _ in 0..p0_lands {
+                add_land(&mut state, PlayerId(0), false);
+            }
+            for opp in 1..players {
+                for _ in 0..opp_lands {
+                    add_land(&mut state, PlayerId(opp), false);
+                }
+                // Asymmetric bodies so the threat weights are genuinely unequal
+                // in the weighted branch.
+                add_creature(&mut state, PlayerId(opp), i32::from(opp), 1, vec![]);
+            }
+            let features = evaluate_features(&state, PlayerId(0)).expect("non-terminal");
+            // Reach guard: the differential must be strictly INSIDE the band. A
+            // saturated value would sit exactly at ±S, and saturation — not
+            // cancellation — could then be producing the equality below.
+            assert!(
+                (features.mana_development_offset / MANA_DEVELOPMENT_COEFF).abs()
+                    < f64::from(MANA_SOURCE_TARGET),
+                "reach-guard: |differential| must be strictly inside the band"
+            );
+            features.mana_development_offset
+        };
+
+        for players in [2u8, 3u8] {
+            // The candidate pair differs ONLY in a p0 permanent (2 lands vs 3).
+            let delta_poor = offset(players, 3, 0) - offset(players, 2, 0);
+            let delta_rich = offset(players, 3, 8) - offset(players, 2, 8);
+            assert!(
+                (delta_poor - delta_rich).abs() < 1e-9,
+                "{players}p: the self-only candidate delta must be identical against \
+                 0 and against 8 opponent sources, got {delta_poor} vs {delta_rich}"
+            );
+            // Non-vacuity: the delta is the coefficient, not zero.
+            assert!(
+                (delta_poor - MANA_DEVELOPMENT_COEFF).abs() < 1e-9,
+                "{players}p: reach-guard — the pair must actually move the term"
+            );
+        }
+    }
+
+    /// Row 6: opponent sources are THREAT-WEIGHTED at `opponents.len() >= 2` and
+    /// AVERAGED at one opponent — the same aggregation `card_advantage_breakdown`
+    /// uses, line for line.
+    ///
+    /// **Discriminating by construction:** with equal opponent source counts the
+    /// weighted and averaged forms agree and the row would prove nothing. The
+    /// asymmetric fixture (2 vs 8) is what separates them.
+    #[test]
+    fn mana_development_aggregates_opponents_like_card_advantage() {
+        // WEIGHTED — two opponents, asymmetric sources AND asymmetric bodies.
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        for _ in 0..5 {
+            add_land(&mut state, PlayerId(0), false);
+        }
+        for _ in 0..2 {
+            add_land(&mut state, PlayerId(1), false);
+        }
+        for _ in 0..8 {
+            add_land(&mut state, PlayerId(2), false);
+        }
+        add_creature(&mut state, PlayerId(1), 5, 5, vec![]);
+        add_creature(&mut state, PlayerId(2), 1, 1, vec![]);
+
+        let t1 = threat_level(&state, PlayerId(0), PlayerId(1));
+        let t2 = threat_level(&state, PlayerId(0), PlayerId(2));
+        let total = t1 + t2;
+        // Reach guard: if the weights have collapsed to equal, the fixture has
+        // silently become the averaged case and the row stops discriminating.
+        assert!(
+            (t1 / total - t2 / total).abs() > 0.05,
+            "reach-guard: the two threat weights must genuinely differ, got \
+             {} and {}",
+            t1 / total,
+            t2 / total
+        );
+
+        let expected = MANA_DEVELOPMENT_COEFF * (5.0 - (t1 / total * 2.0 + t2 / total * 8.0));
+        let features = evaluate_features(&state, PlayerId(0)).expect("non-terminal");
+        assert!(
+            (features.mana_development_offset - expected).abs() < 1e-9,
+            "weighted branch: expected {expected}, got {}",
+            features.mana_development_offset
+        );
+
+        // AVERAGED — one opponent, `opp_count == 1`.
+        let mut duel = make_state();
+        for _ in 0..5 {
+            add_land(&mut duel, PlayerId(0), false);
+        }
+        for _ in 0..2 {
+            add_land(&mut duel, PlayerId(1), false);
+        }
+        let features = evaluate_features(&duel, PlayerId(0)).expect("non-terminal");
+        assert!(
+            (features.mana_development_offset - MANA_DEVELOPMENT_COEFF * (5.0 - 2.0 / 1.0)).abs()
+                < 1e-9
+        );
+    }
+
+    /// Row 13 — a DISCLOSURE test, in the same tradition as Unit 1's above-cap
+    /// record: it asserts a known, accepted, *undesirable* behaviour so that a
+    /// later change to the aggregator reds loudly and forces the disclosure to be
+    /// updated rather than silently invalidated.
+    ///
+    /// **The behaviour: reweighting an opponent's threat moves the mana term with
+    /// NO mana source changing hands.** In the `opponents.len() >= 2` branch the
+    /// aggregate is `Σ wᵢ·sourcesᵢ` with `wᵢ = threatᵢ / Σthreat`, so removing a
+    /// body from the mana-RICH seat shifts weight onto the mana-POOR seat and
+    /// *raises* the evaluator's score, while the identical removal on the poor
+    /// seat *lowers* it. This is an ACCEPTED COST (rider R8) and **D4 ruled to
+    /// keep the threat weights**: `card_advantage_breakdown` is aggregated by the
+    /// same weights, so this is the house pattern, and a plain mean would make
+    /// the mana term the only differently-aggregated feature in the file.
+    ///
+    /// Assertion 6 recomputes the exact weighted expectation from the LIVE
+    /// `threat_level`, so an aggregator-shape change reds exactly there.
+    ///
+    /// **If the pin guard reds**, the fixture drifted: restore the pinned inputs,
+    /// **or** re-derive assertion 3's floor from the closed form
+    /// `|Δ| = 2.79 / (2·T − 0.124)` at the fixture's actual
+    /// `T = 0.224 + 0.0214286·|hand|`. That is a legitimate repair and is NOT
+    /// "relaxing the assertion."
+    /// **If the pin guard is green and assertion 3 reds**, the aggregator,
+    /// `threat_level`'s constants, or `MANA_DEVELOPMENT_COEFF` moved: update
+    /// `MANA_DEVELOPMENT_COEFF`'s threat-weight section and R8. **Do not relax
+    /// the assertion.**
+    #[test]
+    fn threat_reweighting_moves_the_mana_term_without_a_source_changing_hands() {
+        // `remove_body_of` names the seat whose 4/4 is killed, if any.
+        let measure = |remove_body_of: Option<PlayerId>| -> f64 {
+            let mut state =
+                GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+            for _ in 0..9 {
+                add_land(&mut state, PlayerId(0), false);
+            }
+            for _ in 0..8 {
+                add_land(&mut state, PlayerId(1), false);
+            }
+            for _ in 0..2 {
+                add_land(&mut state, PlayerId(2), false);
+            }
+            let body_1 = add_creature(&mut state, PlayerId(1), 4, 4, vec![]);
+            let body_2 = add_creature(&mut state, PlayerId(2), 4, 4, vec![]);
+
+            // ASSERTION 0 — PIN GUARD, before every other assertion. These three
+            // inputs put each opponent's baseline threat at exactly T = 0.224, and
+            // assertion 3's band is quoted AT THESE INPUTS: it holds for opponent
+            // hand size <= 1 and fails from 2. Closed form in the docstring.
+            for opp in [PlayerId(1), PlayerId(2)] {
+                assert!(
+                    state.players[opp.0 as usize].hand.is_empty(),
+                    "pin: empty hands"
+                );
+                assert_eq!(
+                    state.players[opp.0 as usize].life, state.format_config.starting_life,
+                    "pin: full life"
+                );
+            }
+            assert!(
+                state.format_config.commander_damage_threshold.is_none(),
+                "pin: no commander threshold"
+            );
+
+            if let Some(seat) = remove_body_of {
+                let body = if seat == PlayerId(1) { body_1 } else { body_2 };
+                let mut events = Vec::new();
+                engine::game::zones::move_to_zone(&mut state, body, Zone::Graveyard, &mut events);
+            }
+
+            // ASSERTION 4 — REACH GUARD, the load-bearing one. Without it this row
+            // would be indistinguishable from a test in which a mana source moved,
+            // and the whole claim is "with no mana source changing hands."
+            assert_eq!(board_stats(&state, PlayerId(1)).mana_sources, 8);
+            assert_eq!(board_stats(&state, PlayerId(2)).mana_sources, 2);
+
+            let features = evaluate_features(&state, PlayerId(0)).expect("non-terminal");
+
+            // ASSERTION 6 — EXACT RECOMPUTE from the live `threat_level`. Two-sided
+            // and shape-exact: a plain mean, an unnormalised weight, or a wrong
+            // divisor reds in at least one of the three states. `clamp` is the
+            // identity here — `9 − agg` ranges ≈ 2.85..5.15, deep inside ±S, which
+            // reach guard 4's pinned source counts establish.
+            let t1 = threat_level(&state, PlayerId(0), PlayerId(1));
+            let t2 = threat_level(&state, PlayerId(0), PlayerId(2));
+            let (w1, w2) = (t1 / (t1 + t2), t2 / (t1 + t2));
+            let agg = w1 * 8.0 + w2 * 2.0;
+            assert!(
+                (features.mana_development_offset - MANA_DEVELOPMENT_COEFF * (9.0 - agg)).abs()
+                    < 1e-9,
+                "aggregator shape changed: offset {} != C·(9 − {agg})",
+                features.mana_development_offset
+            );
+
+            features.mana_development_offset
+        };
+
+        let baseline = measure(None);
+        let kill_rich = measure(Some(PlayerId(1))); // the 8-source seat
+        let kill_poor = measure(Some(PlayerId(2))); // the 2-source seat
+
+        // ASSERTION 1 — the sign inversion, which is the whole finding.
+        assert!(
+            kill_rich > baseline,
+            "removing a threat from the MANA-RICH seat must RAISE the term: \
+             {baseline} -> {kill_rich}"
+        );
+        assert!(
+            kill_poor < baseline,
+            "the identical removal on the MANA-POOR seat must LOWER it: \
+             {baseline} -> {kill_poor}"
+        );
+
+        // ASSERTION 2 — symmetry, proving it is the NORMALISATION doing the work
+        // and not an incidental board effect.
+        assert!(
+            ((kill_rich - baseline) + (kill_poor - baseline)).abs() < 1e-9,
+            "the two swings must be exact mirrors"
+        );
+
+        // ASSERTION 3 — magnitude band. Pins the disclosed effect as LARGER THAN A
+        // WHOLE MANA SOURCE rather than as noise. At the pinned inputs the true
+        // value is 8.6111, clearing 7.5 by 14.8%. NOT input-independent: it holds
+        // for opponent hand size <= 1 and fails from 2. Re-derivable from
+        // `|Δ| = 2.79 / (2·T − 0.124)`.
+        assert!(
+            (kill_rich - baseline).abs() > MANA_DEVELOPMENT_COEFF,
+            "the threat-weight channel must move the term by MORE than one mana \
+             source ({}); if the pin guard above is green, the aggregator or a \
+             constant moved — update `MANA_DEVELOPMENT_COEFF`'s threat-weight \
+             section and R8, do NOT relax this. The band is quoted at the pinned \
+             inputs (empty hands, full life, no commander threshold) and is \
+             re-derivable from |Δ| = 2.79/(2·T − 0.124), T = 0.224 + 0.0214286·|hand|",
+            kill_rich - baseline
+        );
+
+        // ASSERTION 5 — CARDINALITY GUARD. The channel is gated on
+        // `opponents.len() >= 2`, so the identical removal in a DUEL must leave the
+        // term byte-identical. Duels are unaffected — which is also why
+        // `cargo ai-gate` (2-seat `MatchupSpec`) cannot see any of this.
+        let duel = |remove_body: bool| -> f64 {
+            let mut state = make_state();
+            for _ in 0..9 {
+                add_land(&mut state, PlayerId(0), false);
+            }
+            for _ in 0..8 {
+                add_land(&mut state, PlayerId(1), false);
+            }
+            let body = add_creature(&mut state, PlayerId(1), 4, 4, vec![]);
+            if remove_body {
+                let mut events = Vec::new();
+                engine::game::zones::move_to_zone(&mut state, body, Zone::Graveyard, &mut events);
+            }
+            evaluate_features(&state, PlayerId(0))
+                .expect("non-terminal")
+                .mana_development_offset
+        };
+        assert_eq!(
+            duel(false),
+            duel(true),
+            "two-player games must be entirely unaffected by the threat-weight channel"
         );
     }
 
