@@ -220,8 +220,8 @@ mod tests {
     };
     use engine::types::format::FormatConfig;
     use engine::types::game_state::{
-        CastPaymentMode, CopyTargetSlot, GameState, PendingCast, TargetSelectionProgress,
-        TargetSelectionSlot, WaitingFor,
+        CastPaymentMode, CopyTargetSlot, GameState, PendingCast, TargetEffectDetail,
+        TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
@@ -635,6 +635,8 @@ mod tests {
             legal_targets: vec![TargetRef::Object(low), TargetRef::Object(high)],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         };
         let trigger = AiDecisionContext {
             waiting_for: WaitingFor::TriggerTargetSelection {
@@ -708,6 +710,8 @@ mod tests {
                     ],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
@@ -774,6 +778,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(flyer)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -840,6 +846,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(ground_opp)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),

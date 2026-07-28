@@ -27,9 +27,10 @@ use engine::types::game_state::{
     ShardChoice, StackEntryKind, WaitingFor,
 };
 use engine::types::interaction::{
-    InteractionChoice, InteractionOpportunity, InteractionOpportunityResponse,
-    InteractionPresentationSurface, InteractionResponse, InteractionResponseSpec,
-    InteractionRoleCode, InteractionSubmission, SelectionConstraint, ViewerInteraction,
+    InteractionChoice, InteractionIntentCode, InteractionOpportunity,
+    InteractionOpportunityResponse, InteractionPresentationSurface, InteractionResponse,
+    InteractionResponseSpec, InteractionRoleCode, InteractionSubmission, SelectionConstraint,
+    ViewerInteraction,
 };
 use engine::types::mana::{ManaColor as EngineManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
@@ -1409,10 +1410,10 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 83] = [
         suggested_protocol_extension: "None needed upstream for reveals — the prompt is already answerable, and raising it from labels to cards is local work: either a bespoke ChooseCards arm here (as DiscardChoice has, with its matching gate entry) or an engine projection that classifies the reveal as a card selection. For DiceRolled, treat it as a display event with audience and sequencing metadata rather than a prompt, since no engine pause backs it.",
     },
     UnsupportedCapability {
-        code: "local.targeting-intent-unsourceable",
+        code: "local.targeting-intent-neutral-inexpressible",
         area: "prompts",
-        reason: "Fidelity, not coverage: target prompts are fully answerable, but ChooseBoardTargetsInput.intent is a placeholder rather than a computed value, so a client must not read it. The field is required (no serde default) and all 25 TargetingIntent variants are effect semantics — Damage, Destroy, Sacrifice, Exile, Bounce, Mill, Discard, Counter, Tap, Untap, Copy, Buff, Debuff, Heal, LoseLife, Reveal, Draw, Fetch, GainControl, Fight, Attach, Attack, Block, Hostile, Friendly — with no neutral or unknown member, so every ChooseBoardTargets must claim one. Phase has none to give. Both producing states (WaitingFor::TargetSelection and TriggerTargetSelection) project as TargetSequenceProjection (game/interaction.rs), whose only descriptor is TargetSequenceAction — ChooseTarget | SelectObjects | SelectTargets | Retarget — which is the MECHANISM of the pick, not what the spell does to what it picks. The engine's one intent vocabulary, InteractionIntentCode (14 variants: Choose, Keep, Sacrifice, Return, Exile, Tap, Crew, Saddle, Station, RingBearer, Blight, Pay, Attack, Block), hangs off SelectionProjection for non-targeting Select states and likewise names the action taken on the objects, not a disposition toward a CR 115.1 target; nothing equivalent exists on the targeting path. Deriving intent from the pending spell's effect would be the adapter inventing game semantics, which the thin-boundary rule forbids. Consequence, stated plainly rather than hidden: build_prompt_input has exactly one ChooseBoardTargets construction site, so EVERY target prompt is advertised as Hostile — including targeting your own creature to buff or regenerate it — and the emitted hostile: false contradicts it. The asymmetry is visible inside this same DTO: TargetRefDto.intent is Option<TargetingIntent>, and target_ref_dto declines it with None for every candidate. The adapter already refuses to guess wherever refusing is expressible; the prompt-level field is the one place it cannot.",
-        suggested_protocol_extension: "Preferred: make ChooseBoardTargetsInput.intent an Option<TargetingIntent>, exactly matching TargetRefDto.intent one field away. This asks for no new concept — the protocol already models a declinable targeting intent and already spells it `#[serde(default, skip_serializing_if = \"Option::is_none\")] Option<TargetingIntent>`; the prompt-level field is simply inconsistent with it. Adding a neutral/unknown variant is the weaker fallback: it would let an engine say nothing, but it grows the semantic enum to encode absence, which the type system already expresses. Align hostile's optionality with whichever is chosen, since the two fields can currently contradict each other. Either shape is breaking for older readers (the transport envelope sets deny_unknown_fields and no family enum is non_exhaustive), so it belongs in a major bump.",
+        reason: "Fidelity, narrowed twice. ChooseBoardTargetsInput.intent is now COMPUTED, not a placeholder. TargetSelectionSlot carries the announcing ability's EffectKind AND the discriminating payload that the unit tag cannot hold (TargetEffectDetail: a zone-change Destination or a P/T Modification direction), both stamped per CR 601.2c announcement frame by collect_target_slots in game/ability_utils.rs; game/interaction.rs projects the pair with target_intent (delegating to the pre-existing effect_zone_intent for the zone family) into InteractionIntentCode; this adapter renames that answer with targeting_intent_dto. hostile is derived from the same value, so the two fields no longer contradict each other. The earlier claim that Phase cannot source targeting intent was WRONG and has been retracted. Measured against data/card-data.json: of 21,077 targeting links in the card corpus, 61.4% resolved from EffectKind alone, and stamping the destination lifts that to roughly 70% by resolving 1,016 exiles and 865 bounces that previously shared one ChangeZone tag. What survives is a protocol-shape gap, not an engine gap: TargetingIntent's 25 variants (Damage, Destroy, Sacrifice, Exile, Bounce, Mill, Discard, Counter, Tap, Untap, Copy, Buff, Debuff, Heal, LoseLife, Reveal, Draw, Fetch, GainControl, Fight, Attach, Attack, Block, Hostile, Friendly) contain NO neutral or unknown member, and the field is required (no serde default), so a choice with no effect-semantic disposition must still claim one. Two populations land here. (1) Genuinely neutral picks, which the engine projects as InteractionIntentCode::Choose - about 30% of targeting links, led by GenericEffect (1,560), Shuffle (871) and TargetOnly (424), plus mutate targets (CR 702.140a), which the casting pipeline resolves without an Effect at all and which therefore carry EffectKind::NoOp. These fall back to Hostile. That is a LEAST-WRONG choice and NOT a safe one: an unlabelled pick still reads as hostile, which is the residue of the original defect rather than a fix for it, and a client must not read Hostile as an assertion. (2) Modifications whose direction is genuinely unknowable - a dynamic X or count-based magnitude (193 links) or a genuinely opposing '+2/-2' (83 links), together about 16% of the 1,679 targeted pumps. These project as InteractionIntentCode::Modify and resolve to Debuff, the adverse member, on an asymmetric-loss argument: Buff would be right more often, since pump is more often positive, but it is the one direction whose error is unrecoverable - it would mark 'target creature gets -4/-4' as harmless, while a caution affordance on a genuine combat trick is recoverable by the player. The other 84% of pumps (1,079 buff, 324 debuff) now resolve to their true direction and do not reach this arm. Exhibited by a_damage_target_prompt_and_a_regenerate_target_prompt_carry_opposite_intents, an_unsigned_pump_target_prompt_fails_cautious_as_debuff, a_signed_pump_resolves_to_its_actual_direction and a_zone_change_target_resolves_by_destination rather than asserted here.",
+        suggested_protocol_extension: "Preferred, unchanged in shape and now much narrower in scope: make ChooseBoardTargetsInput.intent an Option<TargetingIntent>, matching TargetRefDto.intent one field away - the protocol already models a declinable targeting intent and already spells it `#[serde(default, skip_serializing_if = \"Option::is_none\")] Option<TargetingIntent>`. That would let population (1) decline rather than fall back to Hostile, which is the single highest-value change upstream could make here. Population (2) is better served by a direction-neutral modification member (e.g. Modify alongside Buff/Debuff) so an engine that knows the action but not the direction can say exactly that instead of guessing. Align hostile's optionality with whichever is chosen. Either shape is breaking for older readers (the transport envelope sets deny_unknown_fields and no family enum is non_exhaustive), so it belongs in a major bump.",
     },
     UnsupportedCapability {
         code: "local.library-arrangement-reorder-unsupported",
@@ -2134,6 +2135,7 @@ fn build_prompt_input(
                     waiting_for_type: waiting_for_type(waiting_for),
                     code: "local.target-slot-missing",
                 })?;
+            let intent = targeting_intent_dto(projected_target_intent(prepared));
             Ok(PromptInput::ChooseBoardTargets(ChooseBoardTargetsInput {
                 // v2 removed the flat `label`; the slot's mode label is the
                 // presentation title.
@@ -2144,32 +2146,21 @@ fn build_prompt_input(
                         .unwrap_or_else(|| "Choose target".to_string()),
                 ),
                 candidates: target_refs(&slot.legal_targets),
-                // PLACEHOLDERS, not computed values — declared as
-                // `local.targeting-intent-unsourceable`.
+                // COMPUTED, not placeholders. The engine stamps the announcing
+                // ability's `EffectKind` on each target slot (CR 601.2c: one
+                // slot per announced target) and `game::interaction`'s
+                // `target_intent` projects it to an `InteractionIntentCode`;
+                // this adapter only renames that answer into the wire
+                // vocabulary. `hostile` is derived from the same value, so the
+                // two fields can no longer contradict each other.
                 //
-                // `intent` is a required field and every one of
-                // `TargetingIntent`'s 25 variants is effect semantics (Damage,
-                // Destroy, Buff, Heal, ...); none means "unknown". Phase projects
-                // no effect-semantic intent for a CR 115.1 target choice — the
-                // engine's `TargetSequenceProjection` describes only the
-                // MECHANISM of the pick (`TargetSequenceAction`: ChooseTarget |
-                // SelectObjects | SelectTargets | Retarget) — and deriving one
-                // from the pending spell's effect would be this adapter
-                // inventing game semantics. So the field is filled rather than
-                // computed, and there is no value that would make it honest.
-                // Contrast the candidates just above: `TargetRefDto.intent` is
-                // an `Option`, and `target_ref_dto` declines it with `None`.
-                // That is what this field would do if the protocol let it.
-                //
-                // The two fields read as contradictory, and neither is
-                // authoritative: `hostile` is `#[serde(default)]`, so leaving it
-                // false asserts nothing, while `intent` must name a variant and
-                // only `Hostile`/`Friendly` name a disposition rather than a
-                // specific action. A client must not read either as engine-derived
-                // — in particular, targeting your own creature to buff or
-                // regenerate it is advertised here exactly as a kill spell is.
-                hostile: false,
-                intent: TargetingIntent::Hostile,
+                // Two residues remain, both declared as
+                // `local.targeting-intent-neutral-inexpressible`: a genuinely
+                // neutral pick and an unsigned P/T modification have no honest
+                // `TargetingIntent`, because the protocol's 25 variants contain
+                // no neutral member. See `targeting_intent_dto`.
+                hostile: targeting_is_hostile(intent),
+                intent,
                 min_targets: if slot.optional { 0 } else { 1 },
                 max_targets: 1,
                 chosen_targets: 0,
@@ -4154,6 +4145,143 @@ fn target_refs(targets: &[TargetRef]) -> Vec<TargetRefDto> {
     targets.iter().filter_map(target_ref_dto).collect()
 }
 
+/// The engine's projected intent for the viewer's single open target
+/// opportunity, or `Choose` if there is none.
+///
+/// Read from the interaction projection rather than from the slot's
+/// `effect_kind` directly: mapping an `EffectKind` to a disposition is game
+/// semantics, which belongs in `engine::game::interaction::target_intent`, not
+/// in this adapter. The adapter's job is only to rename the engine's answer
+/// into the wire vocabulary.
+fn projected_target_intent(prepared: &PreparedManabrewSnapshot) -> InteractionIntentCode {
+    prepared
+        .interaction
+        .opportunities
+        .iter()
+        .find_map(|opportunity| {
+            opportunity.surfaces.iter().find_map(|surface| {
+                if let InteractionPresentationSurface::Selection { intent, .. } = surface {
+                    Some(*intent)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or(InteractionIntentCode::Choose)
+}
+
+/// Rename an engine intent into the wire's `TargetingIntent` vocabulary.
+///
+/// Every arm below is a pure rename of a value the engine computed. The two
+/// lossy arms are called out because the protocol forces a choice the engine
+/// deliberately does not make:
+///
+/// * `Modify` — a P/T change whose direction is genuinely not knowable at
+///   announcement (a dynamic X / count-based magnitude, or an opposing
+///   "+2/-2"). `TargetingIntent` has only `Buff` and `Debuff`, so this resolves
+///   to the ADVERSE member on the asymmetric-loss argument the arm below
+///   states. Declared as `local.targeting-intent-neutral-inexpressible`.
+///   Directional modifications do NOT arrive here — the engine resolves those
+///   to `Buff`/`Debuff` from the direction stamped on the slot at
+///   construction, so this arm now serves only the ~16% of targeted pumps
+///   whose direction is genuinely unknowable.
+/// * `Choose` — a genuinely neutral pick. `TargetingIntent` has no neutral
+///   member, so this falls back to `Hostile`. That is a LEAST-WRONG choice and
+///   not a safe one: an unlabelled pick still reads as hostile, which is the
+///   residue of the original defect rather than a fix for it. Same declaration.
+fn targeting_intent_dto(intent: InteractionIntentCode) -> TargetingIntent {
+    match intent {
+        InteractionIntentCode::Damage => TargetingIntent::Damage,
+        InteractionIntentCode::Destroy => TargetingIntent::Destroy,
+        InteractionIntentCode::Sacrifice => TargetingIntent::Sacrifice,
+        InteractionIntentCode::Exile => TargetingIntent::Exile,
+        InteractionIntentCode::Return => TargetingIntent::Bounce,
+        InteractionIntentCode::Mill => TargetingIntent::Mill,
+        InteractionIntentCode::Discard => TargetingIntent::Discard,
+        InteractionIntentCode::Counter => TargetingIntent::Counter,
+        InteractionIntentCode::Tap => TargetingIntent::Tap,
+        InteractionIntentCode::Untap => TargetingIntent::Untap,
+        InteractionIntentCode::Copy => TargetingIntent::Copy,
+        InteractionIntentCode::GainLife => TargetingIntent::Heal,
+        InteractionIntentCode::LoseLife => TargetingIntent::LoseLife,
+        InteractionIntentCode::Reveal => TargetingIntent::Reveal,
+        InteractionIntentCode::Draw => TargetingIntent::Draw,
+        InteractionIntentCode::GainControl => TargetingIntent::GainControl,
+        InteractionIntentCode::Fight => TargetingIntent::Fight,
+        InteractionIntentCode::Attach => TargetingIntent::Attach,
+        InteractionIntentCode::Attack => TargetingIntent::Attack,
+        InteractionIntentCode::Block => TargetingIntent::Block,
+        // CR 701.19: a regeneration shield only ever helps its target, and
+        // `Friendly` is the protocol's disposition member for exactly that.
+        InteractionIntentCode::Regenerate => TargetingIntent::Friendly,
+        // Lossy, declared: see the doc comment above. `EffectKind` is a unit tag
+        // and `Effect::Pump` is the same variant for "+3/+3" and "-4/-4" (the
+        // sign lives in `PtValue` and may be dynamic), so this bucket cannot
+        // tell a combat trick from removal. It resolves to the ADVERSE member
+        // for the same asymmetric-loss reason `targeting_is_hostile` gives for
+        // the neutral bucket: a caution affordance on a genuine buff is
+        // recoverable, whereas marking "target creature gets -4/-4" as harmless
+        // is not. Mapping to `Buff` would be the more frequently correct guess
+        // and the one unrecoverable kind of wrong.
+        InteractionIntentCode::Modify => TargetingIntent::Debuff,
+        // CR 613.4: direction IS known for these — read off `Effect::Pump`'s
+        // `PtValue` payload at slot construction — so they are exact renames,
+        // not guesses. This is what shrinks the lossy arm above from the whole
+        // pump family to just its unknowable tail: 1,079 buff and 324 debuff
+        // targeted links in the card corpus now resolve correctly, where
+        // before every one of them took a single guess.
+        InteractionIntentCode::Buff => TargetingIntent::Buff,
+        InteractionIntentCode::Debuff => TargetingIntent::Debuff,
+        // These never reach a CR 115.1 target announcement — they belong to the
+        // board-selection and cost-payment models — but the match stays
+        // exhaustive so a new intent code cannot silently fall into `Hostile`.
+        InteractionIntentCode::Choose
+        | InteractionIntentCode::Keep
+        | InteractionIntentCode::Crew
+        | InteractionIntentCode::Saddle
+        | InteractionIntentCode::Station
+        | InteractionIntentCode::RingBearer
+        | InteractionIntentCode::Blight
+        | InteractionIntentCode::Pay => TargetingIntent::Hostile,
+    }
+}
+
+/// CR 115.1: whether the announcement is adverse to the thing being chosen.
+///
+/// Derived from the same engine intent that fills `intent`, so the two fields
+/// agree instead of contradicting each other. The neutral bucket resolves to
+/// `true` only because `Choose` was already renamed to `Hostile` one step
+/// earlier — a least-wrong protocol fallback, NOT a safety property.
+fn targeting_is_hostile(intent: TargetingIntent) -> bool {
+    match intent {
+        TargetingIntent::Damage
+        | TargetingIntent::Destroy
+        | TargetingIntent::Sacrifice
+        | TargetingIntent::Exile
+        | TargetingIntent::Bounce
+        | TargetingIntent::Mill
+        | TargetingIntent::Discard
+        | TargetingIntent::Counter
+        | TargetingIntent::Tap
+        | TargetingIntent::Debuff
+        | TargetingIntent::LoseLife
+        | TargetingIntent::GainControl
+        | TargetingIntent::Fight
+        | TargetingIntent::Attack
+        | TargetingIntent::Block
+        | TargetingIntent::Hostile => true,
+        TargetingIntent::Untap
+        | TargetingIntent::Copy
+        | TargetingIntent::Buff
+        | TargetingIntent::Heal
+        | TargetingIntent::Reveal
+        | TargetingIntent::Draw
+        | TargetingIntent::Fetch
+        | TargetingIntent::Attach
+        | TargetingIntent::Friendly => false,
+    }
+}
+
 fn combat_assignments(state: &GameState) -> Vec<CombatAssignmentDto> {
     state
         .combat
@@ -5165,12 +5293,12 @@ mod tests {
 
     use engine::game::interaction::bind_interaction_authority;
     use engine::game::zones::create_object;
-    use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{Effect, EffectKind, ResolvedAbility, TargetFilter};
     use engine::types::counter::CounterType;
     use engine::types::game_state::{
         MulliganDecisionEntry, MulliganDecisionPhase, OutsideGameChoiceEntry,
-        OutsideGameChoiceSource, PayableResource, PendingCast, PendingMulliganAction,
-        TargetSelectionProgress, TargetSelectionSlot,
+        OutsideGameChoiceSource, PayableResource, PendingCast, PendingMulliganAction, PtDirection,
+        TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
     };
     use engine::types::identifiers::CardId;
     use engine::types::interaction::InteractionSessionId;
@@ -5751,6 +5879,8 @@ mod tests {
                 legal_targets: vec![TargetRef::Player(PlayerId(1))],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::DealDamage,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -5786,6 +5916,8 @@ mod tests {
                     ],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::DealDamage,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
@@ -5801,6 +5933,194 @@ mod tests {
         // v2 removed the flat `label` in favour of `presentation`.
         assert!(json["input"].get("label").is_none());
         assert_eq!(json["input"]["presentation"]["title"], "Choose target");
+    }
+
+    /// Build a `TargetSelection` board-target prompt whose single slot carries
+    /// `effect_kind`, driving the real engine projection
+    /// (`derive_viewer_interaction` -> `target_intent`) and the real adapter
+    /// mapping. Returns the serialized prompt.
+    fn board_target_prompt_for(effect_kind: EffectKind) -> serde_json::Value {
+        board_target_prompt_detailed(effect_kind, TargetEffectDetail::None)
+    }
+
+    /// As above, with the discriminating payload the effect kind cannot carry.
+    fn board_target_prompt_detailed(
+        effect_kind: EffectKind,
+        effect_detail: TargetEffectDetail,
+    ) -> serde_json::Value {
+        let mut state = GameState::new_two_player(7);
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let legal = vec![TargetRef::Object(target)];
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: PlayerId(0),
+            pending_cast: dummy_pending_cast(),
+            target_slots: vec![TargetSelectionSlot {
+                legal_targets: legal.clone(),
+                optional: false,
+                chooser: None,
+                effect_kind,
+                effect_detail,
+            }],
+            mode_labels: Vec::new(),
+            selection: TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets: legal,
+            },
+        };
+        // The intent rides the engine's interaction projection, which only
+        // produces opportunities once authority is bound. Without this the
+        // adapter sees no opportunity and falls back to neutral, which would
+        // make the assertions below pass for the wrong reason.
+        bind_interaction_authority(&mut state, InteractionSessionId("intent".to_string()))
+            .expect("valid interaction authority binding");
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        assert!(
+            !prepared.interaction.opportunities.is_empty(),
+            "reach guard: the viewer must actually own an open target opportunity, \
+             otherwise the intent assertions below are vacuous"
+        );
+        serde_json::to_value(build_prompt(&prepared, &lookup).unwrap()).unwrap()
+    }
+
+    /// CR 115.1: the defect this fixes — every target prompt used to be
+    /// advertised as `Hostile` with a contradicting `hostile: false`, so
+    /// targeting your own creature to regenerate it looked exactly like a kill
+    /// spell.
+    ///
+    /// Both halves of each pair flip if the derivation is reverted to the old
+    /// hardcoded `intent: TargetingIntent::Hostile, hostile: false`.
+    #[test]
+    fn a_damage_target_prompt_and_a_regenerate_target_prompt_carry_opposite_intents() {
+        // CR 120.1: damage is adverse to whatever is chosen.
+        let damage = board_target_prompt_for(EffectKind::DealDamage);
+        assert_eq!(damage["input"]["type"], "chooseBoardTargets");
+        assert_eq!(damage["input"]["intent"], "damage");
+        assert_eq!(damage["input"]["hostile"], true);
+
+        // CR 701.19: a regeneration shield only ever helps its target.
+        let regenerate = board_target_prompt_for(EffectKind::Regenerate);
+        assert_eq!(regenerate["input"]["intent"], "friendly");
+        assert_eq!(regenerate["input"]["hostile"], false);
+
+        assert_ne!(
+            damage["input"]["intent"], regenerate["input"]["intent"],
+            "a kill spell and a protective spell must not advertise the same intent"
+        );
+    }
+
+    /// The declared residue of `local.targeting-intent-neutral-inexpressible`.
+    ///
+    /// `EffectKind` is a unit tag, so `Effect::Pump` is the same variant for
+    /// "+3/+3" and "-3/-3"; the engine honestly projects `Modify`, and the
+    /// protocol — which has only `Buff`/`Debuff` and no neutral member — forces
+    /// a guess. It resolves to `Debuff`, the ADVERSE member, for the same
+    /// asymmetric-loss reason the neutral bucket does: `Buff` would be right
+    /// more often, since pump is more often positive, but it is the direction
+    /// whose error cannot be recovered — it marks "target creature gets -4/-4"
+    /// as harmless. Pinning it here means the lossy step is visible rather than
+    /// discovered later by a client.
+    #[test]
+    fn an_unsigned_pump_target_prompt_fails_cautious_as_debuff() {
+        let pump = board_target_prompt_for(EffectKind::Pump);
+        assert_eq!(pump["input"]["intent"], "debuff");
+        assert_eq!(
+            pump["input"]["hostile"], true,
+            "an unsigned modification must not claim to be harmless"
+        );
+
+        // The pair that makes "every prompt is Hostile" impossible to
+        // reintroduce: an unsigned modification and a burn spell are both
+        // adverse, so `hostile` agrees — but they must still be distinguishable,
+        // which is what a constant `intent` would destroy.
+        let damage = board_target_prompt_for(EffectKind::DealDamage);
+        assert_ne!(pump["input"]["intent"], damage["input"]["intent"]);
+
+        // A genuinely neutral pick (mutate carries `NoOp` — no `Effect` backs
+        // it) has no honest protocol value at all. It resolves to `Hostile`,
+        // which is a least-wrong fallback and not a fix: an unlabelled pick
+        // still reads as hostile.
+        let neutral = board_target_prompt_for(EffectKind::NoOp);
+        assert_eq!(neutral["input"]["intent"], "hostile");
+        assert_eq!(neutral["input"]["hostile"], true);
+    }
+
+    /// CR 613.4: a signed modification resolves to its true direction.
+    ///
+    /// This is the payoff of stamping the discriminating payload alongside the
+    /// kind. Before it, every `Effect::Pump` — 1,679 targeted links in the card
+    /// corpus — took one guess; 324 of them were targeted DEBUFFS being shown
+    /// under a single label with 1,079 buffs. Both halves below flip to the
+    /// lossy `Modify` arm if `TargetEffectDetail::Modification` is dropped.
+    #[test]
+    fn a_signed_pump_resolves_to_its_actual_direction() {
+        let buff = board_target_prompt_detailed(
+            EffectKind::Pump,
+            TargetEffectDetail::Modification(PtDirection::Increase),
+        );
+        assert_eq!(buff["input"]["intent"], "buff");
+        assert_eq!(
+            buff["input"]["hostile"], false,
+            "a combat trick on your own creature is not adverse"
+        );
+
+        let debuff = board_target_prompt_detailed(
+            EffectKind::Pump,
+            TargetEffectDetail::Modification(PtDirection::Decrease),
+        );
+        assert_eq!(debuff["input"]["intent"], "debuff");
+        assert_eq!(debuff["input"]["hostile"], true);
+
+        assert_ne!(
+            buff["input"]["intent"], debuff["input"]["intent"],
+            "+3/+3 and -3/-3 share one EffectKind; only the stamped direction \
+             separates them"
+        );
+        // And the unknowable tail still declines to claim a direction.
+        let unsigned = board_target_prompt_for(EffectKind::Pump);
+        assert_eq!(unsigned["input"]["intent"], "debuff");
+    }
+
+    /// CR 115.1: a zone-change target resolves by DESTINATION, reusing the
+    /// engine's existing `effect_zone_intent` rather than a second labeller.
+    ///
+    /// `EffectKind::ChangeZone` is the single largest targeting family (2,828
+    /// links) and its tag says only "a zone change happened". Exile and
+    /// return-to-hand are opposite dispositions under one kind.
+    #[test]
+    fn a_zone_change_target_resolves_by_destination() {
+        let exile = board_target_prompt_detailed(
+            EffectKind::ChangeZone,
+            TargetEffectDetail::Destination(Zone::Exile),
+        );
+        assert_eq!(exile["input"]["intent"], "exile");
+        assert_eq!(exile["input"]["hostile"], true);
+
+        let bounce = board_target_prompt_detailed(
+            EffectKind::ChangeZone,
+            TargetEffectDetail::Destination(Zone::Hand),
+        );
+        assert_eq!(bounce["input"]["intent"], "bounce");
+
+        assert_ne!(
+            exile["input"]["intent"], bounce["input"]["intent"],
+            "both are EffectKind::ChangeZone; only the stamped destination \
+             separates them"
+        );
+
+        // Destinations `effect_zone_intent` deliberately leaves unlabelled stay
+        // neutral rather than inventing a disposition.
+        let battlefield = board_target_prompt_detailed(
+            EffectKind::ChangeZone,
+            TargetEffectDetail::Destination(Zone::Battlefield),
+        );
+        assert_eq!(battlefield["input"]["intent"], "hostile");
     }
 
     /// Grounds the capability registry in behaviour rather than prose.

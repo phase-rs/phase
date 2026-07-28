@@ -29,7 +29,7 @@ export type InteractionSummaryCode = "decision" | "candidate" | "source" | "sele
 
 export type InteractionZoneCode = "battlefield" | "hand" | "library" | "graveyard" | "exile" | "stack" | "command" | "outsideGame" | "other";
 
-export type InteractionIntentCode = "choose" | "keep" | "sacrifice" | "return" | "exile" | "tap" | "crew" | "saddle" | "station" | "ringBearer" | "blight" | "pay" | "attack" | "block";
+export type InteractionIntentCode = "choose" | "keep" | "sacrifice" | "return" | "exile" | "tap" | "crew" | "saddle" | "station" | "ringBearer" | "blight" | "pay" | "attack" | "block" | "damage" | "destroy" | "regenerate" | "counter" | "untap" | "mill" | "discard" | "draw" | "gainLife" | "loseLife" | "fight" | "attach" | "copy" | "gainControl" | "reveal" | "modify" | "buff" | "debuff";
 
 export type AggregateComparator = "greaterThan" | "lessThan" | "atLeast" | "atMost" | "equal" | "notEqual";
 
