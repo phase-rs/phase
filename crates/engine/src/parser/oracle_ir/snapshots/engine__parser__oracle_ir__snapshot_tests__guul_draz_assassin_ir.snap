@@ -1,6 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 524
+assertion_line: 550
 expression: "&ir"
 ---
 {
@@ -106,62 +106,118 @@ expression: "&ir"
         "fragment": "{B}, {T}: Target creature gets -2/-2 until end of turn."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": {
-              "type": "Fixed",
-              "value": -2
-            },
-            "toughness": {
-              "type": "Fixed",
-              "value": -2
-            },
-            "target": {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": null,
-              "properties": []
-            }
-          },
-          "cost": {
-            "type": "Composite",
-            "costs": [
+        "Spell": {
+          "source_text": "Target creature gets -2/-2 until end of turn",
+          "body": {
+            "clauses": [
               {
-                "type": "Mana",
-                "cost": {
-                  "type": "Cost",
-                  "shards": [
-                    "Black"
-                  ],
-                  "generic": 0
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 44,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Target creature gets -2/-2 until end of turn"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Pump",
+                    "power": {
+                      "type": "Fixed",
+                      "value": -2
+                    },
+                    "toughness": {
+                      "type": "Fixed",
+                      "value": -2
+                    },
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": null,
+                      "properties": []
+                    }
+                  },
+                  "duration": "UntilEndOfTurn",
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Composite",
+              "costs": [
+                {
+                  "type": "Mana",
+                  "cost": {
+                    "type": "Cost",
+                    "shards": [
+                      "Black"
+                    ],
+                    "generic": 0
+                  }
+                },
+                {
+                  "type": "Tap"
                 }
-              },
+              ]
+            },
+            "activation_restrictions": [
               {
-                "type": "Tap"
+                "type": "LevelCounterRange",
+                "data": {
+                  "minimum": 2,
+                  "maximum": 3
+                }
               }
+            ],
+            "description": "{B}, {T}: Target creature gets -2/-2 until end of turn.",
+            "stages": [
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
             ]
-          },
-          "sub_ability": null,
-          "duration": "UntilEndOfTurn",
-          "description": "{B}, {T}: Target creature gets -2/-2 until end of turn.",
-          "target_prompt": null,
-          "activation_restrictions": [
-            {
-              "type": "LevelCounterRange",
-              "data": {
-                "minimum": 2,
-                "maximum": 3
-              }
-            }
-          ],
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          }
         }
       }
     },
@@ -236,61 +292,117 @@ expression: "&ir"
         "fragment": "{B}, {T}: Target creature gets -4/-4 until end of turn."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": {
-              "type": "Fixed",
-              "value": -4
-            },
-            "toughness": {
-              "type": "Fixed",
-              "value": -4
-            },
-            "target": {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": null,
-              "properties": []
-            }
-          },
-          "cost": {
-            "type": "Composite",
-            "costs": [
+        "Spell": {
+          "source_text": "Target creature gets -4/-4 until end of turn",
+          "body": {
+            "clauses": [
               {
-                "type": "Mana",
-                "cost": {
-                  "type": "Cost",
-                  "shards": [
-                    "Black"
-                  ],
-                  "generic": 0
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 44,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Target creature gets -4/-4 until end of turn"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Pump",
+                    "power": {
+                      "type": "Fixed",
+                      "value": -4
+                    },
+                    "toughness": {
+                      "type": "Fixed",
+                      "value": -4
+                    },
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": null,
+                      "properties": []
+                    }
+                  },
+                  "duration": "UntilEndOfTurn",
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Composite",
+              "costs": [
+                {
+                  "type": "Mana",
+                  "cost": {
+                    "type": "Cost",
+                    "shards": [
+                      "Black"
+                    ],
+                    "generic": 0
+                  }
+                },
+                {
+                  "type": "Tap"
                 }
-              },
+              ]
+            },
+            "activation_restrictions": [
               {
-                "type": "Tap"
+                "type": "LevelCounterRange",
+                "data": {
+                  "minimum": 4
+                }
               }
+            ],
+            "description": "{B}, {T}: Target creature gets -4/-4 until end of turn.",
+            "stages": [
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
             ]
-          },
-          "sub_ability": null,
-          "duration": "UntilEndOfTurn",
-          "description": "{B}, {T}: Target creature gets -4/-4 until end of turn.",
-          "target_prompt": null,
-          "activation_restrictions": [
-            {
-              "type": "LevelCounterRange",
-              "data": {
-                "minimum": 4
-              }
-            }
-          ],
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          }
         }
       }
     }

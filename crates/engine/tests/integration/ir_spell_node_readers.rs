@@ -59,24 +59,25 @@ fn retained_ability_slots(parsed: &ParsedAbilities) -> Vec<usize> {
 }
 
 /// CR 707.9a: a printed slot is consumed by the printed ability that occupies
-/// it, whether or not that ability has a definition yet to stamp.
+/// it, whether or not that ability carried a definition to stamp.
 ///
-/// `OracleDocBuilder::finish()` resolves every "…except it has this ability"
-/// clause by walking items in source order and counting each category
-/// separately. An IR-native spell node holds only an effect chain, so there is
-/// nothing to stamp into — but it still occupies an ability slot, because
-/// `lower_oracle_ir` pushes it into `result.abilities` exactly like a
-/// pre-lowered one does.
+/// `lower_oracle_ir` resolves every "…except it has this ability" clause while
+/// bucketing items into the per-category vectors: the slot IS
+/// `result.abilities.len()` at the moment of the push, so an IR-native spell
+/// consumes its slot by being pushed, exactly like a pre-lowered one. (Plan 05b
+/// T9b moved this off `OracleDocBuilder::finish()`, which ran before lowering
+/// and so could only stamp the pre-lowered shapes.)
 ///
-/// DISCRIMINATING: with the `Spell` arm parked in `finish()`'s no-op list this
-/// reads `0`, and the copy grafts the FIRST printed ability — the prevention
-/// spell — instead of itself.
+/// DISCRIMINATING: drop the stamp and this reads `0` — the copy grafts the FIRST
+/// printed ability, the prevention spell, instead of itself. Verified red.
 ///
-/// Line 1 is the shape the only live `OracleNodeIr::Spell` producer emits: an
-/// instant/sorcery prevention line. Line 2 is a synthetic activated ability,
-/// which is the sole source of `RetainPrintedAbilityFromSource`. No printing
-/// pairs the two today — which is exactly why this defect had no corpus witness
-/// and why the full-pool byte gate is silent on it.
+/// Line 1 reaches the instant/sorcery prevention recognizer, an IR-native
+/// (`OracleNodeIr::Spell`) producer. Line 2 is a synthetic activated ability;
+/// `parse_activated_ability_definition` is the only writer of
+/// `ParseContext::current_ability_index` and therefore the only source of
+/// `RetainPrintedAbilityFromSource`, and it is deliberately still pre-lowered.
+/// No printing pairs the two today — which is why this defect had no corpus
+/// witness and why the full-pool byte gate is silent on it.
 #[test]
 fn an_ir_native_spell_consumes_the_printed_ability_slot_it_occupies() {
     let parsed = parse_oracle_text(
@@ -127,13 +128,13 @@ fn an_ir_native_spell_consumes_the_printed_ability_slot_it_occupies() {
 // therefore needs an explicit non-regression witness across the signature
 // change.
 //
-// SCOPE, stated honestly: this witnesses the BORROWED arm. The new IR-native
-// arm has no witness, because no text can currently reach it — the single live
-// `Spell` producer is a prevent-damage spell line, and no relation predicate
-// matches a prevention chain. Verified by construction (removing the new arm
-// leaves these tests green) and by attempting to synthesize a card that pairs
-// the two, which the line splitter refuses to produce. The arm is forward
-// hardening for T8, when `Spell` producers rise from 1 to ~14.
+// SCOPE, stated honestly: this witnesses the BORROWED arm. The IR-native arm is
+// exercised by nine producers as of Plan 05b T9b, but by no *relation predicate*
+// — the relations these tests drive pair ability items whose text reaches the
+// still-pre-lowered fallbacks, and no relation predicate matches a prevention
+// chain or a keyword-activated body. So the IR-native arm remains covered by
+// construction (`item_ability` lowers through the same `lower_ability_ir` the
+// `Spell` bucketing arm calls) rather than by a relation witness.
 // ---------------------------------------------------------------------------
 
 /// Verified against Scryfall 2026-07-27 (`cards/named?exact=Siren's Call`).

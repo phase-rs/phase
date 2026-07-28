@@ -6,7 +6,7 @@
 
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_ir::doc::OracleDocIr;
+use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
 
 /// Parse Oracle text through both IR and lowering layers.
 fn parse_two_layer(
@@ -190,6 +190,58 @@ fn blunt_the_assault_prevention_spell_preserves_preceding_clause() {
     );
     insta::assert_json_snapshot!("blunt_the_assault_ir", &ir);
     insta::assert_json_snapshot!("blunt_the_assault_lowered", &lowered);
+}
+
+/// CR 601.2b: a standalone "X can't be 0." annotation paragraph raises the
+/// announced-X floor on the ability printed ABOVE it, and must do so without
+/// converting that ability's node back to the pre-lowered shape.
+///
+/// DISCRIMINATING, and newly so. This line reaches
+/// `DocEmitter::raise_last_spell_min_x`, which pops the last emitted spell item,
+/// edits it, and re-emits it. Its predecessor — the general
+/// `mutate_last_spell(f)` closure mutator — could only hand a closure an
+/// `&mut AbilityDefinition`, so it had to LOWER the popped node first and could
+/// only ever re-emit pre-lowered. Before T9b that was invisible, because the
+/// only IR-native spell producer was unreachable from this line; after the
+/// payload swap nine producers can precede it. Restore the closure mutator and
+/// the `min_x_value` assertion still passes while the node assertion fails —
+/// which is exactly the silent un-conversion this shape guards against.
+///
+/// The prevention line is the fixture because it is a *converted* producer
+/// (U0-39), so `abilities[0]` is genuinely IR-native here; a fallback-parsed
+/// line would emit the pre-lowered shape and make the node assertion vacuous.
+///
+/// Both layers are asserted on purpose. The IR half pins WHERE the floor is
+/// stored (`AbilityShellIr::min_x_value`, pre-lowering); the lowered half pins
+/// that `apply_ability_shell_envelope`'s `max` actually carries it onto the
+/// root, so a floor parked in a shell field nothing reads cannot pass.
+#[test]
+fn a_standalone_x_floor_annotation_raises_an_ir_native_spells_floor() {
+    let (ir, lowered) = parse_two_layer(
+        "Prevent all combat damage that would be dealt this turn.\nX can't be 0.",
+        "Probe",
+        &["Instant"],
+        &[],
+    );
+
+    // Reach-guard: exactly one ability, and it must be the IR-native node —
+    // otherwise the floor assertion below says nothing about the `Spell` arm.
+    assert_eq!(
+        lowered.abilities.len(),
+        1,
+        "expected the prevention spell alone; the annotation paragraph is not an ability, got {:?}",
+        lowered.abilities
+    );
+    assert!(
+        matches!(ir.items[0].node, OracleNodeIr::Spell(_)),
+        "the re-emitted node must stay IR-native, got {:?}",
+        ir.items[0].node
+    );
+
+    assert_eq!(
+        lowered.abilities[0].min_x_value, 1,
+        "the \"X can't be 0.\" annotation must raise the lowered root's floor to 1"
+    );
 }
 
 // ---------------------------------------------------------------------------
