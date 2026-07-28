@@ -26858,7 +26858,8 @@ pub(crate) enum ChainLoweringMode {
 ///
 /// # The order is pinned and behavior-load-bearing
 ///
-/// **chain → finalize → anchor → `sub_link` → envelope stamps → stages.**
+/// **chain → die results → finalize → anchor → `sub_link` → envelope stamps →
+/// stages.**
 ///
 /// It is not an aesthetic choice: it reproduces what the whole-body recognizers
 /// in `oracle.rs` do by hand. Every one of them stamps its root fields *after*
@@ -26866,6 +26867,14 @@ pub(crate) enum ChainLoweringMode {
 /// runs the `extract_*` folds last. Reordering — in particular running a stage
 /// before the stamps — changes output, because both stages write root fields
 /// that a stamp may also write. Do not reorder for elegance.
+///
+/// CR 706.3b: the die-result table is part of the *same* ability as the roll, so
+/// it is attached before `finalize_effect_chain` rather than after — finalize and
+/// the anchor then see the complete effect, exactly as they would for an ability
+/// whose table was printed inline. Attaching it later would hand those two a
+/// `RollDie` with an empty results vector and then mutate the result behind them.
+/// The step is a no-op on an empty `die_results`, which is what keeps every
+/// non-die producer byte-identical.
 pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     let mut def = lower_effect_chain_ir(&ir.body);
     if !ir.die_results.is_empty() {
