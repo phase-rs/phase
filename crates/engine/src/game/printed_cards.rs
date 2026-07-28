@@ -3731,6 +3731,7 @@ mod tests {
             static_abilities: vec![generic_static],
             duration: None,
             target: None,
+            end_cost: None,
         };
         walk_effect(&generic, &mut names);
 

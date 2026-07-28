@@ -465,6 +465,7 @@ fn modal_ability() -> AbilityDefinition {
             static_abilities: Vec::new(),
             duration: None,
             target: None,
+            end_cost: None,
         },
     );
     ability.modal = Some(ModalChoice {

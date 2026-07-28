@@ -630,6 +630,7 @@ fn azure_beastbinder_attack_trigger_has_no_unimplemented() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(
                 *target,
@@ -7572,6 +7573,7 @@ fn teferi_time_raveler_loyalty_abilities_parse() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*r.abilities[0].effect
     else {
         panic!(
@@ -10534,6 +10536,7 @@ fn triggered_modal_block_routes_modes_through_effect_parser() {
             ref static_abilities,
             duration: None,
             target: None,
+            end_cost: _,
         } if static_abilities.is_empty()
     ));
     let modal = execute.modal.as_ref().expect("execute should be modal");
@@ -16627,6 +16630,7 @@ fn activated_target_player_cant_play_lands_pardic_miner() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*ab.effect
     else {
         panic!("expected GenericEffect, got {:?}", ab.effect);
@@ -16727,6 +16731,7 @@ fn roiling_vortex_parses_trigger_lines_and_opponent_life_lock_activation() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*ab.effect
     else {
         panic!("expected GenericEffect, got {:?}", ab.effect);
@@ -17355,6 +17360,7 @@ fn karn_sydri_artifact_animation_has_dynamic_mana_value_pt_no_warning() {
                 target: Some(TargetFilter::Typed(tf)),
                 static_abilities,
                 duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
+                end_cost: _,
             } = r.abilities[0].effect.as_ref()
             else {
                 panic!("{name}: expected UEOT GenericEffect, got {:?}", r.abilities[0].effect);
@@ -20235,6 +20241,7 @@ fn helm_of_the_host_emits_remove_supertype_legendary() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(
                 *target,

@@ -125,6 +125,7 @@ pub(crate) fn try_parse_activated_ability_cost_reduction_effect(
             }])],
         duration: Some(Duration::UntilEndOfTurn),
         target: None,
+        end_cost: None,
     })
 }
 
@@ -3738,9 +3739,9 @@ pub(super) fn parse_choose_ast(
 
         // CR 608.2d + CR 122.1: "choose a counter on it / that permanent" —
         // pick one of the distinct counter kinds on the anaphoric object
-        // (The Caves of Androzani II/III). Anaphoric form only; the declared-
-        // target form ("a counter on target permanent", Ichormoon Gauntlet)
-        // is handled by the target parser below.
+        // (The Caves of Androzani II/III), or on an untargeted typed domain
+        // (Aven Courier). Declared-target forms remain owned by the target
+        // parser below.
         if let Some(ast) = try_parse_choose_counter_kind(rest_lower) {
             return Some(ast);
         }
@@ -3842,30 +3843,51 @@ fn try_parse_choose_damage_source(rest: &str) -> Option<ChooseImperativeAst> {
     Some(ChooseImperativeAst::DamageSource { source_filter })
 }
 
-/// CR 608.2d + CR 122.1: "a counter on <anaphor>" — the counter-kind choice
-/// head for the anaphoric form (`it` / `that permanent` / `that creature` →
-/// `ParentTarget`, The Caves of Androzani II/III). Combinator-based: `tag("a
-/// counter on ")` then the anaphor phrase, consuming the entire residual.
+/// CR 608.2d + CR 122.1: "a [kind of] counter on <domain>" — the counter-kind
+/// choice head. An anaphor (`it` / `that permanent` / `that creature`) binds
+/// to `ParentTarget` (The Caves of Androzani); a typed untargeted domain uses
+/// the shared target parser (Aven Courier / Contractual Safeguard).
 ///
 /// The declared-target form ("a counter on target permanent", Ichormoon
-/// Gauntlet) is intentionally excluded: its consumer ("put one more counter of
-/// that kind on that permanent or remove one of those counters from it") is not
-/// yet implemented, so parsing only the head would create a partial and
-/// rules-incorrect parse. Left as an honest Unimplemented gap.
+/// Gauntlet / Clockspinning) is intentionally excluded so the declared target
+/// remains owned by the existing target-designation path rather than being
+/// misclassified as a resolution-time source population.
 fn try_parse_choose_counter_kind(rest_lower: &str) -> Option<ChooseImperativeAst> {
-    let anaphor = |i| -> OracleResult<'_, ()> {
-        let (i, _) = tag("a counter on ").parse(i)?;
-        let (i, _) = alt((tag("it"), tag("that permanent"), tag("that creature"))).parse(i)?;
-        let (i, _) = opt(tag(".")).parse(i)?;
-        let (i, _) = eof.parse(i)?;
-        Ok((i, ()))
-    };
-    if anaphor(rest_lower.trim()).is_ok() {
+    let (domain, _) = alt((
+        tag::<_, _, OracleError<'_>>("a kind of counter on "),
+        tag("a counter on "),
+    ))
+    .parse(rest_lower.trim())
+    .ok()?;
+    if nom_target::parse_declared_target_prefix(domain).is_ok() {
+        return None;
+    }
+
+    if all_consuming(terminated(
+        alt((
+            tag::<_, _, OracleError<'_>>("it"),
+            tag("that permanent"),
+            tag("that creature"),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(domain)
+    .is_ok()
+    {
         return Some(ChooseImperativeAst::CounterKind {
             target: TargetFilter::ParentTarget,
         });
     }
-    None
+
+    let (target, remainder) = parse_target(domain);
+    if matches!(target, TargetFilter::Any)
+        || all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+            .parse(remainder.trim_start())
+            .is_err()
+    {
+        return None;
+    }
+    Some(ChooseImperativeAst::CounterKind { target })
 }
 
 /// CR 108.3 + CR 701.38d: Detect "a <type> owned by the voter" and emit
@@ -5710,9 +5732,47 @@ fn parse_neuter_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
 /// "Choose target X and target Y", that object is the sole attachable
 /// (Equipment/Aura) slot among the declared targets — so bind the pronoun to
 /// that `ParentTargetSlot`, giving the Attach a distinct `attachment` and
-/// `target` (no slot collision). When there is no unique attachable slot (empty
-/// or ambiguous registry), fall back to the normal target parse so every
-/// existing attach card is byte-identical.
+/// `target` (no slot collision).
+///
+/// With no declared attachable slot, exactly ONE narrow class rebinds the
+/// pronoun away from the default target parse (issue #605): a chain in which an
+/// EARLIER clause animated the ability's own SOURCE into an Aura (CR 303.4) or
+/// an Equipment (CR 301.5) — `ctx.source_becomes_attachment_in_chain`. That is
+/// the animate-then-attach class, of which the 12 Licids are the canonical
+/// members ("{W}, {T}: This creature loses this ability and becomes an Aura
+/// enchantment with enchant creature. Attach **it** to target creature"). The
+/// chain has made exactly one object attachable, so "it" names the source
+/// (`SelfRef`). Without this the clause fell through to `ParentTarget`, which
+/// `resolve_object_filter` reads as the ability's *chosen target* — the
+/// enchant-recipient creature — so the effect attached the recipient to itself
+/// and state-based actions silently undid the whole activation.
+///
+/// Every other chain keeps its pre-existing `parse_target` binding, unchanged:
+///
+/// * **A chain with an earlier typed object referent** — "it" names that
+///   referent and `ParentTarget` is correct (Aura Graft "gain control of target
+///   Aura … attach **it** to another permanent"; Ogre Geargrabber; Auriok
+///   Survivors).
+/// * **The Equipment-ETB class** (Embercleave — "When this Equipment enters,
+///   attach **it** to target creature you control") — intentionally left at
+///   `ParentTarget`. It is resolved at RUNTIME by
+///   `game::effects::attach::resolve_parent_target_attachment_from_trigger`,
+///   which rescues a `ParentTarget` attachment out of the trigger context
+///   whenever the current trigger event is a `ZoneChanged { to: Battlefield }`.
+///   Rebinding it here would be behaviorally inert for those cards and an active
+///   REGRESSION for the cards whose SOURCE IS NOT ATTACHABLE (Adaptive Armorer,
+///   Stonehewer Giant, Quest for the Holy Relic, Armored Skyhunter, …): they
+///   would attach a creature/artifact/instant source to a permanent. CR 704.5p
+///   is now implemented (`sba::check_illegal_attachment_unattach`), so that
+///   illegal state is swept on the next SBA check instead of persisting — but
+///   the attachment the card asked for would simply evaporate, which is still a
+///   regression, not a fix.
+///
+/// The recipient-side sibling `parse_attach_recipient` gates its own delegation
+/// on the wider `attach_neuter_recipient_resolves_via_subject` predicate. That
+/// asymmetry is deliberate: the recipient slot may legally name a chosen target
+/// ("attach up to one target Equipment you control **to it**"), so it needs the
+/// `ctx.subject` / `parent_target_is_chosen` arms to tell the two apart.
 fn parse_attachment_anaphor<'a>(text: &'a str, ctx: &ParseContext) -> (TargetFilter, &'a str) {
     if is_bare_object_pronoun(text.trim().to_ascii_lowercase().as_str()) {
         if let Some(index) = unique_attachable_slot(&ctx.declared_target_slots) {
@@ -5720,6 +5780,12 @@ fn parse_attachment_anaphor<'a>(text: &'a str, ctx: &ParseContext) -> (TargetFil
                 TargetFilter::ParentTargetSlot { index },
                 &text[text.len()..],
             );
+        }
+        // CR 608.2c + CR 301.5 + CR 303.4: an earlier clause animated the
+        // source into an Aura/Equipment, so the source is the only object this
+        // chain could be asking to attach.
+        if ctx.source_becomes_attachment_in_chain {
+            return (TargetFilter::SelfRef, &text[text.len()..]);
         }
     }
     parse_target(text)
@@ -6125,6 +6191,7 @@ fn try_parse_gain_quoted_ability(text: &str) -> Option<Effect> {
             .description(text.to_string())],
         duration,
         target: None,
+        end_cost: None,
     })
 }
 
@@ -6162,6 +6229,7 @@ fn coalesce_pump_with_modifications(body_text: &str) -> Option<Effect> {
             .description(body_text.to_string())],
         duration,
         target: None,
+        end_cost: None,
     })
 }
 
@@ -6197,6 +6265,7 @@ fn try_parse_gain_keyword(text: &str) -> Option<Effect> {
             .description(text.to_string())],
         duration,
         target: None,
+        end_cost: None,
     })
 }
 
@@ -9608,6 +9677,7 @@ pub(super) fn parse_imperative_family_ast(
                 }])],
             duration: None,
             target: None,
+            end_cost: None,
         }));
     }
 
@@ -12121,6 +12191,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             ],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
+            end_cost: None,
         },
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::Learn => Effect::Learn,
@@ -12469,10 +12540,17 @@ pub(super) fn parse_zone_counter_ast(
         if let Some(after_put) =
             nom_on_lower(text, lower, |i| value((), tag("put ")).parse(i)).map(|((), rest)| rest)
         {
-            if let Some(Effect::PutChosenCounter { target, count }) =
-                super::counter::try_parse_put_chosen_counter(&after_put.to_ascii_lowercase())
+            if let Some(Effect::PutChosenCounter {
+                target,
+                count,
+                target_condition,
+            }) = super::counter::try_parse_put_chosen_counter(&after_put.to_ascii_lowercase())
             {
-                return Some(ZoneCounterImperativeAst::PutChosenCounter { target, count });
+                return Some(ZoneCounterImperativeAst::PutChosenCounter {
+                    target,
+                    count,
+                    target_condition,
+                });
             }
         }
         // Try move-counters first ("put its counters on ...")
@@ -12733,9 +12811,15 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             target,
         },
         // CR 122.1 + CR 122.6: "put an additional counter of that kind on <anaphor>".
-        ZoneCounterImperativeAst::PutChosenCounter { target, count } => {
-            Effect::PutChosenCounter { target, count }
-        }
+        ZoneCounterImperativeAst::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        },
         // CR 122.1: PutCounterList is always intercepted upstream in
         // `lower_imperative_family_ast` because it lowers to a sub_ability
         // chain that a bare Effect can't express. If execution reaches here
@@ -12919,6 +13003,7 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
             static_abilities: vec![must_attack_static_definition()],
             duration: Some(duration),
             target: None,
+            end_cost: None,
         }));
     }
 
@@ -13052,6 +13137,7 @@ pub(super) fn try_parse_attack_or_block_if_able(lower: &str) -> Option<Imperativ
                 static_abilities: must_attack_or_block_static_definitions(),
                 duration: Some(duration),
                 target: None,
+                end_cost: None,
             }));
         }
     }
@@ -13207,6 +13293,7 @@ fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
                 .modifications(vec![ContinuousModification::AddKeyword { keyword }])],
             duration: Some(duration),
             target: None,
+            end_cost: None,
         }));
     }
 
@@ -13233,6 +13320,7 @@ fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
         static_abilities: statics,
         duration: Some(duration),
         target: None,
+        end_cost: None,
     }))
 }
 
@@ -13396,6 +13484,86 @@ mod tests {
                         }
                     ))
         )));
+    }
+
+    /// CR 608.2d + CR 122.1: Aven Courier's untargeted source domain lowers to
+    /// `ChooseCounterKind` over permanents the controller controls.
+    #[test]
+    fn try_parse_choose_counter_kind_accepts_typed_untargeted_domain() {
+        for (input, expected_type) in [
+            (
+                "a counter on a permanent you control.",
+                TypeFilter::Permanent,
+            ),
+            (
+                "a kind of counter on a creature you control.",
+                TypeFilter::Creature,
+            ),
+        ] {
+            let ast = try_parse_choose_counter_kind(input)
+                .expect("typed untargeted counter domain must parse");
+            let ChooseImperativeAst::CounterKind {
+                target: TargetFilter::Typed(filter),
+            } = ast
+            else {
+                panic!("expected typed CounterKind domain, got {ast:?}");
+            };
+            assert_eq!(filter.type_filters, vec![expected_type]);
+            assert_eq!(filter.controller, Some(ControllerRef::You));
+        }
+    }
+
+    /// CR 115.1 + CR 608.2d: Literal-target siblings remain owned by the
+    /// stack-target designation path (Clockspinning / Ichormoon Gauntlet), not
+    /// the untargeted chosen-counter population parser.
+    #[test]
+    fn try_parse_choose_counter_kind_rejects_declared_target_prefixes() {
+        for input in [
+            "a counter on target permanent.",
+            "a counter on another target permanent.",
+            "a counter on other target permanent.",
+            "a kind of counter on target creature.",
+        ] {
+            let (domain, _) = alt((
+                tag::<_, _, OracleError<'_>>("a kind of counter on "),
+                tag("a counter on "),
+            ))
+            .parse(input)
+            .expect("test input has the chooser prefix");
+            let (target, remainder) = parse_target(domain);
+            assert!(
+                !matches!(target, TargetFilter::Any) && remainder == ".",
+                "positive reach guard: declared target syntax must remain parseable: {input}"
+            );
+            assert!(
+                try_parse_choose_counter_kind(input).is_none(),
+                "declared target must not become a resolution population: {input}"
+            );
+        }
+
+        assert!(
+            try_parse_choose_counter_kind("a counter on target permanent or suspended card.")
+                .is_none(),
+            "Clockspinning literal target must stay in TargetOnly parsing"
+        );
+    }
+
+    /// CR 608.2d + CR 122.1: Every supported definite anaphor binds the
+    /// counter-kind choice to the preceding instruction's object.
+    #[test]
+    fn try_parse_choose_counter_kind_preserves_anaphoric_family() {
+        for input in [
+            "a counter on it.",
+            "a counter on that permanent.",
+            "a counter on that creature.",
+        ] {
+            assert!(matches!(
+                try_parse_choose_counter_kind(input),
+                Some(ChooseImperativeAst::CounterKind {
+                    target: TargetFilter::ParentTarget,
+                })
+            ));
+        }
     }
 
     fn has_type(tf: &TypedFilter, ty: TypeFilter) -> bool {
@@ -14273,6 +14441,80 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    /// CR 608.2c + CR 303.4 (issue #605): when an earlier clause of the chain
+    /// animated the SOURCE into an Aura/Equipment, the attachment slot's bare
+    /// "it" names that source — not the ability's chosen target. Seeds the flag
+    /// axis directly so the branch is pinned independently of any one card.
+    #[test]
+    fn parse_attachment_anaphor_it_binds_source_when_chain_animates_source() {
+        let input = "attach it to target creature";
+        let lower = input.to_lowercase();
+        let mut ctx = ParseContext {
+            source_becomes_attachment_in_chain: true,
+            ..Default::default()
+        };
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach { attachment, .. }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(attachment, TargetFilter::SelfRef);
+    }
+
+    /// CR 608.2c: without that animation the pronoun keeps its pre-existing
+    /// `ParentTarget` binding. This is the Equipment-ETB class (Embercleave —
+    /// rescued at runtime by `resolve_parent_target_attachment_from_trigger`)
+    /// AND the non-attachable-source class (Adaptive Armorer, Stonehewer Giant),
+    /// which must never be rebound to the source.
+    #[test]
+    fn parse_attachment_anaphor_it_keeps_parent_target_without_source_animation() {
+        let input = "attach it to target creature";
+        let lower = input.to_lowercase();
+        let mut ctx = ParseContext::default();
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach { attachment, .. }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(attachment, TargetFilter::ParentTarget);
+    }
+
+    /// CR 608.2c: with an earlier typed referent in the chain (Aura Graft's
+    /// "gain control of target Aura …"), the same pronoun keeps `ParentTarget`.
+    #[test]
+    fn parse_attachment_anaphor_it_keeps_parent_target_when_referent_available() {
+        let input = "attach it to another permanent it can enchant";
+        let lower = input.to_lowercase();
+        let mut ctx = ParseContext {
+            parent_target_available: true,
+            ..Default::default()
+        };
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach { attachment, .. }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(attachment, TargetFilter::ParentTarget);
+    }
+
+    /// CR 601.2c + CR 608.2c: a declared attachable slot outranks the
+    /// source-animation arm — the pronoun binds to that slot even when the chain
+    /// also animated its source.
+    #[test]
+    fn parse_attachment_anaphor_declared_slot_outranks_source_binding() {
+        let input = "attach it to target creature";
+        let lower = input.to_lowercase();
+        let mut ctx = ParseContext {
+            source_becomes_attachment_in_chain: true,
+            declared_target_slots: vec![TargetFilter::Typed(
+                TypedFilter::default().subtype("Equipment".to_string()),
+            )],
+            ..Default::default()
+        };
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach { attachment, .. }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(attachment, TargetFilter::ParentTargetSlot { index: 0 });
     }
 
     #[test]
@@ -19399,6 +19641,7 @@ mod tests {
                 static_abilities,
                 duration,
                 target,
+                end_cost: _,
             } => {
                 assert_eq!(*target, None, "non-distributed body must not broadcast");
                 assert_eq!(*duration, Some(Duration::UntilEndOfTurn));

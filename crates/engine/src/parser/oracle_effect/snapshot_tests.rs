@@ -590,6 +590,7 @@ fn returned_creatures_can_receive_counters_and_additive_type_followup() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*subtype_followup.effect
     else {
         panic!("expected GenericEffect, got {:?}", subtype_followup.effect);
@@ -680,6 +681,7 @@ fn returned_target_can_receive_contracted_additive_type_followup() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*subtype_followup.effect
     else {
         panic!("expected GenericEffect, got {:?}", subtype_followup.effect);

@@ -3893,9 +3893,42 @@ pub(super) fn handle_resolution_choice(
             if continuation_consumes_tracked_set {
                 effects::publish_fresh_tracked_set(state, chosen.clone());
             }
+            // CR 608.2c + CR 608.2d: A counter-kind choice first selects the
+            // object whose counters define the legal kinds. Preserve that
+            // object's exact public snapshot on the continuation so later
+            // "each other ..." text can exclude it without conflating it with
+            // the spell's source or a separately declared downstream target.
+            let counter_kind_choice = state
+                .active_ability_continuation()
+                .filter(|cont| {
+                    matches!(
+                        cont.chain.effect,
+                        crate::types::ability::Effect::ChooseCounterKind { .. }
+                    )
+                })
+                .and_then(|_| chosen.first())
+                .and_then(|id| {
+                    state.objects.get(id).map(|object| {
+                        crate::types::ability::CostPaidObjectSnapshot {
+                            object_id: *id,
+                            lki: object.snapshot_for_mana_spent(),
+                        }
+                    })
+                });
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 let cont = &mut frame.pending;
-                cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                if let Some(snapshot) = counter_kind_choice {
+                    if let crate::types::ability::Effect::ChooseCounterKind { target } =
+                        &mut cont.chain.effect
+                    {
+                        *target = crate::types::ability::TargetFilter::SpecificObject {
+                            id: snapshot.object_id,
+                        };
+                    }
+                    cont.chain.set_effect_context_object_recursive(snapshot);
+                } else {
+                    cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                }
                 // CR 607.2a + CR 608.2g: A `FreeCastFromZones` continuation
                 // over "the other cards exiled this way" (Plargg and Nassari)
                 // must confine its offer to THIS resolution's exile batch. The
@@ -3929,6 +3962,7 @@ pub(super) fn handle_resolution_choice(
                 let is_partition = !matches!(
                     cont.chain.effect,
                     crate::types::ability::Effect::PutCounter { .. }
+                        | crate::types::ability::Effect::ChooseCounterKind { .. }
                 );
                 if is_partition {
                     if let Some(ref mut next_sub) = cont.chain.sub_ability {

@@ -2461,6 +2461,7 @@ fn temporary_attack_prohibition_bars_only_the_protected_player() {
                 expiry: RestrictionExpiry::EndOfTurn,
                 activity: ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::PlayerOrPlaneswalker,
+                    protected_player: None,
                 },
             });
         park_3p_declare(&mut runner, &[attacker]);

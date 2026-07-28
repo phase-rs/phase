@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while};
@@ -56,8 +58,9 @@ use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_re
 use super::oracle_dispatch::dispatch_line_nom;
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
-    lower_effect_chain_ir, parse_additional_cost_instead_condition_fragment, parse_effect_chain,
-    parse_effect_chain_ir, parse_effect_chain_with_context, rewrite_condition_keyword,
+    lower_ability_ir, lower_effect_chain_ir, parse_ability_ir_with_context,
+    parse_additional_cost_instead_condition_fragment, parse_effect_chain, parse_effect_chain_ir,
+    parse_effect_chain_with_context, rewrite_condition_keyword,
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::context::ParseContext;
@@ -66,10 +69,12 @@ use super::oracle_ir::doc::{
     OracleDocBuilder, OracleDocIr, OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan,
     OracleUnitSource, PrintedAbilityIndex, PrintedTriggerIndex,
 };
+use super::oracle_ir::effect_chain::AbilityIr;
 use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_ir::static_ir::StaticIr;
+use super::oracle_ir::trigger::TriggerNodeIr;
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     is_keyword_cost_line, is_kicker_family_line, parse_kicker_additional_cost_line,
@@ -101,7 +106,7 @@ use super::oracle_static::{
     try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
     GrantedCastKeywordKind,
 };
-use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
+use super::oracle_trigger::{lower_trigger_node_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
     normalize_card_name_refs, parse_mana_symbols, parse_number, split_same_is_true_static_tail,
     strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
@@ -1157,15 +1162,54 @@ fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
     }
 }
 
-fn item_ability(item: &OracleItemIr) -> Option<&AbilityDefinition> {
+/// CR 607.2d: the ability side of document-relation discovery.
+///
+/// Returns `Cow` because the two spell-bearing node shapes own their definition
+/// at different times. A pre-lowered item already holds an `AbilityDefinition`
+/// and lends it out; an IR-native item holds only an `EffectChainIr` and owns no
+/// definition at all until lowering builds one, so it must lower and hand back
+/// the result owned. A plain `&AbilityDefinition` cannot express the second case
+/// — there is nothing to borrow from — and a plain `AbilityDefinition` would
+/// clone the first case at all seven call sites, most of which scan every item
+/// on the card.
+///
+/// This is where the trigger side's reasoning stops applying.
+/// `item_trigger` keeps a borrow and pushes exhaustiveness down onto
+/// `TriggerNodeIr::definition()`, because both of its shapes own a
+/// `TriggerDefinition` — `TriggerNodeIr::Assembled` carries one directly. There
+/// is no equivalent layer to push this obligation onto: a spell node's IR
+/// payload is an `EffectChainIr`, not an enum of definition-owning
+/// representations, so both shapes are named here. `_ => None` is safe for the
+/// same reason it is safe there: every remaining variant is genuinely `None`.
+///
+/// Lowering is the identity conversion `lower_oracle_ir` (the `Spell` arm) will
+/// perform for the same item, so a relation predicate sees exactly the
+/// definition the relation will later be applied to.
+fn item_ability(item: &OracleItemIr) -> Option<Cow<'_, AbilityDefinition>> {
     match &item.node {
-        OracleNodeIr::PreLoweredSpell(def) => Some(def),
+        OracleNodeIr::PreLoweredSpell(def) => Some(Cow::Borrowed(def)),
+        OracleNodeIr::Spell(effect_ir) => Some(Cow::Owned(lower_effect_chain_ir(effect_ir))),
         _ => None,
     }
 }
 
+/// CR 607.2d: the trigger side of document-relation discovery.
+///
+/// Both trigger-bearing node shapes are handled, which is what makes the
+/// `_ => None` safe here. Seven readers drive four document relations off this
+/// and five of them read `trigger.execute`, so a trigger node this failed to
+/// recognize would not fail loudly — it would silently drop the relation, and
+/// the regression would surface on a DIFFERENT card from the converted one,
+/// where per-card byte-identity cannot catch it.
+///
+/// The exhaustiveness obligation lives on `TriggerNodeIr::definition()`, not on
+/// this match, and that is the correct layer: a new trigger representation is a
+/// new `TriggerNodeIr` variant, so it breaks that match at compile time before
+/// it can reach here. Enumerating `OracleNodeIr` instead would add nothing —
+/// every other variant is genuinely `None`.
 fn item_trigger(item: &OracleItemIr) -> Option<&TriggerDefinition> {
     match &item.node {
+        OracleNodeIr::Trigger(node) => node.definition(),
         OracleNodeIr::PreLoweredTrigger(def) => Some(def),
         _ => None,
     }
@@ -1405,7 +1449,7 @@ fn detect_linked_choice_type_statics(
                     }
                 )
             });
-            let is_dig = item_ability(item).is_some_and(ability_chain_has_dig)
+            let is_dig = item_ability(item).is_some_and(|def| ability_chain_has_dig(&def))
                 || item_trigger(item)
                     .and_then(|trigger| trigger.execute.as_deref())
                     .is_some_and(ability_chain_has_dig);
@@ -1526,7 +1570,7 @@ fn chosen_subtype_kind_from_persisted_choice_items(
             items
                 .iter()
                 .filter_map(item_ability)
-                .find_map(chosen_subtype_kind_from_ability)
+                .find_map(|def| chosen_subtype_kind_from_ability(&def))
         })
         .or_else(|| {
             items
@@ -1627,7 +1671,7 @@ fn detect_linked_choice_persisted_player(
 ) {
     let has_durable_reader = items.iter().any(|item| {
         item_static(item).is_some_and(static_references_source_chosen_player)
-            || item_ability(item).is_some_and(ability_references_source_chosen_player)
+            || item_ability(item).is_some_and(|def| ability_references_source_chosen_player(&def))
             || item_trigger(item).is_some_and(trigger_references_source_chosen_player)
     });
     if !has_durable_reader {
@@ -1636,7 +1680,7 @@ fn detect_linked_choice_persisted_player(
     let choosers: Vec<OracleItemId> = items
         .iter()
         .filter(|item| {
-            item_ability(item).is_some_and(ability_chain_has_player_choice)
+            item_ability(item).is_some_and(|def| ability_chain_has_player_choice(&def))
                 || item_trigger(item)
                     .and_then(|trigger| trigger.execute.as_deref())
                     .is_some_and(ability_chain_has_player_choice)
@@ -1687,9 +1731,9 @@ fn detect_linked_choice_copy_chosen_host(
     items: &[OracleItemIr],
     relations: &mut Vec<DocumentRelationIr>,
 ) {
-    let chooser = items
-        .iter()
-        .find(|item| item_ability(item).is_some_and(ability_is_as_enters_choose_permanent_gap));
+    let chooser = items.iter().find(|item| {
+        item_ability(item).is_some_and(|def| ability_is_as_enters_choose_permanent_gap(&def))
+    });
     let copy_static = items.iter().find(|item| {
         item_static(item).is_some_and(|s| {
             s.modifications
@@ -1909,6 +1953,7 @@ fn upgrade_host_bound_phase_out_at_head(def: &mut AbilityDefinition) {
             }])],
         duration: Some(Duration::UntilHostLeavesPlay),
         target: Some(TargetFilter::ParentTarget),
+        end_cost: None,
     };
 
     let mut return_ability = AbilityDefinition::new(
@@ -2872,8 +2917,8 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                 result.abilities.push(lower_effect_chain_ir(effect_ir));
                 ability_ids.push(item.id);
             }
-            OracleNodeIr::Trigger(trigger_ir) => {
-                result.triggers.push(lower_trigger_ir(trigger_ir));
+            OracleNodeIr::Trigger(trigger_node) => {
+                result.triggers.push(lower_trigger_node_ir(trigger_node));
                 trigger_ids.push(item.id);
             }
             OracleNodeIr::Static(static_ir) => {
@@ -3058,12 +3103,12 @@ fn ability_is_active_player_punisher(def: &AbilityDefinition) -> bool {
 fn detect_active_player_punisher(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
     let Some(coerce) = items
         .iter()
-        .find(|item| item_ability(item).is_some_and(ability_is_active_player_coerce))
+        .find(|item| item_ability(item).is_some_and(|def| ability_is_active_player_coerce(&def)))
     else {
         return;
     };
     for item in items {
-        if item_ability(item).is_some_and(ability_is_active_player_punisher) {
+        if item_ability(item).is_some_and(|def| ability_is_active_player_punisher(&def)) {
             relations.push(DocumentRelationIr::ActivePlayerPunisher {
                 coerce: coerce.id,
                 punisher: item.id,
@@ -3554,9 +3599,57 @@ impl<'a> DocEmitter<'a> {
         // `spells_emitted` stack (see `last_ability_node`).
         self.emit_at(line, OracleNodeIr::PreLoweredSpell(def));
     }
+
+    /// The IR seam for spell/activated bodies — Plan 05b Unit 3b, **phase A**.
+    ///
+    /// Phase A lowers **eagerly and still emits the pre-lowered node**, which is
+    /// what lets every producer convert one tranche at a time with the node
+    /// payload, `finish()`, `item_ability`, `mutate_last_spell`, `reemit_spell`
+    /// and the cross-line instead-fold all untouched — and therefore with zero
+    /// snapshot churn and a diff a reviewer can actually read. Phase B (T9)
+    /// changes this body to `self.emit_at(line, OracleNodeIr::Spell(ir))` and
+    /// every producer is already correct.
+    ///
+    /// Written as delegation to `ability_at` rather than as a second emission of
+    /// its own for two reasons. It states the phase-A identity
+    /// `ability_ir_at(l, ir) == ability_at(l, lower_ability_ir(&ir))` literally
+    /// instead of restating it as a separately-maintained copy. And it keeps the
+    /// Plan 05b burn-down ratchet (`scripts/check-prelowered-ratchet.sh`)
+    /// monotone: that gate counts a bare token textually, `oracle.rs` sits
+    /// exactly at its ceiling, and one more occurrence of that token here — in
+    /// code OR in prose — would raise the count and fail a gate whose ceiling may
+    /// only ever decrease.
+    ///
+    /// # CR 707.9a is NOT gapped by this seam
+    ///
+    /// Printed-slot stamping happens only in `OracleDocBuilder::finish`, which
+    /// runs *before* lowering, so a copy-except clause inside an IR-native
+    /// `OracleNodeIr::Spell` body can never be stamped — there is no definition
+    /// to stamp until lowering builds one (`doc.rs`, the `Spell(_)` arm advances
+    /// `ability_slot` without stamping, on purpose). That gap cannot open in
+    /// phase A: this method emits the pre-lowered spell variant, so every
+    /// phase-A-converted producer lands in the corresponding `finish()` arm and
+    /// is stamped by `stamp_retained_printed_slot`, which recurses the whole
+    /// definition (effect, `sub_ability`, `else_ability`, `mode_abilities`). The
+    /// gap becomes reachable exactly when this body switches to
+    /// `OracleNodeIr::Spell(ir)`, so moving the stamp into `lower_oracle_ir`
+    /// belongs to T9 — where it is also the only place it can be done without a
+    /// byte delta on the one pre-existing `Spell` producer, which is deliberately
+    /// not stamped today.
+    fn ability_ir_at(&mut self, line: usize, ir: AbilityIr) {
+        self.ability_at(line, lower_ability_ir(&ir));
+    }
     fn trigger_at(&mut self, line: usize, def: TriggerDefinition) {
         self.last_trigger = Some(def.clone());
         self.emit_at(line, OracleNodeIr::PreLoweredTrigger(def));
+    }
+    /// Mirrors `static_ir_at`: the peek mirror stores the LOWERED definition, so
+    /// the peek reader is unchanged and no `source_text` is invented for a slot
+    /// nothing reads it from. Lowering here is a clone (`lower_trigger_node_ir`
+    /// passes an assembled definition through), exactly what `trigger_at` paid.
+    fn trigger_ir_at(&mut self, line: usize, ir: TriggerNodeIr) {
+        self.last_trigger = Some(lower_trigger_node_ir(&ir));
+        self.emit_at(line, OracleNodeIr::Trigger(ir));
     }
     fn static_at(&mut self, line: usize, def: StaticDefinition) {
         self.last_static = Some(def.clone());
@@ -3674,13 +3767,19 @@ impl<'a> DocEmitter<'a> {
     ///
     /// `take_last_spell` pops the emission-ordered spell stack, which equals
     /// `abilities.last_mut()` regardless of triggers/statics emitted in between.
+    ///
+    /// Reads the popped item through `lower_spell_node`, which accepts BOTH
+    /// spell node shapes. It must: `emit` pushes either shape onto
+    /// `spells_emitted` and `take_last_spell` pops it with no variant filter, so
+    /// a destructure that names one shape panics the parser the first time an
+    /// IR-native spell precedes a mutating line.
     fn mutate_last_spell(&mut self, f: impl FnOnce(&mut AbilityDefinition)) {
         let Some(item) = self.builder.take_last_spell() else {
             return;
         };
         let OracleItemIr { source, node, .. } = item;
-        let OracleNodeIr::PreLoweredSpell(mut def) = node else {
-            unreachable!("take_last_spell returns only PreLoweredSpell items");
+        let Some(mut def) = lower_spell_node(&node) else {
+            unreachable!("`spells_emitted` holds only spell nodes, and both spell shapes lower");
         };
         f(&mut def);
         self.reemit_spell(&source, def);
@@ -3805,9 +3904,17 @@ pub(crate) fn parse_oracle_ir(
         let (chapter_triggers, (etb_line, etb_replacement), consumed) =
             parse_saga_chapters(&lines, card_name);
         for (line, trigger) in chapter_triggers {
-            emitter.trigger_at(line, trigger);
+            // `lines[line]` is the printed chapter line the preprocessor
+            // consumed — provenance only. A multi-numeral line (CR 714.2c)
+            // yields several triggers that legitimately share it.
+            //
+            // The identity path is what preserves the CR 714 `description`:
+            // the preprocessor stamps `"Chapter {n}"`, NOT the printed line,
+            // and `lower_trigger_node_ir` never runs the `lower_trigger_ir`
+            // overwrite that would replace it with `source_text`.
+            emitter.trigger_ir_at(line, TriggerNodeIr::from_definition(lines[line], trigger));
         }
-        emitter.replacement_at(etb_line, etb_replacement);
+        emitter.replacement_ir_at(etb_line, etb_replacement);
         consumed
     } else {
         std::collections::HashSet::new()
@@ -3818,7 +3925,12 @@ pub(crate) fn parse_oracle_ir(
     {
         let (visit_triggers, consumed) = parse_attraction_visit_triggers(&lines, card_name);
         for (line, trigger) in visit_triggers {
-            emitter.trigger_at(line, trigger);
+            // Mirror of the Saga emission above, and the reason both are
+            // identity-lowered: the CR 717 visit trigger leaves `description`
+            // at `None`, the exact opposite of Saga's `"Chapter {n}"` stamp.
+            // Routing either through `lower_trigger_ir` would overwrite one and
+            // invent the other from `source_text`.
+            emitter.trigger_ir_at(line, TriggerNodeIr::from_definition(lines[line], trigger));
         }
         preparsed_consumed.extend(consumed);
     }
@@ -3828,8 +3940,11 @@ pub(crate) fn parse_oracle_ir(
     // header..=max(mod_lines) via `emit_span`).
     let (level_statics, level_consumed, level_ability_lines) =
         parse_level_blocks(&lines, card_name);
-    for (sd, first_line, last_line) in level_statics {
-        emitter.emit_span(first_line, last_line, OracleNodeIr::PreLoweredStatic(sd));
+    // Keeps `emit_span` rather than routing through `static_ir_at`: the
+    // `first..=last` range is load-bearing, and `static_ir_at` would also write
+    // the `last_static` peek mirror, which the leveler deliberately does not.
+    for (ir, first_line, last_line) in level_statics {
+        emitter.emit_span(first_line, last_line, OracleNodeIr::Static(ir));
     }
     // CR 711.2a + CR 711.2b: Re-parse ability lines found within LEVEL blocks through
     // the normal trigger/activated/static pipeline, then attach the level counter condition.
@@ -3908,7 +4023,17 @@ pub(crate) fn parse_oracle_ir(
             });
         }
         for trigger in triggers {
-            emitter.trigger_at(*level_line, trigger);
+            // The CR 711.2a/711.2b level graft above stays exactly where it is,
+            // operating on the LOWERED definition. That is deliberate: moving it
+            // pre-lowering would compose `And[gate, ..]` against an already-
+            // composed intervening-if and yield `And[And[gate, x], y]` where the
+            // post-lowering graft yields the flat `And[gate, x, y]`, and
+            // `trigger_condition_source_zones` would additionally start deriving
+            // `trigger_zones` from the level gate. Identity lowering keeps both.
+            emitter.trigger_ir_at(
+                *level_line,
+                TriggerNodeIr::from_definition(ability_text, trigger),
+            );
         }
     }
 
@@ -3924,11 +4049,14 @@ pub(crate) fn parse_oracle_ir(
         // resolves to the correct printed-trigger slot.
         let (sc_statics, sc_triggers, sc_abilities, consumed) =
             parse_spacecraft_threshold_lines(&lines, card_name, PrintedTriggerIndex::placeholder());
-        for (line, sd) in sc_statics {
-            emitter.static_at(line, sd);
+        for (line, ir) in sc_statics {
+            emitter.static_ir_at(line, ir);
         }
         for (line, trigger) in sc_triggers {
-            emitter.trigger_at(line, trigger);
+            // CR 702.184a + CR 721.2 station gate, same shape as the leveler
+            // graft above: the condition is stamped inside the preprocessor on
+            // the lowered definition, so identity lowering is what keeps it.
+            emitter.trigger_ir_at(line, TriggerNodeIr::from_definition(lines[line], trigger));
         }
         // Post-processing runs here (pre-emit), exactly as before — the (B)
         // tuple-return design obviates moving it inside the preprocessor.
@@ -4346,22 +4474,31 @@ pub(crate) fn parse_oracle_ir(
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
 
+                // The `ParseContext` reset is a parser side effect, not part of
+                // the CR 602.1 envelope: it must keep firing here, before the
+                // parse, and so stays at the call site rather than moving into
+                // the shell.
                 ctx.subject = None;
                 ctx.actor = None;
-                let mut def =
-                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
-                def.cost = Some(cost);
-                def.description = Some(line.to_string());
+                let mut ir =
+                    parse_ability_ir_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+                // CR 602.1a: the activation cost, everything before the colon.
+                ir.shell.cost = Some(cost);
+                ir.shell.description = Some(line.to_string());
+                // CR 602.1b: the activation instructions, composed in the order
+                // this recognizer applies them — the implicit restriction LEADS
+                // and the parsed ones follow. The shell applies the vec verbatim,
+                // so this order is preserved rather than normalized against the
+                // Power-up recognizer below, which is deliberately the reverse.
+                //
                 // CR 719.3c: Solved abilities only activate while Case is solved.
-                def.activation_restrictions
-                    .push(ActivationRestriction::IsSolved);
+                let mut activation_restrictions = vec![ActivationRestriction::IsSolved];
                 // CR 602.5d: `constraints.restrictions` already contains
                 // `AsSorcery` when the source text said "Activate only as a
-                // sorcery"; extend preserves it so the legality gate fires.
-                if !constraints.restrictions.is_empty() {
-                    def.activation_restrictions.extend(constraints.restrictions);
-                }
-                emitter.ability_at(item_line, def);
+                // sorcery"; extending preserves it so the legality gate fires.
+                activation_restrictions.extend(constraints.restrictions);
+                ir.shell.activation_restrictions = activation_restrictions;
+                emitter.ability_ir_at(item_line, ir);
                 i += 1;
                 continue;
             }
@@ -4480,18 +4617,31 @@ pub(crate) fn parse_oracle_ir(
                 let cost = parse_oracle_cost(cost_text);
                 ctx.subject = None;
                 ctx.actor = None;
-                let mut def =
-                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
-                def.cost = Some(cost);
-                def.description = Some(line.to_string());
-                def.activation_restrictions.extend(constraints.restrictions);
+                let mut ir =
+                    parse_ability_ir_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+                // CR 602.1a: the activation cost, everything before the colon.
+                ir.shell.cost = Some(cost);
+                ir.shell.description = Some(line.to_string());
+                // CR 602.1b: the activation instructions, composed in this
+                // recognizer's own order — the parsed constraints LEAD and the
+                // implicit restriction trails, the reverse of the Solved
+                // recognizer above. The shell applies the vec verbatim, so the
+                // two orders are preserved rather than unified.
+                //
                 // CR 702.193a: power-up may be activated only once.
-                def.activation_restrictions
-                    .push(ActivationRestriction::OnlyOnce);
-                def.ability_tag = Some(AbilityTag::PowerUp);
+                let mut activation_restrictions = constraints.restrictions;
+                activation_restrictions.push(ActivationRestriction::OnlyOnce);
+                ir.shell.activation_restrictions = activation_restrictions;
+                ir.shell.ability_tag = Some(AbilityTag::PowerUp);
                 // CR 702.193b + CR 602.2b + CR 601.2f + CR 302.6: the activation cost's
                 // generic mana is reduced by the source's mana value if it entered this turn.
-                def.cost_reduction = Some(CostReduction {
+                //
+                // Stamped explicitly from the keyword definition, which is why
+                // `shell.stages` stays EMPTY here: this is the one site in the
+                // family that does not derive the reduction from the chain, and
+                // `ShellStage::ExtractCostReduction` would both overwrite this
+                // value and strip a node out of the `sub_ability` chain.
+                ir.shell.cost_reduction = Some(CostReduction {
                     mode: crate::types::statics::CostModifyMode::Reduce,
                     amount_per: 1,
                     count: QuantityExpr::Ref {
@@ -4499,7 +4649,7 @@ pub(crate) fn parse_oracle_ir(
                     },
                     condition: Some(ParsedCondition::SourceEnteredThisTurn),
                 });
-                emitter.ability_at(item_line, def);
+                emitter.ability_ir_at(item_line, ir);
                 i += 1;
                 continue;
             }
@@ -4758,7 +4908,12 @@ pub(crate) fn parse_oracle_ir(
                     .trigger_zones(vec![Zone::Battlefield])
                     .execute(effect_def)
                     .description(line.to_string());
-                emitter.trigger_at(item_line, trigger);
+                // `&line` is the whole printed sentence, which is also what the
+                // recognizer stamped as `description` — the body was parsed
+                // from the suffix after ". When you do, ", but the CR 701.43d
+                // optional attack cost and its CR 607.2h linked reflexive
+                // trigger are one printed paragraph.
+                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
             }
             i += 1;
             continue;
@@ -4781,7 +4936,7 @@ pub(crate) fn parse_oracle_ir(
                     .trigger_zones(vec![Zone::Battlefield])
                     .execute(effect_def)
                     .description(line.to_string());
-                emitter.trigger_at(item_line, trigger);
+                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
             }
             i += 1;
             continue;
@@ -4804,7 +4959,12 @@ pub(crate) fn parse_oracle_ir(
                     .trigger_zones(vec![Zone::Battlefield])
                     .execute(effect_def)
                     .description(line.to_string());
-                emitter.trigger_at(item_line, trigger);
+                // The leading if-gate this arm dispatches on is still DROPPED —
+                // no condition is stamped for "hasn't been exerted this turn".
+                // That gap is pre-existing and deliberately preserved here: the
+                // conversion is behavior-identical, and the fix belongs in a
+                // change that is allowed to move bytes.
+                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
             }
             i += 1;
             continue;
@@ -4929,7 +5089,12 @@ pub(crate) fn parse_oracle_ir(
 
         if let Some((option, trigger)) = parse_flash_cleanup_sacrifice_casting_option(&line) {
             emitter.casting_option_at(item_line, option);
-            emitter.trigger_at(item_line, trigger);
+            // The one trigger in this tranche whose `execute` is FULLY
+            // synthesized — `CreateDelayedTrigger{AtNextPhase(Cleanup)} ->
+            // Sacrifice{SelfRef}`, hand-assembled from three `tag()`s with no
+            // parsed source text. `&line` is therefore pure provenance: it is
+            // the sentence that licensed the synthesis, not its input.
+            emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
             i += 1;
             continue;
         }
@@ -5011,7 +5176,11 @@ pub(crate) fn parse_oracle_ir(
                         item_line,
                         StaticIr::from_definition(&line, static_def.description(line.to_string())),
                     );
-                    emitter.trigger_at(item_line, rider_gap);
+                    // Same `&line` the sibling static above passes: both halves
+                    // of this sentence were recognized from the whole printed
+                    // line, before the `". when you do, "` split.
+                    emitter
+                        .trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, rider_gap));
                     i += 1;
                     continue;
                 }
@@ -5339,8 +5508,14 @@ pub(crate) fn parse_oracle_ir(
             // one definition and cannot emit the dual pair. The tight
             // PutCounter-SelfRef guard makes it fall through on any non-counter
             // as-enters line, so the choose/becomes/enters-with siblings are safe.
-            if lower_as_enters_or_face_up_counters(&line, &mut result) {
-                emitter.drain_result_vectors(item_line, &mut result);
+            // Emits directly rather than draining the shared scratch: this is
+            // the only vector this recognizer ever wrote, and every other
+            // `&mut result` handoff in the loop is drain-followed, so the
+            // scratch is provably empty here.
+            if let Some(replacement_irs) = lower_as_enters_or_face_up_counters(&line) {
+                for replacement_ir in replacement_irs {
+                    emitter.replacement_ir_at(item_line, replacement_ir);
+                }
                 i += 1;
                 continue;
             }
@@ -5814,8 +5989,13 @@ pub(crate) fn parse_oracle_ir(
                             node: base_node,
                             ..
                         } = base_item;
-                        let OracleNodeIr::PreLoweredSpell(mut base) = base_node else {
-                            unreachable!("pop_last_spell returns only PreLoweredSpell items");
+                        // Both spell node shapes, via the shared reader:
+                        // `pop_last_spell` pops `spells_emitted`, which `emit`
+                        // fills from either shape with no variant filter.
+                        let Some(mut base) = lower_spell_node(&base_node) else {
+                            unreachable!(
+                                "`spells_emitted` holds only spell nodes, and both spell shapes lower"
+                            );
                         };
                         // Save the base ability's continuation chain in else_ability
                         // so the engine can run it when the condition is NOT met.
@@ -5986,17 +6166,19 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // Priority 13e: "X can't be 0." — casting constraint annotation, not an ability.
-        // These appear as standalone lines on X-cost spells. Earlier empty-line
-        // handling stamps the previous ability's `min_x_value`; this guard is a
-        // defensive fallback for already-normalized forms.
-        if lower.trim_end_matches('.') == "x can't be 0" {
-            emitter.mutate_last_spell(|previous| {
-                previous.min_x_value = previous.min_x_value.max(1);
-            });
-            i += 1;
-            continue;
-        }
+        // The former priority slot 13e ("X can't be 0.") was deleted as
+        // structurally unreachable. This gravestone deliberately avoids the
+        // labeled-slot comment shape that `check-skill-doc.sh` harvests: in
+        // that shape it reads as a live declaration and demands a §3 row for a
+        // slot that no longer exists. A retired slot is documented by its
+        // absence from the table, not by a row saying it is gone.
+        //
+        // `strip_x_cant_be_zero_suffix` returns `""` for exactly that input, and
+        // `lower` is bound once from the post-strip line and never rebound, so
+        // the empty-line guard above always claims it first. Its own comment
+        // called it a "defensive fallback"; it was dead, and it was one of the
+        // two `mutate_last_spell` callers whose destructure asserts a single node
+        // shape.
 
         // Priority 14: Ability word — strip prefix and re-classify effect.
         // B7: Known ability words (Threshold, Metalcraft, Delirium, Spell mastery, Revolt)
@@ -6767,7 +6949,7 @@ fn strip_cost_reduction_node(
 /// as a `ManaSpellGrant::TriggerOnSpend` (Lapis Orb of Dragonkind, Scaled
 /// Nurturer, Gilanra). Only applies to mana abilities; otherwise the clause
 /// drops to an `Effect:when` gap.
-fn extract_mana_spend_trigger_from_chain(def: &mut AbilityDefinition) {
+pub(crate) fn extract_mana_spend_trigger_from_chain(def: &mut AbilityDefinition) {
     if !matches!(&*def.effect, Effect::Mana { .. }) {
         return;
     }

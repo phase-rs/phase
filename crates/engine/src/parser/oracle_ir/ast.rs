@@ -3,12 +3,13 @@ use serde::Serialize;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment,
-    CounterSourceRider, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile,
-    ForceBlockAttackerRef, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
-    SearchDestinationSplit, SearchSelectionConstraint, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter,
+    CastingPermission, ChosenCounterCountCondition, ControlWindow, ControllerRef,
+    CopyRetargetPermission, CounterAdjustment, CounterSourceRider, DoorLockOp, Duration, Effect,
+    EffectScope, FaceDownProfile, ForceBlockAttackerRef, LibraryPosition, ManaProduction,
+    ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat,
+    PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -277,6 +278,16 @@ pub(crate) enum ContinuationAst {
     /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets
     /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect.
     CantRegenerate,
+    /// CR 116.2c + CR 608.2c: "You may pay {W} to end this effect." — later text
+    /// modifying the continuous effect an EARLIER clause of the same chain
+    /// created (CR 608.2c: "later text may modify earlier text"). Stamps
+    /// `end_cost` on the bound `Effect::GenericEffect` antecedent.
+    ///
+    /// Fully absorbed: it emits no def of its own, because CR 116.2c grants a
+    /// later SPECIAL ACTION rather than performing anything on resolution. The
+    /// mandatory `Effect::PayCost` this replaces was flatly wrong at runtime —
+    /// it force-paid the cost the moment the ability resolved.
+    EndEffectCost { cost: crate::types::mana::ManaCost },
     /// CR 120.4a + CR 608.2c + CR 702: "Excess damage is dealt to that
     /// creature's controller instead" patches the preceding `DealDamage`; an
     /// optional source-keyword gate covers Ram Through's "If the creature you
@@ -1606,6 +1617,7 @@ pub(crate) enum ZoneCounterImperativeAst {
     PutChosenCounter {
         target: TargetFilter,
         count: QuantityExpr,
+        target_condition: Option<ChosenCounterCountCondition>,
     },
     /// CR 122.1: "Put a X counter, a Y counter[, and a Z counter] on TARGET" —
     /// a list of typed counters placed on one shared target. Lowered to a

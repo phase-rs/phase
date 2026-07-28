@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-07-26T00:00:00Z",
+  "updated": "2026-07-27T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -1059,8 +1059,8 @@
       "author": "MTGGoldfish",
       "colors": [
         "W",
-        "G",
-        "U"
+        "U",
+        "G"
       ],
       "tags": [
         "metagame"
@@ -1068,55 +1068,7 @@
       "main": [
         {
           "count": 4,
-          "name": "Badgermole Cub"
-        },
-        {
-          "count": 4,
           "name": "Bloom Tender"
-        },
-        {
-          "count": 4,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Nature's Rhythm"
-        },
-        {
-          "count": 1,
-          "name": "Hushwood Verge"
-        },
-        {
-          "count": 1,
-          "name": "Mockingbird"
-        },
-        {
-          "count": 4,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 3,
-          "name": "Nurturing Pixie"
-        },
-        {
-          "count": 2,
-          "name": "Breeding Pool"
-        },
-        {
-          "count": 3,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 4,
-          "name": "Sewer-veillance Cam"
         },
         {
           "count": 4,
@@ -1124,7 +1076,23 @@
         },
         {
           "count": 4,
-          "name": "Stormchaser's Talent"
+          "name": "Brightglass Gearhulk"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Hushwood Verge"
+        },
+        {
+          "count": 2,
+          "name": "Floodfarm Verge"
+        },
+        {
+          "count": 2,
+          "name": "Breeding Pool"
         },
         {
           "count": 1,
@@ -1132,23 +1100,59 @@
         },
         {
           "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 4,
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 4,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 4,
           "name": "Botanical Sanctum"
         },
         {
           "count": 2,
-          "name": "Floodfarm Verge"
+          "name": "Nurturing Pixie"
         },
         {
           "count": 1,
           "name": "The Jolly Balloon Man"
         },
         {
+          "count": 1,
+          "name": "Mockingbird"
+        },
+        {
           "count": 4,
-          "name": "Brightglass Gearhulk"
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 4,
+          "name": "Sewer-veillance Cam"
+        },
+        {
+          "count": 4,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 4,
+          "name": "Nature's Rhythm"
+        },
+        {
+          "count": 3,
+          "name": "Seam Rip"
         },
         {
           "count": 1,
           "name": "Shardmage's Rescue"
+        },
+        {
+          "count": 1,
+          "name": "Cryogen Relic"
         }
       ],
       "sideboard": [
@@ -1157,16 +1161,8 @@
           "name": "Seam Rip"
         },
         {
-          "count": 2,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 3,
-          "name": "Erode"
-        },
-        {
-          "count": 3,
-          "name": "Spell Pierce"
+          "count": 1,
+          "name": "Shardmage's Rescue"
         },
         {
           "count": 2,
@@ -1174,11 +1170,31 @@
         },
         {
           "count": 1,
-          "name": "Dawn's Truce"
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Meltstrider's Resolve"
         },
         {
           "count": 3,
-          "name": "Crystal Barricade"
+          "name": "Erode"
+        },
+        {
+          "count": 2,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 2,
+          "name": "Aang, Swift Savior"
+        },
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
         }
       ]
     },

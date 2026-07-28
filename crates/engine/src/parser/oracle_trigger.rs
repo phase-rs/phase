@@ -17,7 +17,7 @@ use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::EffectChainIr;
 use super::oracle_ir::trigger::{
-    FirstTimeLimit, ReflexivePaymentIr, TriggerBody, TriggerIr, TriggerModifiers,
+    FirstTimeLimit, ReflexivePaymentIr, TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
 };
 use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::condition::parse_elided_subject_state_condition;
@@ -1563,6 +1563,27 @@ fn lower_trigger_effect_chain(
         ability.optional = true;
     }
     ability
+}
+
+/// Lower a document trigger node.
+///
+/// Deliberately does NOT route through `lower_trigger_ir`: an `Assembled`
+/// definition arrives complete, and `lower_trigger_ir` unconditionally
+/// overwrites nine of its fields (`execute`, `description`, `optional`,
+/// `unless_pay`, `condition`, `constraint`, `trigger_zones`, `valid_target`,
+/// `batched`) before re-running ~12 execute-mutating passes over an
+/// already-lowered execute — one of which can replace `execute.effect` with
+/// `Effect::unimplemented`. Passing through is therefore not an optimization,
+/// it is the only correct behavior.
+///
+/// Note this is a stronger byte-identity argument than the statics' one:
+/// statics rely on two transforms being idempotent, a property a future third
+/// transform could silently break; this relies on lowering not running at all,
+/// which nothing added to `lower_trigger_ir` can invalidate.
+pub(crate) fn lower_trigger_node_ir(ir: &TriggerNodeIr) -> TriggerDefinition {
+    match ir {
+        TriggerNodeIr::Assembled { definition, .. } => definition.clone(),
+    }
 }
 
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
@@ -17457,6 +17478,7 @@ mod ood_sphere_tests {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } = &*sub.effect
         else {
             panic!(

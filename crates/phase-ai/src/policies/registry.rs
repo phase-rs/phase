@@ -144,6 +144,8 @@ pub enum PolicyId {
     CombatWithdrawal,
     /// CR 608.2c: "return a land you control" self-bounce target choice.
     SelfBounceTarget,
+    /// CR 121.1: reward drawing into an on-battlefield "whenever you draw" engine.
+    DrawPayoff,
     /// CR 702.29c/d: reward cycling into an on-battlefield "whenever you cycle"
     /// engine.
     CyclingPayoff,
@@ -402,6 +404,7 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),
             Box::new(LoopShortcutPolicy),
             Box::new(super::self_bounce_target::SelfBounceTargetPolicy),
+            Box::new(super::draw_payoff::DrawPayoffPolicy),
             Box::new(super::cycling_payoff::CyclingPayoffPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();

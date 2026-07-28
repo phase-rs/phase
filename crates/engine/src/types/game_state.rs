@@ -1534,6 +1534,59 @@ impl ZoneChangeRecord {
     }
 }
 
+/// The authority state of a record-owned battlefield-departure source context.
+///
+/// `Absent` preserves compatibility with context-free saved/test records;
+/// `Malformed` is a present but incoherent record and must fail closed.
+pub(crate) enum BattlefieldDepartureSourceContext<'a> {
+    Present(&'a TriggerSourceContext),
+    Absent,
+    Malformed,
+}
+
+/// CR 400.7 + CR 603.10a: Returns the authority state for a battlefield
+/// departure's record-owned source context.
+///
+/// A `ZoneChanged` event and its record are one unit of event-time authority. A
+/// later incarnation at the same `ObjectId` (or an overwritten ObjectId-keyed
+/// LKI cache entry) may not answer a question about the object that left the
+/// battlefield. Older saved/test records can lack a source context entirely,
+/// which is distinguishable from a present but malformed context: callers that
+/// retain a documented legacy cache fallback receive `Absent`, while
+/// malformed provenance receives `Malformed` and must fail closed.
+pub(crate) fn battlefield_departure_trigger_source_context(
+    event: &GameEvent,
+) -> BattlefieldDepartureSourceContext<'_> {
+    let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+        record,
+    } = event
+    else {
+        return BattlefieldDepartureSourceContext::Malformed;
+    };
+
+    if *object_id != record.object_id
+        || *from != record.from_zone
+        || *to != record.to_zone
+        || *from != Some(Zone::Battlefield)
+    {
+        return BattlefieldDepartureSourceContext::Malformed;
+    }
+
+    match record.trigger_source_context() {
+        None => BattlefieldDepartureSourceContext::Absent,
+        Some(context)
+            if context.identity.reference.object_id == *object_id
+                && context.identity.expected_zone == Zone::Battlefield =>
+        {
+            BattlefieldDepartureSourceContext::Present(context)
+        }
+        Some(_) => BattlefieldDepartureSourceContext::Malformed,
+    }
+}
+
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
 /// object leaving its current zone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -5894,6 +5947,17 @@ pub enum ManaAbilityResume {
     /// changed board.
     CompanionToHand {
         player: PlayerId,
+        cost: ManaCost,
+    },
+    /// CR 116.2c + CR 605.3b + CR 616.1: A pay-to-end special action whose
+    /// auto-tapped mana source paused on a replacement-aware cost move. `cost`
+    /// is the permission's printed cost, latched at action initiation;
+    /// resumption must not re-derive it from a board that may have changed
+    /// while the replacement choice was pending. `group` names the continuous
+    /// effect to end once payment completes.
+    EndContinuousEffect {
+        player: PlayerId,
+        group: EndEffectGroupId,
         cost: ManaCost,
     },
     ManaPayment {
@@ -11321,6 +11385,13 @@ pub struct GameState {
     pub transient_continuous_effects: im::Vector<TransientContinuousEffect>,
     #[serde(default)]
     pub next_continuous_effect_id: u64,
+    /// CR 116.2c: monotone allocator for [`EndEffectGroupId`]. Starts at 1, so
+    /// `0` is never a valid group. A resolution that allocates a group and then
+    /// installs zero continuous effects (a false `StaticCondition`) simply burns
+    /// the value; monotonicity makes reuse impossible, so no later resolution
+    /// can collide with the burned name.
+    #[serde(default)]
+    pub next_end_effect_group_id: u64,
 
     /// Per-object source-attribution side-table, rebuilt fresh every layers
     /// pass. Records which continuous effects contributed grants/removals to
@@ -12900,6 +12971,35 @@ pub struct GameState {
     pub combat_prevention_tally: Option<HashMap<AppliedReplacementKey, i32>>,
 }
 
+/// CR 116.2c: names the whole continuous effect ONE resolution created, so a
+/// single payment ends every `TransientContinuousEffect` that resolution
+/// installed rather than one of its layers.
+///
+/// A DISTINCT NAMESPACE from `TransientContinuousEffect::id`. That id is the
+/// per-effect handle later duration/recipient bindings address (see
+/// `ResolvedContinuousEffectCommand`, whose `DuplicateEffectId` invariant exists
+/// because two live effects sharing one id would be indistinguishable). Reusing
+/// it as a group key would overload a namespace with its own uniqueness contract
+/// and make the `GameAction` payload ambiguous on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EndEffectGroupId(pub u64);
+
+/// CR 109.5 + CR 116.2c: a standing permission for the resolving ability's
+/// controller—the player meant by "you"—to end that effect by paying a cost as
+/// a special action any time they have priority.
+///
+/// Rides on the installed effect itself, so it is intrinsically bound to the
+/// exact effect one resolution created — a second activation of the same source
+/// installs a second effect with its own group, and each is ended independently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndEffectPermission {
+    /// CR 116.2c: the group every effect from the creating resolution shares.
+    pub group: EndEffectGroupId,
+    /// CR 118.1: what the controller pays to take the special action.
+    pub cost: ManaCost,
+}
+
 /// A runtime-generated continuous effect stored at state level.
 ///
 /// Unlike `StaticDefinition` (which represents intrinsic/printed card text),
@@ -12934,6 +13034,14 @@ pub struct TransientContinuousEffect {
     /// WASM/multiplayer serialization boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_subject: Option<ObjectId>,
+    /// CR 116.2c: see [`EndEffectPermission`]. `None` for every effect with no
+    /// printed termination permission. Set inside the single construction
+    /// authority (`add_transient_continuous_effect_with_end_permission`), so it
+    /// rides inside the journaled `ResolvedContinuousEffectCommand` rather than
+    /// being post-stamped. Backward-compatible across the WASM/multiplayer
+    /// serialization boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_permission: Option<EndEffectPermission>,
     /// Snapshot of the originating object's name, captured at construction.
     /// The originating spell/ability typically moves to a new zone (graveyard,
     /// stack→exile, etc.) with a new ObjectId per CR 400.7 after resolution,
@@ -16171,6 +16279,8 @@ impl GameState {
             state_revision: 0,
             transient_continuous_effects: im::Vector::new(),
             next_continuous_effect_id: 1,
+            // CR 116.2c: 0 is never a valid `EndEffectGroupId`.
+            next_end_effect_group_id: 1,
             attribution: im::HashMap::new(),
             remote_type_layer_recipients: im::HashSet::new(),
             day_night: None,
@@ -16630,6 +16740,44 @@ impl GameState {
         self.priority_yields.retain(|y| y.player != player);
     }
 
+    /// CR 116.2c: draw the next group name. See
+    /// [`GameState::next_end_effect_group_id`].
+    ///
+    /// Legacy saves deserialize the counter as `0` (`#[serde(default)]`), so
+    /// this clamps to `max(1, …)` — a legacy save must not be able to mint the
+    /// never-valid group `0`.
+    pub(crate) fn next_end_effect_group(&mut self) -> EndEffectGroupId {
+        let group = self.next_end_effect_group_id.max(1);
+        self.next_end_effect_group_id = group + 1;
+        EndEffectGroupId(group)
+    }
+
+    /// CR 116.2c: end the continuous effect named by `group`, removing EVERY
+    /// transient effect that one resolution installed.
+    ///
+    /// Matches on `end_permission.group` — NEVER on
+    /// [`TransientContinuousEffect::id`], which is a per-effect handle in a
+    /// different namespace and would leave a multi-effect group half-ended.
+    /// Returns whether anything was removed.
+    ///
+    /// Characteristics restore themselves — they are derived from this list by
+    /// `evaluate_layers`, so removal IS the restoration (CR 613.1). Mirrors the
+    /// `layers.rs` prunes: `retain` + `layers_dirty.mark_full()`, unjournaled,
+    /// because replay re-executes the deterministic sweep.
+    pub fn end_continuous_effect(&mut self, group: EndEffectGroupId) -> bool {
+        let before = self.transient_continuous_effects.len();
+        self.transient_continuous_effects.retain(|tce| {
+            !tce.end_permission
+                .as_ref()
+                .is_some_and(|p| p.group == group)
+        });
+        let removed = self.transient_continuous_effects.len() != before;
+        if removed {
+            self.layers_dirty.mark_full();
+        }
+        removed
+    }
+
     /// Register a transient continuous effect and mark layers dirty.
     ///
     /// SINGLE AUTHORITY for adding to `transient_continuous_effects`. Resolves
@@ -16643,6 +16791,59 @@ impl GameState {
         affected: TargetFilter,
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
+    ) -> u64 {
+        self.add_transient_continuous_effect_inner(
+            source_id,
+            controller,
+            duration,
+            affected,
+            modifications,
+            condition,
+            None,
+        )
+    }
+
+    /// CR 116.2c: install a continuous effect that carries a pay-to-end
+    /// permission. The permission is threaded into the construction authority
+    /// (rather than post-stamped like `duration_subject`) so it rides INSIDE
+    /// the journaled `ResolvedContinuousEffectCommand` and survives replay.
+    ///
+    /// One argument wider than the plain constructor by construction — it is the
+    /// same installation carrying one extra piece of provenance. Collapsing the
+    /// pair into a single `Option`-taking function would churn every existing
+    /// caller of the plain form for no gain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_transient_continuous_effect_with_end_permission(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: Duration,
+        affected: TargetFilter,
+        modifications: Vec<ContinuousModification>,
+        condition: Option<StaticCondition>,
+        end_permission: EndEffectPermission,
+    ) -> u64 {
+        self.add_transient_continuous_effect_inner(
+            source_id,
+            controller,
+            duration,
+            affected,
+            modifications,
+            condition,
+            Some(end_permission),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_transient_continuous_effect_inner(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: Duration,
+        affected: TargetFilter,
+        modifications: Vec<ContinuousModification>,
+        condition: Option<StaticCondition>,
+        end_permission: Option<EndEffectPermission>,
     ) -> u64 {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
@@ -16674,10 +16875,12 @@ impl GameState {
                 modifications,
                 condition,
                 duration_subject: None,
+                end_permission,
                 source_name,
             },
             expected_installed_count: self.transient_continuous_effects.len(),
             resulting_next_continuous_effect_id: self.next_continuous_effect_id,
+            resulting_next_end_effect_group_id: self.next_end_effect_group_id,
             resulting_next_timestamp: self.next_timestamp,
             cause: self.current_or_begin_rules_execution_node(),
         };
@@ -16725,6 +16928,16 @@ impl GameState {
                 },
             );
         }
+        if let Some(permission) = &command.effect.end_permission {
+            if permission.group.0 >= command.resulting_next_end_effect_group_id {
+                return Err(
+                    ResolvedContinuousEffectReplayInvariantError::EndEffectGroupAboveHighWater {
+                        group: permission.group.0,
+                        high_water: command.resulting_next_end_effect_group_id,
+                    },
+                );
+            }
+        }
         // Two live effects sharing one id are indistinguishable to every later
         // id-addressed lookup, so reject before mutating anything.
         if self
@@ -16743,6 +16956,9 @@ impl GameState {
         self.next_continuous_effect_id = self
             .next_continuous_effect_id
             .max(command.resulting_next_continuous_effect_id);
+        self.next_end_effect_group_id = self
+            .next_end_effect_group_id
+            .max(command.resulting_next_end_effect_group_id);
         self.next_timestamp = self.next_timestamp.max(command.resulting_next_timestamp);
         self.layers_dirty.mark_full();
         Ok(())
@@ -17507,6 +17723,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         state_revision: _,
         transient_continuous_effects: _,
         next_continuous_effect_id: _,
+        next_end_effect_group_id: _,
         attribution: _,
         remote_type_layer_recipients: _,
         day_night: _,
@@ -23046,5 +23263,89 @@ mod tests {
             !state.is_priority_yielded(PlayerId(0), &other_trigger),
             "same card but different trigger description must remain held"
         );
+    }
+
+    /// CR 116.2c: `end_continuous_effect` names a GROUP, so one payment must end
+    /// EVERY transient effect the creating resolution installed — never just one
+    /// of its layers, and never anything from a different resolution.
+    ///
+    /// This is the building-block test for the group predicate. The thirteen
+    /// shipped Licids all install exactly one effect per activation, so the
+    /// multi-member path has no card-level coverage; without this row the group
+    /// semantics would be untested machinery.
+    #[test]
+    fn end_continuous_effect_removes_every_member_of_the_named_group() {
+        let mut state = GameState::new_two_player(42);
+        let group = state.next_end_effect_group();
+        let other_group = state.next_end_effect_group();
+        assert_ne!(
+            group, other_group,
+            "the allocator is monotone, so two draws are never equal"
+        );
+
+        let permission = EndEffectPermission {
+            group,
+            cost: ManaCost::NoCost,
+        };
+        // Two effects sharing one group — the two-`StaticDefinition` clause shape.
+        state.add_transient_continuous_effect_with_end_permission(
+            ObjectId(1),
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SelfRef,
+            vec![ContinuousModification::AddPower { value: 1 }],
+            None,
+            permission.clone(),
+        );
+        state.add_transient_continuous_effect_with_end_permission(
+            ObjectId(1),
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SelfRef,
+            vec![ContinuousModification::AddToughness { value: 1 }],
+            None,
+            permission,
+        );
+        // A third effect from a DIFFERENT resolution must be untouched.
+        state.add_transient_continuous_effect_with_end_permission(
+            ObjectId(2),
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SelfRef,
+            vec![ContinuousModification::AddPower { value: 2 }],
+            None,
+            EndEffectPermission {
+                group: other_group,
+                cost: ManaCost::NoCost,
+            },
+        );
+        assert_eq!(state.transient_continuous_effects.len(), 3);
+
+        assert!(
+            state.end_continuous_effect(group),
+            "ending a live group must report that something was removed"
+        );
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "BOTH members of the named group must go — matching on \
+             `TransientContinuousEffect::id` instead would leave the group \
+             half-ended"
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0]
+                .end_permission
+                .as_ref()
+                .map(|p| p.group),
+            Some(other_group),
+            "the surviving effect is the one from the other resolution"
+        );
+
+        // An unknown group removes nothing and says so.
+        assert!(
+            !state.end_continuous_effect(EndEffectGroupId(9999)),
+            "an unknown group must report that nothing was removed"
+        );
+        assert_eq!(state.transient_continuous_effects.len(), 1);
     }
 }

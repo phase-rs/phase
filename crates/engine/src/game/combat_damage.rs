@@ -1952,6 +1952,7 @@ mod tests {
                 ],
                 condition: None,
                 duration_subject: None,
+                end_permission: None,
                 source_name: String::new(),
             });
 

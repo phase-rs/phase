@@ -2478,6 +2478,7 @@ fn parse_as_enters_becomes(text: &str) -> Option<ReplacementDefinition> {
                 .modifications(modifications)],
             duration: Some(Duration::Permanent),
             target: None,
+            end_cost: None,
         },
     )
     .duration(Duration::Permanent);
@@ -2854,16 +2855,13 @@ fn subject_lower_has_face_up(after_subject: &str) -> bool {
 /// CR 708.11: an "As … is turned face up" ability applies while the permanent is
 /// being turned face up (the face-up arm).
 /// CR 122.1a: the placed +1/+1 counters add to the creature's power and toughness.
-pub(crate) fn lower_as_enters_or_face_up_counters(
-    text: &str,
-    result: &mut super::oracle::ParsedAbilities,
-) -> bool {
+pub(crate) fn lower_as_enters_or_face_up_counters(text: &str) -> Option<Vec<ReplacementIr>> {
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
     // nom-frame: "as ~ enters[ the battlefield][ or is turned face up], ".
     let Ok((rest, _)) = tag::<_, _, VE>("as ~ enters").parse(lower.as_str()) else {
-        return false;
+        return None;
     };
     let (rest, _the_battlefield) = opt(tag::<_, _, VE>(" the battlefield"))
         .parse(rest)
@@ -2873,17 +2871,15 @@ pub(crate) fn lower_as_enters_or_face_up_counters(
         .unwrap_or((rest, None));
     let has_face_up = face_up.is_some();
     let Ok((tail_lower, _)) = tag::<_, _, VE>(", ").parse(rest) else {
-        return false;
+        return None;
     };
 
     // Recover the ORIGINAL-case effect slice via byte offset (mirrors
     // `split_once_on_lower`) so `parse_effect_chain` sees the printed casing.
-    let Some(effect_start) = text.len().checked_sub(tail_lower.len()) else {
-        return false;
-    };
+    let effect_start = text.len().checked_sub(tail_lower.len())?;
     let effect_text = text[effect_start..].trim().trim_end_matches('.').trim();
     if effect_text.is_empty() {
-        return false;
+        return None;
     }
 
     // Reuse the counter + quantity effect stack (where-X → ObjectCount / Another).
@@ -2894,32 +2890,39 @@ pub(crate) fn lower_as_enters_or_face_up_counters(
     // Unimplemented or externally targeted). Rewrites the "it" placeholder to
     // `SelfRef` so the runtime event-modifier fold recognizes it.
     if !normalize_self_put_counter_chain(&mut execute) {
-        return false;
+        return None;
     }
+
+    // Both arms derive from the same printed sentence, so both carry `text` as
+    // their provenance — the sentence never splits, which is why this recognizer
+    // exists at all.
+    let mut irs = Vec::new();
 
     // CR 614.1c: ETB arm — a battlefield-entry-scoped `Moved` replacement whose
     // `PutCounter { SelfRef }` execute is folded into the entering object's
     // enter-with-counters by the runtime event-modifier path.
-    result.replacements.push(
+    irs.push(ReplacementIr::from_definition(
+        text,
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(execute.clone())
             .valid_card(TargetFilter::SelfRef)
             .destination_zone(Zone::Battlefield)
             .description(text.to_string()),
-    );
+    ));
 
     // CR 708.11: face-up arm — the same effect applies as the permanent is turned
     // face up (Disguise/megamorph turn-up), bound to that permanent via SelfRef.
     if has_face_up {
-        result.replacements.push(
+        irs.push(ReplacementIr::from_definition(
+            text,
             ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
                 .valid_card(TargetFilter::SelfRef)
                 .execute(execute)
                 .description(text.to_string()),
-        );
+        ));
     }
 
-    true
+    Some(irs)
 }
 
 /// Validate + normalize the execute chain of an as-enters / turned-face-up
@@ -20316,6 +20319,7 @@ mod tests {
                 static_abilities,
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: _,
             } => {
                 assert!(static_abilities.iter().any(|static_ability| {
                     static_ability.affected == Some(TargetFilter::ParentTarget)

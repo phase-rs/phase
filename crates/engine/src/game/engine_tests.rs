@@ -5305,6 +5305,7 @@ fn vorinclex_cant_untap_trigger_fires_on_opponent_tap() {
                                 }])],
                             duration: Some(duration.clone()),
                             target: Some(TargetFilter::TriggeringSource),
+                            end_cost: None,
                         },
                     )
                     .duration(duration),

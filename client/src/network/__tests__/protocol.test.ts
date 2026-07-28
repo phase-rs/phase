@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 
+import type { EndContinuousEffectOffer } from "../../adapter/types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import {
   WIRE_PROTOCOL_VERSION,
@@ -41,6 +42,32 @@ describe("encodeWireMessage / decodeWireMessage", () => {
 
   it("defaults shortcut actions for a v15 payload created before the additive field", () => {
     expect(legalActionsFromWire({ legalActions: [] }).manaPaymentShortcutActions).toEqual([]);
+  });
+
+  it("preserves the engine-authored pay-to-end offer order and display payload", () => {
+    const first: EndContinuousEffectOffer = {
+      type: "EndContinuousEffect",
+      data: {
+        group: 8,
+        source_name: "Calming Licid",
+        cost: { type: "Cost", shards: ["W"], generic: 0 },
+      },
+    };
+    const second: EndContinuousEffectOffer = {
+      type: "EndContinuousEffect",
+      data: {
+        group: 13,
+        source_name: "Convulsing Licid",
+        cost: { type: "Cost", shards: ["R"], generic: 0 },
+      },
+    };
+
+    expect(
+      legalActionsFromWire({
+        legalActions: [first, second],
+        endContinuousEffectOffers: [second, first],
+      }).endContinuousEffectOffers,
+    ).toEqual([second, first]);
   });
 
   // (a) Round-trip across P2PMessage variants.

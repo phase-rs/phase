@@ -7199,6 +7199,19 @@ mod tests {
     use crate::types::ability::{AggregateFunction, PlayerFilter, SharedQuality};
     use crate::types::counter::{CounterMatch, CounterType};
 
+    /// CR 608.2c: Aven Courier's chosen-counter predicate depends on a value
+    /// selected by the immediately preceding instruction. The generic suffix
+    /// condition parser has no such binding and must leave the whole clause for
+    /// the `PutChosenCounter` grammar to consume.
+    #[test]
+    fn chosen_counter_suffix_remains_effect_local() {
+        let original = "Put a counter of that kind on target permanent you control if it doesn't have a counter of that kind on it";
+        let (condition, remainder) =
+            strip_suffix_conditional(original, &mut ParseContext::default());
+        assert_eq!(condition, None);
+        assert_eq!(remainder, original);
+    }
+
     #[test]
     fn strip_milled_shared_quality_conditional_maps_grindstone_gate() {
         let (cond, rest) = strip_milled_shared_quality_conditional(

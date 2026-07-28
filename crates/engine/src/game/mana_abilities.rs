@@ -2594,6 +2594,16 @@ fn resume_mana_ability_root(
         ManaAbilityResume::CompanionToHand { player, cost } => {
             super::companion::resume_companion_to_hand_payment(state, player, cost, events)
         }
+        // CR 116.2c + CR 605.3b: NOT compiler-forced — the `resume =>` catch-all
+        // below would silently route a paused pay-to-end payment into
+        // `resume_waiting_for`, which `unreachable!()`s for this family.
+        ManaAbilityResume::EndContinuousEffect {
+            player,
+            group,
+            cost,
+        } => super::end_continuous_effect::resume_end_continuous_effect_payment(
+            state, player, group, cost, events,
+        ),
         resume => Ok(resume_waiting_for(mana_source_controller, resume)),
     }
 }
@@ -3843,7 +3853,10 @@ pub(crate) fn resume_waiting_for(
         ManaAbilityResume::EffectPayCost { .. }
         | ManaAbilityResume::PhyrexianCastPayment { .. }
         | ManaAbilityResume::FinalizePendingManaPayment { .. }
-        | ManaAbilityResume::CompanionToHand { .. } => {
+        | ManaAbilityResume::CompanionToHand { .. }
+        // CR 116.2c: like `CompanionToHand`, the pay-to-end special action is
+        // resumed by `resume_mana_ability_root`'s named arm, never here.
+        | ManaAbilityResume::EndContinuousEffect { .. } => {
             unreachable!("effect-cost resume is handled by resume_mana_ability_root")
         }
     }
@@ -7393,6 +7406,7 @@ mod tests {
                                 }])],
                                 duration: Some(duration.clone()),
                                 target: Some(TargetFilter::TriggeringSource),
+                                end_cost: None,
                             },
                         )
                         .duration(duration),

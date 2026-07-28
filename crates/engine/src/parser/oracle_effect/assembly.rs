@@ -851,6 +851,13 @@ pub(super) enum EffectClass {
     /// `ChooseDrawnThisTurnPayOrTopdeck` — the only effect
     /// `DrawnThisTurnFollowup` patches.
     DrawnThisTurnChoice,
+    /// CR 116.2c: a `GenericEffect` carrying at least one `StaticDefinition` —
+    /// the only shape an `EndEffectCost` continuation can name, because it is
+    /// the only one that installs a continuous effect for a later special action
+    /// to end. Membership is decided by
+    /// `super::effect_installs_continuous_effect`, the same predicate the
+    /// detector uses, so detection and binding cannot select different defs.
+    InstalledContinuousEffect,
 }
 
 /// What a handler does when its antecedent does not resolve.
@@ -1084,6 +1091,14 @@ impl AssemblyEnv {
                 &*defs[index].effect,
                 Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
             ),
+            // CR 116.2c: `role_members` applies this guard as a MEMBERSHIP
+            // filter, so `LastWithRole(GenericEffectHead)` resolves to "the last
+            // `GenericEffect` WITH non-empty statics" — it skips a later
+            // empty-statics one instead of binding it and stamping a cost that
+            // names nothing.
+            Some(BindGuard::EffectShape(EffectClass::InstalledContinuousEffect)) => {
+                super::effect_installs_continuous_effect(&defs[index].effect)
+            }
             Some(BindGuard::DigLookbackTransparentCost) => {
                 let d = &defs[index];
                 d.optional
@@ -1933,6 +1948,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     ..
                 } if crate::game::casting_costs::cost_has_x(cost)
             );
+        // CR 116.2c: no longer the PRIMARY path for the mana-cost shape — that
+        // clause is now absorbed into `Effect::GenericEffect.end_cost` by the
+        // `EndEffectCost` continuation and never reaches here. Kept as
+        // defense-in-depth for the non-mana shape the narrow extractor rejects.
         let is_pay_to_end_effect_termination =
             crate::parser::clause_shell::is_you_may_pay_to_end_effect_phrase(
                 &clause_ir

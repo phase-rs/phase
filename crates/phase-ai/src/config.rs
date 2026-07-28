@@ -499,6 +499,10 @@ pub struct PolicyPenalties {
     /// threshold, turning a non-creature enchantment into a body.
     #[serde(default = "default_devotion_god_activation")]
     pub devotion_god_activation: f64,
+    /// CR 121.1: card-equivalent value of drawing into one active "whenever you
+    /// draw" engine (preference band, per engine).
+    #[serde(default = "default_draw_payoff_bonus")]
+    pub draw_payoff_bonus: f64,
     /// CR 702.29c/d: card-equivalent value of cycling into one active
     /// "whenever you cycle" engine (preference band, per engine).
     #[serde(default = "default_cycling_payoff_bonus")]
@@ -576,6 +580,7 @@ impl Default for PolicyPenalties {
             graveyard_types_progress: default_graveyard_types_progress(),
             devotion_pip_progress: default_devotion_pip_progress(),
             devotion_god_activation: default_devotion_god_activation(),
+            draw_payoff_bonus: default_draw_payoff_bonus(),
             cycling_payoff_bonus: default_cycling_payoff_bonus(),
         }
     }
@@ -670,6 +675,9 @@ fn default_devotion_pip_progress() -> f64 {
 
 fn default_devotion_god_activation() -> f64 {
     2.5
+}
+fn default_draw_payoff_bonus() -> f64 {
+    0.6
 }
 fn default_cycling_payoff_bonus() -> f64 {
     0.6
@@ -817,6 +825,10 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "devotion_god_activation",
         "CR 700.5 god-threshold-crossing swing weight — awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "draw_payoff_bonus",
+        "CR 121.1 per-engine draw-payoff weight — awaiting a paired-seed ai-gate calibration.",
     ),
     (
         "cycling_payoff_bonus",

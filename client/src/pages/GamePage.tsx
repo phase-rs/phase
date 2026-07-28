@@ -2986,7 +2986,7 @@ function projectedManaChoiceLabel(t: TFunction<"game">, surfaces: InteractionPre
   };
 }
 
-function projectedManaChoices(
+export function projectedManaChoices(
   interaction: ViewerInteraction | null,
   objectId: ObjectId,
 ): Map<string, InteractionPresentationSurface[]> {

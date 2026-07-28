@@ -3036,6 +3036,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             static_abilities,
             duration,
             target,
+            // CR 116.2c: the pay-to-end permission is a runtime special action,
+            // not a characteristic-shaping detail of the continuous effect, so it
+            // is deliberately absent from this display-only detail map.
+            end_cost: _,
         } => {
             if let Some(dur) = duration {
                 d.push(("duration".into(), fmt_duration(dur)));
@@ -3288,9 +3292,23 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ChooseCounterKind { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::PutChosenCounter { target, count } => {
+        Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => {
             d.push(("target".into(), fmt_target(target)));
             d.push(("count".into(), fmt_quantity(count)));
+            if let Some(condition) = target_condition {
+                d.push((
+                    "target_condition".into(),
+                    format!(
+                        "chosen counter count {:?} {}",
+                        condition.comparator,
+                        fmt_quantity(&condition.rhs)
+                    ),
+                ));
+            }
         }
         Effect::GainEnergy { amount } => {
             d.push(("amount".into(), fmt_quantity(amount)));
@@ -11532,6 +11550,7 @@ mod tests {
                 ])],
                 duration: None,
                 target: None,
+                end_cost: None,
             },
         ));
 
@@ -12259,6 +12278,7 @@ mod tests {
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
 
@@ -12307,6 +12327,7 @@ mod tests {
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
 

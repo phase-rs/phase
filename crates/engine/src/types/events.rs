@@ -1104,6 +1104,19 @@ pub enum GameEvent {
         attachment_id: ObjectId,
         old_target: TargetRef,
     },
+    /// CR 109.5 + CR 116.2c: the player meant by "you" took the special action
+    /// of paying the printed termination cost, ending the effect. CR 116.1: the
+    /// action does not use the stack, so this event records a completed state
+    /// change rather than something that can be responded to.
+    ///
+    /// `group` names every `TransientContinuousEffect` the creating resolution
+    /// installed (see `EndEffectPermission`); `source_id` is the object whose
+    /// resolution installed them.
+    ContinuousEffectEnded {
+        group: crate::types::game_state::EndEffectGroupId,
+        source_id: ObjectId,
+        player: PlayerId,
+    },
     AttackersDeclared {
         attacker_ids: Vec<ObjectId>,
         defending_player: PlayerId,
@@ -1590,6 +1603,29 @@ pub enum GameEvent {
         host: PlayerId,
         player_id: PlayerId,
     },
+}
+
+/// CR 603.2 + CR 702.59a: True when an off-zone trigger source was already
+/// functioning in `zone` when `event` occurred — i.e. it did not co-depart into
+/// that zone as the triggering object moved there. Shared by off-zone trigger
+/// collection and SelfRef co-departure mis-latch gating (CR 400.7e).
+pub(crate) fn source_was_not_co_departed_into_zone(
+    event: &GameEvent,
+    source_id: ObjectId,
+    zone: Zone,
+) -> bool {
+    match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            to,
+            record,
+            ..
+        } if *to == zone => {
+            (*object_id != source_id || record.from_zone != Some(Zone::Battlefield))
+                && !record.co_departed.contains(&source_id)
+        }
+        _ => true,
+    }
 }
 
 #[cfg(test)]

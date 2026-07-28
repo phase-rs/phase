@@ -3816,6 +3816,7 @@ fn build_riot_replacement(valid_card: TargetFilter) -> ReplacementDefinition {
                 }])],
             duration: Some(Duration::Permanent),
             target: None,
+            end_cost: None,
         },
     )
     .duration(Duration::Permanent)
@@ -7567,6 +7568,7 @@ pub fn synthesize_backup(face: &mut CardFace) {
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
+            end_cost: None,
         })
     };
 

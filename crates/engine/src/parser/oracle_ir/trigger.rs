@@ -16,6 +16,69 @@ use crate::types::ability::{
 };
 use crate::types::triggers::TriggerMode;
 
+/// The document-node payload for a trigger: either a decomposition the parser
+/// produced, or a definition a recognizer already assembled.
+///
+/// The escape hatch lives HERE and not on `TriggerIr`, because
+/// `TriggerDefinition -> TriggerIr` has no inverse. Two fields of the
+/// decomposition are pure parse-time inputs with no representation in the
+/// output — `TriggerModifiers::trigger_subject` (CR 608.2k pronoun subject) and
+/// `TriggerModifiers::effect_lower`, the latter load-bearing at three sites in
+/// `lower_trigger_ir` — and `TriggerBody` has no variant carrying an
+/// already-lowered ability (unit 3b-5 deliberately deleted the one that did).
+/// Lowering then unconditionally overwrites nine `TriggerDefinition` fields, so
+/// a `partial_def = definition` round-trip does not survive contact with it.
+///
+/// This is the `QuantityExpr`/`QuantityRef` split CLAUDE.md mandates: a
+/// finished definition is a *constant*, not a decomposition, so it wraps the IR
+/// rather than becoming a variant of it.
+///
+/// The variant is `Assembled` rather than reusing the `OracleNodeIr` debt
+/// marker's name, on purpose: that name is what
+/// `scripts/check-prelowered-ratchet.sh` greps for, and this type is the
+/// mechanism that RETIRES that debt. Reusing it would make the burn-down metric
+/// count the fix as debt, so the number would rise as the debt fell.
+///
+/// One variant today, deliberately. The IR-native sibling (`Parsed`, boxing a
+/// `TriggerIr`) is added by the tranche that lands its first producer, not
+/// before: adding it now would need a `#[allow(dead_code)]` and a CR 707.9a
+/// slot-stamp arm that cannot be written until lowering runs (the stamp targets
+/// `execute`, which does not exist pre-lowering), leaving a latent panic behind.
+/// Adding the variant later instead turns every match site into a compile
+/// error, which is the stronger forcing function.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum TriggerNodeIr {
+    /// Already-assembled definition from a recognizer that builds its own.
+    /// `lower_trigger_node_ir` returns it untouched.
+    Assembled {
+        definition: TriggerDefinition,
+        /// The recognizer's own input text — provenance only. Document lowering
+        /// derives spans and fragments from the emitting line, never from here.
+        source_text: String,
+    },
+}
+
+impl TriggerNodeIr {
+    /// Wrap a recognizer-produced trigger definition for source-ordered emission.
+    pub(crate) fn from_definition(source_text: &str, definition: TriggerDefinition) -> Self {
+        Self::Assembled {
+            definition,
+            source_text: source_text.to_string(),
+        }
+    }
+
+    /// The assembled definition, when one exists.
+    ///
+    /// Returns `Option` rather than `&TriggerDefinition` because a future
+    /// IR-native variant has no definition before lowering — CR 607.2d relation
+    /// discovery must see `None` there, not a fabricated definition.
+    pub(crate) fn definition(&self) -> Option<&TriggerDefinition> {
+        match self {
+            Self::Assembled { definition, .. } => Some(definition),
+        }
+    }
+}
+
 /// Trigger-level IR: the complete parsed representation of a trigger line
 /// before final assembly into `TriggerDefinition`.
 ///

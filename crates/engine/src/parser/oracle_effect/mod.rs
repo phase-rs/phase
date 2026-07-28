@@ -157,7 +157,7 @@ pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
     EffectChainIr, OtherwiseKind, PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind,
-    ReplicateKind,
+    ReplicateKind, ShellStage,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -3456,6 +3456,7 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
                 }])],
             duration: Some(Duration::UntilEndOfTurn),
             target: Some(TargetFilter::SelfRef),
+            end_cost: None,
         },
         distribute: None,
         multi_target: None,
@@ -3502,6 +3503,7 @@ fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEf
                 }])],
             duration: Some(duration.clone()),
             target: Some(TargetFilter::SelfRef),
+            end_cost: None,
         },
         distribute: None,
         multi_target: None,
@@ -3569,6 +3571,7 @@ fn try_parse_temporary_cant_become_tapped(tp: TextPair<'_>) -> Option<ParsedEffe
                 }])],
             duration: Some(duration.clone()),
             target: Some(TargetFilter::ParentTarget),
+            end_cost: None,
         },
         distribute: None,
         multi_target: None,
@@ -4240,20 +4243,64 @@ fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<Pa
     })
 }
 
-/// CR 508.1c + CR 514.2 + CR 500.7: "that player can't attack you [or your
-/// permanents/planeswalkers] during their next turn" (Willie Lumpkin) — a
-/// player-scoped, next-turn-expiring attack prohibition. The "that player"
-/// anaphor reuses the parent draw-trigger's targeted player (CR 608.2c), so the
-/// restriction's `affected_players` is `ParentTargetedPlayer`, resolved to a
-/// `SpecificPlayer` at resolution by `add_restriction`. The defended scope rides
-/// the shared `AttackTargetFilter` via `parse_cant_attack_defended_scope_nom`
-/// (the single scope authority), so the declare-attackers gate reuses the same
-/// matcher as static `CantAttack`. The `UntilEndOfNextTurnOf` duration anchors on
-/// the RESTRICTED player (the resolved `SpecificPlayer`), not the controller —
-/// see `add_restriction::fill_runtime_fields`.
+/// CR 508.1c + CR 514.2 + CR 500.7: player-scoped temporary attack
+/// prohibitions. The scoped Advokist form keeps the accepting player as
+/// `ScopedPlayer` and the controller-relative "you" / "your next turn" data for
+/// `add_restriction` to snapshot. The legacy "that player" / "they" form
+/// reuses the parent draw-trigger's targeted player (CR 608.2c), so its
+/// `affected_players` is `ParentTargetedPlayer`, resolved to a `SpecificPlayer`
+/// at resolution. Both forms use `parse_cant_attack_defended_scope_nom` as the
+/// single `AttackTargetFilter` authority, shared with static `CantAttack`.
 fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     use crate::parser::oracle_static::parse_cant_attack_defended_scope_nom;
     use crate::types::triggers::AttackTargetFilter;
+
+    // Orzhov Advokist: this bounded form must precede the legacy anaphor branch.
+    // Unlike the latter, its "creatures that player controls" subject carries
+    // `ScopedPlayer`, and both the explicit defended scope and "until your next
+    // turn" duration are required discriminators. Do not let an incomplete
+    // prefix become a broad blanket attack ban.
+    if let Some((defended, remaining)) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = tag("creatures that player controls ").parse(input)?;
+        let (input, _) =
+            preceded(alt((tag("can't"), tag("cannot"))), tag(" attack")).parse(input)?;
+        let (input, defended) = parse_cant_attack_defended_scope_nom(input)?;
+        let Some(defended) = defended else {
+            return Err(oracle_err(input));
+        };
+        let (input, _) = tag(" until your next turn").parse(input)?;
+        Ok((input, defended))
+    }) {
+        if !remaining
+            .chars()
+            .all(|character| character == '.' || character.is_whitespace())
+        {
+            return None;
+        }
+
+        return Some(ParsedEffectClause {
+            effect: Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::ScopedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::Attack {
+                        defended,
+                        protected_player: None,
+                    },
+                },
+            },
+            duration: Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            }),
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
 
     // Subject: "that player" / "they" (the parent draw-trigger's targeted
     // opponent). Both anaphors bind to `ParentTargetedPlayer` (CR 608.2c). The
@@ -4319,7 +4366,10 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
                 // below re-anchors the expiry to the restricted player's next turn
                 // in `add_restriction`.
                 expiry: RestrictionExpiry::EndOfTurn,
-                activity: ProhibitedActivity::Attack { defended },
+                activity: ProhibitedActivity::Attack {
+                    defended,
+                    protected_player: None,
+                },
             },
         },
         duration,
@@ -6539,6 +6589,22 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         }
     };
     let text = text.as_str();
+
+    // This shared temporary-attack-prohibition recognizer owns the duration,
+    // so dispatch before the clause shell peels it. Normalize the same leading
+    // sequence connector and terminal punctuation that the inner parser does.
+    let prohibition_probe = strip_leading_sequence_connector(text)
+        .trim()
+        .trim_end_matches('.')
+        .trim();
+    let prohibition_probe_lower = prohibition_probe.to_lowercase();
+    if let Some(clause) = try_parse_that_player_cant_attack_prohibition(TextPair::new(
+        prohibition_probe,
+        &prohibition_probe_lower,
+    )) {
+        return attach_unless_slots(clause, unless_condition, unless_pay_deferred);
+    }
+
     // Phase 2: peel structural slots off the head of the clause before
     // body parsing. The recursive shell strips slot-bearing prefixes/suffixes
     // (optional, opponent-may, condition, duration, for-each, player-scope)
@@ -8195,6 +8261,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
             static_abilities: vec![static_def],
             duration: None,
             target: None,
+            end_cost: None,
         });
     }
 
@@ -8430,14 +8497,6 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // activated" (Kang). Tag-scoped prohibition for the granted extra turn — try
     // before the generic non-mana-ability prohibition.
     if let Some(clause) = try_parse_during_that_turn_powerup_prohibition(tp) {
-        return clause;
-    }
-
-    // CR 508.1c + CR 514.2: "that player can't attack you [or your permanents]
-    // during their next turn" (Willie Lumpkin) — player-scoped, next-turn-expiring
-    // attack prohibition. Run before the generic restriction-mode path, which
-    // would otherwise drop the defended scope / duration as Unimplemented.
-    if let Some(clause) = try_parse_that_player_cant_attack_prohibition(tp) {
         return clause;
     }
 
@@ -10305,6 +10364,7 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
             }])],
             duration: Some(Duration::UntilEndOfTurn),
             target: Some(target),
+            end_cost: None,
         },
         distribute: None,
         multi_target: None,
@@ -10358,6 +10418,7 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
                 .description(tp.original.to_string())],
             duration: Some(Duration::Permanent),
             target: None,
+            end_cost: None,
         },
         duration: Some(Duration::Permanent),
         sub_ability: None,
@@ -12295,6 +12356,7 @@ fn try_parse_additional_land_this_turn(tp: TextPair) -> Option<ParsedEffectClaus
         static_abilities: vec![def],
         duration: Some(Duration::UntilEndOfTurn),
         target: None,
+        end_cost: None,
     });
     // CR 305.2: The grant lapses at end of turn — set the clause duration so
     // `register_transient_effect` builds a UntilEndOfTurn transient continuous
@@ -12370,6 +12432,11 @@ fn clause_is_additional_land_permission(clause: &ParsedEffectClause) -> bool {
     )
 }
 
+/// CR 116.2c: no longer the PRIMARY path for the mana-cost shape — that clause is
+/// now absorbed into `Effect::GenericEffect.end_cost` by the `EndEffectCost`
+/// continuation. Kept as defense-in-depth for the non-mana shape (a hypothetical
+/// "pay 2 life to end this effect"), which the narrow extractor rejects and which
+/// therefore still lowers to a non-optional `PayCost`.
 fn clause_is_pay_to_end_effect_termination(source_text: &str) -> bool {
     crate::parser::clause_shell::is_you_may_pay_to_end_effect_phrase(
         &source_text.to_ascii_lowercase(),
@@ -12551,6 +12618,7 @@ pub(crate) fn parse_grant_graveyard_keyword_to_target_ir(
             .description(format!("gain {kw_text}"))],
         duration: Some(Duration::UntilEndOfTurn),
         target: Some(target_filter),
+        end_cost: None,
     };
     Some(EffectChainIr::single_clause(
         text,
@@ -12874,6 +12942,7 @@ fn build_aura_attach_clause(
                 .modifications(modifications)],
             duration: None,
             target: None,
+            end_cost: None,
         },
     )
     .sub_ability(attach);
@@ -13946,6 +14015,7 @@ fn try_parse_random_card_perpetual_gain_quoted_ability(
                 .description(tp.original.to_string())],
             duration: Some(Duration::Permanent),
             target: None,
+            end_cost: None,
         },
         duration: None,
         sub_ability: None,
@@ -14814,6 +14884,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
                 .description(text.to_string())],
                 duration: None,
                 target: Some(TargetFilter::Controller),
+                end_cost: None,
             });
         }
     }
@@ -18888,6 +18959,83 @@ fn chain_prior_referent_is_created_token(clauses: &[ClauseIr]) -> bool {
     false
 }
 
+/// CR 301.5 + CR 303.4: Do these continuous modifications give their subject a
+/// subtype that makes it attachable — "Aura" (CR 303.4: an Aura is attached to
+/// the object or player defined by its enchant ability) or "Equipment"
+/// (CR 301.5: an Equipment can be attached to a creature)?
+///
+/// Keyed on `AddSubtype` because both are SUBTYPES (CR 205.3): a card-type
+/// replacement (`SetCardTypes`) can only carry `CoreType`s, so it can never name
+/// Aura or Equipment, and the `RemoveAllSubtypes` the parser emits alongside the
+/// grant ("becomes an Aura enchantment" lowers to `RemoveAllSubtypes{Enchantment}`
+/// → `AddSubtype{Aura}`) only clears the old set. Matching the grant alone
+/// therefore covers the whole class without depending on whether the clearing
+/// sibling was emitted.
+pub(super) fn modifications_grant_attachable_subtype(mods: &[ContinuousModification]) -> bool {
+    mods.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddSubtype { subtype }
+                if subtype.eq_ignore_ascii_case("Aura")
+                    || subtype.eq_ignore_ascii_case("Equipment")
+        )
+    })
+}
+
+/// CR 301.5 + CR 303.4: Does this continuous static turn the ability's own
+/// SOURCE into an attachable object? `affected: None` is the engine's
+/// self-scoped default (a static that modifies only the object printing it), so
+/// it is treated exactly like an explicit `SelfRef`. That default is an engine
+/// convention, not a CR rule, so it carries no citation of its own.
+fn static_makes_source_attachable(def: &StaticDefinition) -> bool {
+    matches!(def.affected, None | Some(TargetFilter::SelfRef))
+        && modifications_grant_attachable_subtype(&def.modifications)
+}
+
+/// CR 608.2c + CR 301.5 + CR 303.4: Does an EARLIER clause of this chain animate
+/// the ability's own source into an Aura or an Equipment?
+///
+/// This is the animate-then-attach class — the 12 Licids ("This creature loses
+/// this ability and becomes an Aura enchantment with enchant creature. Attach
+/// **it** to target creature"). The chain has made exactly one object
+/// attachable, the source, so the following clause's bare "it" attachment
+/// anaphor names it (CR 608.2c — read the whole text and apply the rules of
+/// English: nothing else in the sentence can be attached).
+///
+/// A flat scan, not a walk-back with re-anchor bails like
+/// `chain_prior_referent_is_created_token`: the animation has no duration
+/// (CR 611.2a — it lasts until the end of the game), so once a clause has made
+/// the source an Aura/Equipment it stays one for every later clause of the
+/// chain. A later typed target cannot un-animate it, and cannot become the
+/// attachment either, because it is not what the chain made attachable.
+///
+/// The condition bail IS kept, matching `chain_prior_referent_is_created_token`:
+/// a gated animation ("if you control an Aura, this creature becomes an
+/// Equipment") may never fire, and binding the attachment to a source that is
+/// still a creature would attach a creature to a permanent — a state
+/// `sba::check_illegal_attachment_unattach` now undoes on the next SBA check,
+/// under CR 704.5p sentence 1, silently voiding the intended attachment. No
+/// shipped card has this shape today; the bail keeps the predicate honest if one
+/// is printed.
+fn chain_source_becomes_attachment(clauses: &[ClauseIr]) -> bool {
+    clauses.iter().any(|prev| {
+        if prev
+            .condition
+            .as_ref()
+            .is_some_and(|c| !c.is_affirmative_reflexive_gate())
+        {
+            return false;
+        }
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &prev.parsed.effect
+        else {
+            return false;
+        };
+        static_abilities.iter().any(static_makes_source_attachable)
+    })
+}
+
 fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
     for prev in clauses.iter().rev() {
         if prev.condition.is_some() {
@@ -21077,6 +21225,7 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
         ])],
         duration: Some(flash_duration),
         target: Some(TargetFilter::Controller),
+        end_cost: None,
     }))
 }
 
@@ -22340,6 +22489,31 @@ fn attach_same_is_true_keywords(def: &mut AbilityDefinition, keywords: &[Keyword
 /// alone, matching the arm `attach_same_is_true_keywords` binds on.
 pub(super) fn def_is_generic_effect_head(def: &AbilityDefinition) -> bool {
     matches!(&*def.effect, Effect::GenericEffect { .. })
+}
+
+/// CR 116.2c: does this effect materialize an INSTALLABLE continuous effect — a
+/// `GenericEffect` head carrying at least one `StaticDefinition`?
+///
+/// SINGLE AUTHORITY. Both the `EndEffectCost` detector (this module's
+/// `followup_continuation` reach-back) and its binder
+/// (`sequence::apply_clause_continuation`, via
+/// `BindGuard::EffectShape(EffectClass::InstalledContinuousEffect)`) call this
+/// function, so detection and binding cannot select different defs.
+///
+/// Deliberately NOT folded into `AntecedentRole::GenericEffectHead`: that role's
+/// membership is documented as the EFFECT VARIANT ALONE, and narrowing it would
+/// resume a walk the pre-arena scan never made, binding a DIFFERENT def for its
+/// existing consumers. The narrowing belongs in a per-binding-site GUARD, which
+/// is exactly what `BindGuard` is for.
+///
+/// The non-empty requirement is semantic, not defensive: an effect that installs
+/// nothing has no continuous effect to terminate, so a CR 116.2c permission on it
+/// would name nothing.
+pub(super) fn effect_installs_continuous_effect(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect { static_abilities, .. } if !static_abilities.is_empty()
+    )
 }
 
 /// Membership mirror for `AntecedentRole::DigOrMill` — the "look at / mill the top N"
@@ -26404,6 +26578,17 @@ pub(crate) enum ChainLoweringMode {
 /// `finalize_effect_chain` and the owner-library anchor belong here and not in
 /// `lower_effect_chain_ir`: pushing them down would newly apply them at the
 /// production callers that lower a *chain* without being a whole ability body.
+///
+/// # The order is pinned and behavior-load-bearing
+///
+/// **chain → finalize → anchor → `sub_link` → envelope stamps → stages.**
+///
+/// It is not an aesthetic choice: it reproduces what the whole-body recognizers
+/// in `oracle.rs` do by hand. Every one of them stamps its root fields *after*
+/// `parse_effect_chain_with_context` returns (which is itself this function) and
+/// runs the `extract_*` folds last. Reordering — in particular running a stage
+/// before the stamps — changes output, because both stages write root fields
+/// that a stamp may also write. Do not reorder for elegance.
 pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     let mut def = lower_effect_chain_ir(&ir.body);
     finalize_effect_chain(&mut def);
@@ -26412,10 +26597,74 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     if let Some(sub_link) = ir.shell.sub_link {
         def.sub_link = sub_link;
     }
+    apply_ability_shell_envelope(&mut def, &ir.shell);
+    for stage in &ir.shell.stages {
+        match stage {
+            ShellStage::ExtractCostReduction => {
+                crate::parser::oracle::extract_cost_reduction_from_chain(&mut def);
+            }
+            ShellStage::ExtractManaSpendTrigger => {
+                crate::parser::oracle::extract_mana_spend_trigger_from_chain(&mut def);
+            }
+        }
+    }
     def
 }
 
-fn parse_ability_ir(
+/// Apply the CR 602.1 activation envelope onto an already-lowered root.
+///
+/// Every field is **defer-on-default**, so a `default()` shell is a no-op and the
+/// widening is byte-identical by construction: `AbilityShellIr::default()` is the
+/// only shell any producer builds until T8-A1 converts the first recognizer.
+///
+/// Split out of `lower_ability_ir` so the pinned step order above reads as six
+/// named steps rather than one field-stamp wall.
+fn apply_ability_shell_envelope(def: &mut AbilityDefinition, shell: &AbilityShellIr) {
+    // CR 602.1a: the activation cost (everything before the colon).
+    if let Some(cost) = &shell.cost {
+        def.cost = Some(cost.clone());
+    }
+    // CR 601.2f: an explicitly stamped reduction. A site that sets this must not
+    // also list `ShellStage::ExtractCostReduction`, which derives the same field.
+    if let Some(cost_reduction) = &shell.cost_reduction {
+        def.cost_reduction = Some(cost_reduction.clone());
+    }
+    // CR 602.1b: activation instructions. `extend`, never `=` — see the field doc
+    // on `AbilityShellIr::activation_restrictions` for the exhaustive verification
+    // that nothing inside this function writes the root's restrictions.
+    def.activation_restrictions
+        .extend(shell.activation_restrictions.iter().cloned());
+    if let Some(restriction) = shell.activation_mana_payment_restriction {
+        def.activation_mana_payment_restriction = Some(restriction);
+    }
+    if let Some(activator_filter) = &shell.activator_filter {
+        def.activator_filter = Some(activator_filter.clone());
+    }
+    // CR 113.6m: the zone the ability functions in.
+    if let Some(activation_zone) = shell.activation_zone {
+        def.activation_zone = Some(activation_zone);
+    }
+    if let Some(ability_tag) = shell.ability_tag {
+        def.ability_tag = Some(ability_tag);
+    }
+    // CR 601.2b: `max`, so the `0` default can never lower an established floor.
+    def.min_x_value = def.min_x_value.max(shell.min_x_value);
+    // CR 707.10: monotone OR, so a `false` default can never clear the flag.
+    def.cant_be_copied |= shell.cant_be_copied;
+    if let Some(description) = &shell.description {
+        def.description = Some(description.clone());
+    }
+}
+
+/// Parse a whole ability body into its `AbilityIr` decomposition.
+///
+/// Prefer the mode-pinned wrappers [`parse_ability_ir_with_context`] and
+/// [`parse_ability_ir_standalone`] over naming a [`ChainLoweringMode`] at a call
+/// site: they exist so a recognizer converted to the IR seam inherits its
+/// original entry point's recognizer set **mechanically** rather than by a
+/// reviewer's judgment. See the `ChainLoweringMode` doc block for why the two
+/// sets must never be unified.
+pub(crate) fn parse_ability_ir(
     text: &str,
     kind: AbilityKind,
     mode: ChainLoweringMode,
@@ -26464,6 +26713,7 @@ fn parse_ability_ir(
             // no preceding ClauseBoundary can stamp its link.
             shell: AbilityShellIr {
                 sub_link: Some(SubAbilityLink::SequentialSibling),
+                ..AbilityShellIr::default()
             },
         };
     }
@@ -26474,29 +26724,61 @@ fn parse_ability_ir(
     }
 }
 
-pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
-    lower_ability_ir(&parse_ability_ir(
+/// Parse an ability body in `Standalone` mode — the mode-pinned wrapper for
+/// every site whose original body called [`parse_effect_chain`].
+///
+/// Takes no `ParseContext` **on purpose**, mirroring `parse_effect_chain`'s own
+/// signature: the standalone entry point has always parsed against a fresh
+/// `default()` context that is discarded. A converted site therefore inherits its
+/// original mode by swapping one function name, with the argument list unchanged
+/// — there is no context argument for a reviewer to get wrong.
+pub(crate) fn parse_ability_ir_standalone(text: &str, kind: AbilityKind) -> AbilityIr {
+    parse_ability_ir(
         text,
         kind,
         ChainLoweringMode::Standalone,
         &mut ParseContext::default(),
-    ))
+    )
+}
+
+/// Parse an ability body in `WithContext` mode — the mode-pinned wrapper for
+/// every site whose original body called [`parse_effect_chain_with_context`].
+///
+/// Same argument list as the function it replaces, for the same reason as
+/// [`parse_ability_ir_standalone`]. **Never** substitute one wrapper for the
+/// other while converting a site: the two modes run different whole-body
+/// recognizer sets, and crossing them silently moves ~113 die-roll cards.
+pub(crate) fn parse_ability_ir_with_context(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> AbilityIr {
+    parse_ability_ir(text, kind, ChainLoweringMode::WithContext, ctx)
+}
+
+/// The algebraic identity T8 rests on, written literally:
+/// `parse_effect_chain(t, k)` **is** `lower_ability_ir(&parse_ability_ir_standalone(t, k))`.
+pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
+    lower_ability_ir(&parse_ability_ir_standalone(text, kind))
 }
 
 /// Parse a compound effect chain with subject context for pronoun resolution.
 /// CR 608.2k: Used by the trigger parser to thread the trigger subject so that
 /// bare pronouns ("it") resolve to TriggeringSource instead of SelfRef.
+///
+/// The `WithContext` half of the same identity:
+/// `parse_effect_chain_with_context(t, k, cx)` **is**
+/// `lower_ability_ir(&parse_ability_ir_with_context(t, k, cx))`. A T8 producer
+/// conversion replaces this single call with the two halves and inserts its root
+/// stamps into the `AbilityShellIr` between them, which is why the conversion is
+/// byte-identical for the whole *class* of text the recognizer handles rather
+/// than merely for today's corpus.
 pub(crate) fn parse_effect_chain_with_context(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
-    lower_ability_ir(&parse_ability_ir(
-        text,
-        kind,
-        ChainLoweringMode::WithContext,
-        ctx,
-    ))
+    lower_ability_ir(&parse_ability_ir_with_context(text, kind, ctx))
 }
 
 /// CR 701.24a + CR 701.58a/e + CR 608.2c: Expose the Culprit mode 2 — "Exile any
@@ -29282,6 +29564,11 @@ pub(crate) fn parse_effect_chain_ir(
             // most-recent object referent (Esper Terra's "put up to three lore
             // counters on it"). Cleared by an intervening explicit typed target.
             token_created_in_chain: chain_prior_referent_is_created_token(builder.clauses()),
+            // CR 608.2c + CR 301.5 + CR 303.4: bind a bare "it" in this chunk's
+            // Attach to the SOURCE when an earlier clause animated the source
+            // into an Aura/Equipment (the Licid class). Nothing else in the
+            // chain is attachable, so the pronoun cannot name the chosen target.
+            source_becomes_attachment_in_chain: chain_source_becomes_attachment(builder.clauses()),
             effect_chain_full_lower: ctx.effect_chain_full_lower.clone(),
             parent_target_is_chosen,
             // CR 608.2c + CR 400.7: seed the zone published by an earlier
@@ -30361,6 +30648,35 @@ pub(crate) fn parse_effect_chain_ir(
                     .iter()
                     .any(|c| sequence::effect_wraps_copy_spell(&effective_effect_of(c)))
                     .then_some(ContinuationAst::CopyMayRetarget { all_copies })
+            })
+            .or_else(|| {
+                // CR 116.2c + CR 608.2c: "You may pay {W} to end this effect"
+                // names the continuous effect an EARLIER clause of this chain
+                // created. The NEAREST non-absorbed clause is an intervening one
+                // on every shipped card in the class — an `Attach` for the twelve
+                // Aura-form Licids, an `Unimplemented` "move" for Flanking Licid
+                // — so the nearest-clause lookback above cannot see the
+                // animation. Scan the non-absorbed clauses for one that installs
+                // a continuous effect. If none exists, fall through so the clause
+                // stays an honest orphaned residual rather than a silently-wrong
+                // termination.
+                //
+                // Gated on the SHAPE (`effect_installs_continuous_effect`), not
+                // on a Licid-specific animate-then-attach predicate: that is what
+                // makes this the CR 116.2c class rather than the Aura class, and
+                // it is why a non-`Attach` intervening clause is absorbed just the
+                // same. Uses the SAME predicate the binder guards on, so the def
+                // this detector saw is the def that gets stamped.
+                //
+                // The parser IS the detector: recognition is the extractor
+                // succeeding, never a text search.
+                let (_, cost) =
+                    crate::parser::clause_shell::parse_pay_to_end_effect_mana_cost(normalized_text)
+                        .ok()?;
+                non_absorbed
+                    .iter()
+                    .any(|c| effect_installs_continuous_effect(&effective_effect_of(c)))
+                    .then_some(ContinuationAst::EndEffectCost { cost })
             });
         let absorb_followup = followup_continuation
             .as_ref()
@@ -30721,18 +31037,26 @@ fn try_fold_loses_other_sibling(clauses: &mut Vec<ClauseIr>) {
                 static_abilities,
                 duration,
                 target,
+                end_cost,
             } => {
-                duration.is_none() && target.is_none() && static_abilities.len() == 1 && {
-                    let s = &static_abilities[0];
-                    s.mode == StaticMode::Continuous
-                        && s.affected == Some(TargetFilter::SelfRef)
-                        && s.condition.is_none()
-                        && s.modifications.len() == 1
-                        && matches!(
-                            s.modifications[0],
-                            ContinuousModification::RemoveAllAbilities
-                        )
-                }
+                // CR 116.2c: fold only a bare "loses all other abilities" sibling.
+                // A sibling carrying a pay-to-end permission is a different clause
+                // shape, and folding it would discard the permission.
+                duration.is_none()
+                    && target.is_none()
+                    && end_cost.is_none()
+                    && static_abilities.len() == 1
+                    && {
+                        let s = &static_abilities[0];
+                        s.mode == StaticMode::Continuous
+                            && s.affected == Some(TargetFilter::SelfRef)
+                            && s.condition.is_none()
+                            && s.modifications.len() == 1
+                            && matches!(
+                                s.modifications[0],
+                                ContinuousModification::RemoveAllAbilities
+                            )
+                    }
             }
             _ => false,
         };
