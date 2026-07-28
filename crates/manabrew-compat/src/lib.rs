@@ -40,28 +40,36 @@ use engine::types::{GameAction, ObjectId};
 pub use manabrew_protocol::display::DisplayEvent;
 pub use manabrew_protocol::game::{
     CardDto, CardIdentity, CardView, ClassLevelDto, CombatAssignmentDto, DayTime, GameViewDto,
-    Mana as ManaDto, ManaColor as ManaColorDto, PlayerCounterKind as PlayerCounterKindDto,
     PlayerDto, PlayerStatus, SagaChapterDto, StackObjectDto, StepKind, TargetingIntent, ZoneDto,
     ZoneKind,
 };
+/// Wire vocabulary keeps `Dto` suffixes where the engine already owns the
+/// unqualified type names.
+pub use manabrew_protocol::game::{
+    Mana as ManaDto, ManaColor as ManaColorDto, PlayerCounterKind as PlayerCounterKindDto,
+};
+pub use manabrew_protocol::prompts::choose_attackers::AttackerOptionDto;
+pub use manabrew_protocol::prompts::choose_blockers::BlockableAttackerDto;
 pub use manabrew_protocol::prompts::common::{
     ActivatableAbilityInfo, AlternativeCostKind, AttackAssignment, AttackTargetDto,
     AttackTargetKind, AvailableAction, AvailableActionKind, BlockAssignment,
     CombatDamageAssignmentEntry, PaymentAction, PaymentActionKind, PaymentResourceKind,
-    PlayCardMode, PromptPresentation, TargetKind as TargetKindDto, TargetRef as TargetRefDto,
+    PlayCardMode, PromptPresentation,
 };
-pub use manabrew_protocol::prompts::choose_attackers::AttackerOptionDto;
-pub use manabrew_protocol::prompts::choose_blockers::BlockableAttackerDto;
+/// Target wire references use `Dto` suffixes to remain distinct from the
+/// engine's target types.
+pub use manabrew_protocol::prompts::common::{
+    TargetKind as TargetKindDto, TargetRef as TargetRefDto,
+};
 pub use manabrew_protocol::prompts::scry::ScryDestination;
 pub use manabrew_protocol::prompts::{
     ChooseActionInput, ChooseActionOutput, ChooseAttackersInput, ChooseAttackersOutput,
-    ChooseBlockersInput, ChooseBlockersOutput,
-    ChooseBoardTargetsInput, ChooseBoardTargetsOutput, ChooseBooleanInput, ChooseBooleanOutput,
-    ChooseCardsInput, ChooseCardsOutput, ChooseColorInput, ChooseColorOutput,
-    ChooseCombatDamageAssignmentInput, ChooseCombatDamageAssignmentOutput,
+    ChooseBlockersInput, ChooseBlockersOutput, ChooseBoardTargetsInput, ChooseBoardTargetsOutput,
+    ChooseBooleanInput, ChooseBooleanOutput, ChooseCardsInput, ChooseCardsOutput, ChooseColorInput,
+    ChooseColorOutput, ChooseCombatDamageAssignmentInput, ChooseCombatDamageAssignmentOutput,
     ChooseDamageAssignmentOrderInput, ChooseDamageAssignmentOrderOutput, ChooseFromSelectionInput,
-    ChooseFromSelectionOutput, ChooseNumberInput, ChooseNumberOutput, DiceRolledInput,
-    DiceRolledOutput, DiceRollEntry, GameOverInput, MulliganInput, MulliganOutput,
+    ChooseFromSelectionOutput, ChooseNumberInput, ChooseNumberOutput, DiceRollEntry,
+    DiceRolledInput, DiceRolledOutput, GameOverInput, MulliganInput, MulliganOutput,
     MulliganPutBackInput, MulliganPutBackOutput, PassUntil, PayManaCostInput, PayManaCostOutput,
     PromptInput, PromptOutput, ReorderInput, ReorderItem, ReorderOutput, ResponseViolation,
     RevealCardsInput, RevealCardsOutput, ScryInput, ScryOutput, SelectionOption,
@@ -273,7 +281,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 84] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 87] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -802,6 +810,24 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 84] = [
         area: "mulligan",
         reason: "Published manabrew-protocol 3.0.0 has only MulliganOutput::MulliganDecision, so it cannot carry the engine's MulliganChoice::UseSerumPowder object id. Its MulliganPutBackInput also has no excluded_card_id, so after that choice it cannot prevent the client from selecting the committed card. The adapter rejects either state instead of emitting a partial prompt.",
         suggested_protocol_extension: "Add a MulliganOutput branch carrying the Serum Powder card id and an optional committed-card id on MulliganPutBackInput.",
+    },
+    UnsupportedCapability {
+        code: "local.class-level-details-unsourceable",
+        area: "card-view",
+        reason: "CardDto::class_levels requires ordered ClassLevelDto values containing each level's printed oracle and cost. GameObject exposes only the current class_level; GameState and DerivedViews do not retain the printed Class section boundaries, source text, or costs after parsing. Reading raw card text and reconstructing sections here would derive game data at the serialization boundary, so class_levels is empty.",
+        suggested_protocol_extension: "No protocol change: the engine must expose an ordered Class presentation view with level, oracle, and optional cost.",
+    },
+    UnsupportedCapability {
+        code: "local.saga-chapter-details-unsourceable",
+        area: "card-view",
+        reason: "CardDto::saga_chapters requires each printed chapter group and its oracle text. GameObject exposes final_chapter_number but GameState and DerivedViews do not retain printable Saga chapter groups or source text after lowering trigger definitions. Re-parsing raw card text in this adapter would violate the serialization-boundary contract, so saga_chapters is empty.",
+        suggested_protocol_extension: "No protocol change: the engine must expose a Saga presentation view with chapter groups and oracle text.",
+    },
+    UnsupportedCapability {
+        code: "local.class-level-up-flag-unsourceable",
+        area: "actions",
+        reason: "ActivatableAbilityInfo::is_class_level_up has no direct engine source. GameAction::ActivateAbility carries only source_id and ability_index; classifying an activation by inspecting its lowered ability definition would re-interpret engine state in this adapter. The field is therefore left None.",
+        suggested_protocol_extension: "No protocol change: have the engine include an explicit class-level-up presentation flag with each activatable ability.",
     },
 ];
 
@@ -2777,8 +2803,16 @@ fn build_card_dto<L: CardTextLookup>(
         base_toughness: board_state_visible
             .then_some(object.base_toughness)
             .flatten(),
-        final_chapter: None,
-        class_level: None,
+        // The engine derives this from the Saga's own trigger definitions.
+        final_chapter: identity_visible
+            .then(|| object.final_chapter_number().map(|chapter| chapter as i32))
+            .flatten(),
+        // The current Class level is an engine-owned object characteristic.
+        class_level: identity_visible
+            .then(|| object.class_level.map(i32::from))
+            .flatten(),
+        // The engine does not expose the printable Class/Saga sections; the
+        // capability registry records both omissions.
         class_levels: Vec::new(),
         saga_chapters: Vec::new(),
         text,
@@ -4144,7 +4178,9 @@ mod tests {
 
     use engine::game::interaction::bind_interaction_authority;
     use engine::game::zones::create_object;
-    use engine::types::ability::{Effect, EffectKind, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{
+        CounterTriggerFilter, Effect, EffectKind, ResolvedAbility, TargetFilter, TriggerDefinition,
+    };
     use engine::types::counter::CounterType;
     use engine::types::game_state::{
         MulliganDecisionEntry, MulliganDecisionPhase, OutsideGameChoiceEntry,
@@ -4153,6 +4189,7 @@ mod tests {
     };
     use engine::types::identifiers::CardId;
     use engine::types::interaction::InteractionSessionId;
+    use engine::types::triggers::TriggerMode;
     use pretty_assertions::assert_eq;
 
     fn lookup(_: &GameObject) -> Option<String> {
@@ -4373,10 +4410,8 @@ mod tests {
             };
             let until_json = serde_json::to_value(&until).unwrap();
             assert_eq!(until_json["phase"], expected);
-            assert_eq!(
-                serde_json::from_value::<PassUntil>(until_json).unwrap(),
-                until
-            );
+            let round_trip: PassUntil = serde_json::from_value(until_json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(round_trip).unwrap(), until_json);
         }
     }
 
@@ -5978,10 +6013,8 @@ mod tests {
                 }
             })
         );
-        assert_eq!(
-            serde_json::from_value::<ClientToServerMessage>(json).unwrap(),
-            message
-        );
+        let round_trip: ClientToServerMessage = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), json);
     }
 
     #[test]
@@ -6167,10 +6200,8 @@ mod tests {
         let update = build_state_update(&prepared, &lookup).unwrap();
 
         let mut value = serde_json::to_value(&update).unwrap();
-        assert_eq!(
-            serde_json::from_value::<StateUpdate>(value.clone()).unwrap(),
-            update
-        );
+        let round_trip: StateUpdate = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
 
         value
             .as_object_mut()
@@ -6190,10 +6221,8 @@ mod tests {
         .unwrap();
 
         let mut value = serde_json::to_value(&prompt).unwrap();
-        assert_eq!(
-            serde_json::from_value::<AgentPrompt>(value.clone()).unwrap(),
-            prompt
-        );
+        let round_trip: AgentPrompt = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
 
         value
             .as_object_mut()
@@ -6232,6 +6261,8 @@ mod tests {
             "kickerCost",
             "effectiveManaCost",
             "madnessCost",
+            "finalChapter",
+            "classLevel",
         ] {
             assert!(
                 !object.contains_key(omitted),
@@ -6242,8 +6273,61 @@ mod tests {
             !object.contains_key("zoneId"),
             "zoneId was removed in v2 — the zone is carried by ZoneDto"
         );
+        assert_eq!(object["classLevels"], serde_json::json!([]));
+        assert_eq!(object["sagaChapters"], serde_json::json!([]));
 
-        assert_eq!(serde_json::from_value::<CardDto>(value).unwrap(), card);
+        let round_trip: CardDto = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
+    }
+
+    #[test]
+    fn card_dto_uses_engine_supplied_saga_and_class_state() {
+        let mut state = GameState::new_two_player(7);
+        let class_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Wizard Class".to_string(),
+            Zone::Battlefield,
+        );
+        let saga_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "The Eldest Reborn".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&class_id).unwrap().class_level = Some(2);
+        let saga = state.objects.get_mut(&saga_id).unwrap();
+        saga.card_types.subtypes.push("Saga".to_string());
+        saga.trigger_definitions = vec![
+            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
+                CounterTriggerFilter {
+                    counter_type: CounterType::Lore,
+                    threshold: Some(1),
+                },
+            ),
+            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
+                CounterTriggerFilter {
+                    counter_type: CounterType::Lore,
+                    threshold: Some(3),
+                },
+            ),
+        ]
+        .into();
+
+        let cards = CardBuildContext {
+            card_lookup: &lookup,
+        };
+        let class = build_card_dto(&state, state.objects.get(&class_id).unwrap(), &cards).unwrap();
+        let saga = build_card_dto(&state, state.objects.get(&saga_id).unwrap(), &cards).unwrap();
+
+        assert_eq!(class.class_level, Some(2));
+        assert_eq!(class.final_chapter, None);
+        assert_eq!(saga.final_chapter, Some(3));
+        assert_eq!(saga.class_level, None);
+        assert!(class.class_levels.is_empty());
+        assert!(saga.saga_chapters.is_empty());
     }
 
     /// One representative instance of every `PromptInput` variant, paired with
@@ -6279,7 +6363,6 @@ mod tests {
                     hand_card_ids: vec!["card-1".to_string()],
                     cards: vec![card()],
                     count: 1,
-                    excluded_card_id: None,
                 }),
             ),
             (
@@ -6451,8 +6534,12 @@ mod tests {
         for (tag, input) in &cases {
             let value = serde_json::to_value(input).unwrap();
             assert_eq!(value["type"], *tag, "wrong discriminant tag for {tag}");
-            let back: PromptInput = serde_json::from_value(value).unwrap();
-            assert_eq!(&back, input, "round-trip mismatch for {tag}");
+            let back: PromptInput = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(back).unwrap(),
+                value,
+                "round-trip mismatch for {tag}"
+            );
         }
     }
 
@@ -6560,7 +6647,7 @@ mod tests {
     /// All five `ProtocolErrorCode` variants must have a wire producer.
     #[test]
     fn every_protocol_error_code_has_a_producer() {
-        let produced: HashSet<_> = [
+        let produced: Vec<_> = [
             protocol_error_for(
                 &AdapterError::PromptIdMismatch {
                     expected: 1,
@@ -6595,6 +6682,13 @@ mod tests {
             produced.len(),
             5,
             "each of the five conformance failures must map to a distinct code"
+        );
+        assert!(
+            produced
+                .iter()
+                .enumerate()
+                .all(|(index, code)| !produced[..index].contains(code)),
+            "each conformance failure must map to a distinct code"
         );
         for code in [
             ProtocolErrorCode::StalePrompt,
@@ -6640,10 +6734,8 @@ mod tests {
         let mut value = serde_json::to_value(&error).unwrap();
         assert_eq!(value["code"], "wrongPlayer");
         assert_eq!(value["promptId"], 9);
-        assert_eq!(
-            serde_json::from_value::<ProtocolError>(value.clone()).unwrap(),
-            error
-        );
+        let round_trip: ProtocolError = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
 
         value
             .as_object_mut()
@@ -6820,41 +6912,22 @@ mod tests {
         );
     }
 
-    /// CR 103.5b: a Serum Powder response is a `Mulligan` family output.
     #[test]
-    fn mulligan_use_serum_powder_response_translates() {
-        let context = context_with(vec![]);
-        let mut state = GameState::new_two_player(7);
-        let powder = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Serum Powder".to_string(),
-            Zone::Hand,
-        );
-        state.waiting_for = WaitingFor::MulliganDecision {
-            pending: vec![MulliganDecisionEntry {
-                player: PlayerId(0),
-                mulligan_count: 0,
-                phase: MulliganDecisionPhase::Declare,
-            }],
-            free_first_mulligan: false,
+    fn serum_powder_wire_surface_is_unsupported_in_protocol_v3() {
+        let input = MulliganPutBackInput {
+            hand_card_ids: vec![],
+            cards: vec![],
+            count: 1,
         };
-
-        assert!(matches!(
-            translate_response(
-                7,
-                PromptOutput::Mulligan(MulliganOutput::MulliganUseSerumPowder {
-                    card_id: encode_object_id(powder),
-                }),
-                &context,
-                &state,
-            )
-            .unwrap(),
-            GameAction::MulliganDecision {
-                choice: engine::types::actions::MulliganChoice::UseSerumPowder { object_id },
-            } if object_id == powder
-        ));
+        let json = serde_json::to_value(input).unwrap();
+        assert!(json.get("excludedCardId").is_none());
+        assert_eq!(
+            serde_json::to_value(MulliganOutput::MulliganDecision { keep: false }).unwrap()["type"],
+            "mulliganDecision"
+        );
+        assert!(unsupported_protocol_capabilities()
+            .iter()
+            .any(|capability| capability.code == "upstream.serum-powder-mulligan-missing"));
     }
 
     #[test]
@@ -7244,7 +7317,10 @@ mod tests {
         })
         .collect();
 
-        assert_eq!(modes, vec![PlayCardMode::Normal, PlayCardMode::Normal]);
+        assert_eq!(
+            serde_json::to_value(modes).unwrap(),
+            serde_json::json!([{"type": "normal"}, {"type": "normal"}])
+        );
     }
 
     /// Sneak, web-slinging, and foretell have exact v2 counterparts and were
@@ -7568,13 +7644,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 83);
+        assert_eq!(capabilities.len(), 87);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 83, "capability codes must be unique");
+        assert_eq!(codes.len(), 87, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(
@@ -7728,9 +7804,9 @@ mod tests {
     }
 
     /// Every gap this migration introduced or surfaced must be recorded, and
-    /// every entry v2 made obsolete must be gone.
+    /// every entry superseded by the current protocol must be gone.
     #[test]
-    fn capability_registry_reflects_v2_reality() {
+    fn capability_registry_reflects_v3_reality() {
         let codes: HashSet<_> = unsupported_protocol_capabilities()
             .iter()
             .map(|capability| capability.code)
@@ -7750,6 +7826,10 @@ mod tests {
             "local.dungeon-room-unsupported",
             "local.room-right-split-mode-unproducible",
             "local.counter-key-vocabulary-unverifiable",
+            "upstream.serum-powder-mulligan-missing",
+            "local.class-level-details-unsourceable",
+            "local.saga-chapter-details-unsourceable",
+            "local.class-level-up-flag-unsourceable",
         ] {
             assert!(codes.contains(expected), "missing new gap `{expected}`");
         }
@@ -7802,36 +7882,19 @@ mod tests {
         ));
     }
 
-    /// Both vendor extensions are deliberate, but their safety arguments differ.
-    ///
-    /// `excludedCardId` is genuinely additive: `MulliganPutBackInput` has no
-    /// `deny_unknown_fields`, so a conforming peer ignores it. The extra
-    /// `MulliganOutput` variant is NOT additive in that sense — a conforming
-    /// peer's deserializer errors on an unknown tag. It is safe only because the
-    /// enum flows client→engine and both ends are ours, so a third-party client
-    /// never emits it.
     #[test]
-    fn vendor_extensions_are_deliberate_and_isolated() {
+    fn mulligan_dtos_are_the_upstream_v3_types() {
         let json = serde_json::to_value(MulliganPutBackInput {
             hand_card_ids: vec![],
             cards: vec![],
             count: 1,
-            excluded_card_id: Some("card-1".to_string()),
         })
         .unwrap();
-        assert_eq!(json["excludedCardId"], "card-1");
-
-        // A peer that does not know the field simply drops it.
-        let mut without = json.clone();
-        without.as_object_mut().unwrap().remove("excludedCardId");
-        assert!(serde_json::from_value::<MulliganPutBackInput>(without).is_ok());
+        assert!(json.get("excludedCardId").is_none());
 
         assert_eq!(
-            serde_json::to_value(MulliganOutput::MulliganUseSerumPowder {
-                card_id: "card-1".to_string(),
-            })
-            .unwrap()["type"],
-            "mulliganUseSerumPowder"
+            serde_json::to_value(MulliganOutput::MulliganDecision { keep: true }).unwrap()["type"],
+            "mulliganDecision"
         );
     }
 }
