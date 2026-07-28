@@ -1803,6 +1803,7 @@ mod tests {
         continue_replacement, replace_event, replacement_choice_waiting_for, ReplacementResult,
     };
     use crate::game::zones::create_object;
+    use crate::types::ability::EffectKind;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot, Effect,
         ReplacementDefinition, ResolvedAbility, TargetFilter,
@@ -1817,6 +1818,7 @@ mod tests {
         ManaAbilityResume, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingBeginGameAbility,
         PendingCast, PendingCostMoveCompletion, PendingCostMoveResume, PendingManaAbility,
         PendingScopedLibrarySearch, PendingSearchFoundBatch, PreparedScopedLibrarySearchChoice,
+        TargetEffectDetail,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -3947,6 +3949,8 @@ mod tests {
                 legal_targets: vec![crate::types::ability::TargetRef::Object(ObjectId(20))],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),

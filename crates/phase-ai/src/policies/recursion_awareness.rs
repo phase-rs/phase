@@ -136,8 +136,10 @@ mod tests {
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{ResolvedAbility, TargetFilter};
-    use engine::types::game_state::{PendingCast, TargetSelectionSlot, WaitingFor};
+    use engine::types::ability::{EffectKind, ResolvedAbility, TargetFilter};
+    use engine::types::game_state::{
+        PendingCast, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
+    };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
     use engine::types::mana::ManaCost;
@@ -194,6 +196,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -286,6 +290,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),

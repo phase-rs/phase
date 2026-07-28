@@ -32,7 +32,7 @@ use crate::types::game_state::{
     ActionResult, AutoMayChoice, CastPaymentMode, CastingVariant, CombatDamageAssignmentMode,
     ConvokeMode, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice, GameState, ManaChoice,
     ManaChoiceContext, ManaChoicePrompt, OutsideGameChoiceSource, PayCostKind, PileSide,
-    ShardChoice, ShardOptions, WaitingFor,
+    PtDirection, ShardChoice, ShardOptions, TargetEffectDetail, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::{
@@ -983,6 +983,12 @@ struct TargetSequenceProjection {
     max: usize,
     unique: bool,
     action: TargetSequenceAction,
+    /// CR 115.1: what the announcing spell/ability will do to the chosen
+    /// target, derived from the current slot's `effect_kind`. Only the two
+    /// slot-carrying states (`TargetSelection`, `TriggerTargetSelection`) can
+    /// answer this; every other state on this model is a "choose" without a
+    /// per-slot effect attribution and stays neutral.
+    intent: InteractionIntentCode,
 }
 
 #[derive(Debug, Clone)]
@@ -1137,15 +1143,22 @@ fn target_sequence_projection(
             selection,
             ..
         } => {
-            let optional = target_slots
-                .get(selection.current_slot)
-                .is_some_and(|slot| slot.optional);
+            let slot = target_slots.get(selection.current_slot);
+            let optional = slot.is_some_and(|slot| slot.optional);
             TargetSequenceProjection {
                 candidates: selection.current_legal_targets.clone(),
                 min: usize::from(!optional),
                 max: 1,
                 unique: true,
                 action: TargetSequenceAction::ChooseTarget,
+                // CR 601.2c: targets are announced one slot at a time, and each
+                // slot carries its own effect, so the label is per-slot rather
+                // than per-spell. A chained "destroy target creature. Draw a
+                // card. Target player gains 2 life" announces two slots with
+                // two different intents.
+                intent: slot.map_or(InteractionIntentCode::Choose, |slot| {
+                    target_intent(slot.effect_kind, slot.effect_detail)
+                }),
             }
         }
         WaitingFor::TriggerTargetSelection {
@@ -1153,15 +1166,22 @@ fn target_sequence_projection(
             selection,
             ..
         } => {
-            let optional = target_slots
-                .get(selection.current_slot)
-                .is_some_and(|slot| slot.optional);
+            let slot = target_slots.get(selection.current_slot);
+            let optional = slot.is_some_and(|slot| slot.optional);
             TargetSequenceProjection {
                 candidates: selection.current_legal_targets.clone(),
                 min: usize::from(!optional),
                 max: 1,
                 unique: true,
                 action: TargetSequenceAction::ChooseTarget,
+                // CR 601.2c: targets are announced one slot at a time, and each
+                // slot carries its own effect, so the label is per-slot rather
+                // than per-spell. A chained "destroy target creature. Draw a
+                // card. Target player gains 2 life" announces two slots with
+                // two different intents.
+                intent: slot.map_or(InteractionIntentCode::Choose, |slot| {
+                    target_intent(slot.effect_kind, slot.effect_detail)
+                }),
             }
         }
         WaitingFor::MultiTargetSelection {
@@ -1179,6 +1199,7 @@ fn target_sequence_projection(
             max: *max_targets,
             unique: true,
             action: TargetSequenceAction::SelectObjects,
+            intent: InteractionIntentCode::Choose,
         },
         WaitingFor::ChooseObjectsSelection { eligible, .. } => TargetSequenceProjection {
             candidates: eligible.clone(),
@@ -1186,6 +1207,7 @@ fn target_sequence_projection(
             max: eligible.len(),
             unique: true,
             action: TargetSequenceAction::SelectTargets,
+            intent: InteractionIntentCode::Choose,
         },
         WaitingFor::EachPlayerCopyChosenSelection {
             eligible, min, max, ..
@@ -1195,6 +1217,7 @@ fn target_sequence_projection(
             max: *max as usize,
             unique: true,
             action: TargetSequenceAction::SelectTargets,
+            intent: InteractionIntentCode::Choose,
         },
         WaitingFor::ProliferateChoice { eligible, .. }
         | WaitingFor::TimeTravelChoice { eligible, .. } => TargetSequenceProjection {
@@ -1203,6 +1226,7 @@ fn target_sequence_projection(
             max: eligible.len(),
             unique: true,
             action: TargetSequenceAction::SelectTargets,
+            intent: InteractionIntentCode::Choose,
         },
         WaitingFor::RetargetChoice {
             scope,
@@ -1225,6 +1249,10 @@ fn target_sequence_projection(
                 max: count,
                 unique: false,
                 action: TargetSequenceAction::Retarget,
+                // CR 115.7: retargeting changes an existing spell's targets. The
+                // intent belongs to that spell, not to this choice, and this
+                // state carries no slot to read it from.
+                intent: InteractionIntentCode::Choose,
             }
         }
         _ => return Ok(None),
@@ -2600,6 +2628,127 @@ fn effect_zone_intent(effect_kind: EffectKind, destination: Option<Zone>) -> Int
             | Some(Zone::Command)
             | None => InteractionIntentCode::Choose,
         }
+    }
+}
+
+/// CR 115.1 + CR 601.2c: Label a target announcement with what the announcing
+/// spell or ability will do to the thing being chosen.
+///
+/// Mirrors `effect_zone_intent` above: the slot stores the game fact
+/// (`EffectKind`), and this projection-layer function decides how to present
+/// it. Nothing about the label is stored in `GameState`.
+///
+/// The catch-all is deliberate and safe. `EffectKind` has 231 variants, the
+/// overwhelming majority of which never reach a CR 115.1 target slot, and the
+/// fallback is the NEUTRAL `Choose` — so an unmapped or newly-added kind reads
+/// as "just pick one", which is an honest partial rather than a wrong claim.
+/// An exhaustive match here would be 231 arms whose default answer is the same
+/// value, and would make every unrelated effect addition edit this function.
+fn target_intent(effect_kind: EffectKind, detail: TargetEffectDetail) -> InteractionIntentCode {
+    // The zone family's unit tag says only "a zone change"; the destination is
+    // the deciding fact and is stamped on the slot. Delegate to the existing
+    // zone labeller rather than reimplementing it, so `EffectZoneChoice` and a
+    // zone-change target announcement can never disagree.
+    if let TargetEffectDetail::Destination(destination) = detail {
+        return effect_zone_intent(effect_kind, Some(destination));
+    }
+    match effect_kind {
+        // CR 120.1: damage.
+        EffectKind::DealDamage
+        | EffectKind::DamageAll
+        | EffectKind::DamageEachPlayer
+        | EffectKind::ApplyPostReplacementDamage
+        | EffectKind::EachDealsDamageEqualToPower
+        | EffectKind::EachSourceDealsDamage => InteractionIntentCode::Damage,
+        // CR 701.8: destroy.
+        EffectKind::Destroy | EffectKind::DestroyAll => InteractionIntentCode::Destroy,
+        // CR 701.19: regeneration shield. Unambiguously protective.
+        EffectKind::Regenerate | EffectKind::RemoveAllDamage => InteractionIntentCode::Regenerate,
+        // CR 701.6: counter a spell.
+        EffectKind::Counter | EffectKind::CounterAll => InteractionIntentCode::Counter,
+        // CR 701.21: sacrifice.
+        EffectKind::Sacrifice | EffectKind::ChooseAndSacrificeRest | EffectKind::Exploit => {
+            InteractionIntentCode::Sacrifice
+        }
+        // CR 701.26: tap / untap.
+        EffectKind::Tap | EffectKind::TapAll => InteractionIntentCode::Tap,
+        EffectKind::Untap | EffectKind::UntapAll => InteractionIntentCode::Untap,
+        // CR 701.17: mill.
+        EffectKind::Mill => InteractionIntentCode::Mill,
+        // CR 701.9: discard.
+        EffectKind::DiscardCard | EffectKind::Discard => InteractionIntentCode::Discard,
+        // CR 121.1: draw.
+        EffectKind::Draw => InteractionIntentCode::Draw,
+        // CR 119.3: life gain / loss.
+        EffectKind::GainLife => InteractionIntentCode::GainLife,
+        EffectKind::LoseLife => InteractionIntentCode::LoseLife,
+        // CR 701.14: fight.
+        EffectKind::Fight => InteractionIntentCode::Fight,
+        // CR 701.3: attach (Auras and Equipment).
+        EffectKind::Attach | EffectKind::AttachAll | EffectKind::ReturnAsAura => {
+            InteractionIntentCode::Attach
+        }
+        // CR 707: copy.
+        EffectKind::CopySpell
+        | EffectKind::EpicCopy
+        | EffectKind::CastCopyOfCard
+        | EffectKind::CopyTokenOf
+        | EffectKind::BecomeCopy => InteractionIntentCode::Copy,
+        // CR 613.1b: control change.
+        EffectKind::GainControl
+        | EffectKind::GainControlAll
+        | EffectKind::ControlNextTurn
+        | EffectKind::GiveControl
+        | EffectKind::ExchangeControl => InteractionIntentCode::GainControl,
+        // CR 701.20: reveal.
+        EffectKind::Reveal | EffectKind::RevealUntil => InteractionIntentCode::Reveal,
+        // CR 406.1: exile. Only the kinds that name exile in the tag itself
+        // qualify. Plain "exile target creature" is `EffectKind::ChangeZone`,
+        // whose destination lives in the `Effect` payload and not in the unit
+        // tag, so it cannot be recognized here and stays neutral below — the
+        // same shape as the `Pump` sign problem. `effect_zone_intent` solves
+        // this for `EffectZoneChoice` only because that state stores the
+        // destination alongside the kind.
+        EffectKind::ExileHaunting | EffectKind::ExileTop | EffectKind::HeistExile => {
+            InteractionIntentCode::Exile
+        }
+        // Return to hand ("bounce"). Not a keyword action, so no CR citation:
+        // it is an ordinary zone change to the owner's hand.
+        EffectKind::Bounce | EffectKind::BounceAll => InteractionIntentCode::Return,
+        // CR 613.4: characteristic modification. Covers both directions —
+        // `EffectKind` is a unit tag, so `Pump` is the same variant for
+        // "+3/+3" and "-3/-3" (`Effect::Pump` carries the sign in `PtValue`,
+        // and that sign can be dynamic). `Modify` therefore names the action
+        // and claims no disposition; see the adapter's mapping for the
+        // consequence at the protocol boundary.
+        // CR 613.4: direction is read off `Effect::Pump`'s `PtValue` payload at
+        // slot construction, because `EffectKind` cannot carry it. `Modify`
+        // survives for the two populations where no direction is true: a
+        // dynamic magnitude (X / count-based) and a genuinely opposing
+        // modification ("+2/-2").
+        EffectKind::Pump | EffectKind::PumpAll => match detail {
+            TargetEffectDetail::Modification(PtDirection::Increase) => InteractionIntentCode::Buff,
+            TargetEffectDetail::Modification(PtDirection::Decrease) => {
+                InteractionIntentCode::Debuff
+            }
+            TargetEffectDetail::None | TargetEffectDetail::Destination(_) => {
+                InteractionIntentCode::Modify
+            }
+        },
+        EffectKind::SwitchPT
+        | EffectKind::DoublePT
+        | EffectKind::DoublePTAll
+        | EffectKind::PutCounter
+        | EffectKind::PutCounterAll
+        | EffectKind::PutChosenCounter
+        | EffectKind::RemoveCounter
+        | EffectKind::MultiplyCounter
+        | EffectKind::MoveCounters
+        | EffectKind::Animate => InteractionIntentCode::Modify,
+        // Everything else is either not reachable from a target slot or has no
+        // effect-semantic disposition (e.g. `NoOp`, which the mutate and other
+        // pipeline-resolved slots carry). Neutral by construction.
+        _ => InteractionIntentCode::Choose,
     }
 }
 
@@ -6249,9 +6398,22 @@ fn opportunity_for_slot(
                             filtered_state,
                         ),
                     },
-                    surfaces: vec![InteractionPresentationSurface::Summary {
-                        code: InteractionSummaryCode::Decision,
-                    }],
+                    surfaces: vec![
+                        InteractionPresentationSurface::Summary {
+                            code: InteractionSummaryCode::Decision,
+                        },
+                        // CR 115.1: the opportunity-level label for what this
+                        // announcement will do to whatever is chosen. The
+                        // per-candidate identity surfaces are emitted by
+                        // `target_sequence_choices`; what was missing here was
+                        // the intent, so a consumer could not tell a kill spell
+                        // from a pump spell.
+                        InteractionPresentationSurface::Selection {
+                            intent: projection.intent,
+                            constraint: SelectionConstraint::Count { min, max },
+                            confirm: ConfirmSemantics::Explicit,
+                        },
+                    ],
                     progress: InteractionProgress {
                         selected: 0,
                         minimum: min,

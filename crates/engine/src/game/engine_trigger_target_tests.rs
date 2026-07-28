@@ -5,7 +5,7 @@ use crate::types::ability::{
     QuantityExpr, ResolvedAbility, StaticCondition, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::card_type::CoreType;
-use crate::types::game_state::TargetSelectionConstraint;
+use crate::types::game_state::{TargetEffectDetail, TargetSelectionConstraint};
 use crate::types::identifiers::CardId;
 
 #[test]
@@ -129,6 +129,8 @@ fn trigger_target_selection_select_targets_pushes_to_stack() {
             legal_targets: legal_targets.clone(),
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         }],
         target_constraints: Vec::new(),
         selection: crate::game::ability_utils::begin_target_selection(
@@ -136,6 +138,8 @@ fn trigger_target_selection_select_targets_pushes_to_stack() {
                 legal_targets: legal_targets.clone(),
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             &[],
         )
@@ -240,6 +244,8 @@ fn trigger_target_selection_rejects_illegal_target() {
             legal_targets: vec![TargetRef::Object(legal_target)],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         }],
         mode_labels: Vec::new(),
         target_constraints: Vec::new(),
@@ -830,6 +836,8 @@ fn trigger_target_selection_enforces_different_player_constraint() {
                 ],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             },
             crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![
@@ -838,6 +846,8 @@ fn trigger_target_selection_enforces_different_player_constraint() {
                 ],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             },
         ],
         mode_labels: Vec::new(),
@@ -899,6 +909,8 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
             ],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         },
         crate::types::game_state::TargetSelectionSlot {
             legal_targets: vec![
@@ -907,6 +919,8 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
             ],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         },
     ];
     let target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];

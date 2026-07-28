@@ -1,0 +1,107 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 5,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Haste"
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "unknown",
+            "description": "Haste"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": "Haste",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 6,
+          "end_byte": 200,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Boast — {1}: You may change Arni's base power to 1 plus the greatest power among other creatures you control until end of turn. (Activate only if ~ attacked this turn and only once each turn.)"
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "change",
+            "description": "change Arni's base power to 1 plus the greatest power among other creatures you control"
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [],
+              "generic": 1
+            }
+          },
+          "sub_ability": null,
+          "duration": "UntilEndOfTurn",
+          "description": "Boast — {1}: You may change Arni's base power to 1 plus the greatest power among other creatures you control until end of turn.",
+          "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "OnlyOnceEachTurn"
+            },
+            {
+              "type": "RequiresCondition",
+              "data": {
+                "condition": {
+                  "type": "SourceAttackedThisTurn"
+                }
+              }
+            }
+          ],
+          "ability_tag": {
+            "type": "Boast"
+          },
+          "condition": null,
+          "optional_targeting": false,
+          "optional": true,
+          "forward_result": false
+        }
+      }
+    }
+  ],
+  "source_text": "Haste\nBoast — {1}: You may change Arni's base power to 1 plus the greatest power among other creatures you control until end of turn. (Activate only if this creature attacked this turn and only once each turn.)",
+  "card_name": "Arni Brokenbrow"
+}

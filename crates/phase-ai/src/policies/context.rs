@@ -252,9 +252,9 @@ mod tests {
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, PtValue, QuantityExpr, TargetFilter,
+        AbilityDefinition, AbilityKind, EffectKind, PtValue, QuantityExpr, TargetFilter,
     };
-    use engine::types::game_state::{PendingCast, TargetSelectionSlot};
+    use engine::types::game_state::{PendingCast, TargetEffectDetail, TargetSelectionSlot};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::ManaCost;
     use engine::types::zones::Zone;
@@ -283,6 +283,8 @@ mod tests {
                     legal_targets: vec![],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -346,6 +348,8 @@ mod tests {
                     legal_targets: vec![],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -560,6 +564,8 @@ mod tests {
                     legal_targets: vec![],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -609,6 +615,8 @@ mod tests {
                     legal_targets: vec![],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -659,6 +667,8 @@ mod tests {
                     legal_targets: vec![],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),

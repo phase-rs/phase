@@ -6182,6 +6182,94 @@ pub struct TargetSelectionSlot {
     /// (CR 115.1) regardless of who announced a slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chooser: Option<PlayerId>,
+    /// CR 115.1: The kind of effect that will affect this target — the game
+    /// fact of *what the spell or ability does to the thing being chosen*.
+    /// Stamped at slot construction from the enclosing ability frame's own
+    /// `Effect`, because the slot is otherwise attribution-free: nothing here
+    /// references the effect, so a consumer cannot recover it later without
+    /// re-walking the effect tree in lockstep with the slot builder.
+    ///
+    /// This is deliberately the game fact and NOT a presentation intent.
+    /// Labelling (e.g. "this prompt is hostile") is a projection-layer
+    /// decision made by `target_intent` in `game::interaction`, mirroring how
+    /// `WaitingFor::EffectZoneChoice` stores `effect_kind` and lets
+    /// `effect_zone_intent` label it.
+    pub effect_kind: EffectKind,
+    /// CR 115.1: The discriminating fact that `effect_kind` does not carry.
+    ///
+    /// `EffectKind` is a unit tag, so two effects that do opposite things to a
+    /// target can share one variant: `Effect::ChangeZone` is the same kind
+    /// whether it exiles or returns to hand, and `Effect::Pump` is the same
+    /// kind for "+3/+3" and "-3/-3". Both hold the deciding value in their
+    /// payload, which is in hand at slot construction and unrecoverable
+    /// afterwards.
+    ///
+    /// One sum type rather than one `Option<T>` field per lossy kind: the axis
+    /// is "what extra fact does this kind need", and a per-kind field would be
+    /// the sibling-cluster smell at struct level. `From<&Effect> for
+    /// EffectKind` already reads payloads this way for `SetTapState`, so
+    /// payload discrimination at this boundary is established practice.
+    #[serde(default)]
+    pub effect_detail: TargetEffectDetail,
+}
+
+/// CR 613.4: Direction of a power/toughness modification. Typed rather than a
+/// signed number so the stored game fact says which way the change goes even
+/// when the magnitude is irrelevant, mirroring [`TapStateChange`] for the
+/// tap/untap axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PtDirection {
+    /// CR 613.4: A modification that raises power and/or toughness.
+    Increase,
+    /// CR 613.4: A modification that lowers power and/or toughness.
+    Decrease,
+}
+
+/// CR 115.1: Effect-kind-specific payload captured alongside a target slot's
+/// [`EffectKind`], for the kinds whose unit tag is ambiguous about what will
+/// happen to the chosen target.
+///
+/// Deliberately a *game fact* and not a presentation intent — a [`Zone`] and a
+/// direction, both read straight off the effect. `target_intent` in
+/// `game::interaction` decides how to label them.
+///
+/// # When a new variant is justified
+///
+/// This enum is a deliberate concession, and a sum type accretes one plausible
+/// variant at a time just as easily as a struct grows `Option` fields. A new
+/// variant must satisfy **all three** of:
+///
+/// 1. It carries a fact the [`EffectKind`] unit tag genuinely **cannot**
+///    express — not merely one it happens not to today.
+/// 2. Its kind actually **reaches a CR 115.1 target announcement**. An effect
+///    that never produces a target slot needs nothing here.
+/// 3. The fact is **available at slot construction**, in
+///    `collect_target_slots`. Anything recoverable later belongs at the
+///    projection layer instead, and anything unknowable at announcement
+///    belongs in [`TargetEffectDetail::None`] rather than being guessed.
+///
+/// If a proposal fails **any** of the three, the answer is a finer
+/// [`EffectKind`] fan-out — see `impl From<&Effect> for EffectKind`'s
+/// `Effect::SetTapState` arm, which reads `scope` and `state` to produce four
+/// distinct kinds — and **not** a new detail variant. Prefer that route
+/// whenever the distinction is intrinsic to the effect rather than to this
+/// one announcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum TargetEffectDetail {
+    /// The kind is self-describing; no extra fact is needed (the default, and
+    /// the honest answer whenever the deciding value is not statically known).
+    #[default]
+    None,
+    /// Destination of a zone-change effect (`ChangeZone`, `ChangeZoneAll`).
+    /// Consumed by reusing the existing `effect_zone_intent(kind, destination)`
+    /// rather than reimplementing zone labelling.
+    Destination(Zone),
+    /// CR 613.4: Direction of a P/T modification (`Pump`, `PumpAll`). Absent
+    /// when the modification is dynamic (X or count-based) or genuinely
+    /// opposing ("+2/-2"), because then no direction is true.
+    Modification(PtDirection),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -21143,6 +21231,8 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(ObjectId(1))],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: vec![],
@@ -21557,6 +21647,8 @@ mod tests {
                 ],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: vec![],

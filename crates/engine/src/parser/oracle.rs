@@ -69,7 +69,7 @@ use super::oracle_ir::doc::{
     OracleDocBuilder, OracleDocIr, OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan,
     OracleUnitSource, PrintedAbilityIndex, PrintedTriggerIndex,
 };
-use super::oracle_ir::effect_chain::AbilityIr;
+use super::oracle_ir::effect_chain::{AbilityIr, ShellStage};
 use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
 use super::oracle_ir::replacement::ReplacementIr;
@@ -4515,20 +4515,35 @@ pub(crate) fn parse_oracle_ir(
                 let cost = parse_oracle_cost(cost_text);
                 ctx.subject = None;
                 ctx.actor = None;
-                let mut def =
-                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
-                def.cost = Some(cost);
+                let mut ir =
+                    parse_ability_ir_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+                // CR 602.1a: the activation cost, everything before the colon.
+                ir.shell.cost = Some(cost);
                 // CR 207.2c: Channel is an ability word; the underlying ability activates from hand.
-                def.activation_zone = Some(Zone::Hand);
-                def.description = Some(line.to_string());
-                if !constraints.restrictions.is_empty() {
-                    def.activation_restrictions = constraints.restrictions;
-                }
-                // CR 601.2f: Extract self-referential cost reduction from the terminal
-                // sub_ability in the chain (it may be several levels deep).
-                extract_cost_reduction_from_chain(&mut def);
-                extract_mana_spend_trigger_from_chain(&mut def);
-                emitter.ability_at(item_line, def);
+                ir.shell.activation_zone = Some(Zone::Hand);
+                ir.shell.description = Some(line.to_string());
+                // CR 602.1b: the activation instructions. This site is the one in
+                // the family whose original wrote `=` (guarded by an is-empty
+                // check) rather than `extend`, and the two are equivalent here:
+                // nothing reachable from `lower_ability_ir` writes the root's
+                // `activation_restrictions` (`rg activation_restrictions
+                // crates/engine/src/parser/oracle_effect/` hits only the shell
+                // applier itself), so the field is empty when the shell runs and
+                // `extend` onto empty reproduces the assignment exactly. The
+                // guard was therefore already redundant: assigning an empty vec
+                // and skipping the assignment are the same state.
+                ir.shell.activation_restrictions = constraints.restrictions;
+                // CR 601.2f: fold a self-referential cost reduction out of the
+                // terminal `sub_ability` in the chain (it may be several levels
+                // deep), then CR 106.6 + CR 603.3 fold a trailing "when you spend
+                // this mana" sub-ability into the mana effect. Both are chain
+                // *structure* folds that run after the field stamps, in this
+                // order — see `ShellStage`.
+                ir.shell.stages = vec![
+                    ShellStage::ExtractCostReduction,
+                    ShellStage::ExtractManaSpendTrigger,
+                ];
+                emitter.ability_ir_at(item_line, ir);
                 i += 1;
                 continue;
             }
@@ -4548,25 +4563,35 @@ pub(crate) fn parse_oracle_ir(
                 let cost = parse_oracle_cost(cost_text);
                 ctx.subject = None;
                 ctx.actor = None;
-                let mut def =
-                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
-                def.cost = Some(cost);
-                def.description = Some(line.to_string());
-                def.activation_restrictions.extend(constraints.restrictions);
+                let mut ir =
+                    parse_ability_ir_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+                // CR 602.1a: the activation cost, everything before the colon.
+                ir.shell.cost = Some(cost);
+                ir.shell.description = Some(line.to_string());
+                // CR 602.1b: the activation instructions, composed in this
+                // recognizer's own order — the parsed constraints LEAD and the
+                // two implicit restrictions trail. The relative order of the two
+                // implicit ones is preserved as printed here as well; it is the
+                // reverse of the order CR 702.142a states them in, which is a
+                // pre-existing property of this site and not something the
+                // conversion may quietly normalize.
+                let mut activation_restrictions = constraints.restrictions;
                 // CR 702.142a: "Activate only if this creature attacked this turn
                 // and only once each turn."
-                def.activation_restrictions
-                    .push(ActivationRestriction::OnlyOnceEachTurn);
-                def.activation_restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: Some(ParsedCondition::SourceAttackedThisTurn),
-                    });
+                activation_restrictions.push(ActivationRestriction::OnlyOnceEachTurn);
+                activation_restrictions.push(ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::SourceAttackedThisTurn),
+                });
+                ir.shell.activation_restrictions = activation_restrictions;
                 // CR 702.142b: Tag this ability as originating from Boast so
                 // effects can reference "boast abilities" as a class.
-                def.ability_tag = Some(AbilityTag::Boast);
-                extract_cost_reduction_from_chain(&mut def);
-                extract_mana_spend_trigger_from_chain(&mut def);
-                emitter.ability_at(item_line, def);
+                ir.shell.ability_tag = Some(AbilityTag::Boast);
+                // CR 601.2f then CR 106.6 + CR 603.3, in this order — see `ShellStage`.
+                ir.shell.stages = vec![
+                    ShellStage::ExtractCostReduction,
+                    ShellStage::ExtractManaSpendTrigger,
+                ];
+                emitter.ability_ir_at(item_line, ir);
                 i += 1;
                 continue;
             }
@@ -4585,17 +4610,23 @@ pub(crate) fn parse_oracle_ir(
                 let cost = parse_oracle_cost(cost_text);
                 ctx.subject = None;
                 ctx.actor = None;
-                let mut def =
-                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
-                def.cost = Some(cost);
-                def.description = Some(line.to_string());
-                def.activation_restrictions.extend(constraints.restrictions);
-                def.activation_restrictions
-                    .push(ActivationRestriction::OnlyOnce);
-                def.ability_tag = Some(AbilityTag::Exhaust);
-                extract_cost_reduction_from_chain(&mut def);
-                extract_mana_spend_trigger_from_chain(&mut def);
-                emitter.ability_at(item_line, def);
+                let mut ir =
+                    parse_ability_ir_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+                // CR 602.1a: the activation cost, everything before the colon.
+                ir.shell.cost = Some(cost);
+                ir.shell.description = Some(line.to_string());
+                // CR 602.1b: parsed constraints LEAD, the implicit restriction trails.
+                let mut activation_restrictions = constraints.restrictions;
+                // CR 702.177a: "Activate only once."
+                activation_restrictions.push(ActivationRestriction::OnlyOnce);
+                ir.shell.activation_restrictions = activation_restrictions;
+                ir.shell.ability_tag = Some(AbilityTag::Exhaust);
+                // CR 601.2f then CR 106.6 + CR 603.3, in this order — see `ShellStage`.
+                ir.shell.stages = vec![
+                    ShellStage::ExtractCostReduction,
+                    ShellStage::ExtractManaSpendTrigger,
+                ];
+                emitter.ability_ir_at(item_line, ir);
                 i += 1;
                 continue;
             }
@@ -4673,21 +4704,26 @@ pub(crate) fn parse_oracle_ir(
                 let cost = parse_oracle_cost(cost_text);
                 ctx.subject = None;
                 ctx.actor = None;
-                let mut def =
-                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
-                def.cost = Some(cost);
-                def.description = Some(line.to_string());
+                let mut ir =
+                    parse_ability_ir_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+                // CR 602.1a: the activation cost, everything before the colon.
+                ir.shell.cost = Some(cost);
+                ir.shell.description = Some(line.to_string());
                 // CR 702.57a: a forecast ability is activated only from hand.
-                def.activation_zone = Some(Zone::Hand);
-                def.activation_restrictions.extend(constraints.restrictions);
+                ir.shell.activation_zone = Some(Zone::Hand);
+                // CR 602.1b: parsed constraints LEAD, the two implicit
+                // restrictions trail in the order CR 702.57b states them.
+                let mut activation_restrictions = constraints.restrictions;
                 // CR 702.57b: only during the owner's upkeep, only once each turn.
-                def.activation_restrictions
-                    .push(ActivationRestriction::DuringYourUpkeep);
-                def.activation_restrictions
-                    .push(ActivationRestriction::OnlyOnceEachTurn);
-                extract_cost_reduction_from_chain(&mut def);
-                extract_mana_spend_trigger_from_chain(&mut def);
-                emitter.ability_at(item_line, def);
+                activation_restrictions.push(ActivationRestriction::DuringYourUpkeep);
+                activation_restrictions.push(ActivationRestriction::OnlyOnceEachTurn);
+                ir.shell.activation_restrictions = activation_restrictions;
+                // CR 601.2f then CR 106.6 + CR 603.3, in this order — see `ShellStage`.
+                ir.shell.stages = vec![
+                    ShellStage::ExtractCostReduction,
+                    ShellStage::ExtractManaSpendTrigger,
+                ];
+                emitter.ability_ir_at(item_line, ir);
                 i += 1;
                 continue;
             }

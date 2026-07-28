@@ -1,0 +1,69 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Unimplemented",
+        "name": "unknown",
+        "description": "Haste"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": "Haste",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Unimplemented",
+        "name": "change",
+        "description": "change Arni's base power to 1 plus the greatest power among other creatures you control"
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": {
+          "type": "Cost",
+          "shards": [],
+          "generic": 1
+        }
+      },
+      "sub_ability": null,
+      "duration": "UntilEndOfTurn",
+      "description": "Boast — {1}: You may change Arni's base power to 1 plus the greatest power among other creatures you control until end of turn.",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "OnlyOnceEachTurn"
+        },
+        {
+          "type": "RequiresCondition",
+          "data": {
+            "condition": {
+              "type": "SourceAttackedThisTurn"
+            }
+          }
+        }
+      ],
+      "ability_tag": {
+        "type": "Boast"
+      },
+      "condition": null,
+      "optional_targeting": false,
+      "optional": true,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

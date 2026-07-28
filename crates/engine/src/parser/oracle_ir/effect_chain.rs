@@ -299,12 +299,8 @@ fn is_zero(v: &u32) -> bool {
 ///
 /// Variants are named for the transform, not for a call site, so the list stays
 /// a description of *what runs* rather than of *who asked*.
-// A0 builds the mechanism and converts no producers, so both variants are
-// constructed for the first time by T8-A2 (the R1 sites that run both folds).
-// The allow is DELETED by that tranche, not moved: unlike `TriggerNodeIr::Parsed`
-// there is no second home for it, because a stage with no producer is exactly
-// the state A2 ends.
-#[allow(dead_code)]
+// Both variants are constructed by the T8-A2 recognizers (Channel, Boast,
+// Exhaust, Forecast), each of which lists them in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum ShellStage {
     /// CR 601.2f: fold a trailing self-referential "this ability costs {X} less
