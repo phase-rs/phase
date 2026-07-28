@@ -2,10 +2,15 @@
 name = "manabrew-compat"
 version.workspace = true
 edition = "2021"
-license.workspace = true
+# `manabrew-protocol` is AGPL-3.0-or-later, so its copyleft flows downstream.
+# This crate must remain a leaf (it has no workspace dependents): a distributed
+# binary that links it is AGPL, including the network-use requirement in §13,
+# while `engine` remains permissively licensed.
+license = "AGPL-3.0-or-later"
 
 [dependencies]
 engine = { path = "../engine" }
+manabrew-protocol = "3"
 serde = { workspace = true }
 serde_json = "1"
 
