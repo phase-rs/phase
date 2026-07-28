@@ -3,16 +3,17 @@ use crate::types::ability::TapStateChange;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
     CardTypeSetSource, CastManaSpentMetric, CombatRelationSubject, ControllerRef,
-    CounterMoveSelection, DamageSource, Effect, EffectScope, FilterProp, GameRestriction,
-    ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope,
-    SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition,
-    TypeFilter, TypedFilter,
+    CounterMoveSelection, DamageSource, Effect, EffectKind, EffectScope, FilterProp,
+    GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    ResolvedAbility, RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::game_state::{
-    GameState, TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
+    GameState, PtDirection, TargetEffectDetail, TargetSelectionConstraint, TargetSelectionProgress,
+    TargetSelectionSlot,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -363,7 +364,6 @@ pub fn find_first_target_filter_in_chain(ability: &ResolvedAbility) -> Option<&T
 /// given mode's collection inherits that mode's `current_label`. Non-modal
 /// collection leaves `current_label` `None`, so `labels` ends up all-`None`
 /// (callers that don't need labels read `slots` and discard `labels`).
-#[derive(Default)]
 struct SlotAccumulator {
     slots: Vec<TargetSelectionSlot>,
     labels: Vec<Option<String>>,
@@ -377,6 +377,36 @@ struct SlotAccumulator {
     /// announcer (the CR-601.2c default). Set/restored by `collect_target_slots`
     /// per link so each chained sub-ability stamps only its own slots.
     current_chooser: Option<PlayerId>,
+    /// CR 115.1: effect kind of the link currently being recursed, applied to
+    /// every slot it pushes. Scoped exactly like `current_chooser`: set before
+    /// a link's slots are collected and restored afterwards, so a chained
+    /// sub-ability's slots carry that sub-ability's effect rather than the
+    /// head link's. `collect_target_slots` recurses per link, so every slot
+    /// pushed within one frame belongs to that frame's `ability.effect`.
+    current_effect_kind: EffectKind,
+    /// CR 115.1: the discriminating payload of the link currently being
+    /// recursed, read by `target_effect_detail`. Scoped exactly like
+    /// `current_effect_kind`.
+    current_effect_detail: TargetEffectDetail,
+}
+
+impl Default for SlotAccumulator {
+    /// `current_effect_kind` seeds to `NoOp` purely to have a value: both
+    /// constructors (`build_target_slots`, `build_target_slots_labelled`) call
+    /// `collect_target_slots` before any push, and that sets the real kind, so
+    /// the seed can never reach a slot. `EffectKind` has no `Default` of its
+    /// own and should not gain one for this — a 231-variant effect tag has no
+    /// meaningful default outside this accumulator.
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            labels: Vec::new(),
+            current_label: None,
+            current_chooser: None,
+            current_effect_kind: EffectKind::NoOp,
+            current_effect_detail: TargetEffectDetail::None,
+        }
+    }
 }
 
 impl SlotAccumulator {
@@ -2237,9 +2267,74 @@ fn collect_target_slots(
             .filter(|&player| player != ability.controller)
     });
     let previous_chooser = std::mem::replace(&mut acc.current_chooser, resolved_chooser);
+    // CR 115.1: stamp this link's own effect on the slots it is about to push.
+    // Restored below so a chained sub-ability does not leak its kind upward.
+    let previous_effect_kind = std::mem::replace(
+        &mut acc.current_effect_kind,
+        EffectKind::from(&ability.effect),
+    );
+    let previous_effect_detail = std::mem::replace(
+        &mut acc.current_effect_detail,
+        target_effect_detail(&ability.effect),
+    );
     let result = collect_target_slots_inner(state, ability, acc);
     acc.current_chooser = previous_chooser;
+    acc.current_effect_kind = previous_effect_kind;
+    acc.current_effect_detail = previous_effect_detail;
     result
+}
+
+/// CR 115.1: Read the fact `EffectKind` cannot carry off the effect's own
+/// payload, at the one point where the payload is in hand.
+///
+/// Only the kinds whose unit tag is genuinely ambiguous about what happens to
+/// the target are covered; everything else is [`TargetEffectDetail::None`],
+/// which is also the honest answer whenever the deciding value is not
+/// statically known. This runs at construction (not projection) because
+/// `WaitingFor::TriggerTargetSelection` carries no ability reference, so a
+/// projection-time read would resolve spell targeting and not trigger
+/// targeting — labelling the same effect differently depending on how it
+/// reached the stack. Construction is symmetric: both `build_target_slots` and
+/// `build_target_slots_labelled` route through `collect_target_slots`.
+fn target_effect_detail(effect: &Effect) -> TargetEffectDetail {
+    match effect {
+        // The zone family's tag says "a zone change happened", never which
+        // zone. Exile and return-to-hand share `EffectKind::ChangeZone`.
+        Effect::ChangeZone { destination, .. } | Effect::ChangeZoneAll { destination, .. } => {
+            TargetEffectDetail::Destination(*destination)
+        }
+        // CR 613.4: `Effect::Pump` is one kind for "+3/+3" and "-3/-3".
+        Effect::Pump {
+            power, toughness, ..
+        }
+        | Effect::PumpAll {
+            power, toughness, ..
+        } => pt_direction(power, toughness)
+            .map_or(TargetEffectDetail::None, TargetEffectDetail::Modification),
+        _ => TargetEffectDetail::None,
+    }
+}
+
+/// CR 613.4: Direction of a P/T modification, or `None` when no single
+/// direction is true.
+///
+/// `None` covers two real populations rather than being a catch-all: a dynamic
+/// magnitude (X or count-based, where the sign is not knowable at announcement
+/// — CR 601.2c fixes targets before X is locked for many cards) and a genuinely
+/// opposing modification such as "+2/-2", which is neither a buff nor a debuff.
+/// A one-sided change like "-4/-0" IS directional and resolves.
+fn pt_direction(power: &PtValue, toughness: &PtValue) -> Option<PtDirection> {
+    let fixed = |value: &PtValue| match value {
+        PtValue::Fixed(amount) => Some(*amount),
+        PtValue::Variable(_) | PtValue::Quantity(_) => None,
+    };
+    let (power, toughness) = (fixed(power)?, fixed(toughness)?);
+    match (power.signum(), toughness.signum()) {
+        (1, 0 | 1) | (0, 1) => Some(PtDirection::Increase),
+        (-1, 0 | -1) | (0, -1) => Some(PtDirection::Decrease),
+        // Both zero (no change) or opposing signs: no direction is true.
+        _ => None,
+    }
 }
 
 fn collect_target_slots_inner(
@@ -2289,6 +2384,8 @@ fn collect_target_slots_inner(
                 legal_targets,
                 optional: ability.optional_targeting,
                 chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
             });
         }
     }
@@ -2313,6 +2410,8 @@ fn collect_target_slots_inner(
                 legal_targets,
                 optional: ability.optional_targeting,
                 chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
             });
         }
         return Ok(());
@@ -2339,6 +2438,8 @@ fn collect_target_slots_inner(
                 legal_targets,
                 optional: ability.optional_targeting,
                 chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
             });
         }
         return Ok(());
@@ -2377,6 +2478,8 @@ fn collect_target_slots_inner(
                 legal_targets,
                 optional: ability.optional_targeting,
                 chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
             });
         }
         return Ok(());
@@ -2404,6 +2507,8 @@ fn collect_target_slots_inner(
                 legal_targets,
                 optional: ability.optional_targeting,
                 chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
             });
         }
     } else if let Effect::Attach { attachment, target } = &ability.effect {
@@ -2420,6 +2525,8 @@ fn collect_target_slots_inner(
                 legal_targets,
                 optional: ability.optional_targeting,
                 chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
             });
         }
     } else if let Effect::CreateDamageReplacement {
@@ -2461,6 +2568,8 @@ fn collect_target_slots_inner(
                 legal_targets,
                 optional: ability.optional_targeting,
                 chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
             });
         }
     } else if let Effect::EachDealsDamageEqualToPower {
@@ -2490,6 +2599,8 @@ fn collect_target_slots_inner(
                         legal_targets: source_legal.clone(),
                         optional: slot_index >= bounds.min,
                         chooser: None,
+                        effect_kind: acc.current_effect_kind,
+                        effect_detail: acc.current_effect_detail,
                     });
                 }
             } else {
@@ -2504,6 +2615,8 @@ fn collect_target_slots_inner(
                     legal_targets: source_legal,
                     optional: false,
                     chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
                 });
             }
 
@@ -2520,6 +2633,8 @@ fn collect_target_slots_inner(
                     legal_targets: extra_legal,
                     optional: true,
                     chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
                 });
             }
 
@@ -2535,6 +2650,8 @@ fn collect_target_slots_inner(
                 legal_targets: recipient_legal,
                 optional: false,
                 chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
             });
         }
     } else {
@@ -2581,6 +2698,8 @@ fn collect_target_slots_inner(
                 legal_targets: player_targets,
                 optional: ability.optional_targeting,
                 chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
             });
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
@@ -2600,6 +2719,8 @@ fn collect_target_slots_inner(
                 legal_targets,
                 optional: ability.optional_targeting,
                 chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
             });
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
@@ -2617,6 +2738,8 @@ fn collect_target_slots_inner(
                 legal_targets,
                 optional: ability.optional_targeting,
                 chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
             });
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
@@ -2637,6 +2760,8 @@ fn collect_target_slots_inner(
                             legal_targets: legal_targets.clone(),
                             optional: slot_index >= bounds.min,
                             chooser: None,
+                            effect_kind: acc.current_effect_kind,
+                            effect_detail: acc.current_effect_detail,
                         });
                     }
                 } else {
@@ -2649,6 +2774,8 @@ fn collect_target_slots_inner(
                         legal_targets,
                         optional: ability.optional_targeting,
                         chooser: None,
+                        effect_kind: acc.current_effect_kind,
+                        effect_detail: acc.current_effect_detail,
                     });
                 }
             }
@@ -3324,6 +3451,8 @@ fn collect_attach_attachment_target_slots(
                 legal_targets: legal_targets.clone(),
                 optional: slot_index >= bounds.min,
                 chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
             });
         }
     } else {
@@ -3331,6 +3460,8 @@ fn collect_attach_attachment_target_slots(
             legal_targets,
             optional: ability.targeting_is_optional(),
             chooser: None,
+            effect_kind: acc.current_effect_kind,
+            effect_detail: acc.current_effect_detail,
         });
     }
     Ok(())
@@ -4729,11 +4860,15 @@ fn collect_per_opponent_target_fanout_slots(
             legal_targets: player_targets,
             optional: false,
             chooser: None,
+            effect_kind: acc.current_effect_kind,
+            effect_detail: acc.current_effect_detail,
         });
         acc.push(TargetSelectionSlot {
             legal_targets,
             optional: ability.targeting_is_optional(),
             chooser: None,
+            effect_kind: acc.current_effect_kind,
+            effect_detail: acc.current_effect_detail,
         });
     }
 
@@ -8411,6 +8546,185 @@ mod tests {
         );
     }
 
+    /// CR 601.2c + CR 115.1: each announced slot carries its OWN link's effect,
+    /// not the head link's.
+    ///
+    /// This is the discriminating assertion for per-frame stamping: verified by
+    /// injecting a whole-chain stamp (sub-abilities inheriting the head link's
+    /// kind), which makes slot 1 report `DealDamage` and fails here.
+    ///
+    /// What it does NOT cover, stated so it is not assumed: the
+    /// `acc.current_effect_kind = previous_effect_kind` restore in
+    /// `collect_target_slots`. Deleting that restore leaves this test green,
+    /// because no reachable path in `collect_target_slots_inner` pushes a slot
+    /// after recursing into a sub-ability — the one mid-frame recursion
+    /// (`is_per_opponent_target_fanout`) returns immediately after. The restore
+    /// is defensive symmetry with `current_chooser`, which has the identical
+    /// set/restore structure, and would become load-bearing the moment a frame
+    /// pushes after recursing. A whole-chain stamp is the bug that
+    /// would silently re-label a pump prompt as a damage prompt.
+    #[test]
+    fn chained_ability_stamps_each_target_slot_with_its_own_links_effect() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chained Source".to_string(),
+            Zone::Stack,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // "Deal 2 damage to target creature. Target creature gets +1/+1."
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        ));
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 2, "each link declares one creature target");
+        assert_eq!(
+            slots[0].effect_kind,
+            EffectKind::DealDamage,
+            "slot 0 belongs to the damage link"
+        );
+        assert_eq!(
+            slots[1].effect_kind,
+            EffectKind::Pump,
+            "slot 1 belongs to the pump link — a whole-chain stamp would report DealDamage here"
+        );
+    }
+
+    /// CR 115.1: the discriminating payload `EffectKind` cannot carry is read
+    /// off the effect at construction, where it is symmetric across the spell
+    /// and trigger paths.
+    ///
+    /// Both `build_target_slots` and `build_target_slots_labelled` route
+    /// through `collect_target_slots`, so this holds for a triggered ability
+    /// too — which is why the read is done here and NOT at projection time,
+    /// where `WaitingFor::TriggerTargetSelection` carries no ability reference
+    /// and the same effect would be labelled differently depending on whether
+    /// it arrived as a spell or a trigger.
+    #[test]
+    fn slot_detail_carries_the_fact_the_effect_kind_cannot() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Payload Source".to_string(),
+            Zone::Stack,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let pump = |power: i32, toughness: i32| {
+            ResolvedAbility::new(
+                Effect::Pump {
+                    power: PtValue::Fixed(power),
+                    toughness: PtValue::Fixed(toughness),
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+
+        // "+3/+3" and "-3/-3" are the SAME `EffectKind`; only the detail
+        // separates them. This is the assertion that fails if the payload read
+        // is dropped.
+        let buff = build_target_slots(&state, &pump(3, 3)).expect("slots");
+        assert_eq!(buff[0].effect_kind, EffectKind::Pump);
+        assert_eq!(
+            buff[0].effect_detail,
+            TargetEffectDetail::Modification(PtDirection::Increase)
+        );
+        let debuff = build_target_slots(&state, &pump(-3, -3)).expect("slots");
+        assert_eq!(debuff[0].effect_kind, EffectKind::Pump);
+        assert_eq!(
+            debuff[0].effect_detail,
+            TargetEffectDetail::Modification(PtDirection::Decrease)
+        );
+
+        // A one-sided reduction ("-4/-0") IS directional and must resolve.
+        let one_sided = build_target_slots(&state, &pump(-4, 0)).expect("slots");
+        assert_eq!(
+            one_sided[0].effect_detail,
+            TargetEffectDetail::Modification(PtDirection::Decrease),
+            "-4/-0 is a debuff, not an undirected modification"
+        );
+
+        // A genuinely opposing modification claims no direction rather than
+        // guessing one.
+        let opposing = build_target_slots(&state, &pump(2, -2)).expect("slots");
+        assert_eq!(
+            opposing[0].effect_detail,
+            TargetEffectDetail::None,
+            "+2/-2 is neither a buff nor a debuff"
+        );
+
+        // A dynamic magnitude is not knowable at announcement (CR 601.2c fixes
+        // targets before X is locked), so it also declines.
+        let dynamic = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Variable("X".to_string()),
+                toughness: PtValue::Variable("X".to_string()),
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            build_target_slots(&state, &dynamic).expect("slots")[0].effect_detail,
+            TargetEffectDetail::None,
+            "an X-sized pump has no statically known direction"
+        );
+    }
+
     #[test]
     fn search_library_collects_later_independent_stack_targets() {
         let mut state = GameState::new_two_player(42);
@@ -9172,6 +9486,8 @@ mod tests {
                 ],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             },
             TargetSelectionSlot {
                 legal_targets: vec![
@@ -9180,6 +9496,8 @@ mod tests {
                 ],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             },
         ];
 
@@ -9543,6 +9861,8 @@ mod tests {
             legal_targets: vec![TargetRef::Player(PlayerId(1))],
             optional: true,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         }];
 
         let selected = auto_select_targets(&slots, &[]).expect("optional targeting stays legal");
@@ -9557,11 +9877,15 @@ mod tests {
                 legal_targets: vec![TargetRef::Player(PlayerId(0))],
                 optional: true,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             },
             TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Player(PlayerId(0))],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             },
         ];
 
@@ -9579,11 +9903,15 @@ mod tests {
                 legal_targets: vec![TargetRef::Player(PlayerId(1))],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             },
             TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Player(PlayerId(1))],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             },
         ];
 
@@ -9603,6 +9931,8 @@ mod tests {
                 ],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             },
             TargetSelectionSlot {
                 legal_targets: vec![
@@ -9611,6 +9941,8 @@ mod tests {
                 ],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             },
         ];
 
@@ -9646,11 +9978,15 @@ mod tests {
                 legal_targets: vec![TargetRef::Player(PlayerId(1))],
                 optional: true,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             },
             TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(ObjectId(42))],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             },
         ];
 
@@ -12387,11 +12723,15 @@ mod tests {
                     legal_targets: vec![],
                     optional: true,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 },
                 TargetSelectionSlot {
                     legal_targets: vec![],
                     optional: true,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 },
             ]
         };
@@ -12725,6 +13065,8 @@ mod tests {
             ],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         };
         let chosen =
             random_select_targets_for_ability(&mut state, std::slice::from_ref(&slot), &[])
@@ -12746,6 +13088,8 @@ mod tests {
             ],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         };
         let mut state_a = GameState::new_two_player(1234);
         let mut state_b = GameState::new_two_player(1234);
@@ -12768,6 +13112,8 @@ mod tests {
             legal_targets: vec![],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         };
         let result = random_select_targets_for_ability(&mut state, &[slot], &[]);
         assert!(result.is_err(), "empty legal-target set must error");
@@ -12783,6 +13129,8 @@ mod tests {
             legal_targets: vec![],
             optional: true,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         };
         let chosen = random_select_targets_for_ability(&mut state, &[slot], &[])
             .expect("optional empty slot resolves to empty selection");
@@ -12803,6 +13151,8 @@ mod tests {
             ],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         };
         let slot_b = TargetSelectionSlot {
             legal_targets: vec![
@@ -12811,6 +13161,8 @@ mod tests {
             ],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         };
         let chosen =
             random_select_targets_for_ability(&mut state, &[slot_a.clone(), slot_b.clone()], &[])
@@ -12834,11 +13186,15 @@ mod tests {
             legal_targets: vec![shared.clone()],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         };
         let slot_optional = TargetSelectionSlot {
             legal_targets: vec![shared.clone()],
             optional: true,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         };
         // Required + required: second slot has no remaining legal target → error.
         let err = random_select_targets_for_ability(

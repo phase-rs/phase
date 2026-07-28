@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 1572
 expression: "&ir"
 ---
 {
@@ -112,108 +113,196 @@ expression: "&ir"
         "fragment": "Exhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery. (Activate each exhaust ability only once.)"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Graveyard",
-            "destination": "Battlefield",
-            "target": {
-              "type": "Or",
-              "filters": [
-                {
-                  "type": "Typed",
-                  "type_filters": [
-                    "Creature"
-                  ],
-                  "controller": "You",
-                  "properties": [
-                    {
-                      "type": "InZone",
-                      "zone": "Graveyard"
-                    }
-                  ]
+        "Spell": {
+          "source_text": "Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 82,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Return target creature or planeswalker card from your graveyard to the battlefield"
                 },
-                {
-                  "type": "Typed",
-                  "type_filters": [
-                    "Planeswalker"
-                  ],
-                  "controller": "You",
-                  "properties": [
-                    {
-                      "type": "InZone",
-                      "zone": "Graveyard"
-                    }
-                  ]
-                }
-              ]
-            },
-            "owner_library": false,
-            "enter_transformed": false,
-            "enter_tapped": false,
-            "enters_attacking": false
-          },
-          "cost": {
-            "type": "Mana",
-            "cost": {
-              "type": "Cost",
-              "shards": [
-                "Black"
-              ],
-              "generic": 5
-            }
-          },
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "PutCounter",
-              "counter_type": "P1P1",
-              "count": {
-                "type": "Fixed",
-                "value": 1
-              },
-              "target": {
-                "type": "Typed",
-                "type_filters": [
-                  {
-                    "Subtype": "Liliana"
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
                   }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "ChangeZone",
+                    "origin": "Graveyard",
+                    "destination": "Battlefield",
+                    "target": {
+                      "type": "Or",
+                      "filters": [
+                        {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Creature"
+                          ],
+                          "controller": "You",
+                          "properties": [
+                            {
+                              "type": "InZone",
+                              "zone": "Graveyard"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Planeswalker"
+                          ],
+                          "controller": "You",
+                          "properties": [
+                            {
+                              "type": "InZone",
+                              "zone": "Graveyard"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    "owner_library": false,
+                    "enter_transformed": false,
+                    "enter_tapped": false,
+                    "enters_attacking": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 84,
+                    "end_byte": 114,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "Put a +1/+1 counter on Liliana"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "PutCounter",
+                    "counter_type": "P1P1",
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        {
+                          "Subtype": "Liliana"
+                        }
+                      ],
+                      "controller": null,
+                      "properties": []
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Mana",
+              "cost": {
+                "type": "Cost",
+                "shards": [
+                  "Black"
                 ],
-                "controller": null,
-                "properties": []
+                "generic": 5
               }
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "target_choice_timing": "Resolution",
-            "forward_result": false,
-            "sub_link": "SequentialSibling"
-          },
-          "duration": null,
-          "description": "Exhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery.",
-          "target_prompt": null,
-          "activation_restrictions": [
-            {
-              "type": "AsSorcery"
+            "activation_restrictions": [
+              {
+                "type": "AsSorcery"
+              },
+              {
+                "type": "OnlyOnce"
+              }
+            ],
+            "ability_tag": {
+              "type": "Exhaust"
             },
-            {
-              "type": "OnlyOnce"
-            }
-          ],
-          "ability_tag": {
-            "type": "Exhaust"
-          },
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+            "description": "Exhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery.",
+            "stages": [
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
+          }
         }
       }
     }

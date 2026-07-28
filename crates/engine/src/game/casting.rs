@@ -3,10 +3,11 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
     AdditionalCost, CardPlayMode, CardSelectionMode, CastTimingPermission, CastingPermission,
     ChoiceType, ContinuousModification, CostObjectCount, CostPaidObjectSnapshot,
-    CounterCostSelection, Duration, Effect, FilterProp, GameRestriction, ModalSelectionCondition,
-    ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef,
-    ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition,
-    SubAbilityLink, TapCreaturesRequirement, TargetFilter, TargetRef,
+    CounterCostSelection, Duration, Effect, EffectKind, FilterProp, GameRestriction,
+    ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity,
+    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
+    StaticCondition, StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter,
+    TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -16,7 +17,7 @@ use crate::types::game_state::{
     CastingPermissionIndex, CastingVariant, CastingVariantChoiceOption, ConvokeMode, CostResume,
     GameState, ManaAbilityCostParent, ManaAbilityResume, NextSpellModifier, PayCostKind,
     PendingCast, PendingCostMoveResume, SneakPlacement, SpellCostSource, StackEntry,
-    StackEntryKind, TargetSelectionSlot, WaitingFor,
+    StackEntryKind, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -11619,10 +11620,15 @@ fn continue_with_prepared(
                     "No legal targets for Aura".to_string(),
                 ));
             }
+            // CR 303.4a + CR 702.5a: the enchant-defined target is the
+            // permanent this Aura will attach to on resolution, so `Attach` is
+            // the effect the chosen target will be subject to.
             let target_slots = vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: legal,
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::Attach,
+                effect_detail: TargetEffectDetail::None,
             }];
             if let Some(targets) = auto_select_targets(&target_slots, &[])? {
                 let mut resolved = resolved;
@@ -11691,10 +11697,17 @@ fn continue_with_prepared(
                 "No legal target for mutate".to_string(),
             ));
         }
+        // CR 702.140a: mutate is resolved by the casting pipeline, not by an
+        // `Effect`, so there is no effect tag to name here. `NoOp` is the
+        // honest "the engine has no effect kind for this target" marker and
+        // projects as the neutral `Choose` intent rather than claiming a
+        // semantic the engine does not have.
         let target_slots = vec![crate::types::game_state::TargetSelectionSlot {
             legal_targets: legal,
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         }];
         if let Some(targets) = auto_select_targets(&target_slots, &[])? {
             let mut resolved = resolved;
@@ -12476,6 +12489,9 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
                         ),
                         optional: false,
                         chooser: None,
+                        // CR 303.4a + CR 702.5a: see the cast path above.
+                        effect_kind: EffectKind::Attach,
+                        effect_detail: TargetEffectDetail::None,
                     })
                 } else {
                     None
@@ -12502,6 +12518,10 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
                 legal_targets: legal,
                 optional: false,
                 chooser: None,
+                // CR 702.140a: see the cast path above — no `Effect` backs
+                // mutate, so no effect kind names it.
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }]
         });
     }

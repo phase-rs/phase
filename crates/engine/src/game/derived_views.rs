@@ -1902,8 +1902,14 @@ mod tests {
     fn turn_order_duplicates_survive_wire_round_trip() {
         let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
         state.active_player = PlayerId(0);
-        state.extra_turns.push(PlayerId(2));
-        state.extra_turns.push(PlayerId(0));
+        state.extra_turns.push(crate::types::game_state::ExtraTurn {
+            player: PlayerId(2),
+            anchor: PlayerId(0),
+        });
+        state.extra_turns.push(crate::types::game_state::ExtraTurn {
+            player: PlayerId(0),
+            anchor: PlayerId(0),
+        });
 
         let views = derive_views(&state, None);
 

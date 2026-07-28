@@ -51,8 +51,9 @@ use crate::types::ability::{
     DestinationConstraint, DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint,
     ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
     RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality,
-    StaticCondition, TapCreaturesRequirement, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    StaticCondition, SubAbilityLink, TapCreaturesRequirement, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -2053,6 +2054,25 @@ fn lift_parent_target_to_triggering_source(effect: &mut Effect) {
     }
 }
 
+/// Return the first independent sibling after a search-result continuation.
+///
+/// `SearchLibrary` passes its found cards to continuation links through
+/// `ParentTarget`; that dataflow ends at the first `SequentialSibling`, whose
+/// effect is an independent instruction and may again refer to the trigger
+/// event source.
+fn first_independent_sibling_after_search(
+    search: &mut AbilityDefinition,
+) -> Option<&mut AbilityDefinition> {
+    let mut node = search.sub_ability.as_deref_mut();
+    while let Some(link) = node {
+        if link.sub_link == SubAbilityLink::SequentialSibling {
+            return Some(link);
+        }
+        node = link.sub_ability.as_deref_mut();
+    }
+    None
+}
+
 /// CR 608.2k + CR 603.7c: Recurse `lift_parent_target_to_triggering_source`
 /// through an ability's effect AND every chained `sub_ability`. Required
 /// for the punisher-trigger class: a chained Tergrid-shape ability like
@@ -2070,6 +2090,20 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
     // ("put that card …, then create a token") still lift correctly.
     let mut node = Some(ability);
     while let Some(link) = node {
+        // CR 701.23a: A library search's continuation receives the found cards
+        // as its parent targets. In an event-source-bearing trigger, the
+        // search still belongs to the trigger event, but "those cards" after
+        // the search does not: it denotes the cards chosen from the library.
+        // Skip only that continuation, then resume at a sequential sibling.
+        // Otherwise an ETB such as Scholarship Sponsor rewrites its found-card
+        // delivery from `ParentTarget` to `TriggeringSource` and can neither
+        // deliver the searched cards nor enter the scoped simultaneous-search
+        // path. A later independent sibling still needs its ordinary
+        // event-source rewrite.
+        if matches!(link.effect.as_ref(), Effect::SearchLibrary { .. }) {
+            node = first_independent_sibling_after_search(link);
+            continue;
+        }
         if introduces_chosen_object_target(link.effect.as_ref()) {
             break;
         }

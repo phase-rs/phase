@@ -193,6 +193,7 @@ fn single_member(
 
 #[cfg(test)]
 mod tests {
+    use crate::types::game_state::TargetEffectDetail;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -200,6 +201,7 @@ mod tests {
     use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use crate::game::engine::apply_as_current_for_simulation;
     use crate::game::zones::create_object;
+    use crate::types::ability::EffectKind;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Effect, PtValue, TargetFilter, TargetRef, TypedFilter,
     };
@@ -273,6 +275,8 @@ mod tests {
                 legal_targets: legal_targets.clone(),
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: TargetSelectionProgress {

@@ -6,7 +6,7 @@
 
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_ir::doc::OracleDocIr;
+use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
 
 /// Parse Oracle text through both IR and lowering layers.
 fn parse_two_layer(
@@ -135,6 +135,113 @@ fn questing_beast() {
     );
     insta::assert_json_snapshot!("questing_beast_ir", &ir);
     insta::assert_json_snapshot!("questing_beast_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// CR 615.1a prevention spells — the instant/sorcery prevention recognizer
+// ---------------------------------------------------------------------------
+//
+// CR 615.1a: "Effects that use the word 'prevent' are prevention effects."
+// That sentence *is* this recognizer's admission test: it claims an
+// instant/sorcery line containing both "prevent" and "damage" (excluding the
+// CR 614.15 ability-word self-replacement printings) and lowers the whole line
+// as a resolving spell chain rather than a standing replacement definition.
+//
+// **Why these two fixtures exist.** 153 cards in the pool reach that site and,
+// before Plan 05b T9a, NOT ONE of them was snapshotted — the only spell path
+// that lowered a whole ability body without `finalize_effect_chain`, the
+// owner-library reveal anchor, and the `WithContext` whole-body recognizer set
+// was also the one with no two-layer guard. T9a routed it through
+// `lower_ability_ir` (via `ability_ir_at`) and measured a zero full-pool delta;
+// these pin that result so T9b's payload swap — which lands on this exact
+// recognizer — cannot move it silently.
+//
+// Both texts are verbatim MTGJSON, not paraphrases: a paraphrase can take a
+// different parser branch and go green while the real card stays broken.
+
+/// The canonical single-clause prevention spell — the whole card is the
+/// prevention sentence, so the chain has exactly one clause and no `sub_ability`.
+#[test]
+fn fog_prevention_spell() {
+    let (ir, lowered) = parse_two_layer(
+        "Prevent all combat damage that would be dealt this turn.",
+        "Fog",
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!("fog_ir", &ir);
+    insta::assert_json_snapshot!("fog_lowered", &lowered);
+}
+
+/// The multi-clause case the recognizer was written for. The site's own comment
+/// cites this shape verbatim — "preserve any preceding clauses ('You gain 1 life
+/// for each ...')" — because the prevention marker sits in the SECOND sentence,
+/// so a replacement classifier reaching the line first would drop the life gain.
+/// This is the fixture that exercises chain assembly and `lower_ability_ir`'s
+/// pinned chain → finalize → anchor → `sub_link` order, rather than a
+/// degenerate one-clause body that would take the same path either way.
+#[test]
+fn blunt_the_assault_prevention_spell_preserves_preceding_clause() {
+    let (ir, lowered) = parse_two_layer(
+        "You gain 1 life for each creature on the battlefield. Prevent all combat damage that would be dealt this turn.",
+        "Blunt the Assault",
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!("blunt_the_assault_ir", &ir);
+    insta::assert_json_snapshot!("blunt_the_assault_lowered", &lowered);
+}
+
+/// CR 601.2b: a standalone "X can't be 0." annotation paragraph raises the
+/// announced-X floor on the ability printed ABOVE it, and must do so without
+/// converting that ability's node back to the pre-lowered shape.
+///
+/// DISCRIMINATING, and newly so. This line reaches
+/// `DocEmitter::raise_last_spell_min_x`, which pops the last emitted spell item,
+/// edits it, and re-emits it. Its predecessor — the general
+/// `mutate_last_spell(f)` closure mutator — could only hand a closure an
+/// `&mut AbilityDefinition`, so it had to LOWER the popped node first and could
+/// only ever re-emit pre-lowered. Before T9b that was invisible, because the
+/// only IR-native spell producer was unreachable from this line; after the
+/// payload swap nine producers can precede it. Restore the closure mutator and
+/// the `min_x_value` assertion still passes while the node assertion fails —
+/// which is exactly the silent un-conversion this shape guards against.
+///
+/// The prevention line is the fixture because it is a *converted* producer
+/// (U0-39), so `abilities[0]` is genuinely IR-native here; a fallback-parsed
+/// line would emit the pre-lowered shape and make the node assertion vacuous.
+///
+/// Both layers are asserted on purpose. The IR half pins WHERE the floor is
+/// stored (`AbilityShellIr::min_x_value`, pre-lowering); the lowered half pins
+/// that `apply_ability_shell_envelope`'s `max` actually carries it onto the
+/// root, so a floor parked in a shell field nothing reads cannot pass.
+#[test]
+fn a_standalone_x_floor_annotation_raises_an_ir_native_spells_floor() {
+    let (ir, lowered) = parse_two_layer(
+        "Prevent all combat damage that would be dealt this turn.\nX can't be 0.",
+        "Probe",
+        &["Instant"],
+        &[],
+    );
+
+    // Reach-guard: exactly one ability, and it must be the IR-native node —
+    // otherwise the floor assertion below says nothing about the `Spell` arm.
+    assert_eq!(
+        lowered.abilities.len(),
+        1,
+        "expected the prevention spell alone; the annotation paragraph is not an ability, got {:?}",
+        lowered.abilities
+    );
+    assert!(
+        matches!(ir.items[0].node, OracleNodeIr::Spell(_)),
+        "the re-emitted node must stay IR-native, got {:?}",
+        ir.items[0].node
+    );
+
+    assert_eq!(
+        lowered.abilities[0].min_x_value, 1,
+        "the \"X can't be 0.\" annotation must raise the lowered root's floor to 1"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +567,70 @@ fn entropic_battlecruiser() {
     );
     insta::assert_json_snapshot!("entropic_battlecruiser_ir", &ir);
     insta::assert_json_snapshot!("entropic_battlecruiser_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Plan 05b T8-A3 (§5.3 remediation): U0-12 had no fixture that witnessed the
+// envelope it stamps.
+// ---------------------------------------------------------------------------
+
+/// U0-12 — the CR 711.2a/711.2b LEVEL-block activated line (T8-A3 witness).
+///
+/// **What was unwitnessed.** The only pre-existing test over this site
+/// (`oracle_tests::leveler_activated_abilities_get_level_counter_range`) asserts
+/// `LevelCounterRange` presence with `.contains(…)`, which is order-insensitive,
+/// and asserts nothing about the `cost` or `description` the site also stamps.
+/// Dropping `LevelCounterRange` was witnessed; every other axis was not.
+///
+/// Guul Draz Assassin is the richest fixture in the nine-card leveler
+/// population: two striations, a two-component `{B}, {T}` cost (so the CR 602.1a
+/// stamp is pinned to something more than a bare `{T}`), a targeted effect, and
+/// two *different* level ranges — a bounded `2-3` and an unbounded `4+` — so a
+/// range that collapsed to a constant would show.
+///
+/// Fixture is pool-verified, not synthetic: Oracle text, `Creature` type and
+/// `Vampire`/`Assassin` subtypes are verbatim from `data/card-data.json`.
+#[test]
+fn guul_draz_assassin_level_activated() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Level up {1}{B} ({1}{B}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 2-3\n2/2\n{B}, {T}: Target creature gets -2/-2 until end of turn.\nLEVEL 4+\n4/4\n{B}, {T}: Target creature gets -4/-4 until end of turn.",
+        "Guul Draz Assassin",
+        &["level up"],
+        &["Creature"],
+        &["Vampire", "Assassin"],
+    );
+    insta::assert_json_snapshot!("guul_draz_assassin_ir", &ir);
+    insta::assert_json_snapshot!("guul_draz_assassin_lowered", &lowered);
+}
+
+/// U0-12 — the first site in phase A where `ExtractManaSpendTrigger`'s guard is
+/// LIVE (T8-A3 witness).
+///
+/// A2 established that its four keyword sites can never run that fold: no pool
+/// card with those keywords lowers to a root `Effect::Mana`, so the stage
+/// early-returns every time. **U0-12 is different.** Joraga Treespeaker's
+/// `LEVEL 1-4` body is `{T}: Add {G}{G}.`, which lowers to a root `Effect::Mana`,
+/// so the guard passes here for the first time in the tranche.
+///
+/// The fold's *body* still does nothing — it additionally needs a trailing "when
+/// you spend this mana …" sub-ability, and no leveler card prints one — so
+/// dropping the stage is still extensionally inert. Pinning the mana root is
+/// what makes that distinction visible: this fixture is the one that would start
+/// discriminating the moment a level striation prints a spend trigger.
+///
+/// Fixture is pool-verified, not synthetic: Oracle text, `Creature` type and
+/// `Elf`/`Druid` subtypes are verbatim from `data/card-data.json`.
+#[test]
+fn joraga_treespeaker_level_mana_ability() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Level up {1}{G} ({1}{G}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 1-4\n1/2\n{T}: Add {G}{G}.\nLEVEL 5+\n1/4\nElves you control have \"{T}: Add {G}{G}.\"",
+        "Joraga Treespeaker",
+        &["level up"],
+        &["Creature"],
+        &["Elf", "Druid"],
+    );
+    insta::assert_json_snapshot!("joraga_treespeaker_ir", &ir);
+    insta::assert_json_snapshot!("joraga_treespeaker_lowered", &lowered);
 }
 
 // ---------------------------------------------------------------------------

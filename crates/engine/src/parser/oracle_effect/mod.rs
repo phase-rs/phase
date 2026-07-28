@@ -13514,6 +13514,182 @@ fn parse_threshold_land_balance_ir(
     })
 }
 
+/// The terminal delivery grammar of an uneven-land search. These are distinct
+/// because only the hand form publicly reveals the found cards before delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnevenLandSearchDelivery {
+    TappedBattlefield,
+    RevealedHand,
+}
+
+/// CR 101.4a + CR 701.23a/e/i: Whole-chain recognizer for the shared
+/// cross-player land catch-up search (Scholarship Sponsor / Enigma Ridges).
+///
+/// The player predicate, extremum, bounded difference, basic-land search, and
+/// delivery are independently typed. The two delivery grammars are deliberately
+/// closed: unrevealed cards enter the battlefield tapped, while revealed cards
+/// go to hand. This makes the scoped-search protocol's privacy and delivery
+/// eligibility visible in the resulting effect tree rather than dispatching on
+/// card names or residual strings.
+fn parse_uneven_land_search_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
+    let lower = text.to_lowercase();
+    let ((extremum, delivery), _) = nom_on_lower(text, &lower, |input| {
+        let (input, _) =
+            tag("each player who controls fewer lands than the player who controls the ")
+                .parse(input)?;
+        let saved = input;
+        let (input, extremum) = alt((
+            value(AggregateFunction::Max, tag("most")),
+            value(AggregateFunction::Min, tag("fewest")),
+        ))
+        .parse(input)?;
+        // The comparison subject is only coherent with the maximum land count:
+        // every matching player must have fewer lands than that maximum.
+        if extremum != AggregateFunction::Max {
+            return Err(nom::Err::Error(OracleError::new(
+                saved,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        let (input, _) = tag(
+            " lands searches their library for a number of basic land cards less than or equal to the difference, ",
+        )
+        .parse(input)?;
+        let (input, delivery) = alt((
+            value(
+                UnevenLandSearchDelivery::TappedBattlefield,
+                tag("puts those cards onto the battlefield tapped, then shuffles"),
+            ),
+            value(
+                UnevenLandSearchDelivery::RevealedHand,
+                tag("reveals them, puts them into their hand, then shuffles"),
+            ),
+        ))
+        .parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, (extremum, delivery)))
+    })?;
+
+    let lands = TargetFilter::Typed(TypedFilter::land());
+    let basic_lands =
+        TargetFilter::Typed(
+            TypedFilter::land().properties(vec![FilterProp::HasSupertype {
+                value: Supertype::Basic,
+            }]),
+        );
+    let scoped_lands =
+        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::ScopedPlayer));
+    let maximum_lands = QuantityExpr::Ref {
+        qty: QuantityRef::ControlledByEachPlayer {
+            filter: lands.clone(),
+            aggregate: extremum,
+        },
+    };
+    let difference = QuantityExpr::Difference {
+        left: Box::new(maximum_lands.clone()),
+        right: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: scoped_lands,
+            },
+        }),
+    };
+
+    let (destination, enter_tapped, reveal) = match delivery {
+        UnevenLandSearchDelivery::TappedBattlefield => (
+            Zone::Battlefield,
+            crate::types::zones::EtbTapState::Tapped,
+            false,
+        ),
+        UnevenLandSearchDelivery::RevealedHand => (
+            Zone::Hand,
+            crate::types::zones::EtbTapState::Unspecified,
+            true,
+        ),
+    };
+    let mut shuffle = AbilityDefinition::new(
+        kind,
+        Effect::Shuffle {
+            target: TargetFilter::Controller,
+        },
+    )
+    .player_scope(PlayerFilter::PerformedActionThisWay {
+        relation: PlayerRelation::All,
+        action: crate::types::events::PlayerActionKind::SearchedLibrary,
+    });
+    // The final "searched this way" shuffle is a distinct instruction, not a
+    // result-delivery continuation. It remains physically attached as the
+    // delivery tail so the scoped-search executor can detach and batch it.
+    shuffle.sub_link = SubAbilityLink::SequentialSibling;
+    let delivery = AbilityDefinition::new(
+        kind,
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: Vec::new(),
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    )
+    .sub_ability(shuffle);
+    let mut search = parsed_clause(Effect::SearchLibrary {
+        filter: basic_lands,
+        count: QuantityExpr::up_to(difference),
+        reveal,
+        target_player: None,
+        selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
+        split: None,
+        source_zones: vec![Zone::Library],
+    });
+    search.sub_ability = Some(Box::new(delivery));
+
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            text,
+            search,
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .player_scope(Some(PlayerFilter::ControlsCount {
+            relation: PlayerRelation::All,
+            filter: lands,
+            comparator: Comparator::LT,
+            count: Box::new(maximum_lands),
+        }))
+        .push();
+
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        // This is an `each player who ...` instruction, not an already-local
+        // effect. Retain the scope in the lowered ability so the resolver can
+        // split the search/delivery/shuffle chain and use its simultaneous
+        // scoped-search protocol.
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
+}
+
 /// CR 121.1 + CR 402.1 + CR 608.2e: Whole-line interceptor for the "catch up to
 /// the player with the most cards in hand" equalize-upward draw (Tales of the
 /// Ancestors). Structured like [`parse_balance_equalization_ir`]: the
@@ -27585,6 +27761,9 @@ pub(crate) fn parse_effect_chain_ir(
         return ir;
     }
     if let Some(ir) = parse_threshold_land_balance_ir(text, kind, ctx) {
+        return ir;
+    }
+    if let Some(ir) = parse_uneven_land_search_ir(text, kind, ctx) {
         return ir;
     }
     if let Some(ir) = parse_return_target_and_same_name_from_your_graveyard_ir(text, kind, ctx) {

@@ -5163,6 +5163,7 @@ fn combinations_generic<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::game_state::TargetEffectDetail;
     use std::sync::Arc;
 
     use super::*;
@@ -5861,6 +5862,8 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),

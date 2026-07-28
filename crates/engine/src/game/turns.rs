@@ -10,8 +10,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    AutoPassMode, ExtraPhase, GameState, LoopCollapseAxis, PayableResource, PendingCounterAddition,
-    PendingEffectResolved, TurnBoundary, WaitingFor,
+    AutoPassMode, ExtraPhase, ExtraTurn, GameState, LoopCollapseAxis, PayableResource,
+    PendingCounterAddition, PendingEffectResolved, TurnBoundary, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
@@ -653,6 +653,46 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     }
 }
 
+/// CR 500.7: Enqueue an extra turn for `player` after the specified turn
+/// represented by `anchor`. Both ids are team-normalized (CR 805.8).
+pub(crate) fn enqueue_extra_turn(state: &mut GameState, player: PlayerId, anchor: PlayerId) {
+    state.extra_turns.push(ExtraTurn {
+        player: super::topology::normalize_shared_turn_recipient(state, player),
+        anchor: super::topology::normalize_shared_turn_recipient(state, anchor),
+    });
+}
+
+/// CR 500.7: Select the next active player after `completed_player`'s turn ends.
+///
+/// Returns `(next_active, is_extra_turn)`. When the extra-turn queue drains,
+/// natural order resumes after the latched specified-turn anchor rather than
+/// after the last extra-turn taker — so an out-of-sequence extra turn during
+/// player C's turn resumes with the player after C, not after the beneficiary.
+pub(crate) fn select_next_turn_after_completion(
+    state: &mut GameState,
+    completed_player: PlayerId,
+) -> (PlayerId, bool) {
+    if let Some(entry) = state.extra_turns.pop() {
+        // First pop in a chain: latch the specified turn (nested extras must not
+        // overwrite the outer CR 500.7 anchor).
+        if state.extra_turn_sequence_anchor.is_none() {
+            state.extra_turn_sequence_anchor = Some(entry.anchor);
+        }
+        let active = super::topology::normalize_shared_turn_recipient(state, entry.player);
+        (active, true)
+    } else if let Some(anchor) = state.extra_turn_sequence_anchor.take() {
+        (
+            super::topology::next_turn_representative(state, anchor),
+            false,
+        )
+    } else {
+        (
+            super::topology::next_turn_representative(state, completed_player),
+            false,
+        )
+    }
+}
+
 /// CR 101.4 + CR 103.1 + CR 500.1 + CR 500.7 + CR 805.4: Display-only turn
 /// projection. Slot 0 is the current live turn representative; later slots are
 /// the next turns that would actually begin after extra turns, skipped turns,
@@ -704,7 +744,7 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
             .map(|idx| turn_control::release_control_at(&mut scratch, idx).grant_extra_turn_after)
             .unwrap_or(false);
             if grant_extra_turn_after {
-                scratch.extra_turns.push(completed_player);
+                enqueue_extra_turn(&mut scratch, completed_player, completed_turn_key);
             }
             scratch.active_full_turn_control = None;
             scratch.active_combat_phase_control = None;
@@ -713,16 +753,10 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
 
         scratch.turn_number += 1;
 
-        // CR 500.7: extra turns are LIFO; otherwise walk current turn order.
-        let is_extra_turn = if let Some(extra_turn_player) = scratch.extra_turns.pop() {
-            scratch.active_player =
-                super::topology::normalize_shared_turn_recipient(&scratch, extra_turn_player);
-            true
-        } else {
-            scratch.active_player =
-                super::topology::next_turn_representative(&scratch, scratch.active_player);
-            false
-        };
+        // CR 500.7: extra turns are LIFO; resume after the specified-turn anchor.
+        let (next_active, is_extra_turn) =
+            select_next_turn_after_completion(&mut scratch, completed_player);
+        scratch.active_player = next_active;
 
         // CR 614.10: a skipped turn never emits a display slot. Leave the
         // cursor on the skipped would-be active player so the next attempt
@@ -800,7 +834,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .map(|idx| turn_control::release_control_at(state, idx).grant_extra_turn_after)
         .unwrap_or(false);
         if grant_extra_turn_after {
-            state.extra_turns.push(completed_player);
+            enqueue_extra_turn(state, completed_player, completed_turn_key);
         }
         // CR 723.1 + CR 723.2: every active window on the completed turn is done.
         // This also covers an effect that ended the turn during combat; an
@@ -813,17 +847,13 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.turn_number += 1;
 
     // CR 500.7: Determine the active player and whether this turn is an *extra*
-    // turn (LIFO-popped from `state.extra_turns`) or a natural turn (next seat
-    // in APNAP order). `is_extra_turn` flows into the replacement pipeline so
-    // condition-gated skip effects (e.g., Stranglehold) can observe it.
-    let is_extra_turn = if let Some(extra_turn_player) = state.extra_turns.pop() {
-        state.active_player =
-            super::topology::normalize_shared_turn_recipient(state, extra_turn_player);
-        true
-    } else {
-        state.active_player = super::topology::next_turn_representative(state, state.active_player);
-        false
-    };
+    // turn (LIFO-popped from `state.extra_turns`) or a natural turn. When the
+    // extra-turn queue drains, resume after the latched specified-turn anchor
+    // (not after the last extra-turn taker). `is_extra_turn` flows into the
+    // replacement pipeline so condition-gated skip effects (e.g., Stranglehold)
+    // can observe it.
+    let (next_active, is_extra_turn) = select_next_turn_after_completion(state, completed_player);
+    state.active_player = next_active;
 
     // CR 614.10: Simple turn-skip counter (effect-based, e.g., Meditate, Eater of
     // Days). This is a fast path for "you skip your next turn" that doesn't need
@@ -4094,12 +4124,12 @@ mod tests {
 
     /// Negative test — extra-turn / extra-step mechanics that did NOT use
     /// `extra_phases` are unaffected by the typing change. `extra_turns` is
-    /// a separate `Vec<PlayerId>` consumed by `start_next_turn`.
+    /// a separate LIFO stack consumed by `start_next_turn`.
     #[test]
     fn extra_turns_field_is_independent_of_extra_phases() {
         let mut state = setup();
         state.active_player = PlayerId(0);
-        state.extra_turns.push(PlayerId(0));
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0));
         // No extra_phases pushed — make sure normal phase advance is unaffected.
         state.phase = Phase::Cleanup;
 
@@ -7679,8 +7709,8 @@ mod tests {
         let mut state = setup();
         state.active_player = PlayerId(0);
         state.turn_number = 1;
-        // CR 500.7: Push extra turn for player 0
-        state.extra_turns.push(PlayerId(0));
+        // CR 500.7: Push extra turn for player 0 (in-sequence: anchor = player)
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0));
 
         let mut events = Vec::new();
         start_next_turn(&mut state, &mut events);
@@ -7696,8 +7726,8 @@ mod tests {
         state.active_player = PlayerId(0);
         state.turn_number = 1;
         // CR 500.7: Push two extra turns — player 0 first, then player 1
-        state.extra_turns.push(PlayerId(0));
-        state.extra_turns.push(PlayerId(1));
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0));
+        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(0));
 
         let mut events = Vec::new();
 
@@ -7710,6 +7740,69 @@ mod tests {
         start_next_turn(&mut state, &mut events);
         assert_eq!(state.active_player, PlayerId(0));
         assert!(state.extra_turns.is_empty());
+    }
+
+    /// CR 500.7: extras granted during C's turn resume with D, not with B.
+    #[test]
+    fn extra_turns_lifo_then_resume_specified_turn() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(2); // C
+                                           // During C: grant A then B (LIFO → B first)
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(2));
+        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(2));
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(state.active_player, PlayerId(1), "LIFO: B's extra first");
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(state.active_player, PlayerId(0), "then A's extra");
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(
+            state.active_player,
+            PlayerId(3),
+            "resume after specified turn C → D, not after A → B"
+        );
+        assert!(state.extra_turn_sequence_anchor.is_none());
+    }
+
+    /// CR 500.7: an extra granted during A's extra turn must retain the outer C
+    /// anchor when the queue drains.
+    #[test]
+    fn extra_turn_nested_extra_preserves_outer_anchor() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(2); // C
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(2));
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(state.active_player, PlayerId(0), "C ends → A's extra");
+        assert_eq!(
+            state.extra_turn_sequence_anchor,
+            Some(PlayerId(2)),
+            "first pop must latch specified turn C"
+        );
+
+        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(0));
+
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(
+            state.active_player,
+            PlayerId(1),
+            "during A: grant B → B's extra"
+        );
+        assert_eq!(
+            state.extra_turn_sequence_anchor,
+            Some(PlayerId(2)),
+            "nested extra must not overwrite outer anchor"
+        );
+
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(
+            state.active_player,
+            PlayerId(3),
+            "after nested extras drain, resume after original specified turn C → D"
+        );
+        assert!(state.extra_turn_sequence_anchor.is_none());
     }
 
     #[test]
@@ -7854,7 +7947,8 @@ mod tests {
 
         let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
         state.active_player = PlayerId(0);
-        state.extra_turns.push(PlayerId(2));
+        // Extra for P2 granted during P0's turn — anchor is the specified turn.
+        enqueue_extra_turn(&mut state, PlayerId(2), PlayerId(0));
         install_begin_turn_skip_permanent(
             &mut state,
             ObjectId(100),
@@ -7866,12 +7960,15 @@ mod tests {
 
         assert_eq!(
             projected,
-            vec![PlayerId(0), PlayerId(3)],
-            "P2's prevented extra turn leaves the cursor on P2, so the next natural slot is P3"
+            vec![PlayerId(0), PlayerId(1)],
+            "skipped OOS extra for P2 resumes after specified turn P0 → P1, not after P2 → P3"
         );
         assert_eq!(
             state.extra_turns,
-            vec![PlayerId(2)],
+            vec![ExtraTurn {
+                player: PlayerId(2),
+                anchor: PlayerId(0)
+            }],
             "projection must not pop the source state's queued extra turn"
         );
         assert!(
@@ -8353,9 +8450,9 @@ mod tests {
             Some(ReplacementCondition::OnlyExtraTurn),
         );
 
-        // Push an extra turn for player 0. With no further extras, the next
-        // natural turn after the skip should go to player 1.
-        state.extra_turns.push(PlayerId(0));
+        // Push an extra turn for player 0 (in-sequence). With no further extras,
+        // the next natural turn after the skip should go to player 1.
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0));
 
         let mut events = Vec::new();
         start_next_turn(&mut state, &mut events);

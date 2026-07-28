@@ -2090,6 +2090,7 @@ fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::game_state::TargetEffectDetail;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -2102,6 +2103,7 @@ mod tests {
     use crate::game::mana_sources;
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::EffectKind;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification,
         ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction, QuantityExpr,
@@ -5484,6 +5486,8 @@ mod tests {
                 legal_targets: vec![target.clone()],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -5535,6 +5539,8 @@ mod tests {
                 legal_targets: targets.clone(),
                 optional: true,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -5638,6 +5644,8 @@ mod tests {
                 legal_targets: vec![target],
                 optional: true,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {

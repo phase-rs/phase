@@ -20382,6 +20382,102 @@ mod tests {
         );
     }
 
+    /// Scholarship Sponsor / Enigma Ridges lower one scoped search with a
+    /// ParentTarget delivery and a ledger-scoped shuffle tail. Trigger setup
+    /// recursively stamps provenance on both children, but that provenance is
+    /// not delivery behavior: after splitting, the plain delivery must still
+    /// enter the simultaneous-search protocol and the shuffle must be its
+    /// once-after-all-searches tail.
+    #[test]
+    fn triggered_uneven_land_search_detaches_shuffle_before_batch_admission() {
+        const ORACLE: &str = "When this creature enters, each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, puts those cards onto the battlefield tapped, then shuffles.";
+
+        // Use the real ETB lowerer, not merely a standalone effect parse. A
+        // `ChangesZone` trigger carries an event source, so this exercises the
+        // event-source anaphor rewrite that must leave a SearchLibrary
+        // delivery's ParentTarget intact.
+        let trigger =
+            crate::parser::oracle_trigger::parse_trigger_line(ORACLE, "Scholarship Sponsor");
+        let definition = trigger
+            .execute
+            .as_deref()
+            .expect("Scholarship Sponsor ETB has an execute chain");
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Scoped trigger source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = build_resolved_from_def(definition, source, PlayerId(0));
+        let trigger_source = {
+            let source_object = state
+                .objects
+                .get(&source)
+                .expect("trigger source exists for provenance capture");
+            crate::game::triggers::trigger_source_context_for_latch(&state, source_object)
+        };
+        let definition_ref = crate::types::ability::TriggerDefinitionRef {
+            source: trigger_source.identity.reference,
+            occurrence: crate::types::ability::TriggerDefinitionOccurrenceRef::Unmaterialized,
+        };
+        ability.set_trigger_source_recursive(trigger_source);
+        ability.set_trigger_definition_ref_recursive(definition_ref);
+
+        let scope = ability
+            .player_scope
+            .clone()
+            .expect("uneven-land search retains its player scope");
+        assert!(
+            scoped_library_search::has_only_detachable_shuffle_tail(&ability),
+            "the raw chain has only the searched-this-way shuffle after delivery"
+        );
+
+        let (scoped, after_scope) = split_player_scope_chain(&ability, &scope);
+        assert!(
+            scoped.player_scope.is_none(),
+            "the split template owns one scoped iteration rather than re-entering it"
+        );
+        let delivery = scoped
+            .sub_ability
+            .as_deref()
+            .expect("the search keeps its ParentTarget delivery");
+        assert!(
+            matches!(
+                &delivery.effect,
+                Effect::ChangeZone {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "the ETB event-source rewrite must not capture the search-result delivery"
+        );
+        assert!(
+            delivery.trigger_source.is_some() && delivery.trigger_definition_ref.is_some(),
+            "trigger provenance is recursively present on the otherwise plain delivery"
+        );
+        assert!(
+            delivery.sub_ability.is_none() && delivery.sub_link == SubAbilityLink::ContinuationStep,
+            "the scoped template is exactly SearchLibrary followed by plain delivery"
+        );
+        assert!(
+            scoped_library_search::supports_simultaneous_delivery(&scoped),
+            "trigger provenance must not reject an otherwise batch-safe delivery"
+        );
+
+        let shuffle = after_scope.expect("the searched-this-way shuffle detaches after scope");
+        assert!(matches!(shuffle.effect, Effect::Shuffle { .. }));
+        assert!(matches!(
+            shuffle.player_scope,
+            Some(PlayerFilter::PerformedActionThisWay {
+                action: PlayerActionKind::SearchedLibrary,
+                ..
+            })
+        ));
+        assert_eq!(shuffle.sub_link, SubAbilityLink::SequentialSibling);
+    }
+
     #[test]
     fn player_scope_preserves_controller_for_you_quantities() {
         let mut state = GameState::new_two_player(42);

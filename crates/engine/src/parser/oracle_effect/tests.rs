@@ -48589,6 +48589,236 @@ fn threshold_land_balance_rejects_nonbasic_search_variant() {
     assert!(matches!(def.effect.as_ref(), Effect::Unimplemented { .. }));
 }
 
+const SCHOLARSHIP_SPONSOR_SEARCH: &str = "Each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, puts those cards onto the battlefield tapped, then shuffles.";
+const ENIGMA_RIDGES_SEARCH: &str = "Each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, reveals them, puts them into their hand, then shuffles.";
+const FEWEST_LANDS_SEARCH: &str = "Each player who controls fewer lands than the player who controls the fewest lands searches their library for a number of basic land cards less than or equal to the difference, puts those cards onto the battlefield tapped, then shuffles.";
+
+fn assert_uneven_land_search_shape(
+    text: &str,
+    expected_reveal: bool,
+    expected_destination: Zone,
+    expected_tapped: crate::types::zones::EtbTapState,
+) {
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let Effect::SearchLibrary {
+        filter,
+        count,
+        reveal,
+        target_player,
+        source_zones,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected SearchLibrary root, got {:?}", def.effect);
+    };
+    assert_eq!(*reveal, expected_reveal);
+    assert!(target_player.is_none());
+    assert_eq!(source_zones, &vec![Zone::Library]);
+    assert_eq!(
+        filter,
+        &TargetFilter::Typed(
+            TypedFilter::land().properties(vec![FilterProp::HasSupertype {
+                value: Supertype::Basic,
+            }])
+        ),
+        "the search selection is exactly basic land cards"
+    );
+
+    let QuantityExpr::UpTo { max } = count else {
+        panic!("expected an up-to difference bound, got {count:?}");
+    };
+    let QuantityExpr::Difference { left, right } = max.as_ref() else {
+        panic!("expected max-land-count minus scoped-land-count, got {max:?}");
+    };
+    assert!(matches!(
+        left.as_ref(),
+        QuantityExpr::Ref {
+            qty: QuantityRef::ControlledByEachPlayer {
+                filter: TargetFilter::Typed(lands),
+                aggregate: AggregateFunction::Max,
+            },
+        } if lands == &TypedFilter::land()
+    ));
+    assert!(matches!(
+        right.as_ref(),
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(lands),
+            },
+        } if lands == &TypedFilter::land().controller(ControllerRef::ScopedPlayer)
+    ));
+
+    let Some(PlayerFilter::ControlsCount {
+        relation,
+        filter: scoped_population,
+        comparator,
+        count: scope_count,
+    }) = &def.player_scope
+    else {
+        panic!(
+            "expected fewer-than-most player scope, got {:?}",
+            def.player_scope
+        );
+    };
+    assert_eq!(*relation, PlayerRelation::All);
+    assert_eq!(*comparator, Comparator::LT);
+    assert_eq!(scoped_population, &TargetFilter::Typed(TypedFilter::land()));
+    assert_eq!(scope_count.as_ref(), left.as_ref());
+
+    let delivery = def
+        .sub_ability
+        .as_deref()
+        .expect("search must have a ParentTarget delivery continuation");
+    assert!(matches!(
+        delivery.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters,
+            conditional_enter_with_counters,
+            face_down_profile: None,
+            enters_modified_if: None,
+        } if *destination == expected_destination
+            && *enter_tapped == expected_tapped
+            && enter_with_counters.is_empty()
+            && conditional_enter_with_counters.is_empty()
+    ));
+    let shuffle = delivery
+        .sub_ability
+        .as_deref()
+        .expect("delivery must retain the searched-this-way shuffle tail");
+    assert!(matches!(
+        shuffle.effect.as_ref(),
+        Effect::Shuffle {
+            target: TargetFilter::Controller,
+        }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::PerformedActionThisWay {
+            relation: PlayerRelation::All,
+            action: crate::types::events::PlayerActionKind::SearchedLibrary,
+        })
+    ));
+    assert_eq!(
+        shuffle.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling,
+        "the final searched-this-way shuffle remains an independent instruction"
+    );
+    assert!(
+        !tree_has_unimplemented(&def),
+        "the whole search/delivery/shuffle chain must be typed: {def:#?}"
+    );
+}
+
+/// Scholarship Sponsor and Enigma Ridges differ only on the closed delivery
+/// axis. The common player predicate and bounded difference stay typed rather
+/// than becoming a card-specific string dispatch.
+#[test]
+fn uneven_land_search_lowers_both_delivery_grammars() {
+    assert_uneven_land_search_shape(
+        SCHOLARSHIP_SPONSOR_SEARCH,
+        false,
+        Zone::Battlefield,
+        crate::types::zones::EtbTapState::Tapped,
+    );
+    assert_uneven_land_search_shape(
+        ENIGMA_RIDGES_SEARCH,
+        true,
+        Zone::Hand,
+        crate::types::zones::EtbTapState::Unspecified,
+    );
+}
+
+/// `fewest` fails semantic verification through the production effect parser;
+/// it must never lower to the typed maximum-relative search used by the valid
+/// `fewer than the player who controls the most` instruction.
+#[test]
+fn uneven_land_search_rejects_fewest_nonvacuously() {
+    let fewest = parse_effect_chain(FEWEST_LANDS_SEARCH, AbilityKind::Spell);
+    assert!(
+        !matches!(
+            fewest.effect.as_ref(),
+            Effect::SearchLibrary {
+                count: QuantityExpr::UpTo { max },
+                ..
+            } if matches!(
+                max.as_ref(),
+                QuantityExpr::Difference { left, .. }
+                    if matches!(
+                        left.as_ref(),
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ControlledByEachPlayer {
+                                aggregate: AggregateFunction::Max,
+                                ..
+                            },
+                        }
+                    )
+            )
+        ),
+        "fewest must not lower to a maximum-relative typed SearchLibrary"
+    );
+    assert_uneven_land_search_shape(
+        SCHOLARSHIP_SPONSOR_SEARCH,
+        false,
+        Zone::Battlefield,
+        crate::types::zones::EtbTapState::Tapped,
+    );
+}
+
+/// Production card routing: the ETB and planeswalk trigger front doors must
+/// preserve the typed search chain, and Enigma Ridges' independent chaos line
+/// must not introduce an unrelated residual `Unimplemented` node.
+#[test]
+fn scholarship_sponsor_and_enigma_ridges_full_cards_have_no_unimplemented() {
+    let sponsor = parse_oracle_text(
+        "When this creature enters, each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, puts those cards onto the battlefield tapped, then shuffles.",
+        "Scholarship Sponsor",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert_eq!(sponsor.triggers.len(), 1, "Scholarship Sponsor has one ETB");
+    let sponsor_execute = sponsor.triggers[0]
+        .execute
+        .as_deref()
+        .expect("Scholarship Sponsor ETB must have an effect chain");
+    assert!(
+        !tree_has_unimplemented(sponsor_execute),
+        "Scholarship Sponsor ETB must be completely typed: {sponsor_execute:#?}"
+    );
+
+    let enigma = parse_oracle_text(
+        "When you planeswalk to Enigma Ridges, each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, reveals them, puts them into their hand, then shuffles.\nWhenever chaos ensues, draw a card, then you may put a land card from your hand onto the battlefield.",
+        "Enigma Ridges",
+        &[],
+        &["Plane".to_string()],
+        &[],
+    );
+    assert_eq!(
+        enigma.triggers.len(),
+        2,
+        "Enigma Ridges has two plane triggers"
+    );
+    for trigger in &enigma.triggers {
+        let execute = trigger
+            .execute
+            .as_deref()
+            .expect("each Enigma Ridges trigger must have an effect chain");
+        assert!(
+            !tree_has_unimplemented(execute),
+            "Enigma Ridges trigger must be completely typed: {execute:#?}"
+        );
+    }
+}
+
 /// Issue #5760: U.S.Agent, John Walker creates an Equipment token, then
 /// "Attach it to ~" in a following sentence. "It" is the just-created
 /// Equipment (`LastCreated`); "~" is U.S.Agent itself (`SelfRef`). Before the

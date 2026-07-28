@@ -184,6 +184,55 @@ pub enum InteractionIntentCode {
     Pay,
     Attack,
     Block,
+    // CR 115.1 targeting vocabulary. Each of these names a distinct game
+    // action in its own CR section, so they stay flat siblings rather than one
+    // parameterized variant: unifying e.g. Destroy (CR 701.8), Counter
+    // (CR 701.6) and Mill (CR 701.17) under a single code with a "which
+    // action" axis would conflate rule sections the engine resolves
+    // separately, which the workspace categorical-boundary rule forbids.
+    /// CR 120.1: damage dealt to the chosen target.
+    Damage,
+    /// CR 701.8: destroy the chosen permanent.
+    Destroy,
+    /// CR 701.19: put a regeneration shield on the chosen permanent.
+    Regenerate,
+    /// CR 701.6: counter the chosen spell.
+    Counter,
+    /// CR 701.26: untap the chosen permanent.
+    Untap,
+    /// CR 701.17: mill from the chosen player's library.
+    Mill,
+    /// CR 701.9: the chosen player discards.
+    Discard,
+    /// CR 121.1: the chosen player draws.
+    Draw,
+    /// CR 119.3: the chosen player gains life.
+    GainLife,
+    /// CR 119.3: the chosen player loses life.
+    LoseLife,
+    /// CR 701.14: the chosen creature fights.
+    Fight,
+    /// CR 701.3: attach to the chosen permanent.
+    Attach,
+    /// CR 707: copy the chosen object.
+    Copy,
+    /// CR 613.1b: take control of the chosen permanent.
+    GainControl,
+    /// CR 701.20: reveal the chosen card.
+    Reveal,
+    /// CR 613.4: change the chosen object's characteristics (power/toughness,
+    /// counters, types) with NO claim about direction. Used when no single
+    /// direction is true — a dynamic magnitude (X / count-based) or a genuinely
+    /// opposing modification such as "+2/-2".
+    Modify,
+    /// CR 613.4: a modification that raises the chosen object's power and/or
+    /// toughness. Split from `Modify` because `TargetSelectionSlot` stamps the
+    /// direction read off the effect payload at construction; the unit
+    /// `EffectKind` tag alone cannot distinguish these three.
+    Buff,
+    /// CR 613.4: a modification that lowers the chosen object's power and/or
+    /// toughness.
+    Debuff,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

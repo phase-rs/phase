@@ -127,12 +127,12 @@ mod tests {
     use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, PtValue, ResolvedAbility, TargetFilter, TargetRef,
-        TypedFilter,
+        AbilityDefinition, AbilityKind, Effect, EffectKind, PtValue, ResolvedAbility, TargetFilter,
+        TargetRef, TypedFilter,
     };
     use engine::types::card_type::CoreType;
     use engine::types::game_state::{
-        PendingCast, TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
+        PendingCast, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::ManaCost;
@@ -238,6 +238,8 @@ mod tests {
                 legal_targets: legal_targets.clone(),
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: TargetSelectionProgress {

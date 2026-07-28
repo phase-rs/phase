@@ -6182,6 +6182,94 @@ pub struct TargetSelectionSlot {
     /// (CR 115.1) regardless of who announced a slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chooser: Option<PlayerId>,
+    /// CR 115.1: The kind of effect that will affect this target — the game
+    /// fact of *what the spell or ability does to the thing being chosen*.
+    /// Stamped at slot construction from the enclosing ability frame's own
+    /// `Effect`, because the slot is otherwise attribution-free: nothing here
+    /// references the effect, so a consumer cannot recover it later without
+    /// re-walking the effect tree in lockstep with the slot builder.
+    ///
+    /// This is deliberately the game fact and NOT a presentation intent.
+    /// Labelling (e.g. "this prompt is hostile") is a projection-layer
+    /// decision made by `target_intent` in `game::interaction`, mirroring how
+    /// `WaitingFor::EffectZoneChoice` stores `effect_kind` and lets
+    /// `effect_zone_intent` label it.
+    pub effect_kind: EffectKind,
+    /// CR 115.1: The discriminating fact that `effect_kind` does not carry.
+    ///
+    /// `EffectKind` is a unit tag, so two effects that do opposite things to a
+    /// target can share one variant: `Effect::ChangeZone` is the same kind
+    /// whether it exiles or returns to hand, and `Effect::Pump` is the same
+    /// kind for "+3/+3" and "-3/-3". Both hold the deciding value in their
+    /// payload, which is in hand at slot construction and unrecoverable
+    /// afterwards.
+    ///
+    /// One sum type rather than one `Option<T>` field per lossy kind: the axis
+    /// is "what extra fact does this kind need", and a per-kind field would be
+    /// the sibling-cluster smell at struct level. `From<&Effect> for
+    /// EffectKind` already reads payloads this way for `SetTapState`, so
+    /// payload discrimination at this boundary is established practice.
+    #[serde(default)]
+    pub effect_detail: TargetEffectDetail,
+}
+
+/// CR 613.4: Direction of a power/toughness modification. Typed rather than a
+/// signed number so the stored game fact says which way the change goes even
+/// when the magnitude is irrelevant, mirroring [`TapStateChange`] for the
+/// tap/untap axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PtDirection {
+    /// CR 613.4: A modification that raises power and/or toughness.
+    Increase,
+    /// CR 613.4: A modification that lowers power and/or toughness.
+    Decrease,
+}
+
+/// CR 115.1: Effect-kind-specific payload captured alongside a target slot's
+/// [`EffectKind`], for the kinds whose unit tag is ambiguous about what will
+/// happen to the chosen target.
+///
+/// Deliberately a *game fact* and not a presentation intent — a [`Zone`] and a
+/// direction, both read straight off the effect. `target_intent` in
+/// `game::interaction` decides how to label them.
+///
+/// # When a new variant is justified
+///
+/// This enum is a deliberate concession, and a sum type accretes one plausible
+/// variant at a time just as easily as a struct grows `Option` fields. A new
+/// variant must satisfy **all three** of:
+///
+/// 1. It carries a fact the [`EffectKind`] unit tag genuinely **cannot**
+///    express — not merely one it happens not to today.
+/// 2. Its kind actually **reaches a CR 115.1 target announcement**. An effect
+///    that never produces a target slot needs nothing here.
+/// 3. The fact is **available at slot construction**, in
+///    `collect_target_slots`. Anything recoverable later belongs at the
+///    projection layer instead, and anything unknowable at announcement
+///    belongs in [`TargetEffectDetail::None`] rather than being guessed.
+///
+/// If a proposal fails **any** of the three, the answer is a finer
+/// [`EffectKind`] fan-out — see `impl From<&Effect> for EffectKind`'s
+/// `Effect::SetTapState` arm, which reads `scope` and `state` to produce four
+/// distinct kinds — and **not** a new detail variant. Prefer that route
+/// whenever the distinction is intrinsic to the effect rather than to this
+/// one announcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum TargetEffectDetail {
+    /// The kind is self-describing; no extra fact is needed (the default, and
+    /// the honest answer whenever the deciding value is not statically known).
+    #[default]
+    None,
+    /// Destination of a zone-change effect (`ChangeZone`, `ChangeZoneAll`).
+    /// Consumed by reusing the existing `effect_zone_intent(kind, destination)`
+    /// rather than reimplementing zone labelling.
+    Destination(Zone),
+    /// CR 613.4: Direction of a P/T modification (`Pump`, `PumpAll`). Absent
+    /// when the modification is dynamic (X or count-based) or genuinely
+    /// opposing ("+2/-2"), because then no direction is true.
+    Modification(PtDirection),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -11576,7 +11664,13 @@ pub struct GameState {
     /// CR 500.7: Extra turns granted by effects, stored as a LIFO stack.
     /// Most recently created extra turn is taken first (pop from end).
     #[serde(default)]
-    pub extra_turns: Vec<PlayerId>,
+    pub extra_turns: Vec<ExtraTurn>,
+
+    /// CR 500.7: While an extra-turn sequence is in progress, records the
+    /// "specified turn" after which those extras were inserted. Cleared once
+    /// play resumes with the player after that anchor turn.
+    #[serde(default)]
+    pub extra_turn_sequence_anchor: Option<PlayerId>,
 
     /// CR 614.10: Per-player count of turns to skip. When a player would begin their
     /// turn with a non-zero counter, the turn is skipped and the counter is decremented.
@@ -13878,6 +13972,49 @@ pub struct ScheduledTurnControl {
 pub struct ActivePlayerControl {
     pub controller: PlayerId,
     pub timestamp: u64,
+}
+
+/// CR 500.7: An extra turn queued after a specified turn.
+///
+/// Oracle text "Take an extra turn after this one" inserts the extra turn
+/// directly after the *specified* turn (the turn that was active when the
+/// effect resolved), not after the beneficiary's next natural turn. The
+/// `anchor` field is that specified turn's active-player representative.
+///
+/// LIFO ordering ("the most recently created turn will be taken first") is
+/// preserved by pushing to the end of `GameState.extra_turns` and popping from
+/// the end in `start_next_turn`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ExtraTurnCompat")]
+pub struct ExtraTurn {
+    /// Player who takes the extra turn (team-normalized in 2HG / CR 805.8).
+    pub player: PlayerId,
+    /// The specified turn (CR 500.7) after which this extra turn is inserted.
+    /// When the extra-turn queue drains, natural order resumes at
+    /// `next_turn_representative(anchor)`.
+    pub anchor: PlayerId,
+}
+
+/// Private serde shim: new saves emit `{ player, anchor }`; legacy saves stored
+/// a bare `PlayerId`. Mid-game saves that lost the OOS anchor recover as
+/// `anchor == player` (in-sequence behavior).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ExtraTurnCompat {
+    Full { player: PlayerId, anchor: PlayerId },
+    Legacy(PlayerId),
+}
+
+impl From<ExtraTurnCompat> for ExtraTurn {
+    fn from(c: ExtraTurnCompat) -> Self {
+        match c {
+            ExtraTurnCompat::Full { player, anchor } => Self { player, anchor },
+            ExtraTurnCompat::Legacy(player) => Self {
+                player,
+                anchor: player,
+            },
+        }
+    }
 }
 
 /// CR 500.8: An extra phase added to a turn by an effect, anchored to the
@@ -16302,6 +16439,7 @@ impl GameState {
             commander_cast_count: HashMap::new(),
             commander_cast_owners: HashMap::new(),
             extra_turns: Vec::new(),
+            extra_turn_sequence_anchor: None,
             turns_to_skip: vec![0; player_count as usize],
             steps_to_skip: vec![HashMap::new(); player_count as usize],
             combat_phase_skip_next_turn: vec![
@@ -17749,6 +17887,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         commander_declined_zone_return: _,
         objects_that_dealt_damage: _,
         extra_turns: _,
+        extra_turn_sequence_anchor: _,
         turns_to_skip: _,
         steps_to_skip: _,
         combat_phase_skip_next_turn: _,
@@ -18046,6 +18185,7 @@ impl PartialEq for GameState {
             && self.commander_declined_zone_return == other.commander_declined_zone_return
             && self.objects_that_dealt_damage == other.objects_that_dealt_damage
             && self.extra_turns == other.extra_turns
+            && self.extra_turn_sequence_anchor == other.extra_turn_sequence_anchor
             && self.turns_to_skip == other.turns_to_skip
             && self.steps_to_skip == other.steps_to_skip
             && self.combat_phase_skip_next_turn == other.combat_phase_skip_next_turn
@@ -21143,6 +21283,8 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(ObjectId(1))],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: vec![],
@@ -21557,6 +21699,8 @@ mod tests {
                 ],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: vec![],
@@ -22500,6 +22644,46 @@ mod tests {
         );
         assert!(trusted_state.get("resolution_frames").is_some());
         assert!(trusted_state.get("pending_multi_draw").is_none());
+    }
+
+    #[test]
+    fn persisted_extra_turns_deserialize_legacy_bare_player_id() {
+        let mut raw = serde_json::to_value(GameState::new(
+            crate::types::format::FormatConfig::free_for_all(),
+            4,
+            42,
+        ))
+        .expect("serialize baseline");
+        raw["extra_turns"] = serde_json::json!([0]);
+
+        let mut restored = serde_json::from_value::<PersistedGameState>(raw)
+            .expect("legacy bare PlayerId extra turn must deserialize")
+            .into_game_state();
+        assert_eq!(
+            restored.extra_turns,
+            vec![ExtraTurn {
+                player: PlayerId(0),
+                anchor: PlayerId(0),
+            }],
+            "legacy saves recover in-sequence behavior via anchor == player"
+        );
+
+        restored.active_player = PlayerId(0);
+        let mut events = Vec::new();
+        crate::game::turns::start_next_turn(&mut restored, &mut events);
+        assert_eq!(
+            restored.active_player,
+            PlayerId(0),
+            "legacy extra must consume on the beneficiary's next turn boundary"
+        );
+
+        let mut events = Vec::new();
+        crate::game::turns::start_next_turn(&mut restored, &mut events);
+        assert_eq!(
+            restored.active_player,
+            PlayerId(1),
+            "after legacy in-sequence extra, resume natural next player"
+        );
     }
 
     #[test]
