@@ -3923,14 +3923,6 @@ impl<'a> DocEmitter<'a> {
         self.emit_at(line, OracleNodeIr::Modal(m));
     }
 
-    /// Remove and return the most recently emitted spell item — the typed
-    /// `result.abilities.pop()` for the cross-line "instead" fold. The caller
-    /// folds it into a new ability and re-emits via `reemit_spell` at the base
-    /// item's ORIGINAL span.
-    fn pop_last_spell(&mut self) -> Option<OracleItemIr> {
-        self.builder.take_last_spell()
-    }
-
     /// Re-emit a node at a template item's ORIGINAL span — same `first_line`,
     /// bytes, AND `ordinal_within_span`, the key `take_last_spell` just freed.
     ///
@@ -3940,14 +3932,18 @@ impl<'a> DocEmitter<'a> {
     /// `(first_line, start_byte)` (e.g. a `push_same_is_true_*` static + ability
     /// from one line). Original-ordinal re-emit is position- and slot-preserving.
     ///
-    /// Takes an `OracleNodeIr`, not an `AbilityDefinition`, because the two
-    /// re-emitting callers legitimately differ in what they hand back. The
-    /// cross-line "instead" fold genuinely *builds* a new `AbilityDefinition`
-    /// (it moves the popped ability's continuation into `else_ability` and nests
-    /// it under the new one), so it can only re-emit pre-lowered.
-    /// `raise_last_spell_min_x` changes one field in place and must return the
-    /// shape it took — lowering an IR-native node just to reach a root field
-    /// would quietly convert the item back to pre-lowered.
+    /// Takes an `OracleNodeIr`, not an `AbilityDefinition`: the sole remaining
+    /// caller, `raise_last_spell_min_x`, changes one field in place and must
+    /// return the shape it took — lowering an IR-native node just to reach a root
+    /// field would quietly convert the item back to pre-lowered.
+    ///
+    /// It had a second caller until Plan 05b T10f: the cross-line "instead" fold
+    /// popped the base spell, nested it under a new definition, and re-emitted
+    /// pre-lowered at the base's span. That fold is now
+    /// `DocumentRelationIr::SelfReplacementOverride` (CR 614.15) — both paragraphs
+    /// stay emitted and lowering binds them by id — so nothing pops-and-rebuilds
+    /// here any more. `pop_last_spell`, the wrapper that served only that fold,
+    /// went with it; `take_last_spell` itself is still live beneath this method.
     fn reemit_node(&mut self, source: &OracleUnitSource, node: OracleNodeIr) {
         let span = source.span().clone();
         let fragment = source.fragment();
