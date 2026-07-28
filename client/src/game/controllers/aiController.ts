@@ -279,12 +279,20 @@ export function createAIController(config: AIControllerConfig): AIController {
   function pickEscapeAction(
     waitingFor: WaitingFor,
     state: GameState,
-  ): Promise<GameAction> {
+  ): Promise<GameAction | null> {
     if (state.has_pending_cast) {
       return Promise.resolve({ type: "CancelCast" });
     }
     const { adapter } = useGameStore.getState();
-    if (!adapter) return Promise.resolve({ type: "PassPriority" });
+    // Priority may still fabricate PassPriority (the only legal Priority
+    // escape). Non-Priority must never invent PassPriority — the engine
+    // rejects it and the controller softlocks (#6393).
+    if (!adapter) {
+      if (waitingFor.type === "Priority") {
+        return Promise.resolve({ type: "PassPriority" });
+      }
+      return Promise.resolve(null);
+    }
     return adapter.getLegalActions().then((result) => {
       if (waitingFor.type === "Priority") {
         return (
@@ -292,7 +300,7 @@ export function createAIController(config: AIControllerConfig): AIController {
           { type: "PassPriority" }
         );
       }
-      return result.actions[0] ?? { type: "PassPriority" };
+      return result.actions[0] ?? null;
     });
   }
 
@@ -306,6 +314,17 @@ export function createAIController(config: AIControllerConfig): AIController {
     try {
       const fallback = await pickEscapeAction(waitingFor, state);
       if (!isAttemptCurrent(attempt)) return;
+      // Empty non-Priority legal set: halt immediately rather than dispatching
+      // a fabricated PassPriority that the engine rejects in a loop (#6393).
+      if (fallback == null) {
+        debugLog(
+          `AI controller halting: no legal escape for ${waitingFor.type}`,
+          "error",
+        );
+        notifyEngineLost(`ai-controller-stuck:${waitingFor.type}`);
+        stop();
+        return;
+      }
       await dispatchAction(fallback, waitingPlayerId);
       if (!isAttemptCurrent(attempt)) return;
       consecutiveFailures = 0;

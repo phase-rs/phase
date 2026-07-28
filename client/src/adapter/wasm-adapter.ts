@@ -587,6 +587,13 @@ export class WasmAdapter implements EngineAdapter {
   async restoreState(state: PersistedGameState): Promise<void> {
     this.assertInitialized();
     await this.ensureCardDb();
+    // Soft-failed ensureCardDb leaves cardDbLoaded false and skips
+    // rehydrate_game_from_card_db — restored CardName NamedChoices then have
+    // empty legal actions and softlock the AI (#6393). Refuse DB-less restore
+    // the same way warmCardDatabase surfaces load failure.
+    if (!this.cardDbLoaded) {
+      throw new Error("Card database failed to load");
+    }
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
     else await this.fallback!.restoreState(json);

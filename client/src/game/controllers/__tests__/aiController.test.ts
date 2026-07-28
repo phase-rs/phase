@@ -292,6 +292,91 @@ describe("aiController stuck-fallback (issue #484)", () => {
     controller.dispose();
   });
 
+  it("halts on the first empty NamedChoice escape instead of fabricating PassPriority", async () => {
+    const getAiAction = vi.fn(async () => null);
+    const getLegalActions = vi.fn(
+      async (): Promise<LegalActionsResult> => ({
+        actions: [],
+        autoPassRecommended: false,
+      }),
+    );
+    const waitingFor: WaitingFor = {
+      type: "NamedChoice",
+      data: {
+        player: 1,
+        choice_type: "CardName",
+        options: [],
+        source: gollumNamedChoiceSource(300),
+      },
+    };
+    const state = buildGameState({
+      waiting_for: waitingFor,
+      priority_player: 1,
+      active_player: 1,
+    });
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions },
+    };
+    dispatchAction.mockResolvedValue(undefined);
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+
+    for (let i = 0; i < 6; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushMicrotasks();
+    }
+
+    expect(getLegalActions).toHaveBeenCalledOnce();
+    expect(dispatchAction).not.toHaveBeenCalled();
+    expect(notifyEngineLost).toHaveBeenCalledWith("ai-controller-stuck:NamedChoice");
+    // Internal stop() deactivates scheduling — no retry storm after the halt.
+    expect(getAiAction).toHaveBeenCalledOnce();
+
+    controller.dispose();
+  });
+
+  it("halts when non-Priority escape has no adapter instead of fabricating PassPriority", async () => {
+    const waitingFor: WaitingFor = {
+      type: "NamedChoice",
+      data: {
+        player: 1,
+        choice_type: "CardName",
+        options: [],
+        source: gollumNamedChoiceSource(300),
+      },
+    };
+    const state = buildGameState({
+      waiting_for: waitingFor,
+      priority_player: 1,
+      active_player: 1,
+    });
+    // Without an adapter, getAiAction resolves null and escape returns null
+    // for non-Priority — halt instead of fabricating PassPriority (#6393).
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: null,
+    };
+    dispatchAction.mockRejectedValue(new Error("no adapter"));
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+
+    for (let i = 0; i < 6; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushMicrotasks();
+    }
+
+    expect(dispatchAction).not.toHaveBeenCalled();
+    expect(notifyEngineLost).toHaveBeenCalledWith("ai-controller-stuck:NamedChoice");
+    expect(notifyEngineLost).toHaveBeenCalledOnce();
+
+    controller.dispose();
+  });
+
   it("uses the first legal action for CastOffer fallback instead of matching the WaitingFor type", async () => {
     const illegalAction = { type: "PassPriority" } as GameAction;
     const legalCastOfferAction = {

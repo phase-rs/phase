@@ -306,6 +306,22 @@ describe("WasmAdapter", () => {
       const mockState = buildGameState();
       await expect(adapter.restoreState(mockState)).rejects.toThrow(AdapterError);
     });
+
+    it("throws when the card database fails to load and does not restore", async () => {
+      await adapter.initialize();
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error("boom"));
+      const mockState = buildGameState({
+        turn_number: 3,
+        phase: "PreCombatMain",
+        players: [],
+      });
+
+      await expect(adapter.restoreState(mockState)).rejects.toThrow(
+        "Card database failed to load",
+      );
+      expect(adapter.cardDbLoaded).toBe(false);
+      expect(mockWorkerClient.restoreState).not.toHaveBeenCalled();
+    });
   });
 
   describe("initializeGame", () => {
