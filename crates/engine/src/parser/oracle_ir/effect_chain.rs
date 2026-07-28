@@ -142,8 +142,13 @@ impl EffectChainIr {
 /// widening satisfies the categorical-boundary rule rather than straddling rule
 /// sections.
 ///
-/// **This is 10 of `AbilityDefinition`'s 38 root fields, deliberately not a
-/// mirror of the root.** Fields excluded on purpose — `effect`, `sub_ability`,
+/// **This is 12 of `AbilityDefinition`'s 38 root fields, deliberately not a
+/// mirror of the root.** (Counted from the source: this struct has thirteen
+/// fields, twelve of which mirror a root field; `stages` is a transform list,
+/// not a root field. A0's "10" counted the fields that tranche *added* and
+/// omitted the pre-existing `sub_link`, so it read one low even before
+/// `optional` arrived.) Fields
+/// excluded on purpose — `effect`, `sub_ability`,
 /// `else_ability`, `condition` — are all CR 608.2 resolution tree and are
 /// already expressible as `ClauseIr`/`ClauseDisposition`. A shell that mirrored
 /// the root would re-open the escape hatch this type exists to close.
@@ -263,6 +268,55 @@ pub(crate) struct AbilityShellIr {
     /// and UI provenance. `Some(_)` overrides; `None` defers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) description: Option<String>,
+
+    /// CR 608.2d: the controller chooses whether to perform the effect
+    /// ("You may …"). Applied as a monotone OR, never an assignment.
+    ///
+    /// # This is the one field that is NOT the CR 602.1 activation envelope
+    ///
+    /// Everything else on this shell partitions along the seam CR 602.1 (:2514)
+    /// draws — cost before the colon, activation instructions after it. `optional`
+    /// does not: CR 608.2d (`MagicCompRules.txt:2795`) places the choice
+    /// *"while applying the effect"*, which is CR 608.2 resolution, the half this
+    /// type deliberately leaves to [`EffectChainIr`]. So its presence here is an
+    /// explicit, named exception rather than an extension of the partition, and
+    /// this doc block is where the exception is justified.
+    ///
+    /// # Why the exception is nonetheless correct
+    ///
+    /// The mechanical requirement is that `optional` be stamped
+    /// **unconditionally, after lowering** — which is exactly what the
+    /// game-start recognizers (`AbilityKind::Mulligan`, `BeginGame`) do by hand
+    /// today: they call the chain parser, then set `def.optional = true` on the
+    /// result. The alternative — expressing the flag on the first clause and
+    /// letting assembly carry it to the root — is **not** equivalent:
+    /// `assemble_effect_chain` maps a clause's optionality to the root
+    /// conditionally, through four suppressions plus a `SearchOutsideGame` arm
+    /// that forces `optional = false`. A recognizer whose printed text says
+    /// "you may" would silently lose the flag on any input that took one of
+    /// those arms. Named, so the claim is checkable: the `clause_ir.parsed
+    /// .optional` propagation in `assemble_effect_chain` is suppressed for
+    /// `Effect::GrantCastingPermission`, for `is_lingering_cast_from_zone`, for
+    /// `is_join_forces_pay_any_amount_mana_cost` and for
+    /// `is_pay_to_end_effect_termination`, and a following arm sets
+    /// `def.optional = false` outright for `Effect::SearchOutsideGame`. It also
+    /// assumes clause 0 becomes the emitted root, which `ClauseDisposition` does
+    /// not guarantee. The shell is the only place the stamp can be unconditional
+    /// *and* survive the IR conversion, so the field lives here and the
+    /// categorical impurity is paid knowingly.
+    ///
+    /// # Why a monotone OR
+    ///
+    /// `def.optional |= shell.optional`, mirroring `cant_be_copied`. The `false`
+    /// default can then never clear a flag lowering established, so
+    /// `AbilityShellIr::default()` stays a no-op and the widening is
+    /// byte-identical by construction — A0's defer-on-default property, which is
+    /// the whole reason a shell field can be added without touching any existing
+    /// producer. An assignment would break it: every unconverted site building a
+    /// `default()` shell would begin clearing an `optional` that
+    /// `lower_effect_chain_ir` had legitimately set from the printed "you may".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) optional: bool,
 
     /// Chain-**structure** folds to run after the field stamps, in list order.
     ///

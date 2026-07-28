@@ -26928,6 +26928,14 @@ fn apply_ability_shell_envelope(def: &mut AbilityDefinition, shell: &AbilityShel
     def.min_x_value = def.min_x_value.max(shell.min_x_value);
     // CR 707.10: monotone OR, so a `false` default can never clear the flag.
     def.cant_be_copied |= shell.cant_be_copied;
+    // CR 608.2d: the controller's "you may" choice. Monotone OR for the same
+    // reason as `cant_be_copied` — and here the reason is load-bearing rather
+    // than merely tidy: `lower_effect_chain_ir` legitimately sets this from the
+    // printed text, so an assignment would let every producer building a
+    // `default()` shell CLEAR a flag the chain had already established. The OR is
+    // what keeps `AbilityShellIr::default()` a no-op and the widening
+    // byte-identical by construction.
+    def.optional |= shell.optional;
     if let Some(description) = &shell.description {
         def.description = Some(description.clone());
     }
