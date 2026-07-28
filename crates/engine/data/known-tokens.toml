@@ -4691,7 +4691,7 @@ set_code = "SOS"
 set_name = "Secrets of Strixhaven"
 collector_number = "7"
 released_at = "2026-04-24"
-type_line = "Token Creature Inkling"
+type_line = "Token Creature — Inkling"
 rules_text = "Flying"
 
 [token.body]
@@ -4699,7 +4699,7 @@ display_name = "Inkling"
 power = 1
 toughness = 1
 core_types = ["Creature"]
-subtypes = []
+subtypes = ["Inkling"]
 supertypes = []
 colors = [
     "Black",
@@ -173739,7 +173739,7 @@ set_code = "SOS"
 set_name = "Secrets of Strixhaven"
 collector_number = "6"
 released_at = "2026-04-24"
-type_line = "Token Creature Inkling"
+type_line = "Token Creature — Inkling"
 rules_text = "Flying"
 
 [token.body]
@@ -173747,7 +173747,7 @@ display_name = "Inkling"
 power = 1
 toughness = 1
 core_types = ["Creature"]
-subtypes = []
+subtypes = ["Inkling"]
 supertypes = []
 colors = [
     "Black",
