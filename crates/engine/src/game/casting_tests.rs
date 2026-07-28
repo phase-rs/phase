@@ -7232,12 +7232,10 @@ fn x_cost_activated_composite_tap_prompts_for_x_and_taps_on_resolution() {
     );
 }
 
-/// Regression test for issue #897: X-cost activated ability with Composite
-/// {Tap, Mana{X}} cost must NOT attempt to pay the Tap sub-cost a second
-/// time when interactive target selection is required. Before the fix,
-/// `push_activated_ability_to_stack` paid the Tap cost and then stored it
-/// in `pending_act.activation_cost`; the resumed target-selection path in
-/// `casting_targets.rs` would try to pay it again, causing a softlock.
+/// Regression test for issue #897: an X-cost activated ability with Composite
+/// `{T}, {X}` chooses its target after X is announced but before either cost
+/// component is paid. The pending root retains the tap cost through selection,
+/// then pays it exactly once while completing the activation.
 #[test]
 fn x_cost_activated_composite_tap_no_double_payment_on_interactive_targets() {
     let mut state = setup_game_at_main_phase();
@@ -7299,33 +7297,43 @@ fn x_cost_activated_composite_tap_no_double_payment_on_interactive_targets() {
         state.waiting_for
     );
 
-    // Commit X = 2. After mana payment + Tap, the ability needs interactive
-    // target selection (multiple legal targets: both players).
+    // Commit X = 2. X is announced, then the target is selected before the
+    // mana and tap costs are paid (CR 601.2c before CR 601.2h).
     apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
-    // Note: In strict CR 601.2, target selection (601.2c) occurs before cost
-    // payment (601.2h). The engine shortcuts this by paying non-mana costs
-    // first, so the source is already tapped before target selection begins.
     assert!(
-        state.objects[&source].tapped,
-        "source must be tapped after cost payment"
+        !state.objects[&source].tapped,
+        "source must remain untapped while choosing the target"
     );
-    // The waiting_for should be TargetSelection, NOT a softlock/error.
     assert!(
         matches!(state.waiting_for, WaitingFor::TargetSelection { .. }),
         "expected TargetSelection for interactive target choice, got {:?}",
         state.waiting_for
     );
 
-    // Verify the pending_cast does NOT carry activation_cost (no double-pay).
+    // The residual tap cost survives target selection and is paid once after
+    // the target is committed.
     if let WaitingFor::TargetSelection {
         ref pending_cast, ..
     } = state.waiting_for
     {
         assert!(
-            pending_cast.activation_cost.is_none(),
-            "activation_cost must be None after cost was already paid (issue #897)"
+            matches!(pending_cast.activation_cost, Some(AbilityCost::Tap)),
+            "target selection must retain the unpaid tap cost"
         );
     }
+
+    apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(PlayerId(1))],
+        },
+    )
+    .expect("selecting the target must complete payment");
+    assert!(
+        state.objects[&source].tapped,
+        "the tap cost is paid exactly once"
+    );
+    assert_eq!(state.stack.len(), 1, "the activation reaches the stack");
 }
 
 #[test]
