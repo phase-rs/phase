@@ -5952,6 +5952,28 @@ pub enum PendingCostMoveResume {
         resolved: Box<ResolvedAbility>,
         ability_index: usize,
     },
+    /// CR 702.21a + CR 122.1 + CR 616.1: Ward's player-counter unless-cost
+    /// (`AbilityCost::GetPlayerCounters`) paused on a replacement choice for
+    /// the `AddCounter` event it attempted (e.g. an optional "you may
+    /// prevent a player from getting counters" replacement, or a CR 616.1
+    /// ordering choice among several applicable replacements). Retains the
+    /// full `WaitingFor::UnlessPayment` payload so the choice's resolution —
+    /// Applied (paid) via the `ReplacementDelivered` boundary, or Prevented
+    /// (failed) via the `ReplacementPrevented` boundary — can drive the same
+    /// paid/failed tail `handle_unless_payment` uses for every other cost
+    /// shape, instead of resetting to bare priority with the Ward-guarded
+    /// ability's fate undetermined.
+    GetPlayerCountersUnlessPayment {
+        #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
+        cost: AbilityCost,
+        pending_effect: Box<ResolvedAbility>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<GameEvent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effect_description: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining: Vec<PlayerId>,
+    },
 }
 
 /// CR 601.2h + CR 616.1: Resume paying a sequential cost after a replacement

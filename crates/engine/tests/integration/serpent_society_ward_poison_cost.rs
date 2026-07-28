@@ -14,10 +14,18 @@
 //!     exercised by this test).
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::zones::create_object;
+use engine::types::ability::{
+    QuantityModification, ReplacementDefinition, ReplacementMode, ReplacementPlayerScope,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
+use engine::types::identifiers::CardId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerCounterKind;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::Zone;
+use std::sync::Arc;
 
 const SERPENT_SOCIETY: &str = "Deathtouch\n\
 Ward—Get five poison counters. (A player with ten or more poison counters loses the game.)\n\
@@ -269,5 +277,181 @@ fn serpent_society_ward_payment_prevented_by_solemnity_counters_the_spell() {
     assert!(
         !runner.state().stack.iter().any(|entry| entry.id == destroy),
         "the countered spell must be removed from the stack"
+    );
+}
+
+/// Installs a synthetic OPTIONAL "you may prevent a player from getting
+/// counters" replacement on a fresh P0 permanent. No real card has exactly
+/// this wording, so — mirroring this file's own Solemnity test (which uses a
+/// real, if partial, MANDATORY prevention) and the engine's established
+/// pattern for exercising an optional replacement choice with no real-card
+/// precedent — the definition is installed directly, after `scenario.build()`,
+/// so the real Ward -> `GetPlayerCounters` -> `add_player_counter_with_
+/// replacement` -> `replace_event` path discovers it naturally (a production
+/// setup, not a hand-constructed `WaitingFor`).
+fn install_optional_player_counter_prevention(state: &mut engine::types::game_state::GameState) {
+    let source = create_object(
+        state,
+        CardId(9101),
+        P0,
+        "Optional Poison Warden".to_string(),
+        Zone::Battlefield,
+    );
+    let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter);
+    def.mode = ReplacementMode::Optional { decline: None };
+    def.quantity_modification = Some(QuantityModification::Prevent);
+    def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+    let reps = vec![def];
+    let obj = state.objects.get_mut(&source).unwrap();
+    obj.replacement_definitions = reps.clone().into();
+    obj.base_replacement_definitions = Arc::new(reps);
+}
+
+/// Regression for reviewer matthewevans's finding on PR #6662: a Ward
+/// player-counter cost whose `AddCounter` event needs a CR 616.1 replacement
+/// choice (as opposed to Solemnity's unconditional, mandatory prevention
+/// above) must not orphan the unless-payment continuation. Before this fix,
+/// `add_player_counter_with_replacement`'s `NeedsChoice` arm replaced
+/// `waiting_for` with the bare `ReplacementChoice` prompt and nothing
+/// preserved `pending_effect`/`trigger_event` — once the player answered the
+/// prompt, `handle_replacement_choice` applied (or failed to apply) the
+/// counters and reset straight to `WaitingFor::Priority`, leaving Ward's
+/// guarded "counter the spell" outcome permanently undetermined: the
+/// targeting spell was neither countered nor allowed to resolve.
+///
+/// Accept branch: the optional replacement prevents the counter placement
+/// (`PlayerCounterAdditionOutcome::Prevented`) — a FAILED Ward payment, so the
+/// targeting spell must be countered, exactly like the Solemnity test above.
+#[test]
+fn serpent_society_ward_optional_counter_prevention_accepted_counters_the_spell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let serpent_society = scenario
+        .add_creature_from_oracle(P0, "The Serpent Society", 3, 4, SERPENT_SOCIETY)
+        .id();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P1, "Destroy Spell", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+        install_optional_player_counter_prevention(state);
+    }
+
+    runner
+        .cast(destroy)
+        .target_objects(&[serpent_society])
+        .commit();
+    runner.advance_until_stack_empty();
+
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("attempting to pay Ward's poison-counter cost must be legal even when an optional replacement can prevent it");
+
+    // Reaching a REPLACEMENT CHOICE (not an orphaned bare Priority) is the
+    // regression's core assertion.
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        ..
+    } = runner.state().waiting_for
+    else {
+        panic!(
+            "optional player-counter prevention must surface a real replacement choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        player, P1,
+        "the payer (Ward's targeting opponent) makes the replacement choice"
+    );
+    assert_eq!(
+        candidate_count, 2,
+        "an Optional replacement offers accept (0) and decline (1)"
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting the optional prevention must be a legal replacement choice");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].poison_counters,
+        0,
+        "the accepted prevention must stop the poison counters from being given"
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .get(&serpent_society)
+            .is_some_and(|obj| obj.zone == Zone::Battlefield),
+        "a prevented player-counter payment must be treated as a FAILED cost, countering the targeting spell — Serpent Society must survive"
+    );
+    assert!(
+        !runner.state().stack.iter().any(|entry| entry.id == destroy),
+        "the countered spell must be removed from the stack, not left stranded"
+    );
+}
+
+/// Decline branch: the optional replacement does not apply, so the original
+/// `AddCounter` proceeds unmodified (`PlayerCounterAdditionOutcome::Applied`)
+/// — a PAID Ward payment, so the targeting spell must resolve normally.
+#[test]
+fn serpent_society_ward_optional_counter_prevention_declined_pays_the_cost_and_resolves_the_spell()
+{
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let serpent_society = scenario
+        .add_creature_from_oracle(P0, "The Serpent Society", 3, 4, SERPENT_SOCIETY)
+        .id();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P1, "Destroy Spell", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+        install_optional_player_counter_prevention(state);
+    }
+
+    runner
+        .cast(destroy)
+        .target_objects(&[serpent_society])
+        .commit();
+    runner.advance_until_stack_empty();
+
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("attempting to pay must be legal");
+    let WaitingFor::ReplacementChoice { .. } = runner.state().waiting_for else {
+        panic!(
+            "expected a replacement choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining the optional prevention must be a legal replacement choice");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].poison_counters,
+        5,
+        "declining the optional prevention must let Ward's cost actually give five poison counters"
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .get(&serpent_society)
+            .is_none_or(|obj| obj.zone != Zone::Battlefield),
+        "a successfully paid Ward cost must let the targeted destroy spell resolve"
     );
 }

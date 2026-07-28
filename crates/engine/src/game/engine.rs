@@ -3173,12 +3173,15 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
+                    | PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. }
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
         // opponent's Solemnity would prevent the counters) must still complete the
         // parked activation instead of wedging, so `LoyaltyActivation` is eligible
-        // at the Prevented boundary as well.
+        // at the Prevented boundary as well. `GetPlayerCountersUnlessPayment` is
+        // eligible here too: a prevented Ward player-counter payment is a FAILED
+        // cost (CR 702.21a) that must counter the guarded ability, not wedge.
         CostMoveDrainBoundary::ReplacementPrevented { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
@@ -3193,6 +3196,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
+                    | PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. }
             )
         ),
         CostMoveDrainBoundary::PriorityBoundary => matches!(
@@ -3264,6 +3268,15 @@ pub(crate) fn drain_pending_cost_move_resume(
         Some(PendingCostMoveResume::LoyaltyActivation { .. })
     ) {
         super::planeswalker::resume_loyalty_activation(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. })
+    ) {
+        engine_payment_choices::resume_get_player_counters_unless_payment(
+            state,
+            events,
+            matches!(boundary, CostMoveDrainBoundary::ReplacementDelivered { .. }),
+        )?
     } else {
         unreachable!("eligible cost-move root must remain parked")
     };
