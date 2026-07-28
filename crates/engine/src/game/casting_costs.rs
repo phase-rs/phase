@@ -4470,6 +4470,83 @@ pub(super) fn push_activated_ability_to_stack(
     activation_trigger_collection: Option<Box<super::triggers::PendingActivationTriggerCollection>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 602.2b + CR 601.2c-h: This is also a defensive entry point for
+    // resumed activation roots. If a caller still has both unchosen targets and
+    // an unpaid cost suffix, route it through the same target-first transaction
+    // as `handle_activate_ability`; never pay the suffix and reopen targets.
+    if !matches!(target_selection, ActivationTargetSelection::Settled) {
+        let target_slots = build_target_slots(state, &resolved)?;
+        let assigned_targets = flatten_targets_in_chain(&resolved);
+        if !target_slots.is_empty() {
+            let pending = |resolved: ResolvedAbility| {
+                let mut pending =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending.activation_cost = remaining_cost.cloned();
+                pending.activation_ability_index = Some(ability_index);
+                pending.pending_loyalty_activation_player = pending_loyalty_activation_player;
+                pending.activation_trigger_collection = activation_trigger_collection.clone();
+                pending
+            };
+
+            // A fully assigned or divided target set may arrive from a resumed
+            // root. It is still announced before payment, not pushed directly.
+            if assigned_targets.len() >= target_slots.len() || resolved.distribution.is_some() {
+                let mut pending = pending(resolved);
+                pending.begin_activation_trigger_collection();
+                emit_targeting_events(state, &assigned_targets, source_id, player, events);
+                return finish_target_selected_activated_ability_at_payment_boundary(
+                    state, player, pending, events,
+                );
+            }
+
+            if matches!(
+                resolved.target_selection_mode,
+                crate::types::ability::TargetSelectionMode::Random
+            ) {
+                let targets = random_select_targets_for_ability(state, &target_slots, &[])?;
+                assign_targets_in_chain(state, &mut resolved, &targets)?;
+                let mut pending = pending(resolved);
+                pending.begin_activation_trigger_collection();
+                emit_targeting_events(
+                    state,
+                    &flatten_targets_in_chain(&pending.ability),
+                    source_id,
+                    player,
+                    events,
+                );
+                return finish_target_selected_activated_ability_at_payment_boundary(
+                    state, player, pending, events,
+                );
+            }
+
+            if let Some(targets) =
+                auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+            {
+                assign_targets_in_chain(state, &mut resolved, &targets)?;
+                let mut pending = pending(resolved);
+                pending.begin_activation_trigger_collection();
+                emit_targeting_events(
+                    state,
+                    &flatten_targets_in_chain(&pending.ability),
+                    source_id,
+                    player,
+                    events,
+                );
+                return finish_target_selected_activated_ability_at_payment_boundary(
+                    state, player, pending, events,
+                );
+            }
+
+            return super::casting_targets::begin_activated_target_selection(
+                state,
+                player,
+                pending(resolved),
+                target_slots,
+                Vec::new(),
+            );
+        }
+    }
+
     // Pay the exact activation-cost suffix still outstanding. Interactive cost
     // handlers remove the leg they paid before this boundary, so a parked mana
     // root never replays an earlier selection.
@@ -4609,108 +4686,6 @@ pub(super) fn push_activated_ability_to_stack(
             events,
         );
     }
-
-    // CR 602.2b: Check if the ability has targets that need selection.
-    // This handles cases where cost payment (sacrifice, waterbend) detoured
-    // before target selection in handle_activate_ability.
-    let target_slots = build_target_slots(state, &resolved)?;
-    let assigned_targets = flatten_targets_in_chain(&resolved);
-    // CR 601.2d: A divided-effect ability whose `distribution` is already
-    // announced has finalized its targets (a legal "up to N" division may fill
-    // fewer target slots than exist — Captain America's Throw picks 1 of 3), so
-    // it is ready to go on the stack even though `assigned_targets.len()` is below
-    // `target_slots.len()`. Without this the re-check would wrongly re-open target
-    // selection and drop the announced division.
-    if !target_slots.is_empty()
-        && (assigned_targets.len() >= target_slots.len() || resolved.distribution.is_some())
-    {
-        emit_targeting_events(state, &assigned_targets, source_id, player, events);
-        return push_ability_entry(
-            state,
-            player,
-            source_id,
-            ability_index,
-            resolved,
-            pending_loyalty_activation_player,
-            activation_trigger_collection,
-            events,
-        );
-    }
-    if !target_slots.is_empty() {
-        // CR 115.1 + CR 701.9b: Random-target activated abilities — game picks
-        // uniformly via `state.rng`, no controller prompt.
-        if matches!(
-            resolved.target_selection_mode,
-            crate::types::ability::TargetSelectionMode::Random
-        ) {
-            let targets = random_select_targets_for_ability(state, &target_slots, &[])?;
-            let mut resolved = resolved;
-            assign_targets_in_chain(state, &mut resolved, &targets)?;
-
-            let assigned_targets = flatten_targets_in_chain(&resolved);
-            emit_targeting_events(state, &assigned_targets, source_id, player, events);
-
-            return push_ability_entry(
-                state,
-                player,
-                source_id,
-                ability_index,
-                resolved,
-                pending_loyalty_activation_player,
-                activation_trigger_collection,
-                events,
-            );
-        }
-
-        if let Some(targets) =
-            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
-        {
-            let mut resolved = resolved;
-            assign_targets_in_chain(state, &mut resolved, &targets)?;
-
-            let assigned_targets = flatten_targets_in_chain(&resolved);
-            emit_targeting_events(state, &assigned_targets, source_id, player, events);
-
-            return push_ability_entry(
-                state,
-                player,
-                source_id,
-                ability_index,
-                resolved,
-                pending_loyalty_activation_player,
-                activation_trigger_collection,
-                events,
-            );
-        }
-
-        // Targets need interactive selection.
-        let mut pending_act = PendingCast::new(
-            source_id,
-            CardId(0),
-            resolved,
-            crate::types::mana::ManaCost::NoCost,
-        );
-        // CR 602.2b: The remainder of the process for activating an ability is
-        // identical to the process for casting a spell listed in rules 601.2b–i.
-        // Note: The engine currently pays non-mana costs (Tap, Sacrifice, etc.)
-        // before target selection, which is a shortcut that deviates from the
-        // strict CR 601.2 order (targets at 601.2c, costs at 601.2h). To prevent
-        // double-payment when target selection resumes, we clear the activation
-        // cost here — it was already consumed above (issue #897 class).
-        pending_act.activation_cost = None;
-        pending_act.activation_ability_index = Some(ability_index);
-        pending_act.pending_loyalty_activation_player = pending_loyalty_activation_player;
-        pending_act.activation_trigger_collection = activation_trigger_collection;
-        return super::casting_targets::begin_activated_target_selection(
-            state,
-            player,
-            pending_act,
-            target_slots,
-            Vec::new(),
-        );
-    }
-
-    emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
     push_ability_entry(
         state,
@@ -21734,6 +21709,56 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             &mut events,
         );
+    }
+
+    #[test]
+    fn direct_push_target_bearing_activation_selects_targets_before_paying_cost() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(7_710),
+            PlayerId(0),
+            "Target-First Direct Source".to_string(),
+            Zone::Battlefield,
+        );
+        let resolved = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let cost = AbilityCost::Tap;
+        let mut events = Vec::new();
+
+        let waiting = push_activated_ability_to_stack(
+            &mut state,
+            PlayerId(0),
+            source,
+            0,
+            resolved,
+            Some(&cost),
+            ActivationResidual::None,
+            ActivationTargetSelection::Pending,
+            None,
+            None,
+            &mut events,
+        )
+        .expect("direct activation root must enter target selection");
+
+        let WaitingFor::TargetSelection { pending_cast, .. } = waiting else {
+            panic!("expected target selection before the tap cost, got {waiting:?}");
+        };
+        assert_eq!(pending_cast.activation_cost, Some(AbilityCost::Tap));
+        assert!(
+            !state.objects[&source].tapped,
+            "target declaration must precede the activation tap cost"
+        );
+        assert!(state.stack.is_empty());
     }
 
     /// CR 119.4a + CR 810.9a: in 2HG the max X payable via a "pay X life"
