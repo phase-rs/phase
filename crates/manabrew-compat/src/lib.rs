@@ -69,16 +69,407 @@ pub use manabrew_protocol::prompts::{
     ChooseColorOutput, ChooseCombatDamageAssignmentInput, ChooseCombatDamageAssignmentOutput,
     ChooseDamageAssignmentOrderInput, ChooseDamageAssignmentOrderOutput, ChooseFromSelectionInput,
     ChooseFromSelectionOutput, ChooseNumberInput, ChooseNumberOutput, DiceRollEntry,
-    DiceRolledInput, DiceRolledOutput, GameOverInput, MulliganInput, MulliganOutput,
-    MulliganPutBackInput, MulliganPutBackOutput, PassUntil, PayManaCostInput, PayManaCostOutput,
-    PromptInput, PromptOutput, ReorderInput, ReorderItem, ReorderOutput, ResponseViolation,
-    RevealCardsInput, RevealCardsOutput, ScryInput, ScryOutput, SelectionOption,
+    DiceRolledInput, DiceRolledOutput, GameOverInput, MulliganInput, MulliganPutBackOutput,
+    PassUntil, PayManaCostInput, PayManaCostOutput, ReorderInput, ReorderItem, ReorderOutput,
+    ResponseViolation, RevealCardsInput, RevealCardsOutput, ScryInput, ScryOutput, SelectionOption,
+};
+use manabrew_protocol::prompts::{
+    PromptInput as UpstreamPromptInput, PromptOutput as UpstreamPromptOutput,
 };
 pub use manabrew_protocol::transport::{
-    AgentPrompt, ClientToServerMessage, DirectiveInput, ProtocolError, ProtocolErrorCode,
-    StateUpdate,
+    DirectiveInput, ProtocolError, ProtocolErrorCode, StateUpdate,
 };
 use serde::{Deserialize, Serialize};
+
+/// Deliberate local extension of upstream's mulligan answer.
+///
+/// `MulliganUseSerumPowder` is absent from `manabrew-protocol` 3.0.0, but
+/// Phase models `MulliganChoice::UseSerumPowder` and needs the committed object
+/// id. It is safe because this client-to-engine answer is exchanged only
+/// between this adapter and its paired client; third-party clients are not
+/// expected to emit the local variant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum MulliganOutput {
+    MulliganDecision { keep: bool },
+    MulliganUseSerumPowder { card_id: String },
+}
+
+/// Deliberate local extension of upstream's mulligan put-back prompt.
+///
+/// `excluded_card_id` marks the Serum Powder object committed to a pending
+/// `UseSerumPowder` continuation, so the paired client cannot offer it in the
+/// bottom-cards picker. `None` preserves the upstream v3 wire exactly; peers
+/// that do not know the additive field may drop it. `cards` remains upstream's
+/// [`CardDto`], not a local mirror.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MulliganPutBackInput {
+    pub hand_card_ids: Vec<String>,
+    pub cards: Vec<CardDto>,
+    pub count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_card_id: Option<String>,
+}
+
+/// Extension-aware prompt input.
+///
+/// Every non-Serum-Powder family stays as an upstream value. This wrapper is
+/// necessary because upstream's closed `PromptInput` cannot carry the one
+/// deliberate local [`MulliganPutBackInput`] superset.
+#[derive(Debug, Clone)]
+pub enum PromptInput {
+    Upstream(UpstreamPromptInput),
+    MulliganPutBack(MulliganPutBackInput),
+}
+
+impl PromptInput {
+    #[allow(non_snake_case)]
+    pub fn Mulligan(input: MulliganInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::Mulligan(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseAction(input: ChooseActionInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseAction(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseAttackers(input: ChooseAttackersInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseAttackers(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBlockers(input: ChooseBlockersInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseBlockers(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBoardTargets(input: ChooseBoardTargetsInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseBoardTargets(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBoolean(input: ChooseBooleanInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseBoolean(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseFromSelection(input: ChooseFromSelectionInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseFromSelection(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn GameOver(input: GameOverInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::GameOver(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn RevealCards(input: RevealCardsInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::RevealCards(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Scry(input: ScryInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::Scry(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseColor(input: ChooseColorInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseColor(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseNumber(input: ChooseNumberInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseNumber(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseDamageAssignmentOrder(input: ChooseDamageAssignmentOrderInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseDamageAssignmentOrder(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseCombatDamageAssignment(input: ChooseCombatDamageAssignmentInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseCombatDamageAssignment(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn PayManaCost(input: PayManaCostInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::PayManaCost(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseCards(input: ChooseCardsInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseCards(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Reorder(input: ReorderInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::Reorder(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn DiceRolled(input: DiceRolledInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::DiceRolled(input))
+    }
+
+    pub fn validate_response(
+        &self,
+        output: &PromptOutput,
+    ) -> std::result::Result<(), ResponseViolation> {
+        match (self, output) {
+            (
+                Self::MulliganPutBack(_),
+                PromptOutput::Upstream(UpstreamPromptOutput::MulliganPutBack(_)),
+            ) => Ok(()),
+            (Self::Upstream(UpstreamPromptInput::Mulligan(_)), PromptOutput::Mulligan(_)) => Ok(()),
+            (Self::Upstream(input), PromptOutput::Upstream(output)) => {
+                input.validate_response(output)
+            }
+            _ => Err(ResponseViolation::WrongPromptType),
+        }
+    }
+}
+
+impl From<UpstreamPromptInput> for PromptInput {
+    fn from(input: UpstreamPromptInput) -> Self {
+        match input {
+            UpstreamPromptInput::MulliganPutBack(input) => {
+                Self::MulliganPutBack(MulliganPutBackInput {
+                    hand_card_ids: input.hand_card_ids,
+                    cards: input.cards,
+                    count: input.count,
+                    excluded_card_id: None,
+                })
+            }
+            input => Self::Upstream(input),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum PromptInputWire<'a> {
+    MulliganPutBack(&'a MulliganPutBackInput),
+}
+
+impl Serialize for PromptInput {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Upstream(input) => input.serialize(serializer),
+            Self::MulliganPutBack(input) => {
+                PromptInputWire::MulliganPutBack(input).serialize(serializer)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PromptInput {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("mulliganPutBack") {
+            serde_json::from_value(value)
+                .map(Self::MulliganPutBack)
+                .map_err(<D::Error as serde::de::Error>::custom)
+        } else {
+            serde_json::from_value::<UpstreamPromptInput>(value)
+                .map(Self::from)
+                .map_err(<D::Error as serde::de::Error>::custom)
+        }
+    }
+}
+
+/// Extension-aware prompt output.
+///
+/// Every non-Serum-Powder family stays as an upstream value. This wrapper is
+/// necessary because upstream's closed `PromptOutput` cannot carry the one
+/// deliberate local [`MulliganOutput`] superset.
+#[derive(Debug, Clone)]
+pub enum PromptOutput {
+    Mulligan(MulliganOutput),
+    Upstream(UpstreamPromptOutput),
+}
+
+impl PromptOutput {
+    #[allow(non_snake_case)]
+    pub fn MulliganPutBack(output: MulliganPutBackOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::MulliganPutBack(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseAction(output: ChooseActionOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseAction(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseAttackers(output: ChooseAttackersOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseAttackers(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBlockers(output: ChooseBlockersOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseBlockers(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBoardTargets(output: ChooseBoardTargetsOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseBoardTargets(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBoolean(output: ChooseBooleanOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseBoolean(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseFromSelection(output: ChooseFromSelectionOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseFromSelection(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn RevealCards(output: RevealCardsOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::RevealCards(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Scry(output: ScryOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::Scry(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseColor(output: ChooseColorOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseColor(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseNumber(output: ChooseNumberOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseNumber(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseDamageAssignmentOrder(output: ChooseDamageAssignmentOrderOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseDamageAssignmentOrder(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseCombatDamageAssignment(output: ChooseCombatDamageAssignmentOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseCombatDamageAssignment(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn PayManaCost(output: PayManaCostOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::PayManaCost(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseCards(output: ChooseCardsOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseCards(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Reorder(output: ReorderOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::Reorder(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn DiceRolled(output: DiceRolledOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::DiceRolled(output))
+    }
+}
+
+impl From<UpstreamPromptOutput> for PromptOutput {
+    fn from(output: UpstreamPromptOutput) -> Self {
+        match output {
+            UpstreamPromptOutput::Mulligan(
+                manabrew_protocol::prompts::MulliganOutput::MulliganDecision { keep },
+            ) => Self::Mulligan(MulliganOutput::MulliganDecision { keep }),
+            output => Self::Upstream(output),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "output", rename_all = "camelCase")]
+enum PromptOutputWire<'a> {
+    Mulligan(&'a MulliganOutput),
+}
+
+impl Serialize for PromptOutput {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Mulligan(output) => PromptOutputWire::Mulligan(output).serialize(serializer),
+            Self::Upstream(output) => output.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PromptOutput {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("mulligan") {
+            let output = value
+                .get("output")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            serde_json::from_value(output)
+                .map(Self::Mulligan)
+                .map_err(<D::Error as serde::de::Error>::custom)
+        } else {
+            serde_json::from_value::<UpstreamPromptOutput>(value)
+                .map(Self::from)
+                .map_err(<D::Error as serde::de::Error>::custom)
+        }
+    }
+}
+
+/// Extension-aware transport envelope. Its fields are upstream protocol types
+/// except for the prompt wrapper required to carry the two documented local
+/// mulligan members above.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentPrompt {
+    pub prompt_id: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub deciding_player_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_card: Option<CardDto>,
+    pub input: PromptInput,
+}
+
+/// Extension-aware client message. Directives retain the upstream type; only
+/// responses need the local prompt-output wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ClientToServerMessage {
+    Response {
+        prompt_id: u32,
+        action: PromptOutput,
+    },
+    Directive {
+        directive: DirectiveInput,
+    },
+}
 
 /// Wire version of the pinned upstream protocol. Upstream defines the wire
 /// version as the `manabrew-protocol` crate major, so 3.0.0 => 3.
@@ -277,10 +668,12 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
     &UNSUPPORTED_PROTOCOL_CAPABILITIES
 }
 
-/// Gaps between this engine and protocol 3.0.0, machine-readable.
+/// Gaps and deliberate local wire divergences from protocol 3.0.0,
+/// machine-readable.
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
-/// `local.` = the protocol has the primitive but this engine cannot source it.
+/// `local.` = the protocol has the primitive but this engine cannot source it,
+/// or a documented adapter-local extension is intentionally in use.
 static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 87] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
@@ -806,10 +1199,10 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 87] = [
         suggested_protocol_extension: "None needed upstream until a client can opt into interactive loop detection; CR 732.1 shortcuts are a table convention the protocol has no reason to model first.",
     },
     UnsupportedCapability {
-        code: "upstream.serum-powder-mulligan-missing",
+        code: "local.serum-powder-mulligan-vendor-extension",
         area: "mulligan",
-        reason: "Published manabrew-protocol 3.0.0 has only MulliganOutput::MulliganDecision, so it cannot carry the engine's MulliganChoice::UseSerumPowder object id. Its MulliganPutBackInput also has no excluded_card_id, so after that choice it cannot prevent the client from selecting the committed card. The adapter rejects either state instead of emitting a partial prompt.",
-        suggested_protocol_extension: "Add a MulliganOutput branch carrying the Serum Powder card id and an optional committed-card id on MulliganPutBackInput.",
+        reason: "Deliberate adapter-local divergence from manabrew-protocol 3.0.0, not an unsupported capability. MulliganOutput::MulliganUseSerumPowder carries the committed Serum Powder card id from client to engine, and MulliganPutBackInput::excluded_card_id prevents that committed card from appearing in the following bottom-cards picker. The first is safe only for the paired client and adapter; the second is an additive field that older peers may drop.",
+        suggested_protocol_extension: "None required for this paired deployment. Keep both member names under review whenever the upstream protocol version changes.",
     },
     UnsupportedCapability {
         code: "local.class-level-details-unsourceable",
@@ -943,18 +1336,6 @@ fn build_prompt_input(
             let entry = pending_entry_for_viewer(&prepared.state, prepared.viewer, pending)?;
             match &entry.phase {
                 MulliganDecisionPhase::Declare => {
-                    if prepared.actions.iter().any(|action| {
-                        matches!(
-                            action,
-                            GameAction::MulliganDecision {
-                                choice: engine::types::actions::MulliganChoice::UseSerumPowder { .. },
-                            }
-                        )
-                    }) {
-                        return Err(AdapterError::UnsupportedProtocolFeature {
-                            code: "upstream.serum-powder-mulligan-missing",
-                        });
-                    }
                     let hand =
                         &prepared.state.players[player_index(&prepared.state, entry.player)?].hand;
                     Ok(PromptInput::Mulligan(MulliganInput {
@@ -963,11 +1344,6 @@ fn build_prompt_input(
                     }))
                 }
                 MulliganDecisionPhase::BottomCards { count, then } => {
-                    if matches!(then, PendingMulliganAction::UseSerumPowder { .. }) {
-                        return Err(AdapterError::UnsupportedProtocolFeature {
-                            code: "upstream.serum-powder-mulligan-missing",
-                        });
-                    }
                     let cards = CardBuildContext { card_lookup };
                     let hand =
                         &prepared.state.players[player_index(&prepared.state, entry.player)?].hand;
@@ -975,6 +1351,12 @@ fn build_prompt_input(
                         hand_card_ids: hand.iter().copied().map(encode_object_id).collect(),
                         cards: objects_from_ids(&prepared.state, hand, &cards)?,
                         count: usize::from(*count),
+                        excluded_card_id: match then {
+                            PendingMulliganAction::Keep => None,
+                            PendingMulliganAction::UseSerumPowder { object_id } => {
+                                Some(encode_object_id(*object_id))
+                            }
+                        },
                     }))
                 }
             }
@@ -987,6 +1369,7 @@ fn build_prompt_input(
                 hand_card_ids: hand.iter().copied().map(encode_object_id).collect(),
                 cards: objects_from_ids(&prepared.state, hand, &cards)?,
                 count: usize::from(entry.count),
+                excluded_card_id: None,
             }))
         }
         WaitingFor::DeclareAttackers {
@@ -1856,59 +2239,79 @@ pub fn translate_response(
         });
     }
 
-    match output {
-        PromptOutput::ChooseAction(out) => translate_choose_action_output(out, context, state),
-        PromptOutput::PayManaCost(out) => translate_pay_mana_output(out, context),
-        PromptOutput::Mulligan(MulliganOutput::MulliganDecision { keep }) => {
-            Ok(GameAction::MulliganDecision {
-                choice: if keep {
-                    engine::types::actions::MulliganChoice::Keep
-                } else {
-                    engine::types::actions::MulliganChoice::Mulligan
+    let output = match output {
+        PromptOutput::Mulligan(MulliganOutput::MulliganUseSerumPowder { card_id }) => {
+            return Ok(GameAction::MulliganDecision {
+                choice: engine::types::actions::MulliganChoice::UseSerumPowder {
+                    object_id: parse_object_id(&card_id)?,
                 },
-            })
+            });
         }
-        PromptOutput::MulliganPutBack(MulliganPutBackOutput::MulliganPutBackDecision {
+        PromptOutput::Mulligan(MulliganOutput::MulliganDecision { keep }) => {
+            UpstreamPromptOutput::Mulligan(
+                manabrew_protocol::prompts::MulliganOutput::MulliganDecision { keep },
+            )
+        }
+        PromptOutput::Upstream(output) => output,
+    };
+
+    match output {
+        UpstreamPromptOutput::ChooseAction(out) => {
+            translate_choose_action_output(out, context, state)
+        }
+        UpstreamPromptOutput::PayManaCost(out) => translate_pay_mana_output(out, context),
+        UpstreamPromptOutput::Mulligan(
+            manabrew_protocol::prompts::MulliganOutput::MulliganDecision { keep },
+        ) => Ok(GameAction::MulliganDecision {
+            choice: if keep {
+                engine::types::actions::MulliganChoice::Keep
+            } else {
+                engine::types::actions::MulliganChoice::Mulligan
+            },
+        }),
+        UpstreamPromptOutput::MulliganPutBack(MulliganPutBackOutput::MulliganPutBackDecision {
             card_ids,
         }) => Ok(GameAction::SelectCards {
             cards: parse_object_ids(&card_ids)?,
         }),
-        PromptOutput::ChooseAttackers(ChooseAttackersOutput::DeclareAttackers { assignments }) => {
-            Ok(GameAction::DeclareAttackers {
-                attacks: assignments
-                    .iter()
-                    .map(|assignment| {
-                        Ok((
-                            parse_object_id(&assignment.attacker_id)?,
-                            parse_attack_target_id(&assignment.target_id)?,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-                bands: Vec::new(),
-            })
-        }
-        PromptOutput::ChooseBlockers(ChooseBlockersOutput::DeclareBlockers { assignments }) => {
-            Ok(GameAction::DeclareBlockers {
-                assignments: assignments
-                    .iter()
-                    .map(|assignment| {
-                        Ok((
-                            parse_object_id(&assignment.blocker_id)?,
-                            parse_object_id(&assignment.attacker_id)?,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            })
-        }
-        PromptOutput::ChooseBoardTargets(ChooseBoardTargetsOutput::BoardTargets { chosen }) => {
-            Ok(GameAction::SelectTargets {
-                targets: chosen
-                    .iter()
-                    .map(target_ref_from_dto)
-                    .collect::<Result<Vec<_>>>()?,
-            })
-        }
-        PromptOutput::ChooseNumber(ChooseNumberOutput::NumberDecision { chosen_number }) => {
+        UpstreamPromptOutput::ChooseAttackers(ChooseAttackersOutput::DeclareAttackers {
+            assignments,
+        }) => Ok(GameAction::DeclareAttackers {
+            attacks: assignments
+                .iter()
+                .map(|assignment| {
+                    Ok((
+                        parse_object_id(&assignment.attacker_id)?,
+                        parse_attack_target_id(&assignment.target_id)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            bands: Vec::new(),
+        }),
+        UpstreamPromptOutput::ChooseBlockers(ChooseBlockersOutput::DeclareBlockers {
+            assignments,
+        }) => Ok(GameAction::DeclareBlockers {
+            assignments: assignments
+                .iter()
+                .map(|assignment| {
+                    Ok((
+                        parse_object_id(&assignment.blocker_id)?,
+                        parse_object_id(&assignment.attacker_id)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        }),
+        UpstreamPromptOutput::ChooseBoardTargets(ChooseBoardTargetsOutput::BoardTargets {
+            chosen,
+        }) => Ok(GameAction::SelectTargets {
+            targets: chosen
+                .iter()
+                .map(target_ref_from_dto)
+                .collect::<Result<Vec<_>>>()?,
+        }),
+        UpstreamPromptOutput::ChooseNumber(ChooseNumberOutput::NumberDecision {
+            chosen_number,
+        }) => {
             match chosen_number {
                 // CR 107.3 + CR 107.1b: X is a value its controller chooses, and
                 // a negative number can never be chosen — so a declined or
@@ -1927,9 +2330,9 @@ pub fn translate_response(
                 }),
             }
         }
-        PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
-            chosen_indices,
-        }) => match &state.waiting_for {
+        UpstreamPromptOutput::ChooseFromSelection(
+            ChooseFromSelectionOutput::SelectionDecision { chosen_indices },
+        ) => match &state.waiting_for {
             // The two bespoke producers of this family. Their answer is a list
             // of mode indices — one response covering several picks — which is
             // not the one-choice-per-answer shape the projection returns, so it
@@ -1941,10 +2344,10 @@ pub fn translate_response(
             }
             _ => interaction_selection_action(state, context.deciding_player, &chosen_indices),
         },
-        PromptOutput::ChooseColor(ChooseColorOutput::ColorDecision { chosen_colors }) => {
+        UpstreamPromptOutput::ChooseColor(ChooseColorOutput::ColorDecision { chosen_colors }) => {
             translate_color_decision(&state.waiting_for, chosen_colors)
         }
-        PromptOutput::ChooseCombatDamageAssignment(
+        UpstreamPromptOutput::ChooseCombatDamageAssignment(
             ChooseCombatDamageAssignmentOutput::CombatDamageAssignmentDecision { assignments },
         ) => Ok(GameAction::AssignCombatDamage {
             mode: Default::default(),
@@ -1960,7 +2363,7 @@ pub fn translate_response(
             trample_damage: 0,
             controller_damage: 0,
         }),
-        PromptOutput::Scry(ScryOutput::ScryDecision { zone_card_ids }) => {
+        UpstreamPromptOutput::Scry(ScryOutput::ScryDecision { zone_card_ids }) => {
             let bottom = zone_card_ids.get(1).cloned().unwrap_or_default();
             Ok(GameAction::SelectCards {
                 cards: parse_object_ids(&bottom)?,
@@ -1971,7 +2374,7 @@ pub fn translate_response(
         // `output_family_matches_waiting` has already established that the
         // pairing is legal, so any other state here is unreachable rather than
         // merely unhandled.
-        PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value }) => {
+        UpstreamPromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value }) => {
             match &state.waiting_for {
                 // CR 603.12: accept or decline the optional trigger.
                 WaitingFor::OptionalEffectChoice { .. } | WaitingFor::OpponentMayChoice { .. } => {
@@ -2006,7 +2409,9 @@ pub fn translate_response(
                 }),
             }
         }
-        PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision { chosen_card_ids }) => {
+        UpstreamPromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision {
+            chosen_card_ids,
+        }) => {
             match &state.waiting_for {
                 // CR 701.9b: an effect that causes a discard lets the affected
                 // player choose which cards, so the chosen cards are exactly the
@@ -2025,7 +2430,7 @@ pub fn translate_response(
         // CR 603.3b: `ReorderItem::id` is the trigger's index in the prompt's
         // list (see the `OrderTriggers` prompt arm), so the answer parses back
         // into `GameAction::OrderTriggers { order: Vec<usize> }` directly.
-        PromptOutput::Reorder(ReorderOutput::ReorderDecision { ordered_ids }) => {
+        UpstreamPromptOutput::Reorder(ReorderOutput::ReorderDecision { ordered_ids }) => {
             let order = ordered_ids
                 .iter()
                 .map(|id| {
@@ -2040,9 +2445,9 @@ pub fn translate_response(
         // Families the adapter models on the wire but cannot yet drive into the
         // engine. `output_family_matches_waiting` already rejects these, so this
         // arm is the belt-and-braces leg of the same contract.
-        PromptOutput::ChooseDamageAssignmentOrder(_)
-        | PromptOutput::RevealCards(_)
-        | PromptOutput::DiceRolled(_) => Err(AdapterError::IllegalResponseForPrompt {
+        UpstreamPromptOutput::ChooseDamageAssignmentOrder(_)
+        | UpstreamPromptOutput::RevealCards(_)
+        | UpstreamPromptOutput::DiceRolled(_) => Err(AdapterError::IllegalResponseForPrompt {
             response_kind: "unsupportedOutput",
         }),
     }
@@ -3540,13 +3945,32 @@ fn output_family_matches_waiting(
     state: &GameState,
     viewer: PlayerId,
 ) -> bool {
+    match output {
+        PromptOutput::Mulligan(_) => match &state.waiting_for {
+            WaitingFor::MulliganDecision { pending, .. } => {
+                pending_entry_for_viewer(state, viewer, pending)
+                    .is_ok_and(|entry| matches!(entry.phase, MulliganDecisionPhase::Declare))
+            }
+            _ => false,
+        },
+        PromptOutput::Upstream(output) => output_family_matches_upstream(output, state, viewer),
+    }
+}
+
+fn output_family_matches_upstream(
+    output: &UpstreamPromptOutput,
+    state: &GameState,
+    viewer: PlayerId,
+) -> bool {
     let waiting_for = &state.waiting_for;
     match output {
-        PromptOutput::ChooseAction(_) => matches!(waiting_for, WaitingFor::Priority { .. }),
-        PromptOutput::PayManaCost(_) => matches!(waiting_for, WaitingFor::ManaPayment { .. }),
+        UpstreamPromptOutput::ChooseAction(_) => matches!(waiting_for, WaitingFor::Priority { .. }),
+        UpstreamPromptOutput::PayManaCost(_) => {
+            matches!(waiting_for, WaitingFor::ManaPayment { .. })
+        }
         // A declare-point response (keep or mulligan) is only legal while the
         // viewer's own entry is in the `Declare` phase.
-        PromptOutput::Mulligan(_) => match waiting_for {
+        UpstreamPromptOutput::Mulligan(_) => match waiting_for {
             WaitingFor::MulliganDecision { pending, .. } => {
                 pending_entry_for_viewer(state, viewer, pending)
                     .is_ok_and(|entry| matches!(entry.phase, MulliganDecisionPhase::Declare))
@@ -3556,7 +3980,7 @@ fn output_family_matches_waiting(
         // A bottom-cards selection is legal while the viewer's own entry is in
         // the `BottomCards` sub-phase, or during the unrelated
         // `OpeningHandBottomCards` phase.
-        PromptOutput::MulliganPutBack(_) => match waiting_for {
+        UpstreamPromptOutput::MulliganPutBack(_) => match waiting_for {
             WaitingFor::MulliganDecision { pending, .. } => {
                 pending_entry_for_viewer(state, viewer, pending).is_ok_and(|entry| {
                     matches!(entry.phase, MulliganDecisionPhase::BottomCards { .. })
@@ -3567,19 +3991,19 @@ fn output_family_matches_waiting(
             }
             _ => false,
         },
-        PromptOutput::ChooseAttackers(_) => {
+        UpstreamPromptOutput::ChooseAttackers(_) => {
             matches!(waiting_for, WaitingFor::DeclareAttackers { .. })
         }
-        PromptOutput::ChooseBlockers(_) => {
+        UpstreamPromptOutput::ChooseBlockers(_) => {
             matches!(waiting_for, WaitingFor::DeclareBlockers { .. })
         }
-        PromptOutput::ChooseBoardTargets(_) => matches!(
+        UpstreamPromptOutput::ChooseBoardTargets(_) => matches!(
             waiting_for,
             WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
         ),
         // Like `ChooseFromSelection`, reachable both bespoke (X, CR 107.3) and
         // generically, so the open-prompt check carries it rather than a list.
-        PromptOutput::ChooseNumber(_) => {
+        UpstreamPromptOutput::ChooseNumber(_) => {
             matches!(waiting_for, WaitingFor::ChooseXValue { .. })
                 || open_prompt_is_generic_number(state, viewer)
         }
@@ -3596,18 +4020,22 @@ fn output_family_matches_waiting(
         // projection alone would be wrong: `WaitingFor::Priority` also projects
         // a finite list, and would then accept a `chooseFromSelection` answer to
         // a `chooseAction` prompt.
-        PromptOutput::ChooseFromSelection(_) => open_prompt_is_generic_selection(state, viewer),
-        PromptOutput::ChooseColor(_) => matches!(waiting_for, WaitingFor::ChooseManaColor { .. }),
-        PromptOutput::ChooseCombatDamageAssignment(_) => {
+        UpstreamPromptOutput::ChooseFromSelection(_) => {
+            open_prompt_is_generic_selection(state, viewer)
+        }
+        UpstreamPromptOutput::ChooseColor(_) => {
+            matches!(waiting_for, WaitingFor::ChooseManaColor { .. })
+        }
+        UpstreamPromptOutput::ChooseCombatDamageAssignment(_) => {
             matches!(waiting_for, WaitingFor::AssignCombatDamage { .. })
         }
         // CR 701.42a: surveil shares scry's partition shape, differing only in
         // the second destination carried by `ScryInput::zones`.
-        PromptOutput::Scry(_) => matches!(
+        UpstreamPromptOutput::Scry(_) => matches!(
             waiting_for,
             WaitingFor::ScryChoice { .. } | WaitingFor::SurveilChoice { .. }
         ),
-        PromptOutput::ChooseBoolean(_) => matches!(
+        UpstreamPromptOutput::ChooseBoolean(_) => matches!(
             waiting_for,
             WaitingFor::OptionalEffectChoice { .. }
                 | WaitingFor::OpponentMayChoice { .. }
@@ -3618,16 +4046,16 @@ fn output_family_matches_waiting(
         // Reachable both bespoke (discard, CR 701.9b) and generically, so the
         // bespoke match stays primary and the open-prompt check carries the rest
         // rather than a list that would rot as the engine reclassifies states.
-        PromptOutput::ChooseCards(_) => {
+        UpstreamPromptOutput::ChooseCards(_) => {
             matches!(waiting_for, WaitingFor::DiscardChoice { .. })
                 || open_prompt_is_generic_cards(state, viewer)
         }
-        PromptOutput::Reorder(_) => matches!(waiting_for, WaitingFor::OrderTriggers { .. }),
+        UpstreamPromptOutput::Reorder(_) => matches!(waiting_for, WaitingFor::OrderTriggers { .. }),
         // Modeled on the wire, but this adapter emits no prompt that accepts
         // them, so no `WaitingFor` can legally receive one.
-        PromptOutput::ChooseDamageAssignmentOrder(_)
-        | PromptOutput::RevealCards(_)
-        | PromptOutput::DiceRolled(_) => false,
+        UpstreamPromptOutput::ChooseDamageAssignmentOrder(_)
+        | UpstreamPromptOutput::RevealCards(_)
+        | UpstreamPromptOutput::DiceRolled(_) => false,
     }
 }
 
@@ -3657,21 +4085,23 @@ fn open_prompt(state: &GameState, viewer: PlayerId) -> Option<PromptInput> {
 fn open_prompt_is_generic_selection(state: &GameState, viewer: PlayerId) -> bool {
     matches!(
         open_prompt(state, viewer),
-        Some(PromptInput::ChooseFromSelection(_))
+        Some(PromptInput::Upstream(
+            UpstreamPromptInput::ChooseFromSelection(_)
+        ))
     )
 }
 
 fn open_prompt_is_generic_cards(state: &GameState, viewer: PlayerId) -> bool {
     matches!(
         open_prompt(state, viewer),
-        Some(PromptInput::ChooseCards(_))
+        Some(PromptInput::Upstream(UpstreamPromptInput::ChooseCards(_)))
     )
 }
 
 fn open_prompt_is_generic_number(state: &GameState, viewer: PlayerId) -> bool {
     matches!(
         open_prompt(state, viewer),
-        Some(PromptInput::ChooseNumber(_))
+        Some(PromptInput::Upstream(UpstreamPromptInput::ChooseNumber(_)))
     )
 }
 
@@ -3679,23 +4109,26 @@ fn open_prompt_is_generic_number(state: &GameState, viewer: PlayerId) -> bool {
 fn output_family(output: &PromptOutput) -> &'static str {
     match output {
         PromptOutput::Mulligan(_) => "mulligan",
-        PromptOutput::MulliganPutBack(_) => "mulliganPutBack",
-        PromptOutput::ChooseAction(_) => "chooseAction",
-        PromptOutput::ChooseAttackers(_) => "chooseAttackers",
-        PromptOutput::ChooseBlockers(_) => "chooseBlockers",
-        PromptOutput::ChooseBoardTargets(_) => "chooseBoardTargets",
-        PromptOutput::ChooseBoolean(_) => "chooseBoolean",
-        PromptOutput::ChooseFromSelection(_) => "chooseFromSelection",
-        PromptOutput::RevealCards(_) => "revealCards",
-        PromptOutput::Scry(_) => "scry",
-        PromptOutput::ChooseColor(_) => "chooseColor",
-        PromptOutput::ChooseNumber(_) => "chooseNumber",
-        PromptOutput::ChooseDamageAssignmentOrder(_) => "chooseDamageAssignmentOrder",
-        PromptOutput::ChooseCombatDamageAssignment(_) => "chooseCombatDamageAssignment",
-        PromptOutput::PayManaCost(_) => "payManaCost",
-        PromptOutput::ChooseCards(_) => "chooseCards",
-        PromptOutput::Reorder(_) => "reorder",
-        PromptOutput::DiceRolled(_) => "diceRolled",
+        PromptOutput::Upstream(output) => match output {
+            UpstreamPromptOutput::Mulligan(_) => "mulligan",
+            UpstreamPromptOutput::MulliganPutBack(_) => "mulliganPutBack",
+            UpstreamPromptOutput::ChooseAction(_) => "chooseAction",
+            UpstreamPromptOutput::ChooseAttackers(_) => "chooseAttackers",
+            UpstreamPromptOutput::ChooseBlockers(_) => "chooseBlockers",
+            UpstreamPromptOutput::ChooseBoardTargets(_) => "chooseBoardTargets",
+            UpstreamPromptOutput::ChooseBoolean(_) => "chooseBoolean",
+            UpstreamPromptOutput::ChooseFromSelection(_) => "chooseFromSelection",
+            UpstreamPromptOutput::RevealCards(_) => "revealCards",
+            UpstreamPromptOutput::Scry(_) => "scry",
+            UpstreamPromptOutput::ChooseColor(_) => "chooseColor",
+            UpstreamPromptOutput::ChooseNumber(_) => "chooseNumber",
+            UpstreamPromptOutput::ChooseDamageAssignmentOrder(_) => "chooseDamageAssignmentOrder",
+            UpstreamPromptOutput::ChooseCombatDamageAssignment(_) => "chooseCombatDamageAssignment",
+            UpstreamPromptOutput::PayManaCost(_) => "payManaCost",
+            UpstreamPromptOutput::ChooseCards(_) => "chooseCards",
+            UpstreamPromptOutput::Reorder(_) => "reorder",
+            UpstreamPromptOutput::DiceRolled(_) => "diceRolled",
+        },
     }
 }
 
@@ -5306,7 +5739,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("an unmapped waiting state is served by the projection, not refused");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("a finite candidate list is ChooseFromSelection's shape, got {prompt:?}");
         };
         let labels = input
@@ -5372,7 +5805,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Select schema is served by the projection");
-        let PromptInput::ChooseCards(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseCards(input)) = prompt else {
             panic!("a subset choice over objects is ChooseCards, got {prompt:?}");
         };
         assert_eq!(
@@ -5446,7 +5879,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Select schema over objects is served by the projection");
-        let PromptInput::ChooseCards(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseCards(input)) = prompt else {
             panic!("a non-targeting selection over objects is ChooseCards, got {prompt:?}");
         };
         assert_eq!(
@@ -5572,7 +6005,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Sequence schema is served by the projection");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("an ordered sequence stays in the labelled family, got {prompt:?}");
         };
         assert_eq!(
@@ -5626,7 +6059,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Select schema is served by the projection");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("a non-candidate role stays in the labelled family, got {prompt:?}");
         };
         assert_eq!(
@@ -5669,7 +6102,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Number schema is served by the projection");
-        let PromptInput::ChooseNumber(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseNumber(input)) = prompt else {
             panic!("a numeric range is ChooseNumber, not a selection, got {prompt:?}");
         };
         assert_eq!(
@@ -5730,7 +6163,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Sequence schema is served by the projection");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("an ordered subset still renders as ChooseFromSelection, got {prompt:?}");
         };
         assert_eq!(
@@ -5843,7 +6276,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt =
             build_prompt_input(&prepared, &lookup).expect("a reveal is served by the projection");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("a reveal renders as labelled options, got {prompt:?}");
         };
         assert_eq!(
@@ -5926,7 +6359,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt =
             build_prompt_input(&prepared, &lookup).expect("a reveal is served by the projection");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("a reveal renders as labelled options, got {prompt:?}");
         };
         assert_eq!(
@@ -6363,6 +6796,7 @@ mod tests {
                     hand_card_ids: vec!["card-1".to_string()],
                     cards: vec![card()],
                     count: 1,
+                    excluded_card_id: None,
                 }),
             ),
             (
@@ -6912,22 +7346,59 @@ mod tests {
         );
     }
 
+    /// CR 103.5b: a Serum Powder response is a `Mulligan` family output.
     #[test]
-    fn serum_powder_wire_surface_is_unsupported_in_protocol_v3() {
-        let input = MulliganPutBackInput {
-            hand_card_ids: vec![],
-            cards: vec![],
-            count: 1,
-        };
-        let json = serde_json::to_value(input).unwrap();
-        assert!(json.get("excludedCardId").is_none());
-        assert_eq!(
-            serde_json::to_value(MulliganOutput::MulliganDecision { keep: false }).unwrap()["type"],
-            "mulliganDecision"
+    fn mulligan_use_serum_powder_response_translates() {
+        let context = context_with(vec![]);
+        let mut state = GameState::new_two_player(7);
+        let powder = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Serum Powder".to_string(),
+            Zone::Hand,
         );
-        assert!(unsupported_protocol_capabilities()
-            .iter()
-            .any(|capability| capability.code == "upstream.serum-powder-mulligan-missing"));
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 0,
+                phase: MulliganDecisionPhase::Declare,
+            }],
+            free_first_mulligan: false,
+        };
+
+        assert!(matches!(
+            translate_response(
+                7,
+                PromptOutput::Mulligan(MulliganOutput::MulliganUseSerumPowder {
+                    card_id: encode_object_id(powder),
+                }),
+                &context,
+                &state,
+            )
+            .unwrap(),
+            GameAction::MulliganDecision {
+                choice: engine::types::actions::MulliganChoice::UseSerumPowder { object_id },
+            } if object_id == powder
+        ));
+
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 1,
+                phase: MulliganDecisionPhase::BottomCards {
+                    count: 1,
+                    then: PendingMulliganAction::UseSerumPowder { object_id: powder },
+                },
+            }],
+            free_first_mulligan: false,
+        };
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 7).unwrap();
+        let PromptInput::MulliganPutBack(input) = build_prompt_input(&prepared, &lookup).unwrap()
+        else {
+            panic!("a Serum Powder continuation must build a mulligan put-back prompt");
+        };
+        assert_eq!(input.excluded_card_id, Some(encode_object_id(powder)));
     }
 
     #[test]
@@ -7826,7 +8297,7 @@ mod tests {
             "local.dungeon-room-unsupported",
             "local.room-right-split-mode-unproducible",
             "local.counter-key-vocabulary-unverifiable",
-            "upstream.serum-powder-mulligan-missing",
+            "local.serum-powder-mulligan-vendor-extension",
             "local.class-level-details-unsourceable",
             "local.saga-chapter-details-unsourceable",
             "local.class-level-up-flag-unsourceable",
@@ -7856,6 +8327,9 @@ mod tests {
             // Phyrexian route is advertised as `PayLife` (CR 107.4f).
             "local.ninjutsu-cast-unsupported",
             "local.phyrexian-payment-unsupported",
+            // The two local Serum Powder members are intentional vendor
+            // extensions, not an upstream protocol gap.
+            "upstream.serum-powder-mulligan-missing",
         ] {
             assert!(
                 !codes.contains(obsolete),
@@ -7882,19 +8356,74 @@ mod tests {
         ));
     }
 
+    /// Both vendor extensions are deliberate, but their safety arguments differ.
+    ///
+    /// `excludedCardId` is genuinely additive: `MulliganPutBackInput` has no
+    /// `deny_unknown_fields`, so a conforming peer ignores it. The extra
+    /// `MulliganOutput` variant is NOT additive in that sense — a conforming
+    /// peer's deserializer errors on an unknown tag. It is safe only because the
+    /// enum flows client→engine and both ends are ours, so a third-party client
+    /// never emits it.
     #[test]
-    fn mulligan_dtos_are_the_upstream_v3_types() {
+    fn vendor_extensions_are_deliberate_and_isolated() {
+        let without_extension = serde_json::to_value(MulliganPutBackInput {
+            hand_card_ids: vec![],
+            cards: vec![],
+            count: 1,
+            excluded_card_id: None,
+        })
+        .unwrap();
+        assert!(without_extension.get("excludedCardId").is_none());
+        assert_eq!(
+            serde_json::to_string(&MulliganPutBackInput {
+                hand_card_ids: vec![],
+                cards: vec![],
+                count: 1,
+                excluded_card_id: None,
+            })
+            .unwrap(),
+            r#"{"handCardIds":[],"cards":[],"count":1}"#
+        );
+
         let json = serde_json::to_value(MulliganPutBackInput {
             hand_card_ids: vec![],
             cards: vec![],
             count: 1,
+            excluded_card_id: Some("card-1".to_string()),
         })
         .unwrap();
-        assert!(json.get("excludedCardId").is_none());
+        assert_eq!(json["excludedCardId"], "card-1");
 
+        // A peer that does not know the field simply drops it.
+        let mut without = json.clone();
+        without.as_object_mut().unwrap().remove("excludedCardId");
+        let round_trip = serde_json::from_value::<MulliganPutBackInput>(without).unwrap();
+        assert_eq!(round_trip.excluded_card_id, None);
+
+        let serum_powder = serde_json::to_value(MulliganOutput::MulliganUseSerumPowder {
+            card_id: "card-1".to_string(),
+        })
+        .unwrap();
+        assert_eq!(serum_powder["type"], "mulliganUseSerumPowder");
+        assert_eq!(serum_powder["cardId"], "card-1");
         assert_eq!(
-            serde_json::to_value(MulliganOutput::MulliganDecision { keep: true }).unwrap()["type"],
-            "mulliganDecision"
+            serde_json::to_string(&MulliganOutput::MulliganUseSerumPowder {
+                card_id: "card-1".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"mulliganUseSerumPowder","cardId":"card-1"}"#
         );
+    }
+
+    #[test]
+    fn non_extended_mulligan_dtos_remain_upstream_v3_types() {
+        let _: manabrew_protocol::prompts::MulliganInput = MulliganInput {
+            hand_card_ids: vec!["card-1".to_string()],
+            mulligan_count: 1,
+        };
+        let _: manabrew_protocol::prompts::MulliganPutBackOutput =
+            MulliganPutBackOutput::MulliganPutBackDecision {
+                card_ids: vec!["card-1".to_string()],
+            };
     }
 }
