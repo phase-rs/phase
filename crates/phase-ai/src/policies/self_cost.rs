@@ -223,6 +223,40 @@ pub(crate) fn real_self_cost(
 /// Cost of the permanent(s) the sacrifice would consume. A `SelfRef` sacrifice
 /// is priced against the ability's own source (never the cheapest permanent);
 /// any other filter takes the cheapest AI-controlled match.
+///
+/// **KNOWN MISPRICING on the `SelfRef` branch when the source is a land.**
+/// `sacrifice_cost` charges `sacrifice_land_penalty`, whose stated rationale is
+/// CR 305.2's one-land-per-turn rate limit on the replacement drop. CR 305.4
+/// (`docs/MagicCompRules.txt:1700`) refutes that for a fetchland: "Effects may
+/// also allow players to 'put' lands onto the battlefield. This isn't the same
+/// as 'playing a land' and doesn't count as a land played during the current
+/// turn." A fetchland puts its replacement onto the battlefield, so it consumes
+/// no land drop and is close to manabase-neutral — yet this path prices it as a
+/// full land lost, and the AI under-activates it.
+///
+/// Not corrected here, but the correction is **cheap and the parts already
+/// exist** — this is a scoping decision, not a research problem. The discount
+/// cannot be "a land sacrificing itself is cheap": a land that sacrifices itself
+/// for a non-land effect really does lose a source. The discriminator is whether
+/// the ability *replaces* the land, and `policies::fetch_land_patience` already
+/// carries both halves of that predicate:
+///
+/// - `cost_sacrifices_self` — matches `AbilityCost::Sacrifice(sac)` with
+///   `sac.target == TargetFilter::SelfRef`, recursing through `Composite`, which
+///   is exactly the shape this function short-circuits on;
+/// - `effects_are_tapped_land_fetch` — `Effect::SearchLibrary` with a
+///   land-referencing filter plus a `ChangeZone` to the battlefield. Relaxing
+///   its `EtbTapState::Tapped` requirement generalizes Evolving Wilds to true
+///   fetchlands (Flooded Strand), which is the case this docstring is about.
+///   `features::mana_ramp::{chain_searches_for_land, chain_puts_land_to_safe_zone,
+///   target_filter_references_land}` are the same building blocks.
+///
+/// Deferred because it is an **unmeasured AI behaviour change** across this
+/// function's call sites, `scripts/ai-gate.sh` is 2-player-only and cannot reach
+/// the Commander regime the reports come from, and
+/// `crates/engine/data/card-data.json` is not generated in this tree, so a
+/// printed fetchland's parsed representation was never observed end to end.
+/// Owned follow-up; see UNIT2-IMPL-R3 §5.
 fn sacrifice_leaf_cost(
     state: &GameState,
     ai_player: PlayerId,
