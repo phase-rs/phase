@@ -318,12 +318,12 @@ impl PendingTriggerContext {
 /// pending transaction. The overlay is deliberately narrow: it can answer the
 /// controller of that one targeting source, but cannot alter object lookup,
 /// zones, or the stack.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TriggerCollectionOverlay {
     virtual_targeting_source: Option<VirtualTargetingSource>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct VirtualTargetingSource {
     source_id: ObjectId,
     controller: PlayerId,
@@ -355,7 +355,7 @@ impl TriggerCollectionOverlay {
 /// owned operations makes their ordering explicit and gives a future
 /// activation-local collector a single seam at which to retain or discard them.
 /// The ordinary collector applies every operation immediately.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum TriggerCollectionOperation {
     PrepareEventBatch {
         events: Vec<GameEvent>,
@@ -401,10 +401,13 @@ impl TriggerCollectionSession {
     }
 
     #[cfg_attr(not(test), allow(dead_code))] // Wired into casting in the next activation step.
-    fn transactional(overlay: TriggerCollectionOverlay) -> Self {
+    fn transactional(
+        overlay: TriggerCollectionOverlay,
+        operation_journal: Vec<TriggerCollectionOperation>,
+    ) -> Self {
         Self {
             overlay,
-            operation_journal: Some(Vec::new()),
+            operation_journal: Some(operation_journal),
         }
     }
 
@@ -512,14 +515,9 @@ impl TriggerCollectionSession {
         Self::apply_operation(state, operation)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // Consumed by the pending-activation commit boundary.
-    fn commit(mut self, state: &mut GameState) {
-        let Some(operation_journal) = self.operation_journal.take() else {
-            return;
-        };
-        for operation in operation_journal {
-            let _ = Self::apply_operation(state, operation);
-        }
+    #[cfg_attr(not(test), allow(dead_code))] // Returned to the durable pending carrier.
+    fn into_operation_journal(mut self) -> Vec<TriggerCollectionOperation> {
+        self.operation_journal.take().unwrap_or_default()
     }
 
     fn apply_operation(
@@ -591,57 +589,76 @@ impl TriggerCollectionSession {
 ///
 /// CR 602.2a + CR 602.2b: An activation may cross several payment prompts after targets
 /// have produced trigger events, but none of those events become globally
-/// committed until the full activation is complete. This owner runs collection
-/// against a private state snapshot, retains every semantic collector operation
-/// in order, and exposes one consuming commit path. Dropping it is cancellation:
-/// neither its operations nor its pending contexts escape to the live game.
+/// committed until the full activation is complete. This owner retains only the
+/// virtual source authority, ordered semantic operations, and collected
+/// contexts. Each continuation reconstructs an ephemeral staged clone from the
+/// current live state and replays the operations before collecting its next
+/// event slice. Dropping it is cancellation: neither operations nor contexts
+/// escape to the live game.
 #[cfg_attr(not(test), allow(dead_code))] // Casting owns this session in the next activation step.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PendingActivationTriggerCollection {
-    staged_state: GameState,
-    session: TriggerCollectionSession,
+    overlay: TriggerCollectionOverlay,
+    operation_journal: Vec<TriggerCollectionOperation>,
     pending_contexts: Vec<PendingTriggerContext>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))] // Exercised by unit tests until casting adopts it.
 impl PendingActivationTriggerCollection {
-    pub(crate) fn for_activated_ability(
-        state: &GameState,
-        source_id: ObjectId,
-        controller: PlayerId,
-    ) -> Self {
+    #[cfg_attr(not(test), allow(dead_code))] // Construction moves into the activation announcement path next.
+    pub(crate) fn for_activated_ability(source_id: ObjectId, controller: PlayerId) -> Self {
         Self {
-            staged_state: state.clone(),
-            session: TriggerCollectionSession::transactional(
-                TriggerCollectionOverlay::for_activated_ability(source_id, controller),
-            ),
+            overlay: TriggerCollectionOverlay::for_activated_ability(source_id, controller),
+            operation_journal: Vec::new(),
             pending_contexts: Vec::new(),
         }
     }
 
     /// Collect one event slice emitted while the activation is still pending.
     ///
-    /// Later slices read the staged state after all earlier collector operations,
-    /// so per-turn trigger constraints and event-observation ledgers behave as
-    /// one uninterrupted collection transaction without touching live state.
-    pub(crate) fn collect(&mut self, events: &[GameEvent]) {
+    /// Later slices replay the earlier collector operations into a fresh staged
+    /// clone, so per-turn trigger constraints and event-observation ledgers
+    /// behave as one uninterrupted transaction without touching live state.
+    #[cfg_attr(not(test), allow(dead_code))] // Called by target/cost continuation roots next.
+    pub(crate) fn collect(&mut self, state: &GameState, events: &[GameEvent]) {
+        let mut staged_state = self.rebuild_staged_state(state);
+        let operation_journal = std::mem::take(&mut self.operation_journal);
+        let mut session = TriggerCollectionSession::transactional(self.overlay, operation_journal);
         let contexts = collect_pending_triggers_with_collection(
-            &mut self.staged_state,
+            &mut staged_state,
             events,
             LogicalZoneTriggerCollection::Ordinary,
-            &mut self.session,
+            &mut session,
         );
+        self.operation_journal = session.into_operation_journal();
         self.pending_contexts.extend(contexts);
     }
 
     /// Commit collector consequences exactly once and append the retained
     /// contexts to the caller's deferred delivery list.
+    #[cfg_attr(not(test), allow(dead_code))] // Called by the activated stack-push boundary next.
     pub(crate) fn commit_into(
         self,
         state: &mut GameState,
         deferred_contexts: &mut Vec<PendingTriggerContext>,
     ) {
-        self.session.commit(state);
+        for operation in self.operation_journal {
+            let _ = TriggerCollectionSession::apply_operation(state, operation);
+        }
         deferred_contexts.extend(self.pending_contexts);
+    }
+
+    fn rebuild_staged_state(&self, state: &GameState) -> GameState {
+        let mut staged_state = state.clone();
+        for operation in &self.operation_journal {
+            let _ = TriggerCollectionSession::apply_operation(&mut staged_state, operation.clone());
+        }
+        staged_state
+    }
+
+    #[cfg(test)]
+    fn staged_state_for_test(&self, state: &GameState) -> GameState {
+        self.rebuild_staged_state(state)
     }
 }
 
@@ -19312,22 +19329,38 @@ pub mod tests {
 
         let tapped = ObjectId(71);
         let mut pending =
-            PendingActivationTriggerCollection::for_activated_ability(&state, source, PlayerId(1));
-        pending.collect(&[GameEvent::BecomesTarget {
-            target: TargetRef::Object(ward_target),
-            source_id: source,
-        }]);
-        pending.collect(&[GameEvent::PermanentTapped {
-            object_id: tapped,
-            caused_by: None,
-        }]);
-        pending.collect(&[GameEvent::PermanentTapped {
-            object_id: tapped,
-            caused_by: None,
-        }]);
+            PendingActivationTriggerCollection::for_activated_ability(source, PlayerId(1));
+        pending.collect(
+            &state,
+            &[GameEvent::BecomesTarget {
+                target: TargetRef::Object(ward_target),
+                source_id: source,
+            }],
+        );
+        let serialized = serde_json::to_string(&pending)
+            .expect("pending activation collector must serialize for a resumed prompt");
+        let mut pending: PendingActivationTriggerCollection = serde_json::from_str(&serialized)
+            .expect("serialized pending activation collector must restore");
+        pending.collect(
+            &state,
+            &[GameEvent::PermanentTapped {
+                object_id: tapped,
+                caused_by: None,
+            }],
+        );
+        pending.collect(
+            &state,
+            &[GameEvent::PermanentTapped {
+                object_id: tapped,
+                caused_by: None,
+            }],
+        );
 
         assert_eq!(
-            pending.staged_state.object_tap_count_this_turn.get(&tapped),
+            pending
+                .staged_state_for_test(&state)
+                .object_tap_count_this_turn
+                .get(&tapped),
             Some(&2),
             "the later pending-payment event must see the earlier staged collector write"
         );
@@ -19345,11 +19378,14 @@ pub mod tests {
 
         let cancelled_tap = ObjectId(72);
         let mut cancelled =
-            PendingActivationTriggerCollection::for_activated_ability(&state, source, PlayerId(1));
-        cancelled.collect(&[GameEvent::PermanentTapped {
-            object_id: cancelled_tap,
-            caused_by: None,
-        }]);
+            PendingActivationTriggerCollection::for_activated_ability(source, PlayerId(1));
+        cancelled.collect(
+            &state,
+            &[GameEvent::PermanentTapped {
+                object_id: cancelled_tap,
+                caused_by: None,
+            }],
+        );
         drop(cancelled);
         assert!(
             !state
