@@ -309,6 +309,44 @@ impl PendingTriggerContext {
     }
 }
 
+/// Read-only authority supplied while collecting triggers for an action that has
+/// been prepared but has not yet produced its physical stack entry.
+///
+/// CR 602.2a + CR 602.2b: an activated ability is announced before its targets
+/// are chosen. Target-trigger collection therefore needs the announced
+/// ability's controller even while the activation is represented only by a
+/// pending transaction. The overlay is deliberately narrow: it can answer the
+/// controller of that one targeting source, but cannot alter object lookup,
+/// zones, or the stack.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TriggerCollectionOverlay {
+    virtual_targeting_source: Option<VirtualTargetingSource>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VirtualTargetingSource {
+    source_id: ObjectId,
+    controller: PlayerId,
+}
+
+impl TriggerCollectionOverlay {
+    /// Prepares the virtual source authority for one in-flight activation.
+    pub(crate) fn for_activated_ability(source_id: ObjectId, controller: PlayerId) -> Self {
+        Self {
+            virtual_targeting_source: Some(VirtualTargetingSource {
+                source_id,
+                controller,
+            }),
+        }
+    }
+
+    fn targeting_source_controller(self, source_id: ObjectId) -> Option<PlayerId> {
+        self.virtual_targeting_source
+            .filter(|source| source.source_id == source_id)
+            .map(|source| source.controller)
+    }
+}
+
 /// Installs one CR 603.7 delayed triggered ability and journals it.
 ///
 /// SINGLE AUTHORITY for adding to `GameState::delayed_triggers`. Every rules
@@ -2278,7 +2316,26 @@ fn collect_pending_triggers(
     state: &mut GameState,
     events: &[GameEvent],
 ) -> Vec<PendingTriggerContext> {
-    collect_pending_triggers_with_collection(state, events, LogicalZoneTriggerCollection::Ordinary)
+    collect_pending_triggers_with_overlay(state, events, TriggerCollectionOverlay::default())
+}
+
+/// Collect trigger contexts using a read-only authority for an announced
+/// activation that has not yet been committed to the physical stack.
+///
+/// This is collection only; callers remain responsible for placing the returned
+/// contexts in the appropriate deferred queue exactly once at their transaction
+/// commit boundary.
+pub(crate) fn collect_pending_triggers_with_overlay(
+    state: &mut GameState,
+    events: &[GameEvent],
+    overlay: TriggerCollectionOverlay,
+) -> Vec<PendingTriggerContext> {
+    collect_pending_triggers_with_collection(
+        state,
+        events,
+        LogicalZoneTriggerCollection::Ordinary,
+        overlay,
+    )
 }
 
 /// Collect one explicit delivery segment of a logical zone-change owner.
@@ -2295,6 +2352,7 @@ pub(crate) fn collect_logical_zone_trigger_segment(
         state,
         events,
         LogicalZoneTriggerCollection::Segment(group),
+        TriggerCollectionOverlay::default(),
     )
 }
 
@@ -2712,6 +2770,7 @@ fn collect_pending_triggers_with_collection(
     state: &mut GameState,
     events: &[GameEvent],
     collection: LogicalZoneTriggerCollection<'_>,
+    overlay: TriggerCollectionOverlay,
 ) -> Vec<PendingTriggerContext> {
     // CR 603.6a + CR 611.2e: Continuous effects (including statics that grant
     // triggered abilities to a class — sliver-lord pattern) apply the moment
@@ -3154,18 +3213,26 @@ fn collect_pending_triggers_with_collection(
                 } = event
                 {
                     if *targeted_id == obj_id {
-                        // Look up source controller. For spells, StackEntry.id matches source_id.
-                        // For activated abilities, StackEntry.source_id matches (the permanent),
-                        // and the fallback via state.objects finds the permanent's controller.
-                        let source_controller = state
-                            .stack
-                            .iter()
-                            .find(|e| {
-                                e.id == *targeting_source_id || e.source_id == *targeting_source_id
-                            })
-                            .map(|e| e.controller)
+                        // Prefer the prepared activation's virtual authority.
+                        // A committed spell/ability still resolves through its
+                        // physical stack entry, then the live source fallback.
+                        let source_controller = overlay
+                            .targeting_source_controller(*targeting_source_id)
                             .or_else(|| {
-                                state.objects.get(targeting_source_id).map(|o| o.controller)
+                                state
+                                    .stack
+                                    .iter()
+                                    .find(|entry| {
+                                        entry.id == *targeting_source_id
+                                            || entry.source_id == *targeting_source_id
+                                    })
+                                    .map(|entry| entry.controller)
+                            })
+                            .or_else(|| {
+                                state
+                                    .objects
+                                    .get(targeting_source_id)
+                                    .map(|obj| obj.controller)
                             });
 
                         // CR 702.21a + CR 611.3 + CR 613.11: An active
@@ -18910,6 +18977,72 @@ pub mod tests {
             state.stack.len(),
             1,
             "No ward trigger should fire for own spells"
+        );
+    }
+
+    #[test]
+    fn activation_overlay_supplies_controller_before_stack_commit() {
+        let make_state = || {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            let source = create_object(
+                &mut state,
+                CardId(9),
+                PlayerId(0),
+                "Activation Source".to_string(),
+                Zone::Battlefield,
+            );
+            let creature = create_object(
+                &mut state,
+                CardId(10),
+                PlayerId(0),
+                "Ward Creature".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.keywords
+                .push(Keyword::Ward(WardCost::Mana(ManaCost::generic(2))));
+            (state, source, creature)
+        };
+
+        // The source has no StackEntry, and its live controller deliberately
+        // differs from the prepared authority. This proves collection uses the
+        // announce-time controller rather than re-reading mutable battlefield
+        // state while the activation awaits its transaction commit.
+        let (mut without_overlay, prepared_source, ward_target) = make_state();
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(ward_target),
+            source_id: prepared_source,
+        };
+        assert!(
+            collect_pending_triggers(&mut without_overlay, std::slice::from_ref(&event)).is_empty(),
+            "the ordinary collector must use the live source controller"
+        );
+
+        let (mut with_overlay, prepared_source, ward_target) = make_state();
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(ward_target),
+            source_id: prepared_source,
+        };
+        let pending = collect_pending_triggers_with_overlay(
+            &mut with_overlay,
+            &[event],
+            TriggerCollectionOverlay::for_activated_ability(prepared_source, PlayerId(1)),
+        );
+
+        assert_eq!(
+            pending.len(),
+            1,
+            "opponent-controlled prepared activation must trigger ward"
+        );
+        assert_eq!(pending[0].pending.source_id, ward_target);
+        assert_eq!(pending[0].pending.controller, PlayerId(0));
+        assert!(pending[0].pending.ability.unless_pay.is_some());
+        assert!(
+            with_overlay.stack.is_empty(),
+            "collection remains non-dispatching; the future activation transaction owns commit"
         );
     }
 
