@@ -354,6 +354,7 @@ impl TriggerCollectionOverlay {
 /// owned operations makes their ordering explicit and gives a future
 /// activation-local collector a single seam at which to retain or discard them.
 /// The ordinary collector applies every operation immediately.
+#[derive(Clone)]
 enum TriggerCollectionOperation {
     PrepareEventBatch {
         events: Vec<GameEvent>,
@@ -381,21 +382,31 @@ enum TriggerCollectionOperation {
 
 /// Applies trigger-collection mutations in their collection order.
 ///
-/// This session intentionally owns no game-state borrow. Matching still reads
-/// the live state between operations, exactly as it did before this extraction;
-/// only the mutation authority is centralized. A later transactional caller can
-/// replace immediate application with an activation-local operation journal
-/// without changing any trigger-matching path.
+/// This session intentionally owns no game-state borrow. Ordinary collection
+/// applies each operation to live state immediately; activation-local collection
+/// applies it to a staged clone and retains the same ordered operation journal
+/// for its consuming commit path.
 struct TriggerCollectionSession {
     overlay: TriggerCollectionOverlay,
+    operation_journal: Option<Vec<TriggerCollectionOperation>>,
 }
 
 impl TriggerCollectionSession {
     fn new(overlay: TriggerCollectionOverlay) -> Self {
-        Self { overlay }
+        Self {
+            overlay,
+            operation_journal: None,
+        }
     }
 
-    fn prepare(&self, state: &mut GameState, events: &[GameEvent]) {
+    fn transactional(overlay: TriggerCollectionOverlay) -> Self {
+        Self {
+            overlay,
+            operation_journal: Some(Vec::new()),
+        }
+    }
+
+    fn prepare(&mut self, state: &mut GameState, events: &[GameEvent]) {
         let _ = self.apply(
             state,
             TriggerCollectionOperation::PrepareEventBatch {
@@ -404,7 +415,7 @@ impl TriggerCollectionSession {
         );
     }
 
-    fn record_match(&self, state: &mut GameState, matched: &MatchedTrigger, event: &GameEvent) {
+    fn record_match(&mut self, state: &mut GameState, matched: &MatchedTrigger, event: &GameEvent) {
         let _ = self.apply(
             state,
             TriggerCollectionOperation::RecordTriggerFired {
@@ -438,20 +449,20 @@ impl TriggerCollectionSession {
         );
     }
 
-    fn mark_speed_trigger_used(&self, state: &mut GameState, player: PlayerId) {
+    fn mark_speed_trigger_used(&mut self, state: &mut GameState, player: PlayerId) {
         let _ = self.apply(
             state,
             TriggerCollectionOperation::MarkSpeedTriggerUsed { player },
         );
     }
 
-    fn next_timestamp(&self, state: &mut GameState) -> u64 {
+    fn next_timestamp(&mut self, state: &mut GameState) -> u64 {
         self.apply(state, TriggerCollectionOperation::AllocateTimestamp)
             .expect("timestamp allocation must return the allocated timestamp")
     }
 
     fn record_combat_damage_casting_permission(
-        &self,
+        &mut self,
         state: &mut GameState,
         controller: PlayerId,
         grants_freerunning: bool,
@@ -488,7 +499,30 @@ impl TriggerCollectionSession {
             })
     }
 
-    fn apply(&self, state: &mut GameState, operation: TriggerCollectionOperation) -> Option<u64> {
+    fn apply(
+        &mut self,
+        state: &mut GameState,
+        operation: TriggerCollectionOperation,
+    ) -> Option<u64> {
+        if let Some(operation_journal) = &mut self.operation_journal {
+            operation_journal.push(operation.clone());
+        }
+        Self::apply_operation(state, operation)
+    }
+
+    fn commit(mut self, state: &mut GameState) {
+        let Some(operation_journal) = self.operation_journal.take() else {
+            return;
+        };
+        for operation in operation_journal {
+            let _ = Self::apply_operation(state, operation);
+        }
+    }
+
+    fn apply_operation(
+        state: &mut GameState,
+        operation: TriggerCollectionOperation,
+    ) -> Option<u64> {
         match operation {
             TriggerCollectionOperation::PrepareEventBatch { events } => {
                 super::layers::flush_layers(state);
@@ -546,6 +580,63 @@ impl TriggerCollectionSession {
                 None
             }
         }
+    }
+}
+
+/// Trigger collection held by an announced activated ability until its
+/// activation transaction commits or is cancelled.
+///
+/// CR 602.2a + CR 602.2b: An activation may cross several payment prompts after targets
+/// have produced trigger events, but none of those events become globally
+/// committed until the full activation is complete. This owner runs collection
+/// against a private state snapshot, retains every semantic collector operation
+/// in order, and exposes one consuming commit path. Dropping it is cancellation:
+/// neither its operations nor its pending contexts escape to the live game.
+pub(crate) struct PendingActivationTriggerCollection {
+    staged_state: GameState,
+    session: TriggerCollectionSession,
+    pending_contexts: Vec<PendingTriggerContext>,
+}
+
+impl PendingActivationTriggerCollection {
+    pub(crate) fn for_activated_ability(
+        state: &GameState,
+        source_id: ObjectId,
+        controller: PlayerId,
+    ) -> Self {
+        Self {
+            staged_state: state.clone(),
+            session: TriggerCollectionSession::transactional(
+                TriggerCollectionOverlay::for_activated_ability(source_id, controller),
+            ),
+            pending_contexts: Vec::new(),
+        }
+    }
+
+    /// Collect one event slice emitted while the activation is still pending.
+    ///
+    /// Later slices read the staged state after all earlier collector operations,
+    /// so per-turn trigger constraints and event-observation ledgers behave as
+    /// one uninterrupted collection transaction without touching live state.
+    pub(crate) fn collect(&mut self, events: &[GameEvent]) {
+        let contexts = collect_pending_triggers_with_collection(
+            &mut self.staged_state,
+            events,
+            LogicalZoneTriggerCollection::Ordinary,
+            &mut self.session,
+        );
+        self.pending_contexts.extend(contexts);
+    }
+
+    /// Commit collector consequences exactly once and append the retained
+    /// contexts to the caller's deferred delivery list.
+    pub(crate) fn commit_into(
+        self,
+        state: &mut GameState,
+        deferred_contexts: &mut Vec<PendingTriggerContext>,
+    ) {
+        self.session.commit(state);
+        deferred_contexts.extend(self.pending_contexts);
     }
 }
 
@@ -2532,11 +2623,12 @@ pub(crate) fn collect_pending_triggers_with_overlay(
     events: &[GameEvent],
     overlay: TriggerCollectionOverlay,
 ) -> Vec<PendingTriggerContext> {
+    let mut session = TriggerCollectionSession::new(overlay);
     collect_pending_triggers_with_collection(
         state,
         events,
         LogicalZoneTriggerCollection::Ordinary,
-        overlay,
+        &mut session,
     )
 }
 
@@ -2550,11 +2642,12 @@ pub(crate) fn collect_logical_zone_trigger_segment(
     group: &LogicalZoneChangeGroup,
     events: &[GameEvent],
 ) -> Vec<PendingTriggerContext> {
+    let mut session = TriggerCollectionSession::new(TriggerCollectionOverlay::default());
     collect_pending_triggers_with_collection(
         state,
         events,
         LogicalZoneTriggerCollection::Segment(group),
-        TriggerCollectionOverlay::default(),
+        &mut session,
     )
 }
 
@@ -2972,9 +3065,8 @@ fn collect_pending_triggers_with_collection(
     state: &mut GameState,
     events: &[GameEvent],
     collection: LogicalZoneTriggerCollection<'_>,
-    overlay: TriggerCollectionOverlay,
+    session: &mut TriggerCollectionSession,
 ) -> Vec<PendingTriggerContext> {
-    let session = TriggerCollectionSession::new(overlay);
     // CR 603.6a + CR 611.2e: Continuous effects (including statics that grant
     // triggered abilities to a class — sliver-lord pattern) apply the moment
     // the affected permanent is on the battlefield. The newcomers must be
@@ -19186,6 +19278,79 @@ pub mod tests {
         assert!(
             with_overlay.stack.is_empty(),
             "collection remains non-dispatching; the future activation transaction owns commit"
+        );
+    }
+
+    #[test]
+    fn pending_activation_collection_commits_once_and_drop_discards_everything() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Activation Source".to_string(),
+            Zone::Battlefield,
+        );
+        let ward_target = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Ward Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let ward = state.objects.get_mut(&ward_target).unwrap();
+        ward.card_types.core_types.push(CoreType::Creature);
+        ward.entered_battlefield_turn = Some(1);
+        ward.keywords
+            .push(Keyword::Ward(WardCost::Mana(ManaCost::generic(2))));
+
+        let tapped = ObjectId(71);
+        let mut pending =
+            PendingActivationTriggerCollection::for_activated_ability(&state, source, PlayerId(1));
+        pending.collect(&[GameEvent::BecomesTarget {
+            target: TargetRef::Object(ward_target),
+            source_id: source,
+        }]);
+        pending.collect(&[GameEvent::PermanentTapped {
+            object_id: tapped,
+            caused_by: None,
+        }]);
+        pending.collect(&[GameEvent::PermanentTapped {
+            object_id: tapped,
+            caused_by: None,
+        }]);
+
+        assert_eq!(
+            pending.staged_state.object_tap_count_this_turn.get(&tapped),
+            Some(&2),
+            "the later pending-payment event must see the earlier staged collector write"
+        );
+        assert_eq!(pending.pending_contexts.len(), 1);
+        assert!(
+            state.object_tap_count_this_turn.is_empty() && state.stack.is_empty(),
+            "pending collection must not mutate or dispatch through live state"
+        );
+
+        let mut deferred = Vec::new();
+        pending.commit_into(&mut state, &mut deferred);
+        assert_eq!(state.object_tap_count_this_turn.get(&tapped), Some(&2));
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].pending.source_id, ward_target);
+
+        let cancelled_tap = ObjectId(72);
+        let mut cancelled =
+            PendingActivationTriggerCollection::for_activated_ability(&state, source, PlayerId(1));
+        cancelled.collect(&[GameEvent::PermanentTapped {
+            object_id: cancelled_tap,
+            caused_by: None,
+        }]);
+        drop(cancelled);
+        assert!(
+            !state
+                .object_tap_count_this_turn
+                .contains_key(&cancelled_tap),
+            "cancelling the activation by dropping its session must discard collector writes"
         );
     }
 
