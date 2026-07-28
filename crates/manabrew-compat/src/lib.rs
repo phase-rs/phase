@@ -1,7 +1,7 @@
 //! Serialization adapter between this repo's MTG engine (`GameState` /
 //! `GameAction`) and the external ManaBrew wire protocol.
 //!
-//! Pinned upstream: `manabrew-protocol` **2.0.0** (crates.io, 2026-07-24).
+//! Pinned upstream: `manabrew-protocol` **3.0.0** (crates.io, 2026-07-28).
 //! [`PROTOCOL_VERSION`] is the crate major, which is how upstream defines the
 //! wire version.
 //!
@@ -73,8 +73,8 @@ pub use manabrew_protocol::transport::{
 use serde::{Deserialize, Serialize};
 
 /// Wire version of the pinned upstream protocol. Upstream defines the wire
-/// version as the `manabrew-protocol` crate major, so 2.0.0 => 2.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// version as the `manabrew-protocol` crate major, so 3.0.0 => 3.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub type Result<T> = std::result::Result<T, AdapterError>;
 
@@ -269,7 +269,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
     &UNSUPPORTED_PROTOCOL_CAPABILITIES
 }
 
-/// Gaps between this engine and protocol 2.0.0, machine-readable.
+/// Gaps between this engine and protocol 3.0.0, machine-readable.
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it.
@@ -4258,7 +4258,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_the_pinned_crate_major() {
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 3);
     }
 
     // -------------------------------------------------------------- state ---

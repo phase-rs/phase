@@ -4,7 +4,7 @@ This guide is the **first thing any agent working on `crates/manabrew-compat/` s
 
 ## What this crate does
 
-Translates between phase's engine types and the **ManaBrew wire protocol** (external MTG engine↔client JSON protocol, currently 2.0.0). It is a bidirectional adapter:
+Translates between phase's engine types and the **ManaBrew wire protocol** (external MTG engine↔client JSON protocol, currently 3.0.0). It is a bidirectional adapter:
 
 - **Outbound:** `WaitingFor` (engine decision point) → `PromptInput` (protocol prompt), plus `GameAction` → `AvailableActionKind`.
 - **Inbound:** `PromptOutput` (client answer) → `GameAction`.
