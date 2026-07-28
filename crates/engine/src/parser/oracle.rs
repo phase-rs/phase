@@ -3700,6 +3700,30 @@ impl<'a> DocEmitter<'a> {
         self.last_static.as_ref()
     }
 
+    /// Emit a heterogeneous IR node sequence at one line, in the order the
+    /// recognizer produced it. The IR-native counterpart of
+    /// `drain_result_vectors`: a recognizer that yields more than one CATEGORY
+    /// of node (Plan 05b U0-40 yields statics + a replacement) returns them as
+    /// one ordered `Vec<OracleNodeIr>` instead of pushing into a scratch
+    /// `ParsedAbilities` whose drain order is fixed by category rather than by
+    /// the recognizer.
+    ///
+    /// Nodes are dispatched through the typed `*_ir_at` helpers rather than
+    /// straight to `emit_at`, so the per-category `last_*` peek mirrors stay
+    /// maintained — `parsed_result_recently_granted_flashback` reads
+    /// `last_static()` mid-loop, and `drain_result_vectors` (via `static_at`)
+    /// maintains it today. Emitting these nodes raw would silently stop
+    /// updating it.
+    fn emit_ir_nodes_at(&mut self, item_line: usize, nodes: Vec<OracleNodeIr>) {
+        for node in nodes {
+            match node {
+                OracleNodeIr::Static(ir) => self.static_ir_at(item_line, ir),
+                OracleNodeIr::Trigger(ir) => self.trigger_ir_at(item_line, ir),
+                other => self.emit_at(item_line, other),
+            }
+        }
+    }
+
     /// Move every vector item a `&mut ParsedAbilities`-taking mutator just pushed
     /// into the builder at `item_line`, then clear them. Used for the complex
     /// cross-file mutators (modal / enters-replacement lowering) that the (B)
@@ -5624,15 +5648,31 @@ pub(crate) fn parse_oracle_ir(
             // generic `parse_replacement_sentence_sequence` / `parse_replacement_line`
             // parsers so those don't claim the "becomes your choice of" line as a
             // plain choice/animate and drop the per-mode gated statics.
-            if is_as_enters_becomes_choice_pattern(&lower)
-                && lower_as_enters_becomes_choice_modal(&line, &mut result)
-            {
-                emitter.drain_result_vectors(item_line, &mut result);
-                if result.modal.is_some() {
-                    modal_line.get_or_insert(item_line);
+            //
+            // Plan 05b U0-40: the recognizer returns typed IR nodes instead of
+            // pushing into the shared scratch. Emission order reproduces
+            // `drain_result_vectors`' CATEGORY order exactly — the face-up
+            // residual (an ability) first, then the per-mode statics, then the
+            // choice replacement — because `emit_at` stamps
+            // `ordinal_within_span` in emission order. Emitting directly rather
+            // than draining the scratch is safe for the same reason the
+            // `lower_as_enters_or_face_up_counters` site below gives: every
+            // other `&mut result` handoff in this loop is drain-followed, so the
+            // vectors are provably empty here. `result.modal` is a SINGLETON,
+            // which `drain_result_vectors` never touched either, so the check
+            // below is unchanged.
+            if is_as_enters_becomes_choice_pattern(&lower) {
+                if let Some(modal_ir) = lower_as_enters_becomes_choice_modal(&line) {
+                    if let Some(residual) = modal_ir.face_up_residual {
+                        emitter.ability_at(item_line, residual);
+                    }
+                    emitter.emit_ir_nodes_at(item_line, modal_ir.nodes);
+                    if result.modal.is_some() {
+                        modal_line.get_or_insert(item_line);
+                    }
+                    i += 1;
+                    continue;
                 }
-                i += 1;
-                continue;
             }
             // CR 614.1c + CR 708.11: dual "As ~ enters[ or is turned face up],
             // put X +1/+1 counters on it, where X is …" (Crowd-Control Warden).
