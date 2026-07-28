@@ -7897,6 +7897,46 @@ mod tests {
         );
     }
 
+    /// The mandatory-sacrifice entry point must use the commander-aware key,
+    /// rather than relying on the stable input order that used to break the
+    /// equal-priced pair. Both input orders are intentionally exercised.
+    #[test]
+    fn pick_lowest_value_sacrifices_spares_an_owned_commander_in_both_input_orders() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        let commander = add_creature(&mut state, ai, 4, 4);
+        let bear = add_creature(&mut state, ai, 4, 4);
+        {
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.is_commander = true;
+            obj.mana_cost = engine::types::mana::ManaCost::generic(4);
+            obj.base_mana_cost = engine::types::mana::ManaCost::generic(4);
+        }
+        state.commander_cast_count.insert(commander, 1);
+        let penalties = crate::config::PolicyPenalties::default();
+
+        assert_eq!(
+            sacrifice_key(&state, bear, &penalties).1,
+            10.0,
+            "reach guard: the ordinary 4/4 must retain its board price"
+        );
+        assert_eq!(
+            sacrifice_key(&state, commander, &penalties).1,
+            16.0,
+            "reach guard: the owned commander must carry its 6.0 repurchase premium"
+        );
+        assert_eq!(
+            pick_lowest_value_sacrifices(&state, &[bear, commander], 1, &penalties),
+            vec![bear],
+            "the bear is selected when it is already first"
+        );
+        assert_eq!(
+            pick_lowest_value_sacrifices(&state, &[commander, bear], 1, &penalties),
+            vec![bear],
+            "the bear is still selected when the commander arrives first"
+        );
+    }
+
     /// F8 — CR 701.21a: `pick_lowest_value_sacrifices` now routes through
     /// `strategy_helpers::sacrifice_cost`, the same battlefield authority
     /// `SacrificeValuePolicy` uses, instead of the land-blind card scalar.

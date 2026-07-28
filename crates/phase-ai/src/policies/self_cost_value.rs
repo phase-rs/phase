@@ -514,6 +514,25 @@ mod tests {
         id
     }
 
+    fn owned_commander_creature(
+        state: &mut GameState,
+        name: &str,
+        power: i32,
+        toughness: i32,
+        command_zone_casts: u32,
+    ) -> ObjectId {
+        let id = creature(state, AI, name, power, toughness);
+        let object = state.objects.get_mut(&id).unwrap();
+        object.is_commander = true;
+        object.mana_cost = engine::types::mana::ManaCost::generic(4);
+        object.base_mana_cost = engine::types::mana::ManaCost::generic(4);
+        state.format_config.command_zone = true;
+        if command_zone_casts > 0 {
+            state.commander_cast_count.insert(id, command_zone_casts);
+        }
+        id
+    }
+
     fn token_creature(state: &mut GameState, name: &str, p: i32, t: i32) -> ObjectId {
         let id = creature(state, AI, name, p, t);
         state.objects.get_mut(&id).unwrap().is_token = true;
@@ -1807,6 +1826,134 @@ mod tests {
         assert_neutral(
             &verdict_for(&state, source, plain_features()),
             "self_cost_benefit_covers_cost",
+        );
+    }
+
+    /// The filtered-sacrifice leaf is reached through `real_self_cost` and the
+    /// `SelfCostValuePolicy` adapter. A draw is worth 1.0: an ordinary 4/4
+    /// leaves a -9.0 margin, while the owned commander cast once costs 16.0 and
+    /// leaves -15.0. Both are categorical rejects; the exact margins prevent a
+    /// threshold change from hiding behind that shared verdict shape.
+    #[test]
+    fn commander_sacrifice_cost_widens_the_self_cost_veto_margin() {
+        let config = AiConfig::default();
+
+        let mut commander_state = state_with_library();
+        let commander = owned_commander_creature(&mut commander_state, "Commander", 4, 4, 1);
+        let commander_source = source_with(
+            &mut commander_state,
+            "High Market",
+            &[CoreType::Land],
+            activated(draw(1), sac_creature_cost()),
+        );
+        let commander_ability = commander_state.objects[&commander_source]
+            .abilities
+            .first()
+            .expect("fixture source has its sacrifice ability");
+        let commander_cost = real_self_cost(
+            &commander_state,
+            AI,
+            commander_source,
+            commander_ability
+                .cost
+                .as_ref()
+                .expect("fixture ability has a cost"),
+            &config.policy_penalties,
+        );
+
+        assert_eq!(
+            commander_cost, 16.0,
+            "reach guard: the commander must be the sole matching sacrifice and carry its 6.0 premium"
+        );
+        assert_eq!(1.0 - commander_cost, -15.0);
+        let commander_verdict = verdict_for(&commander_state, commander_source, plain_features());
+        assert_reject(&commander_verdict, "self_cost_benefit_underwater");
+        assert_facts(&commander_verdict, 16000, 1000);
+
+        let mut ordinary_state = state_with_library();
+        ordinary_state.format_config.command_zone = true;
+        creature(&mut ordinary_state, AI, "Bear", 4, 4);
+        let ordinary_source = source_with(
+            &mut ordinary_state,
+            "High Market",
+            &[CoreType::Land],
+            activated(draw(1), sac_creature_cost()),
+        );
+        let ordinary_ability = ordinary_state.objects[&ordinary_source]
+            .abilities
+            .first()
+            .expect("fixture source has its sacrifice ability");
+        let ordinary_cost = real_self_cost(
+            &ordinary_state,
+            AI,
+            ordinary_source,
+            ordinary_ability
+                .cost
+                .as_ref()
+                .expect("fixture ability has a cost"),
+            &config.policy_penalties,
+        );
+
+        assert_eq!(
+            ordinary_cost, 10.0,
+            "commander-free control: command-zone format alone must not uplift an ordinary 4/4"
+        );
+        assert_eq!(1.0 - ordinary_cost, -9.0);
+        let ordinary_verdict = verdict_for(&ordinary_state, ordinary_source, plain_features());
+        assert_reject(&ordinary_verdict, "self_cost_benefit_underwater");
+        assert_facts(&ordinary_verdict, 10000, 1000);
+
+        assert_eq!(
+            commander_cost - ordinary_cost,
+            6.0,
+            "the self-cost leaf reaches the premium exactly once"
+        );
+        assert_ne!(
+            commander, commander_source,
+            "the source must not join the creature fodder pool"
+        );
+    }
+
+    /// At six prior command-zone casts, the same 4/4's 16.0 repurchase premium
+    /// makes its sacrifice cost 26.0. Against draw(1), the verdict remains a
+    /// reject with a -25.0 margin; the finite price is intentionally observed at
+    /// the self-cost veto seam rather than assumed from the helper alone.
+    #[test]
+    fn high_tax_commander_reaches_the_self_cost_veto_with_its_live_margin() {
+        let config = AiConfig::default();
+        let mut state = state_with_library();
+        let commander = owned_commander_creature(&mut state, "Commander", 4, 4, 6);
+        let source = source_with(
+            &mut state,
+            "High Market",
+            &[CoreType::Land],
+            activated(draw(1), sac_creature_cost()),
+        );
+        assert_eq!(
+            state.commander_cast_count.get(&commander),
+            Some(&6),
+            "reach guard: the high-tax fixture must record exactly six prior command-zone casts"
+        );
+        let ability = state.objects[&source]
+            .abilities
+            .first()
+            .expect("fixture source has its sacrifice ability");
+        let cost = real_self_cost(
+            &state,
+            AI,
+            source,
+            ability.cost.as_ref().expect("fixture ability has a cost"),
+            &config.policy_penalties,
+        );
+
+        assert_eq!(cost, 26.0, "10.0 board value + 4.0 mana value + 12.0 tax");
+        assert_eq!(1.0 - cost, -25.0);
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_reject(&verdict, "self_cost_benefit_underwater");
+        assert_facts(&verdict, 26000, 1000);
+        assert!(
+            state.format_config.command_zone && state.objects[&commander].is_commander,
+            "reach guard: this high-tax fixture must be an owned commander in a command-zone format"
         );
     }
 

@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use engine::game::commander::commander_tax;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::players;
@@ -357,13 +358,106 @@ pub(crate) fn cmp_sacrifice(a: &(SacrificeTier, f64), b: &(SacrificeTier, f64)) 
         .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
 }
 
+/// The price of getting an owned commander back after it is given up, or `None`
+/// when this object has no command-zone repurchase to price.
+///
+/// # The price
+///
+/// CR 903.9a: a sacrificed or exiled commander does not leave the game — "its
+/// owner may put it into the command zone", a state-based action. Giving one up
+/// is therefore a **deferred repurchase**, and the price is what the repurchase
+/// costs. CR 903.8: that is the commander's mana value plus {2} per previous cast
+/// from the command zone. `commander_cast_count` already includes the cast that
+/// put this permanent onto the battlefield (`commander::record_commander_cast`,
+/// `commander.rs:21`, is its only mutating writer anywhere in `crates/engine/src`;
+/// `commander_tax_zero_on_first_cast` at `commander.rs:444` pins the ordering), so
+/// the returned value IS the next cast's tax. No adjustment is applied.
+///
+/// # Why `Option<f64>` and not `f64`
+///
+/// `Some(0.0)` and `None` are different facts and both are reachable on the real
+/// card pool. Returning `f64` would make `0.0` mean both "not a commander" and "a
+/// commander that is genuinely free to buy back" — the sentinel collapse CLAUDE.md
+/// forbids, where `Option<T>` is house style. That is the whole warrant; it does
+/// not rest on any test asserting it.
+///
+/// # The four conjuncts
+///
+/// 1. `state.format_config.command_zone` — checked FIRST, mirroring
+///    `sba::check_commander_zone_return` (`sba.rs:653`), whose own first statement
+///    is `if !state.format_config.command_zone { return; }` (`:654`). Outside a
+///    command-zone format a sacrificed commander is a TOTAL loss and the
+///    deferred-repurchase model does not apply, so there is no premium to charge.
+///    Load-bearing, not decorative: `FormatConfig::standard()` leaves it `false`
+///    (`format.rs:647`) and `GameState::new_two_player` builds from it.
+/// 2. `obj.uses_command_zone_rules()` (`game_object.rs:1648` =
+///    `is_commander || is_signature_spell()`) — reading the method rather than the
+///    bare `is_commander` field keeps Oathbreaker signature spells correct.
+/// 3. `obj.owner == obj.controller`. CR 903.3: the commander designation "is an
+///    attribute of the card itself". CR 108.3 defines owner; CR 110.2 states the
+///    owner/controller distinction for a permanent. CR 903.9a returns the card to
+///    **its owner's** command zone, so an OPPONENT's commander this player has
+///    stolen costs this player nothing extra to give up.
+/// 4. `obj.is_phased_in()`.
+///
+/// # On conjunct 4 — a documented MIRROR, not a reachability guard
+///
+/// This conjunct is kept because `commander::controls_own_commander`
+/// (`commander.rs:76`) — the engine's own "this player has their own commander on
+/// the battlefield" predicate — is a four-way conjunction whose fourth term is
+/// `obj.is_phased_in()`, annotated CR 702.26b. Matching the engine authority is
+/// right on its own terms.
+///
+/// It is explicitly NOT justified on reachability, and it excludes nothing that
+/// would otherwise get through. CR 702.26b in full (the prefix matters):
+/// "**Except for rules and effects that specifically mention phased-out
+/// permanents,** a phased-out permanent is treated as though it does not exist."
+/// `filter::matches_target_filter` (`filter.rs:1002`) is a one-line delegation to
+/// `filter_inner` (`:1844`), whose second statement — before any filter dispatch —
+/// is `if obj.is_phased_out() { return false; }` (`:1858`, annotated CR 702.26b).
+/// `matches_target_filter_including_phased_out` (`:1239`) exists solely as the
+/// documented bypass for that exception clause, with three production call sites
+/// (`turns.rs:1856`, `trigger_matchers.rs:4621`, `effects/phase_out.rs:197`). So
+/// the phased-out fodder is already excluded upstream and this conjunct is
+/// defence-in-depth on an already-excluded path.
+///
+/// # Why the live function and not `GameObject::commander_tax`
+///
+/// `GameObject` carries a `commander_tax: Option<u32>` field (`game_object.rs:861`)
+/// eight lines below `is_commander` (`:853`). Do NOT read it. Three reasons, any
+/// one sufficient: it is annotated "Display-only: computed by
+/// `derive_display_state()`"; it is populated only under
+/// `dirty.all_objects_dirty || dirty.battlefield_display_dirty`, so it is stale
+/// between derives; and it is `#[serde(skip_deserializing, ...)]`, so it is `None`
+/// on EVERY deserialized state — which is every state that crosses the WASM/IPC
+/// boundary. Reading it would make the premium silently vanish in exactly the
+/// deployments that matter. `commander::commander_tax(state, obj.id)` is a live
+/// `commander_cast_count` read and has none of these properties.
+fn command_zone_repurchase_cost(state: &GameState, obj: &GameObject) -> Option<f64> {
+    // CR 903.9a is gated on the format before anything else (`sba.rs:654`).
+    if !state.format_config.command_zone
+        || !obj.uses_command_zone_rules()
+        // CR 108.3 + CR 110.2 + CR 903.9a: the card returns to its OWNER's
+        // command zone, so a stolen commander is not this player's to repurchase.
+        || obj.owner != obj.controller
+        // CR 702.26b (mirroring `commander::controls_own_commander`'s fourth
+        // conjunct). Defence-in-depth: `matches_target_filter` already excludes
+        // phased-out objects at `filter.rs:1858`.
+        || !obj.is_phased_in()
+    {
+        return None;
+    }
+    Some(f64::from(
+        obj.mana_value_on_battlefield_exit() + commander_tax(state, obj.id),
+    ))
+}
+
 /// Value of a permanent for sacrifice-ordering decisions.
 /// Higher values mean the permanent is more costly to sacrifice.
 ///
 /// **This is the single battlefield give-up authority.** It prices the
 /// `Sacrifice` payment kind, every battlefield arm of `payment_selection`'s
-/// exile / return / remove-counter / tap-creatures kinds, `SacrificeValuePolicy`,
-/// and `self_cost`'s sacrifice leaves.
+/// exile kinds, `SacrificeValuePolicy`, and `self_cost`'s sacrifice leaves.
 ///
 /// Ordering a *selection* by this scalar alone is not safe — see
 /// [`SacrificeTier`] and use [`sacrifice_key`] / [`cmp_sacrifice`].
@@ -410,7 +504,75 @@ pub(crate) fn cmp_sacrifice(a: &(SacrificeTier, f64), b: &(SacrificeTier, f64)) 
 /// lives — never smuggled back into the price. Pinned by
 /// `sacrifice_cost_is_invariant_under_tap_state` and
 /// `sacrifice_ordering_prefers_lesser_permanent_over_tapped_discount`.
+///
+/// The command-zone repurchase premium is likewise intrinsic to the permanent's
+/// identity, not a board-state fact: an owned commander that is surrendered has
+/// the same next-cast cost whether it is tapped or untapped.
+///
+/// **Composition (CR 903.8 + CR 903.9a).** This function is now a thin wrapper:
+/// `permanent_board_value` + `command_zone_repurchase_cost`. It is the price of
+/// **surrendering** the permanent. Callers where the permanent is tapped,
+/// bounced or merely drained must call [`permanent_board_value`] instead — see
+/// its docstring for which is which. The six-branch price itself did not move
+/// or change; it lives in `permanent_board_value` verbatim.
 pub(crate) fn sacrifice_cost(
+    state: &GameState,
+    obj_id: ObjectId,
+    penalties: &PolicyPenalties,
+) -> f64 {
+    permanent_board_value(state, obj_id, penalties)
+        + state
+            .objects
+            .get(&obj_id)
+            .and_then(|obj| command_zone_repurchase_cost(state, obj))
+            .unwrap_or(0.0)
+}
+
+/// Board presence only — what the game loses in PERMANENTS when `obj_id` is
+/// given up. Carries no command-zone repurchase term.
+///
+/// # When to call this, and when to call [`sacrifice_cost`]
+///
+/// Call [`sacrifice_cost`] when the permanent is **surrendered** — sacrificed,
+/// or exiled from the battlefield. CR 903.9a then makes an owned commander a
+/// deferred repurchase at CR 903.8's price, and that price is real.
+///
+/// Call **this** function when the permanent is **used and kept**: tapped to
+/// crew or saddle (CR 702.122a / CR 702.171a), tapped to station
+/// (CR 702.184a), tapped as a `PayCostKind::TapCreatures` payment, drained by
+/// `RemoveCounter`, or bounced by `ReturnToHand` — which for a commander is
+/// governed by CR 903.9b, under which it is optionally command-zone-bound and
+/// in no case lost. Charging a repurchase for a permanent its controller still
+/// has prices a loss that does not occur.
+///
+/// # This is NOT a return of the deleted `permanent_value` twin
+///
+/// [`payment_cost`](super::payment_selection) records that a private
+/// `permanent_value` twin was deleted because it DIVERGED from this authority:
+/// it priced a land at 3.0 against `sacrifice_land_penalty` (4.5), and it tested
+/// `Creature` before `Land` where the authority tests `Land` first, so a
+/// creature-land came out of the two functions with opposite CLASSIFICATIONS,
+/// not merely opposite prices. "Both are now one call, so divergence is
+/// structurally impossible."
+///
+/// That decision is intact. The twin was a SECOND IMPLEMENTATION of the same
+/// question. This is ONE implementation of board value plus a strictly-additive
+/// wrapper: `sacrifice_cost` is defined as `permanent_board_value(..) +
+/// command_zone_repurchase_cost(..).unwrap_or(0.0)` and computes nothing of its
+/// own. There is no second branch dispatch, no second land/creature ordering,
+/// and no second coefficient — so there is no surface for the two to drift
+/// across. Every classification and every price still has exactly one home, and
+/// it is this function. **Do not re-merge them:** doing so re-introduces the
+/// commander repurchase premium into five call sites where the permanent is
+/// never given up.
+///
+/// # The split is this codebase's own stated intent
+///
+/// `payment_cost`'s docstring already draws this exact line in prose: "the
+/// per-kind economics live at the call sites as multipliers on that one scalar
+/// ... `RemoveCounter` and `TapCreatures` scale it BECAUSE THE PERMANENT IS NOT
+/// GIVEN UP AT ALL". This function is that sentence promoted to a boundary.
+pub(crate) fn permanent_board_value(
     state: &GameState,
     obj_id: ObjectId,
     penalties: &PolicyPenalties,
@@ -649,10 +811,18 @@ fn keyword_pressure(object: &GameObject) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::config::PolicyPenalties;
+    use engine::game::casting::handle_cast_spell;
     use engine::game::zones::create_object;
+    use engine::types::ability::{AbilityDefinition, AbilityKind};
+    use engine::types::format::FormatConfig;
+    use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::phase::Phase;
     use engine::types::zones::Zone;
 
     const AI: PlayerId = PlayerId(0);
@@ -946,6 +1116,25 @@ mod tests {
         id
     }
 
+    fn owned_commander_body(
+        state: &mut GameState,
+        power: i32,
+        toughness: i32,
+        mana_value: u32,
+        command_zone_casts: u32,
+    ) -> ObjectId {
+        let id = body(state, power, toughness, false);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.is_commander = true;
+        obj.mana_cost = ManaCost::generic(mana_value);
+        obj.base_mana_cost = ManaCost::generic(mana_value);
+        state.format_config.command_zone = true;
+        if command_zone_casts > 0 {
+            state.commander_cast_count.insert(id, command_zone_casts);
+        }
+        id
+    }
+
     /// **The give-up price is tap-invariant.** Two identical 2/2s, one tapped:
     /// sacrificing either loses exactly one 2/2 worth of permanent.
     ///
@@ -1039,6 +1228,237 @@ mod tests {
             ),
             Ordering::Less,
             "the 0/4 is the lesser permanent and is given up before the tapped 2/2"
+        );
+    }
+
+    /// An owned commander carries its next command-zone recast cost exactly
+    /// once, while the stat-identical non-commander retains the old board price.
+    #[test]
+    fn owned_commander_is_more_expensive_to_surrender_than_an_equal_body() {
+        let mut state = GameState::new_two_player(7);
+        let penalties = PolicyPenalties::default();
+        let commander = owned_commander_body(&mut state, 4, 4, 4, 1);
+        let bear = body(&mut state, 4, 4, false);
+
+        assert_eq!(sacrifice_cost(&state, bear, &penalties), 10.0);
+        assert_eq!(sacrifice_cost(&state, commander, &penalties), 16.0);
+        assert!(
+            cmp_sacrifice(
+                &sacrifice_key(&state, bear, &penalties),
+                &sacrifice_key(&state, commander, &penalties),
+            ) == Ordering::Less,
+            "the production sacrifice comparator must surrender the bear first"
+        );
+
+        let vehicle_card = CardId(state.next_object_id);
+        let vehicle = create_object(
+            &mut state,
+            vehicle_card,
+            AI,
+            "Vehicle Commander".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&vehicle).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.is_commander = true;
+            obj.mana_cost = ManaCost::generic(4);
+            obj.base_mana_cost = ManaCost::generic(4);
+        }
+        state.commander_cast_count.insert(vehicle, 1);
+        assert_eq!(
+            sacrifice_cost(&state, vehicle, &penalties),
+            10.0,
+            "uncrewed Vehicle commander = capped board value 4 + recast price 6"
+        );
+    }
+
+    /// `Some(0.0)` is a real free commander repurchase, distinct from a
+    /// non-commander's `None`; disabling the format gate removes the premium.
+    #[test]
+    fn command_zone_repurchase_gate_distinguishes_free_and_absent_prices() {
+        let mut state = GameState::new_two_player(7);
+        let penalties = PolicyPenalties::default();
+        let rograkh = owned_commander_body(&mut state, 0, 1, 0, 0);
+        let bear = body(&mut state, 0, 1, false);
+
+        assert_eq!(
+            command_zone_repurchase_cost(&state, &state.objects[&rograkh]),
+            Some(0.0)
+        );
+        assert_eq!(
+            command_zone_repurchase_cost(&state, &state.objects[&bear]),
+            None
+        );
+        assert_eq!(
+            sacrifice_cost(&state, rograkh, &penalties),
+            sacrifice_cost(&state, bear, &penalties),
+            "a zero-mana commander with no prior command-zone cast is correctly equal"
+        );
+
+        state.format_config.command_zone = false;
+        assert_eq!(
+            command_zone_repurchase_cost(&state, &state.objects[&rograkh]),
+            None
+        );
+        assert_eq!(
+            sacrifice_cost(&state, rograkh, &penalties),
+            sacrifice_cost(&state, bear, &penalties),
+            "format-off negative control proves the premium reach guard"
+        );
+    }
+
+    /// Ownership, not commander-looking characteristics, determines who has to
+    /// pay the next command-zone cast cost.
+    #[test]
+    fn only_the_controller_owned_commander_gets_the_repurchase_premium() {
+        let mut state = GameState::new_two_player(7);
+        let penalties = PolicyPenalties::default();
+        let owned = owned_commander_body(&mut state, 4, 4, 4, 1);
+        let stolen = owned_commander_body(&mut state, 4, 4, 4, 1);
+        state.objects.get_mut(&stolen).unwrap().owner = PlayerId(1);
+        let bear = body(&mut state, 4, 4, false);
+
+        assert_eq!(sacrifice_cost(&state, owned, &penalties), 16.0);
+        assert_eq!(
+            sacrifice_cost(&state, stolen, &penalties),
+            sacrifice_cost(&state, bear, &penalties),
+            "a stolen commander is not this controller's deferred repurchase"
+        );
+    }
+
+    /// A token copy is not a commander card and cannot be repurchased from the
+    /// command zone; the original on the same board reaches the positive gate.
+    #[test]
+    fn token_copy_of_a_commander_has_no_repurchase_premium() {
+        let mut state = GameState::new_two_player(7);
+        let penalties = PolicyPenalties::default();
+        let original = owned_commander_body(&mut state, 4, 4, 4, 1);
+        let token_copy = body(&mut state, 4, 4, false);
+        state.objects.get_mut(&token_copy).unwrap().is_token = true;
+        let plain_token = body(&mut state, 4, 4, false);
+        state.objects.get_mut(&plain_token).unwrap().is_token = true;
+
+        assert_eq!(
+            command_zone_repurchase_cost(&state, &state.objects[&token_copy]),
+            None
+        );
+        assert_eq!(
+            sacrifice_cost(&state, token_copy, &penalties),
+            sacrifice_cost(&state, plain_token, &penalties)
+        );
+        assert!(
+            sacrifice_cost(&state, original, &penalties)
+                > sacrifice_cost(&state, token_copy, &penalties),
+            "positive reach guard: the original commander must be more expensive"
+        );
+    }
+
+    /// The premium reads the face restored on battlefield exit, not a mutable
+    /// live mana cost or a face-down shell.
+    #[test]
+    fn command_zone_repurchase_uses_the_battlefield_exit_mana_value() {
+        let mut state = GameState::new_two_player(7);
+        let transformed = owned_commander_body(&mut state, 4, 4, 0, 0);
+        {
+            let obj = state.objects.get_mut(&transformed).unwrap();
+            obj.transformed = true;
+            let mut stashed = obj.clone();
+            stashed.mana_cost = ManaCost::generic(5);
+            obj.back_face = Some(engine::game::printed_cards::snapshot_object_face(&stashed));
+        }
+        assert_eq!(
+            command_zone_repurchase_cost(&state, &state.objects[&transformed]),
+            Some(5.0)
+        );
+
+        let copied = owned_commander_body(&mut state, 4, 4, 4, 1);
+        state.objects.get_mut(&copied).unwrap().mana_cost = ManaCost::NoCost;
+        assert_eq!(
+            command_zone_repurchase_cost(&state, &state.objects[&copied]),
+            Some(6.0)
+        );
+
+        let untouched = owned_commander_body(&mut state, 4, 4, 4, 1);
+        assert_eq!(
+            command_zone_repurchase_cost(&state, &state.objects[&untouched]),
+            Some(6.0)
+        );
+
+        let face_down_non_commander = body(&mut state, 2, 2, false);
+        state
+            .objects
+            .get_mut(&face_down_non_commander)
+            .unwrap()
+            .face_down = true;
+        assert_eq!(
+            command_zone_repurchase_cost(&state, &state.objects[&face_down_non_commander]),
+            None
+        );
+    }
+
+    /// The live tax is keyed by the object that really travelled from command
+    /// zone through stack to battlefield, rather than a test-only map insertion.
+    #[test]
+    fn command_zone_repurchase_cost_follows_a_real_commander_cast() {
+        let mut state = GameState::new(FormatConfig::commander(), 2, 7);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = AI;
+        state.priority_player = AI;
+        state.waiting_for = WaitingFor::Priority { player: AI };
+        state.turn_number = 2;
+
+        let card_id = CardId(state.next_object_id);
+        let commander = create_object(
+            &mut state,
+            card_id,
+            AI,
+            "Cast Commander".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+            obj.is_commander = true;
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 2,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Commander".to_string(),
+                    description: None,
+                },
+            ));
+        }
+        for _ in 0..3 {
+            let _ = state
+                .add_mana_to_pool(AI, ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+        }
+
+        handle_cast_spell(&mut state, AI, commander, card_id, &mut Vec::new())
+            .expect("cast the commander from the command zone");
+        engine::game::zones::move_to_zone(
+            &mut state,
+            commander,
+            Zone::Battlefield,
+            &mut Vec::new(),
+        );
+
+        assert_eq!(state.objects[&commander].zone, Zone::Battlefield);
+        assert_eq!(
+            command_zone_repurchase_cost(&state, &state.objects[&commander]),
+            Some(5.0),
+            "mana value 3 plus the real first-cast tax 2"
+        );
+        assert_eq!(
+            sacrifice_cost(&state, commander, &PolicyPenalties::default()),
+            15.0,
+            "4/4 board value 10 plus the real-cast premium 5"
         );
     }
 }

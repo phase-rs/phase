@@ -251,10 +251,14 @@ impl TacticalPolicy for SacrificeValuePolicy {
     /// **What it does and does not guarantee.** Its magnitude strictly exceeds
     /// `NONCREATURE_SACRIFICE_CAP`, so a land is never given up ahead of any
     /// *non-creature* permanent — **for selections whose raw magnitude stays
-    /// within `SACRIFICE_VALUE_RAW_CEILING`**, which at the shipped defaults
-    /// means every all-non-creature selection up to **seven** cards, a bound
-    /// measured by `sacrifice_value_ceiling_pins_the_compression_it_costs`
-    /// rather than asserted here. That qualifier is load-bearing
+    /// within `SACRIFICE_VALUE_RAW_CEILING`**. At the shipped defaults, that
+    /// means every all-non-creature selection containing no owned commander up
+    /// to **seven** cards. With one owned commander whose `sacrifice_cost` is
+    /// `C`, the bound is instead `ceil((34 - C) / 4) - 1`: **five** cards for
+    /// the canonical `{3}{W}` Vehicle commander cast once (`C = 10.0`), and
+    /// **three** for a high-tax ten-drop (`C = 20.0`). There is deliberately no
+    /// single commander-present cardinality. Both bounds are measured by
+    /// `sacrifice_value_ceiling_pins_the_compression_it_costs`. That qualifier is load-bearing
     /// and is why this returns a *rescaled* score below rather than the raw
     /// one: the guard is an additive term, so a bare `PolicyVerdict::score`
     /// clamp erases it first, and it did so from four cards upward. Past the
@@ -310,14 +314,18 @@ mod tests {
     use super::super::strategy_helpers::NONCREATURE_SACRIFICE_CAP;
     use super::*;
 
-    /// The largest all-non-creature selection cardinality at which the land guard
-    /// must still order correctly under [`SACRIFICE_VALUE_RAW_CEILING`].
+    /// The largest all-non-creature selection cardinality containing no owned
+    /// commander at which the land guard must still order correctly under
+    /// [`SACRIFICE_VALUE_RAW_CEILING`].
     ///
     /// Not chosen — *measured*, then checked against reachability. The worst-case
     /// magnitude of such a selection is
     /// `NONCREATURE_SACRIFICE_CAP * (N - 1) + sacrifice_land_penalty +
     /// |sacrifice_needed_land_penalty|` = `4N + 5` at the shipped defaults, so the
-    /// ceiling above orders the guard up to `N = 7`.
+    /// ceiling above orders the guard up to `N = 7`. This constant intentionally
+    /// has no commander arm: a commander prices at its live `sacrifice_cost`, so
+    /// the commander-present bound is a function of that price rather than one
+    /// universal integer.
     ///
     /// **The bound is set by where BOTH sides saturate, not by `4N + 5 <=
     /// ceiling`.** Do not re-derive it the short way: `4 * 7 + 5 = 33` already
@@ -380,6 +388,242 @@ mod tests {
             ),
             ManaCost::zero(),
         ))
+    }
+
+    fn creature_body(state: &mut GameState, name: &str, power: i32, toughness: i32) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.power = Some(power);
+        object.toughness = Some(toughness);
+        id
+    }
+
+    fn owned_commander_body(
+        state: &mut GameState,
+        name: &str,
+        power: i32,
+        toughness: i32,
+        mana_value: u32,
+        command_zone_casts: u32,
+    ) -> ObjectId {
+        let id = creature_body(state, name, power, toughness);
+        let object = state.objects.get_mut(&id).unwrap();
+        object.is_commander = true;
+        object.mana_cost = ManaCost::generic(mana_value);
+        object.base_mana_cost = ManaCost::generic(mana_value);
+        state.format_config.command_zone = true;
+        if command_zone_casts > 0 {
+            state.commander_cast_count.insert(id, command_zone_casts);
+        }
+        id
+    }
+
+    fn sacrifice_policy_score_and_verdict(
+        state: &GameState,
+        choices: &[ObjectId],
+        cards: Vec<ObjectId>,
+    ) -> (f64, PolicyVerdict) {
+        let config = AiConfig::default();
+        let selection_count = cards.len();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::PayCost {
+                player: PlayerId(0),
+                kind: PayCostKind::Sacrifice,
+                choices: choices.to_vec(),
+                count: selection_count,
+                min_count: selection_count,
+                resume: CostResume::Spell {
+                    spell: dummy_pending(),
+                },
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::SelectCards { cards },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
+        };
+        let context = crate::context::AiContext::empty(&config.weights);
+        let policy_context = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let raw = SacrificeValuePolicy.score(&policy_context);
+        (raw, SacrificeValuePolicy.verdict(&policy_context))
+    }
+
+    /// At temperature 1.0, two equally priced 4/4 bodies gave the commander a
+    /// 0.500 softmax rate before this change. The commander now scores -9.40
+    /// against the bear's -7.00, giving it a 0.083 rate.
+    #[test]
+    fn commander_premium_reduces_the_sacrifice_policy_softmax_rate() {
+        let mut state = GameState::new_two_player(42);
+        let commander = owned_commander_body(&mut state, "Commander", 4, 4, 4, 1);
+        let bear = creature_body(&mut state, "Bear", 4, 4);
+
+        let (bear_raw, bear_verdict) =
+            sacrifice_policy_score_and_verdict(&state, &[commander, bear], vec![bear]);
+        let (commander_raw, commander_verdict) =
+            sacrifice_policy_score_and_verdict(&state, &[commander, bear], vec![commander]);
+        let PolicyVerdict::Score {
+            delta: bear_delta, ..
+        } = bear_verdict
+        else {
+            panic!("sacrifice value policy must score the bear selection");
+        };
+        let PolicyVerdict::Score {
+            delta: commander_delta,
+            ..
+        } = commander_verdict
+        else {
+            panic!("sacrifice value policy must score the commander selection");
+        };
+
+        assert_eq!(
+            bear_raw, -10.0,
+            "reach guard: the bear reaches the policy score"
+        );
+        assert_eq!(
+            commander_raw, -16.0,
+            "reach guard: the premium reaches the policy score"
+        );
+        assert!(
+            bear_raw.abs() < SACRIFICE_VALUE_RAW_CEILING
+                && commander_raw.abs() < SACRIFICE_VALUE_RAW_CEILING,
+            "the rate is meaningful only before saturation: bear={bear_raw}, commander={commander_raw}"
+        );
+        assert_eq!(bear_delta, -7.0);
+        assert_eq!(commander_delta, -9.4);
+
+        let pre_change_commander_rate = 1.0 / (1.0 + (bear_delta - bear_delta).exp());
+        let commander_rate =
+            (commander_delta - bear_delta).exp() / (1.0 + (commander_delta - bear_delta).exp());
+        assert_eq!(pre_change_commander_rate, 0.5);
+        assert!(
+            (commander_rate - 0.083_172_696_493_922_38).abs() < 1e-12,
+            "the changed softmax rate must remain the documented 0.083, got {commander_rate}"
+        );
+        assert!(
+            commander_rate < 0.5 * pre_change_commander_rate,
+            "the commander rate must fall materially: post={commander_rate} pre={pre_change_commander_rate}"
+        );
+    }
+
+    /// Two 6/6 bodies cost 15.0 each, so the unchanged pair lands exactly at
+    /// the 30.0 raw ceiling. Adding the command-zone premium only moves the
+    /// pair farther into the same saturated result.
+    #[test]
+    fn two_six_sixes_keep_the_sacrifice_verdict_at_the_raw_ceiling() {
+        use super::super::registry::CRITICAL_MAX;
+
+        let mut state = GameState::new_two_player(42);
+        let commander = owned_commander_body(&mut state, "Commander", 6, 6, 4, 1);
+        let bear = creature_body(&mut state, "Bear", 6, 6);
+        let second_bear = creature_body(&mut state, "Second Bear", 6, 6);
+        let penalties = crate::config::PolicyPenalties::default();
+
+        assert_eq!(sacrifice_cost(&state, bear, &penalties), 15.0);
+        assert_eq!(sacrifice_cost(&state, second_bear, &penalties), 15.0);
+        assert_eq!(
+            sacrifice_cost(&state, commander, &penalties),
+            21.0,
+            "reach guard: the commander premium is live before the ceiling pin"
+        );
+
+        let (commander_raw, commander_verdict) = sacrifice_policy_score_and_verdict(
+            &state,
+            &[commander, bear, second_bear],
+            vec![commander, bear],
+        );
+        let (control_raw, control_verdict) = sacrifice_policy_score_and_verdict(
+            &state,
+            &[commander, bear, second_bear],
+            vec![bear, second_bear],
+        );
+        let PolicyVerdict::Score {
+            delta: commander_delta,
+            reason: commander_reason,
+        } = commander_verdict
+        else {
+            panic!("sacrifice value policy must score the premium-bearing selection");
+        };
+        let PolicyVerdict::Score {
+            delta: control_delta,
+            reason: control_reason,
+        } = control_verdict
+        else {
+            panic!("sacrifice value policy must score the pre-change control");
+        };
+
+        assert_eq!(control_raw, -SACRIFICE_VALUE_RAW_CEILING);
+        assert_eq!(commander_raw, -36.0);
+        assert_eq!(control_delta, -CRITICAL_MAX);
+        assert_eq!(commander_delta, -CRITICAL_MAX);
+        assert_eq!(
+            commander_delta, control_delta,
+            "the pre-change control and premium-bearing selection must have the same saturated delta"
+        );
+        assert_eq!(
+            commander_reason.kind, control_reason.kind,
+            "the saturated verdict reason must remain identical"
+        );
+        assert_eq!(
+            commander_reason.facts, control_reason.facts,
+            "the saturated verdict facts must remain identical"
+        );
+    }
+
+    /// Before the premium, the owned commander and ordinary 4/4 both cost 10.0
+    /// and had identical `(Ordinary, 10.0)` keys, so P(commander) was 0.5. Now
+    /// the bear scores -7.0 and the commander -9.4: the bear selection wins and
+    /// the commander is spared.
+    ///
+    /// The premium is finite, not absolute protection: a 12/12 body costs 30.0
+    /// and is the kind of irreplaceable body that can still outrank a recastable
+    /// commander. It sits on this policy's ceiling, so it is documented here
+    /// rather than used in a live assertion.
+    #[test]
+    fn comparable_body_sacrifice_verdict_gives_up_the_bear_and_spares_the_commander() {
+        let mut state = GameState::new_two_player(42);
+        let commander = owned_commander_body(&mut state, "Commander", 4, 4, 4, 1);
+        let bear = creature_body(&mut state, "Bear", 4, 4);
+
+        let (bear_raw, bear_verdict) =
+            sacrifice_policy_score_and_verdict(&state, &[commander, bear], vec![bear]);
+        let (commander_raw, commander_verdict) =
+            sacrifice_policy_score_and_verdict(&state, &[commander, bear], vec![commander]);
+        let PolicyVerdict::Score {
+            delta: bear_delta, ..
+        } = bear_verdict
+        else {
+            panic!("sacrifice value policy must score the bear selection");
+        };
+        let PolicyVerdict::Score {
+            delta: commander_delta,
+            ..
+        } = commander_verdict
+        else {
+            panic!("sacrifice value policy must score the commander selection");
+        };
+
+        assert_eq!(bear_raw, -10.0);
+        assert_eq!(commander_raw, -16.0);
+        assert!(
+            bear_delta > commander_delta,
+            "the bear candidate wins ({bear_delta}) over the commander candidate ({commander_delta}), so the AI gives up the BEAR and spares the commander"
+        );
     }
 
     fn optional_sacrifice_for_card_state() -> (GameState, ObjectId) {
@@ -1196,6 +1440,55 @@ mod tests {
              {GUARDED_SELECTION_CARDINALITY}. Whichever you changed — the \
              ceiling, NONCREATURE_SACRIFICE_CAP, or a sacrifice penalty default \
              — the two must be re-derived together."
+        );
+
+        // The no-commander derivation above is intentionally constant-only. This
+        // arm constructs the commander that invalidates its universal reading:
+        // an uncrewed `{3}{W}` Vehicle commander cast once costs 4.0 on board
+        // plus a 6.0 command-zone repurchase, so C is literally 10.0.
+        let mut commander_state = GameState::new_two_player(42);
+        commander_state.format_config.command_zone = true;
+        let vehicle_card = CardId(commander_state.next_object_id);
+        let vehicle = create_object(
+            &mut commander_state,
+            vehicle_card,
+            PlayerId(0),
+            "Vehicle Commander".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = commander_state.objects.get_mut(&vehicle).unwrap();
+            object.card_types.core_types.push(CoreType::Artifact);
+            object.is_commander = true;
+            object.mana_cost = ManaCost::generic(4);
+            object.base_mana_cost = ManaCost::generic(4);
+        }
+        commander_state.commander_cast_count.insert(vehicle, 1);
+        let commander_price = sacrifice_cost(&commander_state, vehicle, &penalties);
+        assert_eq!(
+            commander_price, 10.0,
+            "reach guard: the cardinality arm must use a real owned commander priced at C = 10.0"
+        );
+
+        let commander_ordered_to = (2..=12)
+            .take_while(|n| {
+                let n = f64::from(*n);
+                let land_free = -(commander_price + NONCREATURE_SACRIFICE_CAP * (n - 1.0));
+                let with_land = -(commander_price
+                    + NONCREATURE_SACRIFICE_CAP * (n - 2.0)
+                    + penalties.sacrifice_land_penalty
+                    + penalties.sacrifice_needed_land_penalty.abs());
+                rescale_into_critical_band(land_free, SACRIFICE_VALUE_RAW_CEILING)
+                    > rescale_into_critical_band(with_land, SACRIFICE_VALUE_RAW_CEILING)
+            })
+            .last()
+            .map(f64::from)
+            .expect("a commander-present selection of two cards still orders");
+        assert_eq!(
+            commander_ordered_to, 5.0,
+            "with C = 10.0, the commander-present bound is five: moving the \
+             ceiling, cap, land penalty, or the live commander price requires \
+             re-deriving this formula"
         );
     }
 
