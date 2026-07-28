@@ -6532,7 +6532,59 @@ pub fn parse_oracle_text(
     );
     let mut parsed = lower_oracle_ir(&mut ir);
     scrub_granting_placeholder_descriptions(&mut parsed);
+    demote_unbound_delayed_sweeps(&mut parsed);
     parsed
+}
+
+/// CR 611.2a + CR 400.7: Post-lowering coverage-honesty net for the
+/// impulse-cleanup **sweep** — a delayed graveyard move whose swept objects were
+/// never bound to a concrete set.
+///
+/// `oracle_effect::delayed_sweep_is_unbound_anaphor` documents the shape and why
+/// it cannot work: the zone change is left targeting `ParentTarget`, which
+/// resolves to the parent instruction's chosen target (for Grinning Totem the
+/// targeted *opponent*, not the exiled card), so the swept card is stranded in
+/// its zone while the card reports as fully supported.
+///
+/// This runs as a post-lowering invariant rather than inside one grammar arm on
+/// purpose: several builders can emit a `CreateDelayedTrigger`, and the honesty
+/// requirement is a property of the FINAL tree, not of any single production. It
+/// sits beside `scrub_granting_placeholder_descriptions` for the same reason —
+/// that pass is the existing precedent for a whole-tree degrade net.
+fn demote_unbound_delayed_sweeps(parsed: &mut ParsedAbilities) {
+    for def in &mut parsed.abilities {
+        demote_sweeps_in_ability(def);
+    }
+    for trig in &mut parsed.triggers {
+        if let Some(exec) = trig.execute.as_deref_mut() {
+            demote_sweeps_in_ability(exec);
+        }
+    }
+}
+
+/// Walk one ability chain, replacing any `CreateDelayedTrigger` whose inner
+/// chain is an unbound graveyard sweep with an honest `Effect::unimplemented`.
+/// The gap key is a stable snake_case pattern-class key (CLAUDE.md), distinct
+/// from every previously-supported handler so the resulting coverage flip lands
+/// in `coverage-regression-check.sh`'s non-fatal "coverage honesty" bucket.
+fn demote_sweeps_in_ability(def: &mut AbilityDefinition) {
+    let demote = match &*def.effect {
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            crate::parser::oracle_effect::delayed_sweep_is_unbound_anaphor(effect)
+        }
+        _ => false,
+    };
+    if demote {
+        let fragment = def.description.clone().unwrap_or_default();
+        // Replace in place rather than reallocating the Box (clippy::replace_box).
+        *def.effect = Effect::unimplemented("delayed_unplayed_exile_sweep", &fragment);
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        demote_sweeps_in_ability(sub);
+    }
+    if let Some(els) = def.else_ability.as_deref_mut() {
+        demote_sweeps_in_ability(els);
+    }
 }
 
 /// CR 201.5a: Single post-parse degrade net for [`GRANTING_SELF_PLACEHOLDER`].

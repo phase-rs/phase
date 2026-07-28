@@ -22915,3 +22915,101 @@ fn throne_of_eldraine_parses_all_chosen_color_mana_riders() {
         Some(ActivationManaPaymentRestriction::OnlySourceChosenColor),
     );
 }
+
+/// Helper: count `Effect::Unimplemented` markers carrying `key` anywhere in a
+/// parsed card, so the honesty tests below assert on the pattern-class key
+/// rather than on a Debug substring.
+fn unimplemented_keys(parsed: &ParsedAbilities) -> Vec<String> {
+    fn walk(def: &AbilityDefinition, out: &mut Vec<String>) {
+        if let Effect::Unimplemented { name, .. } = &*def.effect {
+            out.push(name.to_string());
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            walk(sub, out);
+        }
+        if let Some(els) = def.else_ability.as_deref() {
+            walk(els, out);
+        }
+    }
+    let mut out = Vec::new();
+    for def in &parsed.abilities {
+        walk(def, &mut out);
+    }
+    for trig in &parsed.triggers {
+        if let Some(exec) = trig.execute.as_deref() {
+            walk(exec, &mut out);
+        }
+    }
+    out
+}
+
+/// CR 611.2a + CR 400.7: The impulse-cleanup sweep must stay HONESTLY
+/// unsupported. `demote_unbound_delayed_sweeps` replaces a delayed graveyard
+/// move whose swept objects were never bound to a concrete set with an
+/// `Effect::unimplemented`, because that shape provably strands the swept card
+/// (its `ParentTarget` resolves to the parent instruction's target — for
+/// Grinning Totem the targeted OPPONENT, not the exiled card) while the card
+/// would otherwise report as fully supported.
+///
+/// Three cards share the shape, so this is a class guard, not a card special
+/// case. Reverting the pass drops every key here and silently re-promotes all
+/// three to "supported".
+#[test]
+fn unbound_delayed_graveyard_sweep_stays_honestly_unimplemented() {
+    let cases = [
+        (
+            "Grinning Totem",
+            "{2}, {T}, Sacrifice this artifact: Search target opponent's library for a card and exile it. Then that player shuffles. Until the beginning of your next upkeep, you may play that card. At the beginning of your next upkeep, if you haven't played it, put it into its owner's graveyard.",
+        ),
+        (
+            "Bank Job",
+            "At the beginning of your upkeep, exile the bottom creature card of your library. You may cast that card this turn. At the beginning of the next end step, if that card is still exiled, put it into your graveyard and create a Treasure token.",
+        ),
+        (
+            "Glimpse the Impossible",
+            "Exile the top three cards of your library. You may play those cards this turn. At the beginning of the next end step, if any of those cards remain exiled, put them into your graveyard, then create a 0/1 colorless Eldrazi Spawn creature token for each card put into your graveyard this way.",
+        ),
+    ];
+    for (name, text) in cases {
+        let parsed = parse_oracle_text(text, name, &[], &[], &[]);
+        assert!(
+            unimplemented_keys(&parsed)
+                .iter()
+                .any(|k| k == "delayed_unplayed_exile_sweep"),
+            "{name} must keep an honest `delayed_unplayed_exile_sweep` marker; \
+             keys={:?}",
+            unimplemented_keys(&parsed),
+        );
+    }
+}
+
+/// The honesty net is narrow: a delayed recall/sweep that DOES bind its objects
+/// must be left alone. Both negatives carry a positive reach-guard — each card
+/// parses with zero `Unimplemented` of any kind — so neither assertion can pass
+/// vacuously by the card having failed to parse at all.
+#[test]
+fn bound_delayed_recalls_are_not_demoted() {
+    let cases = [
+        // Necropotence class: delayed recall to HAND, tracked-set bound. Works
+        // end to end today, so demoting it would be a false negative.
+        (
+            "Necropotence",
+            "{2}: Exile the top card of your library face down. Put that card into your hand at the beginning of your next end step.",
+        ),
+        // Valakut Exploration: its sweep names the cards via an
+        // exiled-with-this-source filter, not an unbound anaphor.
+        (
+            "Valakut Exploration",
+            "Landfall — Whenever a land you control enters, exile the top card of your library. You may play that card for as long as it remains exiled. At the beginning of your end step, if there are cards exiled with this enchantment, put them into their owner's graveyard, then this enchantment deals that much damage to each opponent.",
+        ),
+    ];
+    for (name, text) in cases {
+        let parsed = parse_oracle_text(text, name, &[], &[], &[]);
+        let keys = unimplemented_keys(&parsed);
+        // Positive reach-guard: the card parsed, with no gaps at all.
+        assert!(
+            keys.is_empty(),
+            "{name} is expected to parse with zero Unimplemented; keys={keys:?}",
+        );
+    }
+}

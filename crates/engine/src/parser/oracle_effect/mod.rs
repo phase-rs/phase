@@ -1690,6 +1690,67 @@ fn try_parse_at_next_phase_delayed_trigger(
     })
 }
 
+/// CR 611.2a + CR 400.7: Is this delayed trigger's inner chain an impulse-cleanup
+/// **sweep** whose swept objects are an unbound anaphor?
+///
+/// The shape is a zone change into a graveyard whose target is still
+/// `ParentTarget`/`Any` — the parser's "I could not resolve which objects this
+/// pronoun names" state. It arises from the exile-and-play cleanup class, where
+/// a named later step sweeps the remainder the player did not play:
+///
+/// * Grinning Totem — "At the beginning of your next upkeep, if you haven't
+///   played it, put it into its owner's graveyard."
+/// * Bank Job — "At the beginning of the next end step, if that card is still
+///   exiled, put it into your graveyard and create a Treasure token."
+/// * Glimpse the Impossible — "At the beginning of the next end step, if any of
+///   those cards remain exiled, put them into your graveyard, then …"
+/// * Three Wishes — "At the beginning of your next upkeep, put any of those
+///   cards you didn't play into your graveyard."
+///
+/// This shape provably moves nothing at runtime: `ParentTarget` resolves to the
+/// parent instruction's chosen target — for Grinning Totem the targeted
+/// *opponent*, not the exiled card — so the swept card is stranded in exile
+/// forever while the card reports as fully supported. Emitting an honest
+/// `Effect::unimplemented` keeps `cargo coverage` truthful until the sweep is
+/// actually modeled.
+///
+/// Deliberately narrow, so it cannot demote anything that works:
+/// * Only inside a delayed trigger — the ordinary "search your library for a
+///   card, put it into your graveyard" class (77 cards share that raw wording)
+///   never reaches here.
+/// * Only an UNBOUND target. A sweep that resolves its objects properly
+///   (`TrackedSet`, `ExiledBySource`, an explicit filter) is left alone —
+///   Valakut Exploration's `ExiledBySource` sweep is unaffected.
+///
+/// The gap key is a stable pattern-class key, not the Oracle fragment, per
+/// CLAUDE.md — and being distinct from any previously-supported handler is what
+/// places these flips in `coverage-regression-check.sh`'s non-fatal
+/// "coverage honesty" bucket rather than its "engine handler lost" bucket.
+pub(crate) fn delayed_sweep_is_unbound_anaphor(inner: &AbilityDefinition) -> bool {
+    let is_unbound_graveyard_move = match &*inner.effect {
+        Effect::ChangeZone {
+            destination: Zone::Graveyard,
+            target,
+            ..
+        }
+        | Effect::ChangeZoneAll {
+            destination: Zone::Graveyard,
+            target,
+            ..
+        } => matches!(target, TargetFilter::ParentTarget | TargetFilter::Any),
+        _ => false,
+    };
+    is_unbound_graveyard_move
+        || inner
+            .sub_ability
+            .as_deref()
+            .is_some_and(delayed_sweep_is_unbound_anaphor)
+        || inner
+            .else_ability
+            .as_deref()
+            .is_some_and(delayed_sweep_is_unbound_anaphor)
+}
+
 /// CR 614.1a + CR 514.2: Detect "If [target_phrase] would die this turn, exile
 /// it instead." damage-spell rider, returning an `AddTargetReplacement` def.
 /// Returns `None` if the text doesn't match.
