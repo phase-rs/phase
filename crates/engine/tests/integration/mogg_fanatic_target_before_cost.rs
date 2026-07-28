@@ -200,7 +200,7 @@ fn target_first_sacrifice_parked_at_mana_payment_cannot_be_cancelled() {
     assert!(runner.state().stack.is_empty());
     assert!(
         runner.state().deferred_triggers.is_empty(),
-        "the death trigger must remain local to the uncommitted activation"
+        "the death trigger must remain local until the activation reaches the stack"
     );
 
     let error = runner

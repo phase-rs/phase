@@ -2971,14 +2971,13 @@ pub(crate) fn handle_sacrifice_for_cost(
     }
 
     let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
-    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
-        let cost_events: Vec<GameEvent> = events[cost_event_start..]
-            .iter()
-            .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
-            .cloned()
-            .collect();
-        crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
-    }
+    park_cost_payment_triggers_if_paused(
+        state,
+        events,
+        cost_event_start,
+        events.len(),
+        &waiting_for,
+    );
     Ok(waiting_for)
 }
 
