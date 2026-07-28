@@ -55,7 +55,7 @@ use super::oracle_classifier::{
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
-use super::oracle_dispatch::dispatch_line_nom;
+use super::oracle_dispatch::{dispatch_line_nom, NomDispatchIr};
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     lower_ability_ir, parse_ability_ir_standalone, parse_ability_ir_with_context,
@@ -3796,10 +3796,14 @@ impl<'a> DocEmitter<'a> {
     /// definition-shaped predecessor carried; a standalone "X can't be 0."
     /// annotation paragraph still raises it through `raise_last_spell_min_x`.
     fn unsupported_at(&mut self, line: usize, text: String) {
+        self.unsupported_ir_at(line, UnsupportedAbilityIr::unknown(text));
+    }
+
+    fn unsupported_ir_at(&mut self, line: usize, unsupported: UnsupportedAbilityIr) {
         self.emit_at(
             line,
             OracleNodeIr::Unsupported {
-                unsupported: UnsupportedAbilityIr::unknown(text),
+                unsupported,
                 min_x_value: 0,
             },
         );
@@ -6597,20 +6601,14 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // Priority 14a: Nom dispatch — try effect, trigger, static, and replacement
-        // sub-parsers. Returns the full AbilityDefinition so that fields beyond
-        // `effect` (e.g. `distribute`, `multi_target`) are preserved.
-        let nom_def = dispatch_line_nom(&line, card_name, ctx.host_self_reference.clone());
-        if !matches!(*nom_def.effect, Effect::Unimplemented { .. }) {
-            emitter.ability_at(item_line, nom_def);
-            i += 1;
-            continue;
+        // Priority 14a: the dispatcher parses once and retains successful spell IR.
+        // Priority 15: its exact unsupported payload reaches final lowering unchanged.
+        match dispatch_line_nom(&line, card_name, ctx.host_self_reference.clone()) {
+            NomDispatchIr::Spell(ir) => emitter.ability_ir_at(item_line, ir),
+            NomDispatchIr::Unsupported(unsupported) => {
+                emitter.unsupported_ir_at(item_line, unsupported)
+            }
         }
-
-        // Priority 15: Final fallback — the unimplemented def already carries
-        // diagnostic info from dispatch_line_nom; push it as-is.
-        tracing::debug!(oracle_text = line, "unimplemented ability line");
-        emitter.ability_at(item_line, nom_def);
         i += 1;
     }
 
@@ -8322,7 +8320,7 @@ fn x_annotation_min_value(line: &str) -> u32 {
 /// `apply_ability_shell_envelope` — the node's `0` default can then never lower a
 /// floor, and the operation composes with a later raise the same way both other
 /// spell shapes do.
-fn lower_unsupported_node(
+pub(super) fn lower_unsupported_node(
     unsupported: &UnsupportedAbilityIr,
     min_x_value: u32,
 ) -> AbilityDefinition {
