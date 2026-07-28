@@ -286,7 +286,7 @@ if tilt get uiresource clippy >/dev/null 2>&1; then
   ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
 else
   cargo clippy-strict
-  cargo test -p engine
+  cargo test -p phase-engine
   ./scripts/gen-card-data.sh
 fi
 
