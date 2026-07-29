@@ -7517,6 +7517,11 @@ fn x_target_count_does_not_mask_missing_fixed_target() {
     Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability);
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
 
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(0), source, 0),
+        "legal-action generation must not mask the missing fixed target with the later X target"
+    );
+
     let error = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
         .expect_err("the missing fixed target must reject before choosing X");
     assert!(matches!(

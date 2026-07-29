@@ -16649,8 +16649,8 @@ pub fn can_activate_ability_now_with_restriction_gates(
         return has_target;
     }
 
-    match build_target_slots(&simulated, &resolved) {
-        Ok(target_slots) => {
+    match build_target_slots_for_announcement(&simulated, &resolved) {
+        Ok(TargetSlotBuildOutcome::Slots(target_slots)) => {
             if target_slots.is_empty() {
                 return true;
             }
@@ -16664,15 +16664,15 @@ pub fn can_activate_ability_now_with_restriction_gates(
                 &ability_def.target_constraints,
             )
         }
-        Err(_) => {
-            ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
-                && ability_def.cost.as_ref().is_some_and(|cost| {
-                    casting_costs::extract_x_mana_cost(cost).is_some()
-                        || find_non_self_sacrifice_cost(cost)
-                            .is_some_and(|(count, _)| count == u32::MAX)
-                        || casting_costs::activation_cost_needs_x_choice(&resolved, cost)
-                })
+        Ok(TargetSlotBuildOutcome::RequiresChosenX) => {
+            ability_def.cost.as_ref().is_some_and(|cost| {
+                casting_costs::extract_x_mana_cost(cost).is_some()
+                    || find_non_self_sacrifice_cost(cost)
+                        .is_some_and(|(count, _)| count == u32::MAX)
+                    || casting_costs::activation_cost_needs_x_choice(&resolved, cost)
+            })
         }
+        Err(_) => false,
     }
 }
 
