@@ -394,7 +394,10 @@ pub(crate) fn handle_select_targets(
         pending.activation_target_selection = ActivationTargetSelection::Settled;
         if let Some(waiting_for) =
             super::casting_costs::surface_next_unpaid_interactive_activation_cost(
-                state, player, &pending, events,
+                state,
+                player,
+                &mut pending,
+                events,
             )?
         {
             return Ok(waiting_for);
@@ -501,7 +504,10 @@ pub(crate) fn handle_choose_target(
                 pending.activation_target_selection = ActivationTargetSelection::Settled;
                 if let Some(waiting_for) =
                     super::casting_costs::surface_next_unpaid_interactive_activation_cost(
-                        state, controller, &pending, events,
+                        state,
+                        controller,
+                        &mut pending,
+                        events,
                     )?
                 {
                     return Ok(waiting_for);
@@ -531,7 +537,7 @@ pub(crate) fn handle_choose_target(
 pub(crate) fn finish_activation_after_automatic_mana_payment(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if pending.activation_ability_index.is_none() {
@@ -545,7 +551,10 @@ pub(crate) fn finish_activation_after_automatic_mana_payment(
     ) {
         if let Some(waiting) =
             super::casting_costs::surface_next_unpaid_interactive_activation_cost(
-                state, player, &pending, events,
+                state,
+                player,
+                &mut pending,
+                events,
             )?
         {
             return Ok(waiting);

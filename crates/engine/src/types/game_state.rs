@@ -5929,6 +5929,14 @@ pub enum PendingCostMoveResume {
         pending: Box<PendingManaAbility>,
         cursor: ManaAbilityCostCursor,
     },
+    /// CR 602.2b + CR 701.17a + CR 616.1: An activation's deterministic mill
+    /// cost paused while a replacement choice settles. Resume the serialized
+    /// activation suffix only after the mill event has reached a terminal
+    /// replacement outcome.
+    ActivationMillPayment {
+        player: PlayerId,
+        pending: Box<PendingCast>,
+    },
     /// CR 606.4 + CR 614.1a + CR 616.1: A loyalty activation paused on a
     /// counter-cost replacement-ordering choice (e.g. Doubling Season vs an
     /// opponent's Vorinclex halving the loyalty counters). The counter is

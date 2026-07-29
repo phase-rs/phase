@@ -2257,7 +2257,7 @@ pub(crate) fn handle_activation_cost_one_of_choice(
     }
 
     if let Some(waiting_for) =
-        surface_next_unpaid_interactive_activation_cost(state, player, &pending, events)?
+        surface_next_unpaid_interactive_activation_cost(state, player, &mut pending, events)?
     {
         return Ok(waiting_for);
     }
@@ -3594,7 +3594,7 @@ pub(crate) fn handle_blight_choice(
 pub(crate) fn handle_cost_type_choice(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
     options: &[String],
     choice: &str,
     events: &mut Vec<GameEvent>,
@@ -3612,9 +3612,15 @@ pub(crate) fn handle_cost_type_choice(
                 choice.to_string(),
             ));
     }
-    // The behold cost was stashed in `additional_cost_flow` when the choice was
-    // raised; resume it now (the object carries the chosen type, so the behold
-    // dispatch proceeds past the type prompt to the behold selection).
+    if pending.activation_ability_index.is_some() {
+        if let Some(waiting_for) =
+            surface_next_unpaid_interactive_activation_cost(state, player, &mut pending, events)?
+        {
+            return Ok(waiting_for);
+        }
+    }
+    // Spell additional costs stash behold in `additional_cost_flow`; activation
+    // costs retain it in their serialized residual for the shared dispatcher.
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -3772,6 +3778,7 @@ pub(crate) fn handle_behold_for_cost(
         if let Some(snapshot) = snapshot {
             pending.ability.set_cost_paid_object_recursive(snapshot);
         }
+        pending.mark_activation_cost_committed();
         return finish_cost_object_moves(
             state,
             player,
@@ -3796,6 +3803,7 @@ pub(crate) fn handle_behold_for_cost(
     if let Some(snapshot) = snapshot {
         pending.ability.set_cost_paid_object_recursive(snapshot);
     }
+    pending.mark_activation_cost_committed();
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -4298,7 +4306,7 @@ pub(crate) fn finish_target_selected_activated_ability_at_payment_boundary(
 pub(crate) fn surface_next_unpaid_interactive_activation_cost(
     state: &mut GameState,
     player: PlayerId,
-    pending: &PendingCast,
+    pending: &mut PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
     let Some(cost) = pending.activation_cost.as_ref() else {
@@ -4677,6 +4685,213 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         }));
     }
 
+    if let Some(AbilityCost::Mill { count }) =
+        first_activation_cost_component_matching(cost, |cost| {
+            matches!(cost, AbilityCost::Mill { .. })
+        })
+    {
+        let count = *count;
+        pending.activation_cost = remove_first_activation_cost_matching(
+            pending
+                .activation_cost
+                .take()
+                .expect("checked activation cost is present"),
+            |cost| matches!(cost, AbilityCost::Mill { .. }),
+        );
+        pending.mark_activation_cost_committed();
+        let proposed = crate::types::proposed_event::ProposedEvent::Mill {
+            player_id: player,
+            count,
+            destination: Zone::Graveyard,
+            applied: Default::default(),
+        };
+        match super::replacement::replace_event(state, proposed, events) {
+            super::replacement::ReplacementResult::Execute(event) => {
+                if super::effects::mill::apply_mill_after_replacement(state, event, events)
+                    .map_err(|error| {
+                        EngineError::InvalidAction(format!(
+                            "Mill cost could not be paid: {error:?}"
+                        ))
+                    })?
+                {
+                    return surface_next_unpaid_interactive_activation_cost(
+                        state, player, pending, events,
+                    );
+                }
+            }
+            // CR 701.17b: A prevented mill or a library with too few cards still
+            // pays a mill cost by milling as many cards as possible.
+            super::replacement::ReplacementResult::Prevented => {
+                return surface_next_unpaid_interactive_activation_cost(
+                    state, player, pending, events,
+                );
+            }
+            super::replacement::ReplacementResult::NeedsChoice(choosing_player) => {
+                state.waiting_for =
+                    super::replacement::replacement_choice_waiting_for(choosing_player, state);
+            }
+        }
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::ActivationMillPayment {
+            player,
+            pending: Box::new(pending.clone()),
+        });
+        return Ok(Some(state.waiting_for.clone()));
+    }
+
+    if let Some(AbilityCost::Blight { count }) =
+        first_activation_cost_component_matching(cost, |cost| {
+            matches!(cost, AbilityCost::Blight { .. })
+        })
+    {
+        let creatures: Vec<ObjectId> = state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| {
+                state.objects.get(id).is_some_and(|obj| {
+                    obj.controller == player
+                        && obj.card_types.core_types.contains(&CoreType::Creature)
+                })
+            })
+            .collect();
+        if creatures.is_empty() {
+            return Err(EngineError::ActionNotAllowed(
+                "No creature to blight".to_string(),
+            ));
+        }
+        let mut pending = pending.clone();
+        pending.activation_cost = remove_first_activation_cost_matching(
+            pending
+                .activation_cost
+                .take()
+                .expect("checked activation cost is present"),
+            |cost| matches!(cost, AbilityCost::Blight { .. }),
+        );
+        return Ok(Some(WaitingFor::BlightChoice {
+            player,
+            counters: *count,
+            creatures,
+            pending_cast: Box::new(pending),
+        }));
+    }
+
+    if let Some(AbilityCost::Behold {
+        count,
+        filter,
+        action,
+        type_choice,
+    }) = first_activation_cost_component_matching(cost, |cost| {
+        matches!(cost, AbilityCost::Behold { .. })
+    }) {
+        if let Some(choice_type) = type_choice {
+            let already_chosen = state.objects.get(&source_id).is_some_and(|obj| {
+                obj.chosen_attributes.iter().any(|attribute| {
+                    matches!(
+                        attribute,
+                        crate::types::ability::ChosenAttribute::CreatureType(_)
+                    )
+                })
+            });
+            if !already_chosen {
+                let options = super::filter::feasible_behold_creature_types(
+                    state, player, source_id, filter, *count,
+                );
+                if options.is_empty() {
+                    return Err(EngineError::ActionNotAllowed(
+                        "No creature type is feasible to behold".to_string(),
+                    ));
+                }
+                return Ok(Some(WaitingFor::CostTypeChoice {
+                    player,
+                    choice_type: choice_type.clone(),
+                    options,
+                    pending_cast: Box::new(pending.clone()),
+                }));
+            }
+        }
+        let choices = eligible_behold_choices(state, player, source_id, filter);
+        if choices.len() < *count as usize {
+            return Err(EngineError::ActionNotAllowed(
+                "No eligible object to behold".to_string(),
+            ));
+        }
+        let mut pending = pending.clone();
+        pending.activation_cost = remove_first_activation_cost_matching(
+            pending
+                .activation_cost
+                .take()
+                .expect("checked activation cost is present"),
+            |cost| matches!(cost, AbilityCost::Behold { .. }),
+        );
+        return Ok(Some(WaitingFor::PayCost {
+            player,
+            kind: PayCostKind::Behold { action: *action },
+            choices,
+            count: *count as usize,
+            min_count: 0,
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
+        }));
+    }
+
+    if let Some(AbilityCost::Reveal { count, filter }) =
+        first_activation_cost_component_matching(cost, |cost| {
+            matches!(cost, AbilityCost::Reveal { .. })
+        })
+    {
+        if let Some(filter) = filter {
+            let choices =
+                super::casting::find_eligible_reveal_targets(state, player, source_id, filter);
+            if choices.len() < *count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible cards in hand to reveal".to_string(),
+                ));
+            }
+            let mut pending = pending.clone();
+            pending.activation_cost = remove_first_activation_cost_matching(
+                pending
+                    .activation_cost
+                    .take()
+                    .expect("checked activation cost is present"),
+                |cost| matches!(cost, AbilityCost::Reveal { .. }),
+            );
+            return Ok(Some(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Reveal,
+                choices,
+                count: *count as usize,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
+            }));
+        }
+
+        if let Some(obj) = state.objects.get(&source_id) {
+            pending
+                .ability
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                    object_id: source_id,
+                    lki: obj.snapshot_for_mana_spent(),
+                });
+            events.push(GameEvent::CardsRevealed {
+                player,
+                card_ids: vec![source_id],
+                card_names: vec![obj.name.clone()],
+            });
+        }
+        pending.activation_cost = remove_first_activation_cost_matching(
+            pending
+                .activation_cost
+                .take()
+                .expect("checked activation cost is present"),
+            |cost| matches!(cost, AbilityCost::Reveal { .. }),
+        );
+        pending.mark_activation_cost_committed();
+        return surface_next_unpaid_interactive_activation_cost(state, player, pending, events);
+    }
+
     if let Some((waterbend, residual)) = extract_waterbend_activation_cost(cost) {
         let mut pending = pending.clone();
         pending.cost = waterbend;
@@ -4686,6 +4901,43 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
     }
 
     Ok(None)
+}
+
+fn first_activation_cost_component_matching(
+    cost: &AbilityCost,
+    predicate: impl Fn(&AbilityCost) -> bool + Copy,
+) -> Option<&AbilityCost> {
+    if predicate(cost) {
+        return Some(cost);
+    }
+    let AbilityCost::Composite { costs } = cost else {
+        return None;
+    };
+    costs
+        .iter()
+        .find_map(|cost| first_activation_cost_component_matching(cost, predicate))
+}
+
+/// CR 602.2b + CR 701.17a + CR 616.1: Resume an activation after its mill
+/// cost's replacement pipeline reaches a terminal outcome. The residual has
+/// already had precisely that `Mill` leg removed before it was parked.
+pub(crate) fn resume_activation_mill_cost_payment(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(PendingCostMoveResume::ActivationMillPayment {
+        player,
+        mut pending,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("matched an activation mill cost continuation")
+    };
+    if let Some(waiting_for) =
+        surface_next_unpaid_interactive_activation_cost(state, player, &mut pending, events)?
+    {
+        return Ok(waiting_for);
+    }
+    finish_pending_cost_or_cast(state, player, *pending, events)
 }
 
 fn remove_first_activation_cost_matching(
@@ -4865,7 +5117,7 @@ pub(super) fn push_activated_ability_to_stack(
         if let Some(waiting_for) = surface_next_unpaid_interactive_activation_cost(
             state,
             player,
-            &pending_interactive,
+            &mut pending_interactive,
             events,
         )? {
             return Ok(waiting_for);
@@ -7251,6 +7503,7 @@ pub(crate) fn handle_reveal_for_cost(
         card_names: revealed_names,
     });
 
+    pending.mark_activation_cost_committed();
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 

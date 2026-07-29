@@ -17616,7 +17616,7 @@ pub fn handle_activate_ability(
                     casting_costs::surface_next_unpaid_interactive_activation_cost(
                         state,
                         player,
-                        &pending_interactive,
+                        &mut pending_interactive,
                         events,
                     )?
                 {

@@ -3,14 +3,17 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, SacrificeCost,
-    TapCreaturesRequirement, TargetFilter, TargetRef, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, Effect, QuantityExpr,
+    ReplacementDefinition, SacrificeCost, TapCreaturesRequirement, TargetFilter, TargetRef,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::{EtbTapState, Zone};
 
 const GOBLIN_BOMBARDMENT: &str =
     "Sacrifice a creature: This enchantment deals 1 damage to any target.";
@@ -264,4 +267,184 @@ fn target_first_sacrifice_parked_at_mana_payment_cannot_be_cancelled() {
         runner.state().deferred_triggers.is_empty(),
         "rejecting cancellation must neither leak nor duplicate the local trigger"
     );
+}
+
+fn targeted_damage_cost_ability(cost: AbilityCost) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+            damage_source: None,
+            excess: None,
+        },
+    )
+    .cost(cost)
+}
+
+#[test]
+fn targeted_activation_surfaces_blight_cost_after_target_selection() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Targeted Blight Cost", 1, 1)
+        .with_ability_definition(targeted_damage_cost_ability(AbilityCost::Blight {
+            count: 1,
+        }))
+        .id();
+    let blighted = scenario.add_creature(P0, "Blight Payment", 1, 1).id();
+    let target = scenario.add_creature(P1, "Blight Cost Target", 1, 1).id();
+    let mut runner = scenario.build();
+
+    activate(&mut runner, source);
+    choose_target(&mut runner, target);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::BlightChoice { .. }
+    ));
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![blighted],
+        })
+        .expect("paying the target-first blight cost must succeed");
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(
+        runner.state().objects[&blighted]
+            .counters
+            .get(&engine::types::counter::CounterType::Minus1Minus1),
+        Some(&1),
+    );
+}
+
+#[test]
+fn targeted_activation_surfaces_reveal_cost_after_target_selection() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Targeted Reveal Cost", 1, 1)
+        .with_ability_definition(targeted_damage_cost_ability(AbilityCost::Reveal {
+            count: 1,
+            filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+        }))
+        .id();
+    let revealed = scenario
+        .add_creature_to_hand(P0, "Reveal Payment", 1, 1)
+        .id();
+    let target = scenario.add_creature(P1, "Reveal Cost Target", 1, 1).id();
+    let mut runner = scenario.build();
+
+    activate(&mut runner, source);
+    choose_target(&mut runner, target);
+    let WaitingFor::PayCost { kind, choices, .. } = runner.state().waiting_for.clone() else {
+        panic!("target declaration must surface the reveal cost");
+    };
+    assert_eq!(kind, PayCostKind::Reveal);
+    assert!(choices.contains(&revealed));
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![revealed],
+        })
+        .expect("revealing the target-first activation payment must succeed");
+    assert_eq!(runner.state().stack.len(), 1);
+}
+
+#[test]
+fn targeted_activation_surfaces_behold_cost_after_target_selection() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Targeted Behold Cost", 1, 1)
+        .with_ability_definition(targeted_damage_cost_ability(AbilityCost::Behold {
+            count: 1,
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            action: BeholdCostAction::ChooseOrReveal,
+            type_choice: None,
+        }))
+        .id();
+    let behold = scenario.add_creature(P0, "Behold Payment", 1, 1).id();
+    let target = scenario.add_creature(P1, "Behold Cost Target", 1, 1).id();
+    let mut runner = scenario.build();
+
+    activate(&mut runner, source);
+    choose_target(&mut runner, target);
+    let WaitingFor::PayCost { kind, choices, .. } = runner.state().waiting_for.clone() else {
+        panic!("target declaration must surface the behold cost");
+    };
+    assert_eq!(
+        kind,
+        PayCostKind::Behold {
+            action: BeholdCostAction::ChooseOrReveal,
+        }
+    );
+    assert!(choices.contains(&behold));
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![behold],
+        })
+        .expect("beholding the target-first activation payment must succeed");
+    assert_eq!(runner.state().stack.len(), 1);
+}
+
+fn graveyard_exile_replacement(label: &str) -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Graveyard)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ))
+        .description(label.to_string())
+}
+
+#[test]
+fn target_first_mill_cost_resumes_after_replacement_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Targeted Mill Cost", 1, 1)
+        .with_ability_definition(targeted_damage_cost_ability(AbilityCost::Mill { count: 1 }))
+        .id();
+    let target = scenario.add_creature(P1, "Mill Cost Target", 1, 1).id();
+    let milled = scenario.add_card_to_library_top(P0, "Mill Payment Card");
+    for label in ["Mill Redirect One", "Mill Redirect Two"] {
+        scenario
+            .add_creature(P0, label, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(graveyard_exile_replacement(label));
+    }
+    let mut runner = scenario.build();
+
+    activate(&mut runner, source);
+    choose_target(&mut runner, target);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("choosing the mill redirect must resume the target-first activation");
+
+    assert_eq!(runner.state().objects[&milled].zone, Zone::Exile);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }

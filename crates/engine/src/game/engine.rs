@@ -3174,6 +3174,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::DelveManaPayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
             )
         ),
@@ -3193,6 +3194,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::DelveManaPayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
             )
         ),
@@ -3255,6 +3257,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         Some(PendingCostMoveResume::ManaAbilityPayment { .. })
     ) {
         mana_abilities::resume_mana_ability_cost_move(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::ActivationMillPayment { .. })
+    ) {
+        casting_costs::resume_activation_mill_cost_payment(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::LoyaltyActivation { .. })
