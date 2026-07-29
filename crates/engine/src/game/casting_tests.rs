@@ -7407,6 +7407,75 @@ fn x_cost_activation_defers_exact_target_count_until_x_is_announced() {
         .contains(&TargetRef::Object(target)));
 }
 
+/// CR 602.2b + CR 601.2b/c/f: Target legality that depends on X is evaluated
+/// only after X is announced, even when the unannounced value would leave no
+/// legal target.
+#[test]
+fn x_cost_activation_defers_x_dependent_target_filter_until_x_is_announced() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(957),
+        PlayerId(0),
+        "X Filter Relic".to_string(),
+        Zone::Battlefield,
+    );
+    let target = create_object(
+        &mut state,
+        CardId(958),
+        PlayerId(1),
+        "Mana Value Two Creature".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let target_obj = state.objects.get_mut(&target).unwrap();
+        target_obj.card_types.core_types.push(CoreType::Creature);
+        target_obj.mana_cost = ManaCost::generic(2);
+    }
+    let ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+            ])),
+            cant_regenerate: false,
+        },
+    )
+    .cost(AbilityCost::Mana {
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        },
+    });
+    Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability);
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+    state.waiting_for =
+        handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
+            .expect("the X-dependent filter must defer target legality");
+    assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
+
+    apply_as_current(&mut state, GameAction::ChooseX { value: 2 })
+        .expect("announcing X must make the mana-value-two target legal");
+    let WaitingFor::TargetSelection { target_slots, .. } = &state.waiting_for else {
+        panic!(
+            "expected target selection after X announcement, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(target_slots.len(), 1);
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(target)));
+}
+
 /// CR 602.2b + CR 601.2b/c/f: An unresolved X target count may defer target
 /// declaration, but it cannot conceal a separate mandatory target's absence.
 #[test]

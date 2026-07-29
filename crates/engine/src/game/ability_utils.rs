@@ -423,15 +423,67 @@ impl SlotAccumulator {
     }
 }
 
+/// Result of target construction while an ability is being announced.
+///
+/// `RequiresChosenX` is distinct from an illegal target set: CR 601.2b requires
+/// announcing X before the CR 601.2c target declaration can be evaluated.
+pub(crate) enum TargetSlotBuildOutcome {
+    Slots(Vec<TargetSelectionSlot>),
+    RequiresChosenX,
+}
+
+enum TargetSlotBuildError {
+    Engine(EngineError),
+    RequiresChosenX,
+}
+
+impl From<EngineError> for TargetSlotBuildError {
+    fn from(error: EngineError) -> Self {
+        Self::Engine(error)
+    }
+}
+
+pub(crate) fn unresolved_x_target_construction_error() -> EngineError {
+    EngineError::ActionNotAllowed(
+        "Target count requires a resolved quantity before target selection".to_string(),
+    )
+}
+
+impl From<TargetSlotBuildError> for EngineError {
+    fn from(error: TargetSlotBuildError) -> Self {
+        match error {
+            TargetSlotBuildError::Engine(error) => error,
+            TargetSlotBuildError::RequiresChosenX => unresolved_x_target_construction_error(),
+        }
+    }
+}
+
+/// CR 601.2b/c + CR 602.2b: Collect target slots while preserving the
+/// announce-time distinction between an unresolved X and an illegal target set.
+pub(crate) fn build_target_slots_for_announcement(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Result<TargetSlotBuildOutcome, EngineError> {
+    let mut acc = SlotAccumulator::default();
+    match collect_target_slots(state, ability, &mut acc) {
+        Ok(()) => Ok(TargetSlotBuildOutcome::Slots(acc.slots)),
+        Err(TargetSlotBuildError::RequiresChosenX) => Ok(TargetSlotBuildOutcome::RequiresChosenX),
+        Err(TargetSlotBuildError::Engine(error)) => Err(error),
+    }
+}
+
 /// CR 601.2c / CR 602.2b: Collect all target slots for an ability chain. Each targeting
 /// effect in the chain produces a slot whose legal targets are computed from the game state.
 pub fn build_target_slots(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Result<Vec<TargetSelectionSlot>, EngineError> {
-    let mut acc = SlotAccumulator::default();
-    collect_target_slots(state, ability, &mut acc)?;
-    Ok(acc.slots)
+    match build_target_slots_for_announcement(state, ability)? {
+        TargetSlotBuildOutcome::Slots(slots) => Ok(slots),
+        TargetSlotBuildOutcome::RequiresChosenX => {
+            Err(TargetSlotBuildError::RequiresChosenX.into())
+        }
+    }
 }
 
 /// CR 601.2b + CR 702.33a/702.194c: "instead" spells with a target-dependent
@@ -2260,7 +2312,7 @@ fn collect_target_slots(
     state: &GameState,
     ability: &ResolvedAbility,
     acc: &mut SlotAccumulator,
-) -> Result<(), EngineError> {
+) -> Result<(), TargetSlotBuildError> {
     let resolved_chooser = ability.target_chooser.as_ref().and_then(|filter| {
         crate::game::targeting::resolve_effect_player_ref(state, ability, filter)
             // A chooser equal to the controller is the CR-601.2c default; leave the
@@ -2342,7 +2394,7 @@ fn collect_target_slots_inner(
     state: &GameState,
     ability: &ResolvedAbility,
     acc: &mut SlotAccumulator,
-) -> Result<(), EngineError> {
+) -> Result<(), TargetSlotBuildError> {
     if let Some(sub_ability) = ability.sub_ability.as_deref().filter(|sub| {
         matches!(
             sub.condition,
@@ -2364,6 +2416,10 @@ fn collect_target_slots_inner(
         }
     }
 
+    if target_slot_construction_needs_chosen_x(ability) {
+        return Err(TargetSlotBuildError::RequiresChosenX);
+    }
+
     // CR 609.7 + CR 601.2c: A source-scoped `PreventDamage` ("prevent all damage
     // target instant or sorcery spell would deal this turn") surfaces the
     // choosable source spell as a target slot. Declared FIRST (CR 601.2c
@@ -2377,9 +2433,7 @@ fn collect_target_slots_inner(
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, src_leaf, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
-                return Err(EngineError::ActionNotAllowed(
-                    "No legal targets available".to_string(),
-                ));
+                return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets,
@@ -2403,9 +2457,7 @@ fn collect_target_slots_inner(
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
-                return Err(EngineError::ActionNotAllowed(
-                    "No legal targets available".to_string(),
-                ));
+                return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets,
@@ -2431,9 +2483,7 @@ fn collect_target_slots_inner(
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
-                return Err(EngineError::ActionNotAllowed(
-                    "No legal targets available".to_string(),
-                ));
+                return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets,
@@ -2471,9 +2521,7 @@ fn collect_target_slots_inner(
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
-                return Err(EngineError::ActionNotAllowed(
-                    "No legal targets available".to_string(),
-                ));
+                return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets,
@@ -2500,9 +2548,7 @@ fn collect_target_slots_inner(
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
-                return Err(EngineError::ActionNotAllowed(
-                    "No legal targets available".to_string(),
-                ));
+                return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets,
@@ -2518,9 +2564,7 @@ fn collect_target_slots_inner(
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, target, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
-                return Err(EngineError::ActionNotAllowed(
-                    "No legal targets available".to_string(),
-                ));
+                return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets,
@@ -2561,9 +2605,7 @@ fn collect_target_slots_inner(
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
-                return Err(EngineError::ActionNotAllowed(
-                    "No legal targets available".to_string(),
-                ));
+                return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets,
@@ -2608,9 +2650,7 @@ fn collect_target_slots_inner(
                 // No spec means a single mandatory source (defensive — the parser
                 // always attaches an "up to two"/"two" spec for this effect).
                 if source_legal.is_empty() {
-                    return Err(EngineError::ActionNotAllowed(
-                        "No legal targets available".to_string(),
-                    ));
+                    return Err(no_legal_target_slots());
                 }
                 acc.push(TargetSelectionSlot {
                     legal_targets: source_legal,
@@ -2643,9 +2683,7 @@ fn collect_target_slots_inner(
             let recipient_legal =
                 legal_targets_for_ability_filter(state, ability, recipient, &acc.slots);
             if recipient_legal.is_empty() {
-                return Err(EngineError::ActionNotAllowed(
-                    "No legal targets available".to_string(),
-                ));
+                return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets: recipient_legal,
@@ -2691,9 +2729,7 @@ fn collect_target_slots_inner(
             // selection-time recompute so both paths agree.
             let player_targets = companion_target_player_legal_targets(state, ability);
             if player_targets.is_empty() && !ability.optional_targeting {
-                return Err(EngineError::ActionNotAllowed(
-                    "No legal targets available".to_string(),
-                ));
+                return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets: player_targets,
@@ -2712,9 +2748,7 @@ fn collect_target_slots_inner(
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, &filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
-                return Err(EngineError::ActionNotAllowed(
-                    "No legal targets available".to_string(),
-                ));
+                return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets,
@@ -2731,9 +2765,7 @@ fn collect_target_slots_inner(
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, &filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
-                return Err(EngineError::ActionNotAllowed(
-                    "No legal targets available".to_string(),
-                ));
+                return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets,
@@ -2767,9 +2799,7 @@ fn collect_target_slots_inner(
                     }
                 } else {
                     if legal_targets.is_empty() && !ability.optional_targeting {
-                        return Err(EngineError::ActionNotAllowed(
-                            "No legal targets available".to_string(),
-                        ));
+                        return Err(no_legal_target_slots());
                     }
                     acc.push(TargetSelectionSlot {
                         legal_targets,
@@ -2800,6 +2830,10 @@ fn collect_target_slots_inner(
         }
     }
     Ok(())
+}
+
+fn no_legal_target_slots() -> TargetSlotBuildError {
+    EngineError::ActionNotAllowed("No legal targets available".to_string()).into()
 }
 
 fn legal_choices_for_ability_filter(
@@ -3009,15 +3043,7 @@ pub fn ability_target_legality_needs_chosen_x(
 }
 
 fn ability_target_legality_needs_chosen_x_inner(ability: &ResolvedAbility) -> bool {
-    triggers::extract_target_filter_from_effect(&ability.effect)
-        .is_some_and(|filter| target_filter_needs_chosen_x(ability, filter))
-        || ability.multi_target.as_ref().is_some_and(|spec| {
-            quantity_expr_has_unresolved_x(ability, &spec.min)
-                || spec
-                    .max
-                    .as_ref()
-                    .is_some_and(|expr| quantity_expr_has_unresolved_x(ability, expr))
-        })
+    target_slot_construction_needs_chosen_x(ability)
         || ability
             .sub_ability
             .as_deref()
@@ -3026,6 +3052,26 @@ fn ability_target_legality_needs_chosen_x_inner(ability: &ResolvedAbility) -> bo
             .else_ability
             .as_deref()
             .is_some_and(ability_target_legality_needs_chosen_x_inner)
+}
+
+/// CR 601.2b/c: The current chain link cannot determine either its target
+/// filter or its target count until its announced X value is available.
+///
+/// This deliberately excludes sub-abilities. `collect_target_slots` traverses
+/// links in declaration order, so an earlier missing mandatory target remains
+/// an immediate illegal-target error instead of being masked by a later
+/// X-dependent target instruction.
+fn target_slot_construction_needs_chosen_x(ability: &ResolvedAbility) -> bool {
+    ability.chosen_x.is_none()
+        && (triggers::extract_target_filter_from_effect(&ability.effect)
+            .is_some_and(|filter| target_filter_needs_chosen_x(ability, filter))
+            || ability.multi_target.as_ref().is_some_and(|spec| {
+                quantity_expr_has_unresolved_x(ability, &spec.min)
+                    || spec
+                        .max
+                        .as_ref()
+                        .is_some_and(|expr| quantity_expr_has_unresolved_x(ability, expr))
+            }))
 }
 
 fn target_filter_needs_chosen_x(ability: &ResolvedAbility, filter: &TargetFilter) -> bool {
@@ -5483,7 +5529,7 @@ fn collect_target_slots_after_deferred_effect(
     state: &GameState,
     sub_ability: Option<&ResolvedAbility>,
     acc: &mut SlotAccumulator,
-) -> Result<(), EngineError> {
+) -> Result<(), TargetSlotBuildError> {
     let Some(sub_ability) = sub_ability else {
         return Ok(());
     };

@@ -40,9 +40,11 @@ use super::ability_utils::{
     ability_target_legality_needs_chosen_x, additional_cost_instead_spell_has_legal_targets,
     assign_targets_in_chain, auto_select_targets, auto_select_targets_for_ability,
     begin_target_selection, begin_target_selection_for_ability, build_resolved_from_def,
-    build_target_slots, compute_unavailable_modes, filter_references_target_player,
-    flatten_targets_in_chain, has_legal_target_assignment_for_ability, modal_choice_for_player,
+    build_target_slots, build_target_slots_for_announcement, compute_unavailable_modes,
+    filter_references_target_player, flatten_targets_in_chain,
+    has_legal_target_assignment_for_ability, modal_choice_for_player,
     simple_legal_target_assignment_exists_for_ability, target_constraints_from_modal,
+    unresolved_x_target_construction_error, TargetSlotBuildOutcome,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
@@ -17148,23 +17150,21 @@ pub fn handle_activate_ability(
     // reject that specific class of otherwise legal activation; defer only that
     // X-dependent case through the X round-trip. Every other target-build
     // failure remains an immediate activation error.
-    let has_effect_targets = match build_target_slots(state, &resolved) {
-        Ok(target_slots) => !target_slots.is_empty(),
-        // `resolve_multi_target_bounds` fails closed while the exact target
-        // count still depends on X. Do not treat another target-construction
-        // error (for example, a missing mandatory fixed target) as an X
-        // declaration: it must reject the activation immediately.
-        Err(EngineError::ActionNotAllowed(message))
-            if message == "Target count requires a resolved quantity before target selection"
-                && activation_cost.as_ref().is_some_and(|cost| {
-                    ability_target_legality_needs_chosen_x(
-                        &resolved,
-                        ability_def.distribute.as_ref(),
-                    ) && (casting_costs::extract_x_mana_cost(cost).is_some()
-                        || casting_costs::activation_cost_needs_x_choice(&resolved, cost))
-                }) =>
+    let has_effect_targets = match build_target_slots_for_announcement(state, &resolved) {
+        Ok(TargetSlotBuildOutcome::Slots(target_slots)) => !target_slots.is_empty(),
+        // A typed outcome preserves the distinction between a target slot that
+        // cannot yet be evaluated because X is unannounced and a genuinely
+        // illegal target set. Only the former enters the X round-trip.
+        Ok(TargetSlotBuildOutcome::RequiresChosenX)
+            if activation_cost.as_ref().is_some_and(|cost| {
+                casting_costs::extract_x_mana_cost(cost).is_some()
+                    || casting_costs::activation_cost_needs_x_choice(&resolved, cost)
+            }) =>
         {
             true
+        }
+        Ok(TargetSlotBuildOutcome::RequiresChosenX) => {
+            return Err(unresolved_x_target_construction_error());
         }
         Err(error) => return Err(error),
     };
