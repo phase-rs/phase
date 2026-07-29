@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::ast::parsed_clause;
 use super::context::ParseContext;
-use super::effect_chain::EffectChainIr;
+use super::effect_chain::{DieResultBranchIr, EffectChainIr};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, ModalChoice,
     TargetFilter, TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
@@ -39,15 +39,11 @@ use crate::types::triggers::TriggerMode;
 /// mechanism that RETIRES that debt. Reusing it would make the burn-down metric
 /// count the fix as debt, so the number would rise as the debt fell.
 ///
-/// One variant today, deliberately. The IR-native sibling (`Parsed`, boxing a
-/// `TriggerIr`) is added by the tranche that lands its first producer, not
-/// before: adding it now would need a `#[allow(dead_code)]` and a CR 707.9a
-/// slot-stamp arm that cannot be written until lowering runs (the stamp targets
-/// `execute`, which does not exist pre-lowering), leaving a latent panic behind.
-/// Adding the variant later instead turns every match site into a compile
-/// error, which is the stronger forcing function.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum TriggerNodeIr {
+    /// Native parsed trigger decomposition, lowered only at the document seam.
+    #[allow(dead_code)] // C1 installs the IR seam; C2 adds its producers.
+    Parsed(Box<TriggerIr>),
     /// Already-assembled definition from a recognizer that builds its own.
     /// `lower_trigger_node_ir` returns it untouched.
     Assembled {
@@ -64,17 +60,6 @@ impl TriggerNodeIr {
         Self::Assembled {
             definition,
             source_text: source_text.to_string(),
-        }
-    }
-
-    /// The assembled definition, when one exists.
-    ///
-    /// Returns `Option` rather than `&TriggerDefinition` because a future
-    /// IR-native variant has no definition before lowering — CR 607.2d relation
-    /// discovery must see `None` there, not a fabricated definition.
-    pub(crate) fn definition(&self) -> Option<&TriggerDefinition> {
-        match self {
-            Self::Assembled { definition, .. } => Some(definition),
         }
     }
 }
@@ -98,6 +83,9 @@ pub(crate) struct TriggerIr {
     pub(crate) modifiers: TriggerModifiers,
     /// Original oracle text for description/provenance.
     pub(crate) source_text: String,
+    /// CR 706.3b result-table rows for the terminal die roll in this trigger.
+    /// They remain IR until trigger-body lowering attaches them before finalization.
+    pub(crate) die_results: Vec<DieResultBranchIr>,
 }
 
 /// The body of a trigger. Whole-body recognizers retain their typed payloads

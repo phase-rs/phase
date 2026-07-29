@@ -107,7 +107,9 @@ use super::oracle_static::{
     try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
     GrantedCastKeywordKind,
 };
-use super::oracle_trigger::{lower_trigger_node_ir, parse_trigger_lines_at_index};
+use super::oracle_trigger::{
+    lower_trigger_ir, lower_trigger_node_ir, parse_trigger_lines_at_index,
+};
 use super::oracle_util::{
     normalize_card_name_refs, parse_mana_symbols, parse_number, split_same_is_true_static_tail,
     strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
@@ -1210,11 +1212,10 @@ fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
 /// that closed representation without a wildcard, so a fourth spell payload
 /// must be handled here and in `lower_spell_node` at compile time.
 ///
-/// `item_trigger` still keeps a borrow and pushes its own exhaustiveness down
-/// onto `TriggerNodeIr::definition()`, because both of its shapes own a
-/// `TriggerDefinition`. The spell layer differs only in its representations:
-/// the IR-native and residual payloads must be lowered into owned definitions,
-/// while the already-lowered payload can lend its definition.
+/// `item_trigger` uses the trigger-side equivalent of `item_ability`: an
+/// assembled node lends its definition, while a parsed node lowers into an
+/// owned `Cow`. Relations therefore observe the same definition document
+/// lowering will publish without fabricating a pre-lowered representation.
 ///
 /// Lowering is the same `lower_ability_ir` call `lower_oracle_ir` (the `Spell`
 /// arm) will make for the same item, so a relation predicate sees exactly the
@@ -1241,15 +1242,18 @@ fn item_ability(item: &OracleItemIr) -> Option<Cow<'_, AbilityDefinition>> {
 /// the regression would surface on a DIFFERENT card from the converted one,
 /// where per-card byte-identity cannot catch it.
 ///
-/// The exhaustiveness obligation lives on `TriggerNodeIr::definition()`, not on
-/// this match, and that is the correct layer: a new trigger representation is a
-/// new `TriggerNodeIr` variant, so it breaks that match at compile time before
-/// it can reach here. Enumerating `OracleNodeIr` instead would add nothing —
-/// every other variant is genuinely `None`.
-fn item_trigger(item: &OracleItemIr) -> Option<&TriggerDefinition> {
+/// The match is exhaustive over `TriggerNodeIr`, so a new trigger
+/// representation cannot silently evade relation discovery. Every other
+/// `OracleNodeIr` variant is genuinely `None` here.
+fn item_trigger(item: &OracleItemIr) -> Option<Cow<'_, TriggerDefinition>> {
     match &item.node {
-        OracleNodeIr::Trigger(node) => node.definition(),
-        OracleNodeIr::PreLoweredTrigger(def) => Some(def),
+        OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) => {
+            Some(Cow::Owned(lower_trigger_ir(trigger)))
+        }
+        OracleNodeIr::Trigger(TriggerNodeIr::Assembled { definition, .. }) => {
+            Some(Cow::Borrowed(definition))
+        }
+        OracleNodeIr::PreLoweredTrigger(def) => Some(Cow::Borrowed(def)),
         _ => None,
     }
 }
@@ -1543,9 +1547,12 @@ fn detect_linked_choice_type_statics(
                 )
             });
             let is_dig = item_ability(item).is_some_and(|def| ability_chain_has_dig(&def))
-                || item_trigger(item)
-                    .and_then(|trigger| trigger.execute.as_deref())
-                    .is_some_and(ability_chain_has_dig);
+                || item_trigger(item).is_some_and(|trigger| {
+                    trigger
+                        .execute
+                        .as_deref()
+                        .is_some_and(ability_chain_has_dig)
+                });
             if is_cost_reducer || is_dig {
                 retarget.push(item.id);
             }
@@ -1668,8 +1675,8 @@ fn chosen_subtype_kind_from_persisted_choice_items(
         .or_else(|| {
             items
                 .iter()
-                .filter_map(|item| item_trigger(item)?.execute.as_deref())
-                .find_map(chosen_subtype_kind_from_ability)
+                .filter_map(|item| item_trigger(item).and_then(|trigger| trigger.execute.clone()))
+                .find_map(|ability| chosen_subtype_kind_from_ability(&ability))
         })
 }
 
@@ -1765,7 +1772,8 @@ fn detect_linked_choice_persisted_player(
     let has_durable_reader = items.iter().any(|item| {
         item_static(item).is_some_and(static_references_source_chosen_player)
             || item_ability(item).is_some_and(|def| ability_references_source_chosen_player(&def))
-            || item_trigger(item).is_some_and(trigger_references_source_chosen_player)
+            || item_trigger(item)
+                .is_some_and(|trigger| trigger_references_source_chosen_player(&trigger))
     });
     if !has_durable_reader {
         return;
@@ -1774,9 +1782,12 @@ fn detect_linked_choice_persisted_player(
         .iter()
         .filter(|item| {
             item_ability(item).is_some_and(|def| ability_chain_has_player_choice(&def))
-                || item_trigger(item)
-                    .and_then(|trigger| trigger.execute.as_deref())
-                    .is_some_and(ability_chain_has_player_choice)
+                || item_trigger(item).is_some_and(|trigger| {
+                    trigger
+                        .execute
+                        .as_deref()
+                        .is_some_and(ability_chain_has_player_choice)
+                })
         })
         .map(|item| item.id)
         .collect();
@@ -3505,13 +3516,14 @@ fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
 fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
     let ltb_return = items
         .iter()
-        .find(|item| item_trigger(item).is_some_and(trigger_is_ltb_return));
+        .find(|item| item_trigger(item).is_some_and(|trigger| trigger_is_ltb_return(&trigger)));
 
     let (ltb, outcome) = match ltb_return {
         Some(ltb) => (ltb, LinkedReturnOutcome::DurationStamped),
         None => {
             let Some(ltb) = items.iter().find(|item| {
-                item_trigger(item).is_some_and(trigger_is_ltb_return_with_entry_modifier)
+                item_trigger(item)
+                    .is_some_and(|trigger| trigger_is_ltb_return_with_entry_modifier(&trigger))
             }) else {
                 return;
             };
@@ -3526,7 +3538,8 @@ fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<Docum
     };
 
     for item in items {
-        if item_trigger(item).is_some_and(trigger_is_etb_exile_pending_duration) {
+        if item_trigger(item).is_some_and(|trigger| trigger_is_etb_exile_pending_duration(&trigger))
+        {
             relations.push(DocumentRelationIr::EtbExileLtbReturn {
                 etb_exile: item.id,
                 ltb_return: ltb.id,

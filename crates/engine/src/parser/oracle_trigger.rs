@@ -9,13 +9,14 @@ use nom::Parser;
 
 use super::oracle_effect::conditions::source_saddled_filter;
 use super::oracle_effect::{
-    condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
-    try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
+    attach_die_result_branches_before_finalization, condition_text_is_rehomeable,
+    lower_effect_chain_ir, parse_effect_chain_ir, try_parse_reanimator_aura_etb_effect_ir,
+    try_parse_reanimator_aura_grant_etb_effect_ir,
 };
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
-use super::oracle_ir::effect_chain::EffectChainIr;
+use super::oracle_ir::effect_chain::{DieResultBranchIr, EffectChainIr};
 use super::oracle_ir::trigger::{
     FirstTimeLimit, ReflexivePaymentIr, TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
 };
@@ -1474,6 +1475,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             relative_player_scope,
         },
         source_text: text.to_string(),
+        die_results: Vec::new(),
     }
 }
 
@@ -1533,8 +1535,10 @@ fn mode_exposes_subject_batch(mode: &TriggerMode) -> bool {
 fn lower_trigger_effect_chain(
     chain_ir: &EffectChainIr,
     modifiers: &TriggerModifiers,
+    die_results: &[DieResultBranchIr],
 ) -> AbilityDefinition {
     let mut ability = lower_effect_chain_ir(chain_ir);
+    attach_die_result_branches_before_finalization(&mut ability, die_results);
     crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
     if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
         && matches!(
@@ -1583,6 +1587,7 @@ fn lower_trigger_effect_chain(
 /// which nothing added to `lower_trigger_ir` can invalidate.
 pub(crate) fn lower_trigger_node_ir(ir: &TriggerNodeIr) -> TriggerDefinition {
     match ir {
+        TriggerNodeIr::Parsed(trigger) => lower_trigger_ir(trigger),
         TriggerNodeIr::Assembled { definition, .. } => definition.clone(),
     }
 }
@@ -1593,12 +1598,14 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
 
     // Lower the body
     let execute = match &ir.body {
-        Some(TriggerBody::EffectChain(chain_ir)) => {
-            Some(Box::new(lower_trigger_effect_chain(chain_ir, modifiers)))
-        }
+        Some(TriggerBody::EffectChain(chain_ir)) => Some(Box::new(lower_trigger_effect_chain(
+            chain_ir,
+            modifiers,
+            &ir.die_results,
+        ))),
         Some(TriggerBody::ReflexivePayment(reflexive)) => {
             let mut reflexive_ability =
-                lower_trigger_effect_chain(&reflexive.effect_chain, modifiers);
+                lower_trigger_effect_chain(&reflexive.effect_chain, modifiers, &[]);
             reflexive_ability.condition = Some(AbilityCondition::WhenYouDo);
 
             let mut pay_ability = AbilityDefinition::new(
@@ -1614,16 +1621,18 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             Some(Box::new(pay_ability))
         }
         Some(TriggerBody::Modal(modal)) => Some(Box::new(
-            lower_trigger_effect_chain(&modal.marker, modifiers)
+            lower_trigger_effect_chain(&modal.marker, modifiers, &[])
                 .with_modal(modal.choice.clone(), modal.mode_abilities.clone()),
         )),
         Some(TriggerBody::Vote(vote)) => Some(Box::new(lower_trigger_effect_chain(
             &vote.effect_chain(AbilityKind::Spell),
             modifiers,
+            &[],
         ))),
         Some(TriggerBody::Pile(pile)) => Some(Box::new(lower_trigger_effect_chain(
             &pile.effect_chain(AbilityKind::Spell),
             modifiers,
+            &[],
         ))),
         None => None,
     };

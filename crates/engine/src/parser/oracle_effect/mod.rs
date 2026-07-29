@@ -26877,21 +26877,7 @@ pub(crate) enum ChainLoweringMode {
 /// non-die producer byte-identical.
 pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     let mut def = lower_effect_chain_ir(&ir.body);
-    if !ir.die_results.is_empty() {
-        if let Some(Effect::RollDie { results, .. }) =
-            super::oracle_special::find_terminal_roll_die(&mut def)
-        {
-            *results = ir
-                .die_results
-                .iter()
-                .map(|DieResultBranchIr { min, max, effect }| DieResultBranch {
-                    min: *min,
-                    max: *max,
-                    effect: Box::new(lower_ability_ir(effect)),
-                })
-                .collect();
-        }
-    }
+    attach_die_result_branches_before_finalization(&mut def, &ir.die_results);
     finalize_effect_chain(&mut def);
     apply_owner_library_reveal_anchor_from_text(&mut def, &ir.source_text);
     // CR 608.2c: a root the chain cannot describe (it has no previous boundary).
@@ -26910,6 +26896,29 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
         }
     }
     def
+}
+
+/// CR 706.3b: Attach typed die-result branches before finalization so every
+/// caller lowers each branch through the same `lower_ability_ir` authority.
+pub(crate) fn attach_die_result_branches_before_finalization(
+    def: &mut AbilityDefinition,
+    die_results: &[DieResultBranchIr],
+) {
+    if die_results.is_empty() {
+        return;
+    }
+    if let Some(Effect::RollDie { results, .. }) =
+        super::oracle_special::find_terminal_roll_die(def)
+    {
+        *results = die_results
+            .iter()
+            .map(|DieResultBranchIr { min, max, effect }| DieResultBranch {
+                min: *min,
+                max: *max,
+                effect: Box::new(lower_ability_ir(effect)),
+            })
+            .collect();
+    }
 }
 
 /// Apply the CR 602.1 activation envelope onto an already-lowered root.
