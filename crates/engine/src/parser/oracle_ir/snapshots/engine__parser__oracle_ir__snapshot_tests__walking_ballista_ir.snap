@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 981
 expression: "&ir"
 ---
 {
@@ -84,35 +83,93 @@ expression: "&ir"
         "fragment": "{4}: Put a +1/+1 counter on ~."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "P1P1",
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "target": {
-              "type": "SelfRef"
-            }
+        "Spell": {
+          "source_text": "Put a +1/+1 counter on ~",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 24,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Put a +1/+1 counter on ~"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "PutCounter",
+                    "counter_type": "P1P1",
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "target": {
+                      "type": "SelfRef"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "cost": {
-            "type": "Mana",
+          "shell": {
+            "sub_link": null,
             "cost": {
-              "type": "Cost",
-              "shards": [],
-              "generic": 4
-            }
+              "type": "Mana",
+              "cost": {
+                "type": "Cost",
+                "shards": [],
+                "generic": 4
+              }
+            },
+            "description": "{4}: Put a +1/+1 counter on ~.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
           },
-          "sub_ability": null,
-          "duration": null,
-          "description": "{4}: Put a +1/+1 counter on ~.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": []
         }
       }
     },
@@ -134,36 +191,94 @@ expression: "&ir"
         "fragment": "Remove a +1/+1 counter from ~: It deals 1 damage to any target."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "DealDamage",
-            "amount": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "target": {
-              "type": "Any"
-            }
+        "Spell": {
+          "source_text": "It deals 1 damage to any target",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 31,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "It deals 1 damage to any target"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "DealDamage",
+                    "amount": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "target": {
+                      "type": "Any"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "cost": {
-            "type": "RemoveCounter",
-            "count": 1,
-            "counter_type": {
-              "type": "OfType",
-              "data": "P1P1"
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "RemoveCounter",
+              "count": 1,
+              "counter_type": {
+                "type": "OfType",
+                "data": "P1P1"
+              },
+              "target": null,
+              "selection": "SingleObject"
             },
-            "target": null,
-            "selection": "SingleObject"
+            "description": "Remove a +1/+1 counter from ~: It deals 1 damage to any target.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
           },
-          "sub_ability": null,
-          "duration": null,
-          "description": "Remove a +1/+1 counter from ~: It deals 1 damage to any target.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": []
         }
       }
     }

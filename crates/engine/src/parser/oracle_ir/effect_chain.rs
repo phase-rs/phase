@@ -229,7 +229,7 @@ pub(crate) struct AbilityShellIr {
     /// this field by *reading the lowered def*
     /// (`activation_zone_from_self_cost` / `activation_zone_from_self_effect`),
     /// which a shell stamped before lowering cannot express. That is one of the
-    /// reasons `parse_activated_ability_definition` is scoped to its own unit
+    /// reasons `parse_activated_ability_ir` is scoped to its own unit
     /// rather than to T8 — this field is here for the recognizers that know
     /// their zone from the printed keyword (Channel, Forecast), not for that one.
     #[serde(default, skip_serializing_if = "Option::is_none")]

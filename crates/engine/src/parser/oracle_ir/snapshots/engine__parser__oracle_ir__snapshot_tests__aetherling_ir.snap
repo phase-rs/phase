@@ -22,82 +22,156 @@ expression: "&ir"
         "fragment": "{U}: Exile ~. Return it to the battlefield under its owner's control at the beginning of the next end step."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": null,
-            "destination": "Exile",
-            "target": {
-              "type": "SelfRef"
-            },
-            "owner_library": false,
-            "enter_transformed": false,
-            "enter_tapped": false,
-            "enters_attacking": false
-          },
-          "cost": {
-            "type": "Mana",
-            "cost": {
-              "type": "Cost",
-              "shards": [
-                "Blue"
-              ],
-              "generic": 0
-            }
-          },
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "CreateDelayedTrigger",
-              "condition": {
-                "type": "AtNextPhase",
-                "phase": "End"
-              },
-              "effect": {
-                "kind": "Activated",
-                "effect": {
-                  "type": "ChangeZone",
-                  "origin": "Exile",
-                  "destination": "Battlefield",
-                  "target": {
-                    "type": "ParentTarget"
+        "Spell": {
+          "source_text": "Exile ~. Return it to the battlefield under its owner's control at the beginning of the next end step",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
                   },
-                  "owner_library": false,
-                  "enter_transformed": false,
-                  "enter_tapped": false,
-                  "enters_attacking": false
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 7,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Exile ~"
                 },
-                "cost": null,
-                "sub_ability": null,
-                "duration": null,
-                "description": null,
-                "target_prompt": null,
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "ChangeZone",
+                    "origin": null,
+                    "destination": "Exile",
+                    "target": {
+                      "type": "SelfRef"
+                    },
+                    "owner_library": false,
+                    "enter_transformed": false,
+                    "enter_tapped": false,
+                    "enters_attacking": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
                 "condition": null,
-                "optional_targeting": false,
-                "optional": false,
-                "forward_result": false
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               },
-              "uses_tracked_set": true
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false,
-            "sub_link": "SequentialSibling"
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 9,
+                    "end_byte": 101,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "Return it to the battlefield under its owner's control at the beginning of the next end step"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "ChangeZone",
+                    "origin": null,
+                    "destination": "Battlefield",
+                    "target": {
+                      "type": "ParentTarget"
+                    },
+                    "owner_library": false,
+                    "enter_transformed": false,
+                    "enter_tapped": false,
+                    "enters_attacking": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": {
+                  "type": "AtNextPhase",
+                  "phase": "End"
+                },
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": null,
-          "description": "{U}: Exile ~. Return it to the battlefield under its owner's control at the beginning of the next end step.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Mana",
+              "cost": {
+                "type": "Cost",
+                "shards": [
+                  "Blue"
+                ],
+                "generic": 0
+              }
+            },
+            "description": "{U}: Exile ~. Return it to the battlefield under its owner's control at the beginning of the next end step.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
+          },
+          "die_results": []
         }
       }
     },
@@ -119,51 +193,109 @@ expression: "&ir"
         "fragment": "{U}: ~ can't be blocked this turn."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "GenericEffect",
-            "static_abilities": [
+        "Spell": {
+          "source_text": "~ can't be blocked this turn",
+          "body": {
+            "clauses": [
               {
-                "mode": "CantBeBlocked",
-                "affected": {
-                  "type": "SelfRef"
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 28,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "~ can't be blocked this turn"
                 },
-                "modifications": [
-                  {
-                    "type": "AddStaticMode",
-                    "mode": "CantBeBlocked"
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
                   }
-                ],
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "GenericEffect",
+                    "static_abilities": [
+                      {
+                        "mode": "CantBeBlocked",
+                        "affected": {
+                          "type": "SelfRef"
+                        },
+                        "modifications": [
+                          {
+                            "type": "AddStaticMode",
+                            "mode": "CantBeBlocked"
+                          }
+                        ],
+                        "condition": null,
+                        "affected_zone": null,
+                        "effect_zone": null,
+                        "active_zones": [],
+                        "characteristic_defining": false,
+                        "description": "can't be blocked"
+                      }
+                    ],
+                    "duration": "UntilEndOfTurn",
+                    "target": null
+                  },
+                  "duration": "UntilEndOfTurn",
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
                 "condition": null,
-                "affected_zone": null,
-                "effect_zone": null,
-                "active_zones": [],
-                "characteristic_defining": false,
-                "description": "can't be blocked"
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
             ],
-            "duration": "UntilEndOfTurn",
-            "target": null
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "cost": {
-            "type": "Mana",
+          "shell": {
+            "sub_link": null,
             "cost": {
-              "type": "Cost",
-              "shards": [
-                "Blue"
-              ],
-              "generic": 0
-            }
+              "type": "Mana",
+              "cost": {
+                "type": "Cost",
+                "shards": [
+                  "Blue"
+                ],
+                "generic": 0
+              }
+            },
+            "description": "{U}: ~ can't be blocked this turn.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
           },
-          "sub_ability": null,
-          "duration": "UntilEndOfTurn",
-          "description": "{U}: ~ can't be blocked this turn.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": []
         }
       }
     },
@@ -185,38 +317,96 @@ expression: "&ir"
         "fragment": "{1}: ~ gets +1/-1 until end of turn."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "toughness": {
-              "type": "Fixed",
-              "value": -1
-            },
-            "target": {
-              "type": "SelfRef"
-            }
+        "Spell": {
+          "source_text": "~ gets +1/-1 until end of turn",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 30,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "~ gets +1/-1 until end of turn"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Pump",
+                    "power": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "toughness": {
+                      "type": "Fixed",
+                      "value": -1
+                    },
+                    "target": {
+                      "type": "SelfRef"
+                    }
+                  },
+                  "duration": "UntilEndOfTurn",
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "cost": {
-            "type": "Mana",
+          "shell": {
+            "sub_link": null,
             "cost": {
-              "type": "Cost",
-              "shards": [],
-              "generic": 1
-            }
+              "type": "Mana",
+              "cost": {
+                "type": "Cost",
+                "shards": [],
+                "generic": 1
+              }
+            },
+            "description": "{1}: ~ gets +1/-1 until end of turn.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
           },
-          "sub_ability": null,
-          "duration": "UntilEndOfTurn",
-          "description": "{1}: ~ gets +1/-1 until end of turn.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": []
         }
       }
     },
@@ -238,38 +428,96 @@ expression: "&ir"
         "fragment": "{1}: ~ gets -1/+1 until end of turn."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Pump",
-            "power": {
-              "type": "Fixed",
-              "value": -1
-            },
-            "toughness": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "target": {
-              "type": "SelfRef"
-            }
+        "Spell": {
+          "source_text": "~ gets -1/+1 until end of turn",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 30,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "~ gets -1/+1 until end of turn"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Pump",
+                    "power": {
+                      "type": "Fixed",
+                      "value": -1
+                    },
+                    "toughness": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "target": {
+                      "type": "SelfRef"
+                    }
+                  },
+                  "duration": "UntilEndOfTurn",
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "cost": {
-            "type": "Mana",
+          "shell": {
+            "sub_link": null,
             "cost": {
-              "type": "Cost",
-              "shards": [],
-              "generic": 1
-            }
+              "type": "Mana",
+              "cost": {
+                "type": "Cost",
+                "shards": [],
+                "generic": 1
+              }
+            },
+            "description": "{1}: ~ gets -1/+1 until end of turn.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
           },
-          "sub_ability": null,
-          "duration": "UntilEndOfTurn",
-          "description": "{1}: ~ gets -1/+1 until end of turn.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": []
         }
       }
     }

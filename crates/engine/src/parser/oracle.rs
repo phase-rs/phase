@@ -95,7 +95,7 @@ use super::oracle_replacement::{
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
 use super::oracle_special::{
-    attach_die_result_branches_to_chain, normalize_self_refs_for_static,
+    attach_die_result_branches_to_chain, find_terminal_roll_die, normalize_self_refs_for_static,
     parse_cumulative_upkeep_keyword, parse_defiler_cost_reduction, parse_die_result_branches_ir,
     parse_harmonize_keyword, parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
@@ -5045,7 +5045,7 @@ pub(crate) fn parse_oracle_ir(
             // path serves both forms) to gate this ability.
             let aw_condition = strip_ability_word_with_name(cost_text)
                 .and_then(|(aw_name, _)| ability_word_to_condition(&aw_name));
-            let (mut def, effect_text) = parse_activated_ability_definition(
+            let (mut ir, effect_text) = parse_activated_ability_ir(
                 cost_text,
                 effect_text,
                 &line,
@@ -5059,23 +5059,31 @@ pub(crate) fn parse_oracle_ir(
             // `condition` (a resolution-time gate, CR 608.2c + Shelldock Isle
             // ruling, which the engine deliberately does not use for activation
             // legality). Applied AFTER the call because
-            // `parse_activated_ability_definition` overwrites
-            // `activation_restrictions` from the cost-text constraints.
+            // `parse_activated_ability_ir` captures the cost-text constraints in
+            // the activation shell before this outer router stamp is applied.
             if matches!(aw_condition, Some(StaticCondition::SourceIsHarnessed)) {
-                def.activation_restrictions
+                ir.shell
+                    .activation_restrictions
                     .push(ActivationRestriction::SourceIsHarnessed);
             }
             if ability_cant_be_copied {
-                def.cant_be_copied = true;
+                ir.shell.cant_be_copied = true;
             }
-            def.min_x_value = min_x_value;
+            ir.shell.min_x_value = ir.shell.min_x_value.max(min_x_value);
             i += 1;
-            // CR 706: If the activated ability ends with "roll a dN", consume
-            // subsequent d20 table lines and attach them as die result branches.
-            if has_roll_die_pattern(&effect_text.to_lowercase()) {
-                i = attach_die_result_branches_to_chain(&mut def, &lines, i);
+            // CR 706.3b: consume a following table only when the same native IR
+            // lowers to a terminal empty roll. Textual roll markers alone do not
+            // own subsequent lines.
+            let mut lowered_for_die_guard = lower_ability_ir(&ir);
+            if has_roll_die_pattern(&effect_text.to_lowercase())
+                && find_terminal_roll_die(&mut lowered_for_die_guard).is_some()
+            {
+                let (branches, next_line) =
+                    parse_die_result_branches_ir(&lines, i, AbilityKind::Spell);
+                ir.die_results = branches;
+                i = next_line;
             }
-            emitter.ability_at(item_line, def);
+            emitter.ability_ir_at(item_line, ir);
             continue;
         }
 
@@ -5179,7 +5187,7 @@ pub(crate) fn parse_oracle_ir(
                 if let Some(colon_pos) = find_activated_colon(&effect_text) {
                     let cost_text = effect_text[..colon_pos].trim();
                     let activated_effect_text = effect_text[colon_pos + 1..].trim();
-                    let (def, _) = parse_activated_ability_definition(
+                    let (ir, _) = parse_activated_ability_ir(
                         cost_text,
                         activated_effect_text,
                         &line,
@@ -5187,7 +5195,7 @@ pub(crate) fn parse_oracle_ir(
                         Some(PrintedAbilityIndex::placeholder()),
                         &mut ctx,
                     );
-                    emitter.ability_at(item_line, def);
+                    emitter.ability_ir_at(item_line, ir);
                     i += 1;
                     continue;
                 }
@@ -6751,14 +6759,14 @@ fn non_self_exile_cost_zone(cost: &AbilityCost) -> Option<Zone> {
     }
 }
 
-fn parse_activated_ability_definition(
+fn parse_activated_ability_ir(
     cost_text: &str,
     effect_text: &str,
     description: &str,
     card_name: &str,
     current_ability_index: Option<PrintedAbilityIndex>,
     ctx: &mut ParseContext,
-) -> (AbilityDefinition, String) {
+) -> (AbilityIr, String) {
     let (effect_text, activation_mana_payment_restriction) =
         strip_activated_mana_payment_restriction(effect_text);
     let (effect_text, constraints) = strip_activated_constraints(effect_text);
@@ -6784,34 +6792,35 @@ fn parse_activated_ability_definition(
 
     // Retry with `~` normalization if the first pass left an Unimplemented node
     // or emitted a target-fallback warning.
-    let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name, ctx);
+    let mut ir = parse_activated_ability_ir_with_self_ref_fallback(&effect_text, card_name, ctx);
 
     ctx.current_ability_exile_cost_zone = prev_exile_zone;
     ctx.current_ability_index = prev_ability_index;
-    normalize_activated_mana_instead_delta(&mut def);
-    if def.activation_zone.is_none() {
-        def.activation_zone = activation_zone_from_self_cost(&cost);
-    }
+    let lowered_for_activation_zone = lower_ability_ir(&ir);
     // CR 113.6m: fall back to the effect-side derivation — an ability whose
     // effect moves the source out of a non-battlefield zone functions only
     // from that zone. Cost-based derivation keeps priority.
-    if def.activation_zone.is_none() {
-        def.activation_zone = activation_zone_from_self_effect(&def);
-    }
-    def.cost = Some(cost);
-    def.description = Some(description.to_string());
+    ir.shell.activation_zone = lowered_for_activation_zone
+        .activation_zone
+        .or_else(|| activation_zone_from_self_cost(&cost))
+        .or_else(|| activation_zone_from_self_effect(&lowered_for_activation_zone));
+    ir.shell.cost = Some(cost);
+    ir.shell.description = Some(description.to_string());
     if !constraints.restrictions.is_empty() {
-        def.activation_restrictions = constraints.restrictions;
+        ir.shell.activation_restrictions = constraints.restrictions;
     }
-    def.activation_mana_payment_restriction = activation_mana_payment_restriction;
-    def.activator_filter = constraints.activator_filter.or_else(|| {
+    ir.shell.activation_mana_payment_restriction = activation_mana_payment_restriction;
+    ir.shell.activator_filter = constraints.activator_filter.or_else(|| {
         constraints
             .any_player_may_activate
             .then_some(PlayerFilter::All)
     });
-    extract_cost_reduction_from_chain(&mut def);
-    extract_mana_spend_trigger_from_chain(&mut def);
-    (def, effect_text)
+    ir.shell.stages = vec![
+        ShellStage::NormalizeActivatedManaInstead,
+        ShellStage::ExtractCostReduction,
+        ShellStage::ExtractManaSpendTrigger,
+    ];
+    (ir, effect_text)
 }
 
 /// CR 106.6: Strip the exact terminal rider "Spend only mana of the chosen
@@ -8409,31 +8418,31 @@ pub(super) fn has_unimplemented(def: &AbilityDefinition) -> bool {
 /// fell back to `TargetFilter::Any` because the bare card-name wasn't
 /// recognized as a self-reference. Warnings from the discarded pass are
 /// dropped so they don't pollute coverage output.
-pub(super) fn parse_activated_with_self_ref_fallback(
+pub(super) fn parse_activated_ability_ir_with_self_ref_fallback(
     effect_text: &str,
     card_name: &str,
     ctx: &mut ParseContext,
-) -> AbilityDefinition {
+) -> AbilityIr {
     // Pre-diagnostics stay in ctx naturally — only manage trial-parse diagnostics.
     let pre_snapshot = ctx.diagnostics.len();
 
     ctx.subject = None;
     ctx.actor = None;
-    let def = parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
+    let ir = parse_ability_ir_with_context(effect_text, AbilityKind::Activated, ctx);
     let first_has_target_fallback = ctx.diagnostics[pre_snapshot..]
         .iter()
         .any(|d| matches!(d, OracleDiagnostic::TargetFallback { .. }));
-    let first_clean = !has_unimplemented(&def) && !first_has_target_fallback;
+    let first_clean = !has_unimplemented(&lower_ability_ir(&ir)) && !first_has_target_fallback;
 
     if first_clean {
         // First parse is clean — keep its diagnostics.
-        return def;
+        return ir;
     }
 
     let normalized = normalize_self_refs_for_static(effect_text, card_name);
     if normalized == effect_text {
         // No normalization change — keep first-pass diagnostics.
-        return def;
+        return ir;
     }
 
     // Save first-pass diagnostics for potential restoration.
@@ -8442,11 +8451,11 @@ pub(super) fn parse_activated_with_self_ref_fallback(
 
     ctx.subject = None;
     ctx.actor = None;
-    let alt = parse_effect_chain_with_context(&normalized, AbilityKind::Activated, ctx);
+    let alt = parse_ability_ir_with_context(&normalized, AbilityKind::Activated, ctx);
     let alt_has_target_fallback = ctx.diagnostics[pre_snapshot..]
         .iter()
         .any(|d| matches!(d, OracleDiagnostic::TargetFallback { .. }));
-    let alt_clean = !has_unimplemented(&alt) && !alt_has_target_fallback;
+    let alt_clean = !has_unimplemented(&lower_ability_ir(&alt)) && !alt_has_target_fallback;
 
     if alt_clean {
         // Normalized pass is strictly better — keep only its diagnostics (already in ctx).
@@ -8458,7 +8467,7 @@ pub(super) fn parse_activated_with_self_ref_fallback(
         ctx.diagnostics.truncate(pre_snapshot);
         ctx.diagnostics.extend(first_diagnostics);
         ctx.diagnostics.extend(alt_diagnostics);
-        def
+        ir
     }
 }
 

@@ -15,15 +15,15 @@ expression: "&ir"
           "first_line": 0,
           "last_line": 0,
           "start_byte": 0,
-          "end_byte": 74,
+          "end_byte": 38,
           "precision": "Exact",
           "ordinal_within_span": 0
         },
-        "fragment": "{4}{B}, {T}: Target player discards two cards. Activate only as a sorcery."
+        "fragment": "{T}: Add {R}. ~ deals 1 damage to you."
       },
       "node": {
         "Spell": {
-          "source_text": "Target player discards two cards",
+          "source_text": "Add {R}. ~ deals 1 damage to you",
           "body": {
             "clauses": [
               {
@@ -37,11 +37,11 @@ expression: "&ir"
                     "first_line": 0,
                     "last_line": 0,
                     "start_byte": 0,
-                    "end_byte": 32,
+                    "end_byte": 7,
                     "precision": "ChainRelative",
                     "ordinal_within_span": 0
                   },
-                  "fragment": "Target player discards two cards"
+                  "fragment": "Add {R}"
                 },
                 "disposition": {
                   "Emit": {
@@ -51,13 +51,67 @@ expression: "&ir"
                 },
                 "parsed": {
                   "effect": {
-                    "type": "Discard",
-                    "count": {
+                    "type": "Mana",
+                    "produced": {
                       "type": "Fixed",
-                      "value": 2
+                      "colors": [
+                        "Red"
+                      ]
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 9,
+                    "end_byte": 32,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "~ deals 1 damage to you"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "DealDamage",
+                    "amount": {
+                      "type": "Fixed",
+                      "value": 1
                     },
                     "target": {
-                      "type": "Player"
+                      "type": "Controller"
                     }
                   },
                   "duration": null,
@@ -93,29 +147,9 @@ expression: "&ir"
           "shell": {
             "sub_link": null,
             "cost": {
-              "type": "Composite",
-              "costs": [
-                {
-                  "type": "Mana",
-                  "cost": {
-                    "type": "Cost",
-                    "shards": [
-                      "Black"
-                    ],
-                    "generic": 4
-                  }
-                },
-                {
-                  "type": "Tap"
-                }
-              ]
+              "type": "Tap"
             },
-            "activation_restrictions": [
-              {
-                "type": "AsSorcery"
-              }
-            ],
-            "description": "{4}{B}, {T}: Target player discards two cards. Activate only as a sorcery.",
+            "description": "{T}: Add {R}. ~ deals 1 damage to you.",
             "stages": [
               "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
@@ -136,16 +170,16 @@ expression: "&ir"
         "span": {
           "first_line": 1,
           "last_line": 1,
-          "start_byte": 75,
-          "end_byte": 179,
+          "start_byte": 39,
+          "end_byte": 174,
           "precision": "Exact",
           "ordinal_within_span": 0
         },
-        "fragment": "Channel — {5}{B}{B}, Discard this card: Target player discards four cards. Activate only as a sorcery."
+        "fragment": "Threshold — {R}, {T}, Sacrifice ~: It deals 2 damage to any target. Activate only if there are seven or more cards in your graveyard."
       },
       "node": {
         "Spell": {
-          "source_text": "Target player discards four cards",
+          "source_text": "It deals 2 damage to any target",
           "body": {
             "clauses": [
               {
@@ -159,11 +193,11 @@ expression: "&ir"
                     "first_line": 0,
                     "last_line": 0,
                     "start_byte": 0,
-                    "end_byte": 33,
+                    "end_byte": 31,
                     "precision": "ChainRelative",
                     "ordinal_within_span": 0
                   },
-                  "fragment": "Target player discards four cards"
+                  "fragment": "It deals 2 damage to any target"
                 },
                 "disposition": {
                   "Emit": {
@@ -173,13 +207,13 @@ expression: "&ir"
                 },
                 "parsed": {
                   "effect": {
-                    "type": "Discard",
-                    "count": {
+                    "type": "DealDamage",
+                    "amount": {
                       "type": "Fixed",
-                      "value": 4
+                      "value": 2
                     },
                     "target": {
-                      "type": "Player"
+                      "type": "Any"
                     }
                   },
                   "duration": null,
@@ -222,32 +256,50 @@ expression: "&ir"
                   "cost": {
                     "type": "Cost",
                     "shards": [
-                      "Black",
-                      "Black"
+                      "Red"
                     ],
-                    "generic": 5
+                    "generic": 0
                   }
                 },
                 {
-                  "type": "Discard",
-                  "count": {
-                    "type": "Fixed",
-                    "value": 1
+                  "type": "Tap"
+                },
+                {
+                  "type": "Sacrifice",
+                  "target": {
+                    "type": "SelfRef"
                   },
-                  "filter": null,
-                  "random": false,
-                  "self_ref": true
+                  "count": 1
                 }
               ]
             },
             "activation_restrictions": [
               {
-                "type": "AsSorcery"
+                "type": "RequiresCondition",
+                "data": {
+                  "condition": {
+                    "type": "QuantityComparison",
+                    "lhs": {
+                      "type": "Ref",
+                      "qty": {
+                        "type": "GraveyardSize",
+                        "player": {
+                          "type": "Controller"
+                        }
+                      }
+                    },
+                    "comparator": "GE",
+                    "rhs": {
+                      "type": "Fixed",
+                      "value": 7
+                    }
+                  }
+                }
               }
             ],
-            "activation_zone": "Hand",
-            "description": "Channel — {5}{B}{B}, Discard this card: Target player discards four cards. Activate only as a sorcery.",
+            "description": "Threshold — {R}, {T}, Sacrifice ~: It deals 2 damage to any target. Activate only if there are seven or more cards in your graveyard.",
             "stages": [
+              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
@@ -257,6 +309,6 @@ expression: "&ir"
       }
     }
   ],
-  "source_text": "{4}{B}, {T}: Target player discards two cards. Activate only as a sorcery.\nChannel — {5}{B}{B}, Discard this card: Target player discards four cards. Activate only as a sorcery.",
-  "card_name": "Ghost-Lit Stalker"
+  "source_text": "{T}: Add {R}. This land deals 1 damage to you.\nThreshold — {R}, {T}, Sacrifice this land: It deals 2 damage to any target. Activate only if there are seven or more cards in your graveyard.",
+  "card_name": "Barbarian Ring"
 }

@@ -15,15 +15,15 @@ expression: "&ir"
           "first_line": 0,
           "last_line": 0,
           "start_byte": 0,
-          "end_byte": 74,
+          "end_byte": 13,
           "precision": "Exact",
           "ordinal_within_span": 0
         },
-        "fragment": "{4}{B}, {T}: Target player discards two cards. Activate only as a sorcery."
+        "fragment": "{T}: Add {C}."
       },
       "node": {
         "Spell": {
-          "source_text": "Target player discards two cards",
+          "source_text": "Add {C}",
           "body": {
             "clauses": [
               {
@@ -37,11 +37,11 @@ expression: "&ir"
                     "first_line": 0,
                     "last_line": 0,
                     "start_byte": 0,
-                    "end_byte": 32,
+                    "end_byte": 7,
                     "precision": "ChainRelative",
                     "ordinal_within_span": 0
                   },
-                  "fragment": "Target player discards two cards"
+                  "fragment": "Add {C}"
                 },
                 "disposition": {
                   "Emit": {
@@ -51,13 +51,13 @@ expression: "&ir"
                 },
                 "parsed": {
                   "effect": {
-                    "type": "Discard",
-                    "count": {
-                      "type": "Fixed",
-                      "value": 2
-                    },
-                    "target": {
-                      "type": "Player"
+                    "type": "Mana",
+                    "produced": {
+                      "type": "Colorless",
+                      "count": {
+                        "type": "Fixed",
+                        "value": 1
+                      }
                     }
                   },
                   "duration": null,
@@ -93,29 +93,9 @@ expression: "&ir"
           "shell": {
             "sub_link": null,
             "cost": {
-              "type": "Composite",
-              "costs": [
-                {
-                  "type": "Mana",
-                  "cost": {
-                    "type": "Cost",
-                    "shards": [
-                      "Black"
-                    ],
-                    "generic": 4
-                  }
-                },
-                {
-                  "type": "Tap"
-                }
-              ]
+              "type": "Tap"
             },
-            "activation_restrictions": [
-              {
-                "type": "AsSorcery"
-              }
-            ],
-            "description": "{4}{B}, {T}: Target player discards two cards. Activate only as a sorcery.",
+            "description": "{T}: Add {C}.",
             "stages": [
               "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
@@ -136,16 +116,16 @@ expression: "&ir"
         "span": {
           "first_line": 1,
           "last_line": 1,
-          "start_byte": 75,
-          "end_byte": 179,
+          "start_byte": 14,
+          "end_byte": 84,
           "precision": "Exact",
           "ordinal_within_span": 0
         },
-        "fragment": "Channel — {5}{B}{B}, Discard this card: Target player discards four cards. Activate only as a sorcery."
+        "fragment": "{2}, {T}: ~ becomes a copy of target land, except it has this ability."
       },
       "node": {
         "Spell": {
-          "source_text": "Target player discards four cards",
+          "source_text": "~ becomes a copy of target land, except it has this ability",
           "body": {
             "clauses": [
               {
@@ -159,11 +139,11 @@ expression: "&ir"
                     "first_line": 0,
                     "last_line": 0,
                     "start_byte": 0,
-                    "end_byte": 33,
+                    "end_byte": 59,
                     "precision": "ChainRelative",
                     "ordinal_within_span": 0
                   },
-                  "fragment": "Target player discards four cards"
+                  "fragment": "~ becomes a copy of target land, except it has this ability"
                 },
                 "disposition": {
                   "Emit": {
@@ -173,16 +153,24 @@ expression: "&ir"
                 },
                 "parsed": {
                   "effect": {
-                    "type": "Discard",
-                    "count": {
-                      "type": "Fixed",
-                      "value": 4
-                    },
+                    "type": "BecomeCopy",
                     "target": {
-                      "type": "Player"
-                    }
+                      "type": "Typed",
+                      "type_filters": [
+                        "Land"
+                      ],
+                      "controller": null,
+                      "properties": []
+                    },
+                    "duration": "Permanent",
+                    "additional_modifications": [
+                      {
+                        "type": "RetainPrintedAbilityFromSource",
+                        "source_ability_index": 0
+                      }
+                    ]
                   },
-                  "duration": null,
+                  "duration": "Permanent",
                   "sub_ability": null,
                   "distribute": null,
                   "multi_target": null,
@@ -221,33 +209,18 @@ expression: "&ir"
                   "type": "Mana",
                   "cost": {
                     "type": "Cost",
-                    "shards": [
-                      "Black",
-                      "Black"
-                    ],
-                    "generic": 5
+                    "shards": [],
+                    "generic": 2
                   }
                 },
                 {
-                  "type": "Discard",
-                  "count": {
-                    "type": "Fixed",
-                    "value": 1
-                  },
-                  "filter": null,
-                  "random": false,
-                  "self_ref": true
+                  "type": "Tap"
                 }
               ]
             },
-            "activation_restrictions": [
-              {
-                "type": "AsSorcery"
-              }
-            ],
-            "activation_zone": "Hand",
-            "description": "Channel — {5}{B}{B}, Discard this card: Target player discards four cards. Activate only as a sorcery.",
+            "description": "{2}, {T}: ~ becomes a copy of target land, except it has this ability.",
             "stages": [
+              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
@@ -257,6 +230,6 @@ expression: "&ir"
       }
     }
   ],
-  "source_text": "{4}{B}, {T}: Target player discards two cards. Activate only as a sorcery.\nChannel — {5}{B}{B}, Discard this card: Target player discards four cards. Activate only as a sorcery.",
-  "card_name": "Ghost-Lit Stalker"
+  "source_text": "{T}: Add {C}.\n{2}, {T}: This land becomes a copy of target land, except it has this ability.",
+  "card_name": "Thespian's Stage"
 }

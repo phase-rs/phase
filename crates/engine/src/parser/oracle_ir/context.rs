@@ -133,7 +133,7 @@ pub(crate) struct ParseContext {
     /// clause state cannot leak across trigger lines.
     pub pending_trigger_subject_clause: Option<TargetFilter>,
     /// CR 608.2k: Source zone of the current ability's `AbilityCost::Exile`
-    /// component, if any. Set by `parse_activated_ability_definition` after the
+    /// component, if any. Set by `parse_activated_ability_ir` after the
     /// cost is parsed and before the effect text is parsed, then restored after
     /// the ability. Consumed by `parse_cost_paid_object_reference` to
     /// disambiguate "the exiled card" — a cost-paid-object reference

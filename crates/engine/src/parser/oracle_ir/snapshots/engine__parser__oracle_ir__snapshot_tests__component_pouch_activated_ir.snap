@@ -1,0 +1,423 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 73,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{T}, Remove a component counter from ~: Add two mana of different colors."
+      },
+      "node": {
+        "Spell": {
+          "source_text": "Add two mana of different colors",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 32,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Add two mana of different colors"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Mana",
+                    "produced": {
+                      "type": "ChoiceAmongCombinations",
+                      "options": [
+                        [
+                          "White",
+                          "Blue"
+                        ],
+                        [
+                          "White",
+                          "Black"
+                        ],
+                        [
+                          "White",
+                          "Red"
+                        ],
+                        [
+                          "White",
+                          "Green"
+                        ],
+                        [
+                          "Blue",
+                          "Black"
+                        ],
+                        [
+                          "Blue",
+                          "Red"
+                        ],
+                        [
+                          "Blue",
+                          "Green"
+                        ],
+                        [
+                          "Black",
+                          "Red"
+                        ],
+                        [
+                          "Black",
+                          "Green"
+                        ],
+                        [
+                          "Red",
+                          "Green"
+                        ]
+                      ]
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Composite",
+              "costs": [
+                {
+                  "type": "Tap"
+                },
+                {
+                  "type": "RemoveCounter",
+                  "count": 1,
+                  "counter_type": {
+                    "type": "OfType",
+                    "data": "component"
+                  },
+                  "target": null,
+                  "selection": "SingleObject"
+                }
+              ]
+            },
+            "description": "{T}, Remove a component counter from ~: Add two mana of different colors.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
+          },
+          "die_results": []
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 74,
+          "end_byte": 90,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{T}: Roll a d20."
+      },
+      "node": {
+        "Spell": {
+          "source_text": "Roll a d20",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 10,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Roll a d20"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "RollDie",
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "sides": 20,
+                    "results": []
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Tap"
+            },
+            "description": "{T}: Roll a d20.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
+          },
+          "die_results": [
+            {
+              "min": 1,
+              "max": 9,
+              "effect": {
+                "source_text": "Put a component counter on ~.",
+                "body": {
+                  "clauses": [
+                    {
+                      "id": 0,
+                      "source": {
+                        "id": {
+                          "item": 0,
+                          "ordinal": 1
+                        },
+                        "span": {
+                          "first_line": 0,
+                          "last_line": 0,
+                          "start_byte": 0,
+                          "end_byte": 28,
+                          "precision": "ChainRelative",
+                          "ordinal_within_span": 0
+                        },
+                        "fragment": "Put a component counter on ~"
+                      },
+                      "disposition": {
+                        "Emit": {
+                          "followup": null,
+                          "intrinsic": null
+                        }
+                      },
+                      "parsed": {
+                        "effect": {
+                          "type": "PutCounter",
+                          "counter_type": "component",
+                          "count": {
+                            "type": "Fixed",
+                            "value": 1
+                          },
+                          "target": {
+                            "type": "SelfRef"
+                          }
+                        },
+                        "duration": null,
+                        "sub_ability": null,
+                        "distribute": null,
+                        "multi_target": null,
+                        "condition": null,
+                        "optional": false,
+                        "unless_pay": null
+                      },
+                      "boundary": "Sentence",
+                      "condition": null,
+                      "is_optional": false,
+                      "opponent_may_scope": null,
+                      "repeat_for": null,
+                      "player_scope": null,
+                      "starting_with": null,
+                      "delayed_condition": null,
+                      "prefix_delayed_condition": null,
+                      "multi_target": null,
+                      "where_x_expression": null,
+                      "unless_pay": null
+                    }
+                  ],
+                  "kind": "Spell",
+                  "continuation_kind": null,
+                  "player_scope_rewrite": "Apply",
+                  "chain_rounding": null,
+                  "actor": null,
+                  "in_trigger": false,
+                  "repeat_until": null
+                },
+                "shell": {
+                  "sub_link": null
+                },
+                "die_results": []
+              }
+            },
+            {
+              "min": 10,
+              "max": 20,
+              "effect": {
+                "source_text": "Put two component counters on ~.",
+                "body": {
+                  "clauses": [
+                    {
+                      "id": 0,
+                      "source": {
+                        "id": {
+                          "item": 0,
+                          "ordinal": 1
+                        },
+                        "span": {
+                          "first_line": 0,
+                          "last_line": 0,
+                          "start_byte": 0,
+                          "end_byte": 31,
+                          "precision": "ChainRelative",
+                          "ordinal_within_span": 0
+                        },
+                        "fragment": "Put two component counters on ~"
+                      },
+                      "disposition": {
+                        "Emit": {
+                          "followup": null,
+                          "intrinsic": null
+                        }
+                      },
+                      "parsed": {
+                        "effect": {
+                          "type": "PutCounter",
+                          "counter_type": "component",
+                          "count": {
+                            "type": "Fixed",
+                            "value": 2
+                          },
+                          "target": {
+                            "type": "SelfRef"
+                          }
+                        },
+                        "duration": null,
+                        "sub_ability": null,
+                        "distribute": null,
+                        "multi_target": null,
+                        "condition": null,
+                        "optional": false,
+                        "unless_pay": null
+                      },
+                      "boundary": "Sentence",
+                      "condition": null,
+                      "is_optional": false,
+                      "opponent_may_scope": null,
+                      "repeat_for": null,
+                      "player_scope": null,
+                      "starting_with": null,
+                      "delayed_condition": null,
+                      "prefix_delayed_condition": null,
+                      "multi_target": null,
+                      "where_x_expression": null,
+                      "unless_pay": null
+                    }
+                  ],
+                  "kind": "Spell",
+                  "continuation_kind": null,
+                  "player_scope_rewrite": "Apply",
+                  "chain_rounding": null,
+                  "actor": null,
+                  "in_trigger": false,
+                  "repeat_until": null
+                },
+                "shell": {
+                  "sub_link": null
+                },
+                "die_results": []
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "source_text": "{T}, Remove a component counter from this artifact: Add two mana of different colors.\n{T}: Roll a d20.\n1—9 | Put a component counter on this artifact.\n10—20 | Put two component counters on this artifact.",
+  "card_name": "Component Pouch"
+}

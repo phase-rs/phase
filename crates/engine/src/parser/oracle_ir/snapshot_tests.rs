@@ -12,6 +12,18 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{Effect, TriggerCondition};
 use crate::types::game_state::DistributionUnit;
 
+fn ability_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
+    matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_has_unimplemented)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_has_unimplemented)
+}
+
 /// Parse Oracle text through both IR and lowering layers.
 fn parse_two_layer(
     oracle_text: &str,
@@ -35,6 +47,152 @@ fn parse_two_layer_with_keywords(
     let mut ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
     let lowered = lower_oracle_ir(&mut ir);
     (ir, lowered)
+}
+
+/// CR 707.9a + CR 602.1a: generic activated abilities are emitted as native
+/// spell IR, so the source-ordered lowerer can stamp the second printed ability
+/// before its self-retention copy effect is finalized.
+#[test]
+fn thespians_stage_generic_activated_router_is_ir_native() {
+    let (ir, lowered) = parse_two_layer(
+        "{T}: Add {C}.\n{2}, {T}: This land becomes a copy of target land, except it has this ability.",
+        "Thespian's Stage",
+        &["Land"],
+        &[],
+    );
+
+    assert_eq!(ir.items.len(), 2);
+    assert!(matches!(&ir.items[0].node, OracleNodeIr::Spell(_)));
+    assert!(matches!(&ir.items[1].node, OracleNodeIr::Spell(_)));
+    assert_eq!(lowered.abilities.len(), 2);
+    assert!(
+        !ability_has_unimplemented(&lowered.abilities[1]),
+        "the copy ability must lower without a residual fallback: {:?}",
+        lowered.abilities[1]
+    );
+    assert!(matches!(
+        lowered.abilities[1].effect.as_ref(),
+        Effect::BecomeCopy { additional_modifications, .. }
+            if additional_modifications.iter().any(|modification| matches!(
+                modification,
+                crate::types::ability::ContinuousModification::RetainPrintedAbilityFromSource {
+                    source_ability_index: 1
+                }
+            ))
+    ));
+
+    insta::assert_json_snapshot!("thespians_stage_generic_activated_ir", &ir);
+    insta::assert_json_snapshot!("thespians_stage_generic_activated_lowered", &lowered);
+}
+
+/// CR 207.2c + CR 602.1: an ability-word label on an activated ability does
+/// not impose a condition; the generic activation envelope is retained in IR.
+#[test]
+fn barbarian_ring_ability_word_activated_router_is_ir_native() {
+    let (ir, lowered) = parse_two_layer(
+        "{T}: Add {R}. This land deals 1 damage to you.\nThreshold — {R}, {T}, Sacrifice this land: It deals 2 damage to any target. Activate only if there are seven or more cards in your graveyard.",
+        "Barbarian Ring",
+        &["Land"],
+        &[],
+    );
+
+    assert_eq!(ir.items.len(), 2);
+    let OracleNodeIr::Spell(activated) = &ir.items[1].node else {
+        panic!(
+            "expected native activated spell IR, got {:?}",
+            ir.items[1].node
+        );
+    };
+    assert!(activated.shell.activation_restrictions.len() > 0);
+    assert_eq!(lowered.abilities.len(), 2);
+    let ability = &lowered.abilities[1];
+    assert!(
+        !ability_has_unimplemented(ability),
+        "ability-word activated route must not fall back: {ability:?}"
+    );
+    assert!(
+        ability.condition.is_none(),
+        "Threshold has no rules meaning here"
+    );
+    assert!(matches!(
+        ability.cost.as_ref(),
+        Some(crate::types::ability::AbilityCost::Composite { .. })
+    ));
+    assert!(matches!(ability.effect.as_ref(), Effect::DealDamage { .. }));
+    assert!(
+        !ability.activation_restrictions.is_empty(),
+        "explicit Activate only restriction must survive"
+    );
+
+    insta::assert_json_snapshot!("barbarian_ring_activated_ir", &ir);
+    insta::assert_json_snapshot!("barbarian_ring_activated_lowered", &lowered);
+}
+
+/// CR 706.3b: an activated terminal die roll owns only its contiguous result
+/// rows and preserves them as native branch IR until final lowering.
+#[test]
+fn component_pouch_activated_die_table_is_ir_native() {
+    let (ir, lowered) = parse_two_layer(
+        "{T}, Remove a component counter from this artifact: Add two mana of different colors.\n{T}: Roll a d20.\n1—9 | Put a component counter on this artifact.\n10—20 | Put two component counters on this artifact.",
+        "Component Pouch",
+        &["Artifact"],
+        &[],
+    );
+
+    assert_eq!(ir.items.len(), 2, "result rows must not become items");
+    let OracleNodeIr::Spell(roll) = &ir.items[1].node else {
+        panic!(
+            "expected native roll ability IR, got {:?}",
+            ir.items[1].node
+        );
+    };
+    assert_eq!(
+        roll.die_results
+            .iter()
+            .map(|branch| (branch.min, branch.max))
+            .collect::<Vec<_>>(),
+        vec![(1, 9), (10, 20)]
+    );
+    assert!(matches!(
+        lowered.abilities[1].effect.as_ref(),
+        Effect::RollDie { results, .. } if results.len() == 2
+    ));
+
+    insta::assert_json_snapshot!("component_pouch_activated_ir", &ir);
+    insta::assert_json_snapshot!("component_pouch_activated_lowered", &lowered);
+}
+
+/// CR 706.3b: the typed terminal-roll guard must leave the next line to the
+/// ordinary router when a die roll has a following non-roll instruction.
+#[test]
+fn nonterminal_activated_die_roll_does_not_consume_following_ability() {
+    let (ir, lowered) = parse_two_layer(
+        "{T}: Roll a d20, then draw a card.\n{T}: Add {C}.",
+        "Nonterminal Activated Die Fixture",
+        &["Artifact"],
+        &[],
+    );
+
+    assert_eq!(
+        ir.items.len(),
+        2,
+        "the following activation must remain routable"
+    );
+    assert!(matches!(&ir.items[0].node, OracleNodeIr::Spell(_)));
+    assert!(matches!(&ir.items[1].node, OracleNodeIr::Spell(_)));
+    assert_eq!(lowered.abilities.len(), 2);
+    assert!(
+        lowered
+            .abilities
+            .iter()
+            .all(|ability| !ability_has_unimplemented(ability)),
+        "both ordinary activations must parse after the nonterminal roll: {:?}",
+        lowered.abilities
+    );
+    assert!(matches!(
+        lowered.abilities[1].effect.as_ref(),
+        Effect::Mana { .. }
+    ));
 }
 
 /// CR 706.3b: ordinary trigger dispatch retains a die-result table in native

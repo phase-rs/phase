@@ -1,0 +1,82 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": {
+          "type": "Colorless",
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          }
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{T}: Add {C}.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false,
+      "is_mana_ability": true
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "BecomeCopy",
+        "target": {
+          "type": "Typed",
+          "type_filters": [
+            "Land"
+          ],
+          "controller": null,
+          "properties": []
+        },
+        "duration": "Permanent",
+        "additional_modifications": [
+          {
+            "type": "RetainPrintedAbilityFromSource",
+            "source_ability_index": 1
+          }
+        ]
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [],
+              "generic": 2
+            }
+          },
+          {
+            "type": "Tap"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "duration": "Permanent",
+      "description": "{2}, {T}: ~ becomes a copy of target land, except it has this ability.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}
