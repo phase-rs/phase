@@ -153,6 +153,7 @@ mod divine_visitation_token_substitution;
 mod doran_attack_block_pump;
 mod double_strike_first_strike_trigger_removes_attacker;
 mod dragonstorm_forecaster_named_or_tutor;
+mod draw_delivery_preview;
 mod draw_from_general_post_replacement;
 mod draw_preflight_matches_live_pipeline;
 mod dream_salvage_target_opponent_discards;

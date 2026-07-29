@@ -15,7 +15,8 @@
 //!    authority, CR 601.2b/f) reports the only legal X is 0, and
 //! 3. the payoff genuinely scales with X (via `x_reference`, the shared
 //!    detector the ramp policy also consumes), with any *fixed* non-X residual
-//!    still being trivial (priced by `self_cost::effect_is_trivial`).
+//!    still being trivial (classified by
+//!    `self_cost::residual_effects_are_trivial_at_x_zero`).
 //!
 //! Rejecting the cast makes the AI `Pass` (always a Priority candidate) and hold
 //! the card — it never loses the card, it just waits until X≥1 is affordable.
@@ -38,7 +39,7 @@ use crate::features::DeckFeatures;
 
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
-use super::self_cost::effect_is_trivial;
+use super::self_cost::residual_effects_are_trivial_at_x_zero;
 use super::x_reference;
 
 pub struct XCastGatePolicy;
@@ -163,6 +164,7 @@ fn no_op_at_x_zero(
 ) -> bool {
     let mut references_any_x = object_level_x;
     let mut prev_was_x = object_level_x;
+    let mut residual_effects = Vec::new();
     for effect in effects {
         if x_reference::effect_references_x(effect) {
             references_any_x = true;
@@ -175,13 +177,17 @@ fn no_op_at_x_zero(
             prev_was_x = true;
             continue;
         }
-        if !effect_is_trivial(state, ai_player, source_id, ability, effect) {
-            // A fixed, meaningful non-X residual is worth casting at X=0.
-            return false;
-        }
+        residual_effects.push(*effect);
         prev_was_x = false;
     }
     references_any_x
+        && residual_effects_are_trivial_at_x_zero(
+            state,
+            ai_player,
+            source_id,
+            ability,
+            &residual_effects,
+        )
 }
 
 fn gate_rejects(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
@@ -725,7 +731,8 @@ mod tests {
     #[test]
     fn exsanguinate_max_x_zero_rejected_stale_last_effect_amount() {
         // A stale `last_effect_amount` above the lifegain ceiling would make the
-        // GainLife residual resolve non-trivially through effect_is_trivial. The
+        // GainLife residual resolve non-trivially through the shared residual
+        // classifier. The
         // chain-relative branch short-circuits that path, so it stays gated.
         let mut state = base_state();
         state.last_effect_amount = Some(10); // > TRIVIAL_LIFEGAIN_CEILING
@@ -791,7 +798,8 @@ mod tests {
     #[test]
     fn fixed_generic_keyword_grant_not_gated() {
         // {X} ability whose only payoff is a FIXED non-X keyword grant (GenericEffect
-        // AddKeyword). effect_is_trivial treats it as trivial, but references_any_x is
+        // AddKeyword). The shared residual classifier treats it as trivial, but
+        // references_any_x is
         // false → the gate stands down. Reverting the references_any_x requirement
         // (gate whenever all effects are trivial) would REJECT this.
         let mut state = base_state();

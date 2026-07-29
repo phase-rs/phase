@@ -35,6 +35,7 @@ use super::effect_classify::{
     aggregate_player_impact, aura_polarity, effect_polarity, effect_targets_object,
     extract_target_filter, is_spell_beneficial, lethal_to_creature, targeted_object_impact,
     targeted_player_impact, targets_creatures, targets_creatures_only, EffectPolarity,
+    PLAYER_IMPACT_PREFERENCE_BAND,
 };
 use super::registry::{
     DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, CRITICAL_MAX,
@@ -585,9 +586,9 @@ fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<P
 
             let player_impact = targeted_player_impact(ctx, *player_id)
                 .unwrap_or_else(|| aggregate_player_impact(ctx));
-            let prefers_self = if player_impact > 0.25 {
+            let prefers_self = if player_impact > PLAYER_IMPACT_PREFERENCE_BAND {
                 true
-            } else if player_impact < -0.25 {
+            } else if player_impact < -PLAYER_IMPACT_PREFERENCE_BAND {
                 false
             } else {
                 beneficial
@@ -647,8 +648,8 @@ fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
             4.0 + threat_level(ctx.state, ctx.ai_player, *player_id) * 8.0
         }
         TargetRef::Object(object_id) => {
-            let object_beneficial =
-                targeted_object_impact(ctx, *object_id).map_or(beneficial, |impact| impact > 0.25);
+            let object_beneficial = targeted_object_impact(ctx, *object_id)
+                .map_or(beneficial, |impact| impact > PLAYER_IMPACT_PREFERENCE_BAND);
             score_target_object(ctx, *object_id, object_beneficial)
         }
     }
@@ -1806,6 +1807,100 @@ mod tests {
             self_score > opp_score,
             "Net card-positive discard/draw should prefer self: self={self_score}, opp={opp_score}"
         );
+    }
+
+    #[test]
+    fn draw_then_parent_target_discard_prefers_opponent() {
+        let state = make_state();
+        let config = AiConfig::default();
+        let discard = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::ParentTarget,
+                selection: CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Player,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(discard);
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: PlayerId(0),
+                pending_cast: Box::new(PendingCast::new(
+                    ObjectId(100),
+                    CardId(100),
+                    ability,
+                    ManaCost::zero(),
+                )),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![
+                        TargetRef::Player(PlayerId(0)),
+                        TargetRef::Player(PlayerId(1)),
+                    ],
+                    optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                }],
+                mode_labels: Vec::new(),
+                selection: Default::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let self_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(0))),
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let self_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &self_candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let opponent_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let opponent_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &opponent_candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+
+        assert!(matches!(
+            AntiSelfHarmPolicy.verdict(&self_ctx),
+            PolicyVerdict::Reject { ref reason }
+                if reason.kind == "anti_self_harm_wrong_player_target"
+        ));
+        assert!(matches!(
+            AntiSelfHarmPolicy.verdict(&opponent_ctx),
+            PolicyVerdict::Score { .. }
+        ));
     }
 
     #[test]
