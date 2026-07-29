@@ -254,7 +254,7 @@ function verifyPrompt(card) {
     `2. ./scripts/check-parser-combinators.sh   (Gate A; one-shot, direct)\n` +
     `3. If \`tilt get uiresource clippy >/dev/null 2>&1\` succeeds: ` +
     `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data ; else: ` +
-    `cargo clippy-strict && cargo test -p engine && ./scripts/gen-card-data.sh\n` +
+    `cargo clippy-strict && cargo test -p phase-engine && ./scripts/gen-card-data.sh\n` +
     `4. cargo coverage   (confirm "${card}" is now supported:true, gap_count:0 -> ` +
     `set coverageSupported)\n` +
     `5. cargo semantic-audit   (confirm "${card}" has 0 findings -> set ` +

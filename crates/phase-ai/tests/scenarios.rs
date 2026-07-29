@@ -170,8 +170,18 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
     assert!(attacks.iter().any(|(id, _)| *id == attacker_b));
 }
 
+/// Pins the `prefer_land_drop` **fast path**, not the evaluator.
+///
+/// With exactly one playable land, `prefer_land_drop` short-circuits before the
+/// search ever runs (it terminates on `let only_land = land_actions.next()?;`
+/// followed by a second-`next()` guard), so this test **cannot detect an
+/// evaluator regression** — it passed throughout the period when the evaluator
+/// scored its own land drop as a strict loss. Evaluator coverage lives in
+/// `tests/ai_quality.rs::mana_screwed_ai_ranks_land_drop_above_passing`, which uses
+/// **two or more** playable lands so the shortcut declines and the scored path
+/// is reached. Any replacement for this test must do the same.
 #[test]
-fn scenario_mcts_plays_available_land_deterministically() {
+fn scenario_single_playable_land_uses_deterministic_shortcut() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let land_id = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);

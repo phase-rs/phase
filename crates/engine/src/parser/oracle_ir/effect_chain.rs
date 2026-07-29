@@ -368,6 +368,15 @@ pub(crate) enum ShellStage {
     ExtractManaSpendTrigger,
 }
 
+/// CR 706.3a: one row of a die-roll results table — a possible-result range and
+/// the effect associated with it ("N1–N2" or "N+").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DieResultBranchIr {
+    pub(crate) min: u8,
+    pub(crate) max: u8,
+    pub(crate) effect: Box<AbilityIr>,
+}
+
 /// An effect chain plus the root-level metadata applied around it.
 ///
 /// Lowered by `lower_ability_ir`, which is the single authority for
@@ -390,6 +399,10 @@ pub(crate) struct AbilityIr {
     pub(crate) source_text: String,
     pub(crate) body: EffectChainIr,
     pub(crate) shell: AbilityShellIr,
+    /// Result-table rows supplied by a whole-body die-roll recognizer.
+    ///
+    /// Empty is the default for every ordinary ability IR and is a lowering no-op.
+    pub(crate) die_results: Vec<DieResultBranchIr>,
 }
 
 /// CR 608.2c + CR 601.2c: Subject of a "does the same / does so" effect-replication
@@ -595,8 +608,10 @@ pub(crate) enum ReplaceMeaningKind {
     /// CR 608.2c: pop the prior def; wrap this alternative def with the prior as its
     /// `else_ability` (dig-instead alternative).
     DigAlt(Box<AbilityDefinition>),
-    /// CR 614.1a + CR 608.2c: multi-clause base + "instead" override via Cow-swap;
-    /// tail clauses stashed in the override's `else_ability`.
+    /// CR 614.1a + CR 608.2c: within one effect chain, a clause replaces a prior
+    /// clause's definition via Cow-swap; tail clauses are stashed in the
+    /// override's `else_ability`. This remains distinct from the cross-document-
+    /// item `DocumentRelationIr::SelfReplacementOverride` relation.
     Instead(Box<AbilityDefinition>),
     /// CR 608.2c: build this clause's def from `parsed` + condition, attach as the
     /// prior def's `sub_ability` (keyword-instead override).

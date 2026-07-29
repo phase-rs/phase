@@ -156,7 +156,7 @@ ReplacementResult::Execute(modified_event) → caller processes the event
 - [ ] Multi-replacement test: with two matching replacements, selecting one must not apply the other's execute/decline/rider/effect, and the applied set must prevent reapplication of exactly the selected replacement.
 - [ ] Optional replacement test: accept and decline through the actual `GameAction::ChooseReplacement` / `engine_replacement.rs` path, not only direct `replacement.rs` helper calls.
 - [ ] Serialized-state test: if `ProposedEvent`, pending replacement state, `WaitingFor`, `GameAction`, or serialized replacement fields change, add `#[serde(default)]` or an explicit migration plus a fixture/load test for existing repo-owned serialized data.
-- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
+- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p phase-engine` + `./scripts/gen-card-data.sh`.
 
 ---
 

@@ -9,7 +9,7 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-engine = { path = "../engine" }
+engine = { path = "../engine", package = "phase-engine" }
 manabrew-protocol = "3"
 serde = { workspace = true }
 serde_json = "1"
@@ -22,5 +22,5 @@ serde_json = "1"
 # because phase-ai / server-core / engine-wasm happen to enable the same
 # feature from *their* dev-dependencies. Declaring it here makes the crate
 # self-sufficient, matching those three manifests.
-engine = { path = "../engine", features = ["test-support"] }
+engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }
 pretty_assertions = "1"

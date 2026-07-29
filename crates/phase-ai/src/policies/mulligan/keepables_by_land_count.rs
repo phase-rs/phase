@@ -4,8 +4,11 @@
 //! mulligan an opening hand. This policy is the deck-agnostic baseline — it
 //! checks land count, color availability, and early castability.
 //!
+//! The minimum kept-hand size is NOT this policy's concern — it belongs to
+//! `card_floor::MulliganCardFloor`, the single process-level authority, whose
+//! `ForceKeep` outranks every verdict below.
+//!
 //! Outcomes are translated into structured `MulliganScore` verdicts:
-//! - Always-keep short hands (≤ 4 cards post-mulligan) → `Score { +5.0 }`.
 //! - Post-2-mulligan lenient accept (has land + has spell) → `Score { +2.0 }`.
 //! - Post-2-mulligan lenient reject (missing land or spell) →
 //!   `ForceMulligan`.
@@ -43,21 +46,6 @@ impl MulliganPolicy for KeepablesByLandCount {
         mulligans_taken: u8,
     ) -> MulliganScore {
         let hand_size = hand.len();
-
-        // Defensive short-hand keep. Under the London Mulligan (CR 103.5) the
-        // engine always presents a 7-card hand at `WaitingFor::MulliganDecision`
-        // (bottoming happens *after* the keep decision), so this branch is
-        // unreachable from production paths today. It stays as a guard against
-        // direct `evaluate()` invocations (tests, hypothetical non-London
-        // mulligan flows) so no caller can observe an unkeepable tiny hand.
-        if hand_size <= 4 {
-            return MulliganScore::Score {
-                delta: 5.0,
-                reason: PolicyReason::new("hand_short_force_keep")
-                    .with_fact("hand_size", hand_size as i64)
-                    .with_fact("mulligans_taken", mulligans_taken as i64),
-            };
-        }
 
         // After 2+ mulligans, be much more lenient — keep any hand with at
         // least 1 land + 1 spell.
@@ -356,18 +344,6 @@ mod tests {
         }
     }
 
-    fn spell_expensive(name: &str) -> HandCard {
-        HandCard {
-            name: name.to_string(),
-            core_types: vec![CoreType::Creature],
-            subtypes: Vec::new(),
-            mana_cost: ManaCost::Cost {
-                shards: Vec::new(),
-                generic: 6,
-            },
-        }
-    }
-
     fn plan() -> PlanSnapshot {
         PlanSnapshot::default()
     }
@@ -393,33 +369,6 @@ mod tests {
         back_face.mana_cost = mana_cost;
         back_face.layout_kind = Some(LayoutKind::Modal);
         object.back_face = Some(back_face);
-    }
-
-    #[test]
-    fn short_hand_is_kept() {
-        // 4-card hand — always keep regardless of contents.
-        let state = setup_game(vec![
-            spell_expensive("A"),
-            spell_expensive("B"),
-            spell_expensive("C"),
-            spell_expensive("D"),
-        ]);
-        let hand: Vec<_> = state.players[0].hand.iter().copied().collect();
-        let score = KeepablesByLandCount.evaluate(
-            &hand,
-            &state,
-            &features(),
-            &plan(),
-            TurnOrder::OnPlay,
-            3,
-        );
-        match score {
-            MulliganScore::Score { delta, reason } => {
-                assert!(delta > 0.0);
-                assert_eq!(reason.kind, "hand_short_force_keep");
-            }
-            _ => panic!("expected Score"),
-        }
     }
 
     #[test]
@@ -651,8 +600,8 @@ mod tests {
 
     #[test]
     fn lenient_after_two_mulligans() {
-        // 5-card hand (mulligan_count=2 still checked because hand_size>4)
-        // with 1 land + 4 spells — lenient accept.
+        // 5-card hand at mulligans_taken == 2 → the lenient branch; hand size is
+        // no longer consulted. 1 land + 4 spells — lenient accept.
         let state = setup_game(vec![
             land("Mountain", "Mountain"),
             spell_cheap("Bolt 1", ManaCostShard::Red),
@@ -669,8 +618,8 @@ mod tests {
             TurnOrder::OnPlay,
             2,
         );
-        // hand_size 5 → falls through to mulligans_taken>=2 arm? No — short-hand
-        // arm requires hand_size <= 4. 5 goes to the lenient branch.
+        // mulligans_taken == 2 → the lenient branch, which accepts any hand
+        // carrying at least one land and one spell regardless of size.
         match score {
             MulliganScore::Score { reason, .. } => {
                 assert_eq!(reason.kind, "hand_lenient_after_mulligans");

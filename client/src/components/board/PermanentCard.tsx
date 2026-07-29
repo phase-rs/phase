@@ -465,11 +465,15 @@ export const PermanentCard = memo(function PermanentCard({
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
 
-  const openAttachmentFan = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation();
+  const showAttachmentFan = useCallback(() => {
     dismissPreview();
     setAttachmentFanHost(objectId);
   }, [dismissPreview, objectId, setAttachmentFanHost]);
+
+  const openAttachmentFan = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    showAttachmentFan();
+  }, [showAttachmentFan]);
 
   if (!obj) return null;
 
@@ -685,6 +689,12 @@ export const PermanentCard = memo(function PermanentCard({
       });
     } else if (isValidTarget) {
       dispatchAction({ type: "ChooseTarget", data: { target: { Object: objectId } } });
+    } else if (attachmentsActionable) {
+      // The host is not a legal choice, but one of its attachments is. Open
+      // the full-card chooser rather than requiring a precise click on an
+      // overlapping attachment peek. The fan derives every selectable card
+      // from the engine's current legal-target set.
+      showAttachmentFan();
     } else if (isActivatable) {
       const o = useGameStore.getState().gameState?.objects[objectId];
       // Read the engine-provided action list for this permanent — the mapping

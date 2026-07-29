@@ -1,8 +1,15 @@
 [package]
-name = "engine"
+name = "phase-engine"
 version.workspace = true
 edition = "2021"
 license.workspace = true
+description = "A Magic: The Gathering rules engine implementing the Comprehensive Rules for native and WASM."
+repository = "https://github.com/phase-rs/phase"
+homepage = "https://github.com/phase-rs/phase"
+documentation = "https://github.com/phase-rs/phase"
+
+[lib]
+name = "engine"
 
 [features]
 cli = ["tracing-subscriber"]
@@ -103,7 +110,7 @@ serde_json = "1"
 
 [dev-dependencies]
 flate2 = "1"
-engine = { path = ".", features = ["test-support"] }
+engine = { path = ".", package = "phase-engine", features = ["test-support"] }
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
 assert_matches = "1.5"

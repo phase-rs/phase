@@ -1051,6 +1051,13 @@ impl OracleDocBuilder {
         self.items.values().find(|i| i.id == id).map(|i| &i.node)
     }
 
+    /// Peek the most-recently emitted spell item's stable document id. The same
+    /// emission-order stack backs the node peek, so a cross-item relation can
+    /// name the preceding spell without removing or re-emitting it.
+    pub(crate) fn peek_last_spell_id(&self) -> Option<OracleItemId> {
+        self.spells_emitted.last().copied()
+    }
+
     /// Finish, producing items already in Oracle source order.
     ///
     /// # CR 707.9a printed-slot stamping does NOT happen here

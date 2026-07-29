@@ -67,6 +67,65 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
     true
 }
 
+/// CR 701.21a: Detects when this ability's cost sacrifices **the source itself**.
+///
+/// Also detects a self-`ReturnToHand` cost: either form removes the source from
+/// the battlefield. Restricted to [`TargetFilter::SelfRef`] on purpose: a
+/// sac-outlet mana ability that eats *other* permanents (Skirk Prospector,
+/// "Sacrifice a Goblin: Add {R}") keeps its source on the battlefield and stays
+/// renewable. Delegates to [`mana_sources::cost_has_component`] so a **bare**
+/// component and one nested in a `Composite` are both matched.
+///
+/// Deliberately private, but privacy is a signpost rather than a barrier: it
+/// removes the *convenient* route to the naive per-permanent form ("has a mana
+/// ability AND no mana ability self-sacs" — which wrongly drops a permanent
+/// carrying both a renewable and a self-sacrificing mana ability), and does not
+/// make that form inexpressible. `AbilityCost::Sacrifice` and
+/// `TargetFilter::SelfRef` are both public, so any downstream crate can rebuild
+/// this predicate, and one did: `phase-ai` carried a hand-rolled
+/// `ability_cost_requires_sacrifice` whose own doc said it "mirrors
+/// `mana_sources::cost_requires_sacrifice` which is private to the engine
+/// module". It matched only the `Composite` shape, so Gold's **bare**
+/// `Sacrifice` hit its `_ => false` arm and a Gold token counted as renewable.
+/// That miscount — a re-implementation drifting from the rule — is the argument
+/// for keeping the classification here, not any guarantee privacy provides. The
+/// only exported composition is `.any(is_renewable_mana_ability)`, which *is*
+/// the per-ability filter.
+fn cost_removes_self_from_battlefield(cost: &Option<AbilityCost>) -> bool {
+    mana_sources::cost_has_component(cost, |c| {
+        matches!(
+            c,
+            AbilityCost::Sacrifice(s) if s.target == TargetFilter::SelfRef
+        ) || matches!(
+            c,
+            AbilityCost::ReturnToHand {
+                filter: Some(TargetFilter::SelfRef),
+                ..
+            }
+        )
+    })
+}
+
+/// CR 605.1a + CR 701.21: a *renewable* mana ability — one that produces mana
+/// (per [`is_mana_ability`]) without consuming its own source to do it.
+///
+/// This is the **development** predicate: it answers "is this permanent part of a
+/// standing manabase," not "can this produce mana right now." A Treasure, Gold,
+/// Lotus Petal, Black Lotus, or Chromatic Star is a one-shot conversion of a
+/// permanent into mana and is deliberately **excluded**; Commander's Sphere,
+/// Powerstone, Springleaf Drum, and Skirk Prospector are **included**.
+///
+/// For live availability use [`is_mana_ability`] directly — an untapped Treasure
+/// genuinely is one mana available right now, which is why the two predicates must
+/// not be unified.
+///
+/// Takes a single ability so callers compose with `.any()`; a permanent counts if
+/// **at least one** of its mana abilities is renewable (Crystal Vein carries both
+/// a renewable `{T}: Add {C}` and a self-sac `{T}, Sac: Add {C}{C}`).
+pub fn is_renewable_mana_ability(ability_def: &AbilityDefinition) -> bool {
+    is_mana_ability(ability_def) && !cost_removes_self_from_battlefield(&ability_def.cost)
+}
+
 /// CR 605.1b: A triggered ability is a mana ability iff all three hold:
 ///   (a) it doesn't require a target (CR 115.6),
 ///   (b) it triggers from the activation/resolution of an activated mana ability
@@ -4294,6 +4353,115 @@ mod tests {
             ManaChoiceContext::ManaAbility(pending) => pending,
             other => panic!("expected mana ability context, got {other:?}"),
         }
+    }
+
+    /// Skirk Prospector: "Sacrifice a Goblin: Add {R}". The sacrifice target is a
+    /// *type* filter, not `SelfRef`, so the source survives and stays renewable.
+    fn skirk_prospector_mana_ability() -> AbilityDefinition {
+        make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Goblin".to_string()))),
+            1,
+        )))
+    }
+
+    /// Row 4a — CR 701.21: one-shot self-sacrificing mana sources are NOT
+    /// renewable. Gold is the constraint discriminator: its cost is a **bare**
+    /// `Sacrifice` (not wrapped in a `Composite` like Treasure's), so a
+    /// `Composite`-only implementation passes the Treasure assertion and fails
+    /// this one. Driven through the production `predefined_token_abilities`
+    /// materialization path, which is what actually lands on a live `GameObject`.
+    #[test]
+    fn treasure_and_gold_are_not_renewable_mana_abilities() {
+        let treasure = crate::game::effects::token::predefined_token_abilities("Treasure");
+        let gold = crate::game::effects::token::predefined_token_abilities("Gold");
+        assert_eq!(treasure.len(), 1);
+        assert_eq!(gold.len(), 1);
+
+        // Positive control: both ARE mana abilities. This proves the exclusion
+        // comes from the sacrifice clause and not from a failure to classify as
+        // a mana ability at all.
+        assert!(is_mana_ability(&treasure[0]));
+        assert!(is_mana_ability(&gold[0]));
+
+        assert!(
+            !is_renewable_mana_ability(&treasure[0]),
+            "Treasure ({{T}}, Sacrifice) is a one-shot source, not development"
+        );
+        assert!(
+            !is_renewable_mana_ability(&gold[0]),
+            "Gold's cost is a BARE Sacrifice — a Composite-only match misses it"
+        );
+    }
+
+    /// Row 4b — CR 701.21a: sacrificing *another* permanent leaves the source on
+    /// the battlefield, so a sac-outlet mana ability stays renewable. A
+    /// filter-agnostic implementation (reusing `cost_includes_sacrifice` /
+    /// `ManaSourcePenalty::Sacrifices`) fails this row.
+    #[test]
+    fn non_self_sacrifice_mana_outlet_stays_renewable() {
+        assert!(
+            is_renewable_mana_ability(&skirk_prospector_mana_ability()),
+            "\"Sacrifice a Goblin: Add {{R}}\" keeps its source — still development"
+        );
+
+        // Paired negative: the identical shape with a SelfRef filter is excluded.
+        let self_sac = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::SelfRef,
+            1,
+        )));
+        assert!(!is_renewable_mana_ability(&self_sac));
+    }
+
+    /// A self-returning mana source (Grinning Ignus class) is a one-shot
+    /// conversion from the standing manabase, whether its return cost is bare
+    /// or composed with a tap cost.
+    #[test]
+    fn self_return_to_hand_mana_source_is_not_renewable() {
+        let bare_return = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })
+        .cost(AbilityCost::ReturnToHand {
+            count: 1,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone: None,
+        });
+        assert!(!is_renewable_mana_ability(&bare_return));
+
+        let composite_return = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::ReturnToHand {
+                    count: 1,
+                    filter: Some(TargetFilter::SelfRef),
+                    from_zone: None,
+                },
+            ],
+        });
+
+        assert!(!is_renewable_mana_ability(&composite_return));
+    }
+
+    /// Row 4c — Powerstone and Treasure are both artifact tokens differing only in
+    /// cost shape (bare `Tap` vs `Composite{Tap, Sacrifice}`), so this proves the
+    /// discriminator is the sacrifice clause rather than the token-ness.
+    #[test]
+    fn powerstone_is_a_renewable_mana_ability() {
+        let powerstone = crate::game::effects::token::predefined_token_abilities("Powerstone");
+        assert_eq!(powerstone.len(), 1);
+        assert!(is_renewable_mana_ability(&powerstone[0]));
     }
 
     #[test]
