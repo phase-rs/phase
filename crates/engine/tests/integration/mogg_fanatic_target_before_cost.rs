@@ -5,7 +5,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, CounterCostSelection, Effect,
     QuantityExpr, ReplacementDefinition, SacrificeCost, TapCreaturesRequirement, TargetFilter,
-    TargetRef, TypedFilter, REMOVE_COUNTER_COST_X,
+    TargetRef, TypeFilter, TypedFilter, REMOVE_COUNTER_COST_X,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::{CounterMatch, CounterType};
@@ -304,7 +304,7 @@ fn target_first_mana_then_targeted_x_counter_cost_binds_x_before_payment_choice(
                     AbilityCost::RemoveCounter {
                         count: REMOVE_COUNTER_COST_X,
                         counter_type: CounterMatch::OfType(charge.clone()),
-                        target: Some(TargetFilter::Typed(TypedFilter::artifact())),
+                        target: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))),
                         selection: CounterCostSelection::SingleObject,
                     },
                 ],
