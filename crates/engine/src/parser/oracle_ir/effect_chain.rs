@@ -428,6 +428,12 @@ pub(crate) enum AbilityRootTransform {
     SetMinXValue(u32),
     /// Preserve the complete printed source text for this multi-line ability.
     SetDescription(String),
+    /// CR 614.6 + CR 614.15: replace an unbindable self-replacement's final
+    /// lowered root with the explicit honest-failure floor.
+    InsteadOverrideResidual {
+        fragment: String,
+        clear_condition: bool,
+    },
     /// CR 608.2c: prepend a condition (ability word) before the chain-derived
     /// root condition.
     PrependCondition(AbilityCondition),

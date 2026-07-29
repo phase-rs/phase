@@ -27040,6 +27040,17 @@ fn apply_ability_root_transforms(def: &mut AbilityDefinition, transforms: &[Abil
             AbilityRootTransform::SetDescription(description) => {
                 def.description = Some(description.clone());
             }
+            AbilityRootTransform::InsteadOverrideResidual {
+                fragment,
+                clear_condition,
+            } => {
+                def.effect = Box::new(Effect::unimplemented("instead_override", fragment));
+                def.sub_ability = None;
+                def.else_ability = None;
+                if *clear_condition {
+                    def.condition = None;
+                }
+            }
             AbilityRootTransform::PrependCondition(condition) => {
                 def.condition = match def.condition.take() {
                     Some(chain) => Some(crate::parser::oracle::merge_ability_condition(

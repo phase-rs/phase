@@ -63,7 +63,6 @@ use super::oracle_effect::{
     parse_effect_chain_with_context, rewrite_condition_keyword,
     try_parse_temporal_delayed_trigger_ability,
 };
-use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
@@ -71,9 +70,7 @@ use super::oracle_ir::doc::{
     OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan, OracleUnitSource,
     PrintedAbilityIndex, PrintedTriggerIndex, SpellPayloadIr, UnsupportedAbilityIr,
 };
-use super::oracle_ir::effect_chain::{
-    AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr, ShellStage,
-};
+use super::oracle_ir::effect_chain::{AbilityIr, AbilityRootTransform, AbilityShellIr, ShellStage};
 use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
 use super::oracle_ir::replacement::ReplacementIr;
@@ -2858,28 +2855,17 @@ fn ability_word_to_ability_condition(
 /// replacement applied, its original event never happens. Until the document
 /// relation can bind this particular shape, the unsupported root is the only
 /// rules-honest representation.
-fn instead_override_residual_ir(
+fn apply_instead_override_residual_floor(
+    ability_ir: &mut AbilityIr,
     effect_line: &str,
-    min_x_value: u32,
-    description: &str,
-) -> AbilityIr {
-    AbilityIr {
-        source_text: effect_line.to_string(),
-        body: EffectChainIr::single_clause(
-            effect_line,
-            AbilityKind::Spell,
-            parsed_clause(Effect::unimplemented("instead_override", effect_line)),
-            None,
-            None,
-            false,
-        ),
-        shell: AbilityShellIr::default(),
-        die_results: vec![],
-        root_transforms: vec![
-            AbilityRootTransform::SetMinXValue(min_x_value),
-            AbilityRootTransform::SetDescription(description.to_string()),
-        ],
-    }
+    clear_condition: bool,
+) {
+    ability_ir
+        .root_transforms
+        .push(AbilityRootTransform::InsteadOverrideResidual {
+            fragment: effect_line.to_string(),
+            clear_condition,
+        });
 }
 
 /// Single-authority merge for composing a freshly-parsed `AbilityCondition` onto an
@@ -6457,8 +6443,7 @@ pub(crate) fn parse_oracle_ir(
                     // Fail honestly instead: the base ability stands as printed and the
                     // unbindable override is reported as unimplemented. This mirrors the
                     // intra-chain `InsteadLowering::ConditionUnlowerable` floor.
-                    ability_ir =
-                        instead_override_residual_ir(&effect_line, spell_min_x_value, &description);
+                    apply_instead_override_residual_floor(&mut ability_ir, &effect_line, false);
                 }
             } else if is_unbindable_self_replacement && emitter.last_ability_node().is_some() {
                 // CR 614.6 + CR 614.15: the residual self-replacement printings — a
@@ -6479,8 +6464,7 @@ pub(crate) fn parse_oracle_ir(
                 // survives in BOTH branches. Until that exists, fail honestly: the base
                 // ability stands exactly as printed and the override is reported
                 // unimplemented. Never an independent ability.
-                ability_ir =
-                    instead_override_residual_ir(&effect_line, spell_min_x_value, &description);
+                apply_instead_override_residual_floor(&mut ability_ir, &effect_line, true);
             }
             emitter.ability_ir_at(item_line, ability_ir);
             continue;

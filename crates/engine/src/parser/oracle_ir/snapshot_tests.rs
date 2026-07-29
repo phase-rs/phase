@@ -9,7 +9,7 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
 use crate::parser::oracle_ir::trigger::TriggerNodeIr;
 use crate::types::ability::MultiTargetSpec;
-use crate::types::ability::{Effect, TriggerCondition};
+use crate::types::ability::{Effect, TargetChoiceTiming, TriggerCondition};
 use crate::types::game_state::DistributionUnit;
 
 fn ability_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
@@ -1597,6 +1597,63 @@ fn priority_nine_unbindable_conditioned_replacement_stays_honest() {
         Effect::Unimplemented { name, .. } if name == "instead_override"
     ));
     assert!(lowered.abilities[1].condition.is_none());
+}
+
+fn assert_unbindable_override(def: &crate::types::ability::AbilityDefinition) {
+    assert!(matches!(
+        def.effect.as_ref(),
+        Effect::Unimplemented { name, .. } if name == "instead_override"
+    ));
+    assert!(def.sub_ability.is_none());
+    assert!(def.else_ability.is_none());
+}
+
+/// CR 614.6 + CR 614.15: the native override floor retains the root clause's
+/// resolution metadata while making the unsupported replacement explicit.
+#[test]
+fn caravan_vigil_unbindable_override_retains_optional() {
+    let (_, lowered) = parse_two_layer(
+        "Search your library for a basic land card, reveal it, put it into your hand, then shuffle.\nMorbid — You may put that card onto the battlefield instead of putting it into your hand if a creature died this turn.",
+        "Caravan Vigil",
+        &["Sorcery"],
+        &[],
+    );
+    let override_def = &lowered.abilities[1];
+    assert_unbindable_override(override_def);
+    assert!(override_def.optional);
+}
+
+/// CR 614.6 + CR 614.15: partial cross-line replacements preserve a parsed
+/// optional root even when the replacement cannot bind safely.
+#[test]
+fn talent_of_the_telepath_unbindable_override_retains_optional() {
+    let (_, lowered) = parse_two_layer(
+        "Target opponent reveals the top seven cards of their library. You may cast an instant or sorcery spell from among them without paying its mana cost. Then that player puts the rest into their graveyard.\nSpell mastery — If there are two or more instant and/or sorcery cards in your graveyard, you may cast up to two instant and/or sorcery spells from among the revealed cards instead of one.",
+        "Talent of the Telepath",
+        &["Sorcery"],
+        &[],
+    );
+    let override_def = &lowered.abilities[1];
+    assert_unbindable_override(override_def);
+    assert!(override_def.optional);
+}
+
+/// CR 614.6 + CR 614.15: an unbindable partial replacement keeps the original
+/// root's resolution-time selection stamp instead of inferring it from the floor.
+#[test]
+fn see_the_unwritten_unbindable_override_retains_target_choice_timing() {
+    let (_, lowered) = parse_two_layer(
+        "Reveal the top eight cards of your library. You may put a creature card from among them onto the battlefield. Put the rest into your graveyard.\nFerocious — If you control a creature with power 4 or greater, you may put two creature cards onto the battlefield instead of one.",
+        "See the Unwritten",
+        &["Sorcery"],
+        &[],
+    );
+    let override_def = &lowered.abilities[1];
+    assert_unbindable_override(override_def);
+    assert_eq!(
+        override_def.target_choice_timing,
+        TargetChoiceTiming::Resolution
+    );
 }
 
 // CR 614.1a + CR 608.2c: Instead — the multi-clause Cow-swap. Clause 1 ("gain
