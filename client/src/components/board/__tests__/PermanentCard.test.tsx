@@ -145,9 +145,9 @@ function renderPermanent(
   );
 }
 
-function interactionForAttachedObject(objectId: number): ViewerInteraction {
+function interactionForAttachedObjects(objectIds: number[]): ViewerInteraction {
   const interactionId = "attachment-interaction" as InteractionId;
-  const choiceId = `attachment-${objectId}` as InteractionChoiceId;
+  const choiceId = (objectId: number) => `attachment-${objectId}` as InteractionChoiceId;
   return {
     waitingForKind: { simultaneous: null, terminal: false, code: "choose" },
     authorizedSubmitters: [0],
@@ -158,11 +158,11 @@ function interactionForAttachedObject(objectId: number): ViewerInteraction {
       response: {
         type: "exactChoices",
         data: {
-          choices: [{
-            id: choiceId,
+          choices: objectIds.map((objectId) => ({
+            id: choiceId(objectId),
             status: { type: "available" },
             surfaces: [],
-          }],
+          })),
         },
       },
       surfaces: [],
@@ -171,17 +171,21 @@ function interactionForAttachedObject(objectId: number): ViewerInteraction {
     attachmentFans: {
       1: {
       hostId: 1,
-      children: [{
+      children: objectIds.map((objectId) => ({
         objectId,
         submission: {
           interactionId,
-          response: { type: "choose", data: { choiceId } },
+          response: { type: "choose", data: { choiceId: choiceId(objectId) } },
         },
-      }],
+      })),
       },
     },
     availability: { type: "inputRequired" },
   };
+}
+
+function interactionForAttachedObject(objectId: number): ViewerInteraction {
+  return interactionForAttachedObjects([objectId]);
 }
 
 describe("PermanentCard", () => {
@@ -639,6 +643,46 @@ describe("PermanentCard", () => {
         type: "choose",
         data: { choiceId: "attachment-4" },
       },
+    });
+  });
+
+  it("submits each attachment's engine-authored response independently", () => {
+    const secondEquipment = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      attachments: [],
+      name: "Second Equipment",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    const gameState = makeState();
+    gameState.objects[1].attachments = [2, 4];
+    gameState.objects[4] = secondEquipment;
+    gameState.battlefield = [1, 2, 3, 4];
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: interactionForAttachedObjects([2, 4]),
+    });
+    useUiStore.setState({ attachmentFanHostId: 1 });
+    render(<AttachmentFan />);
+
+    fireEvent.click(screen.getByLabelText("Test Equipment"));
+    expect(dispatchInteraction).toHaveBeenCalledWith({
+      interactionId: "attachment-interaction",
+      response: { type: "choose", data: { choiceId: "attachment-2" } },
+    });
+
+    fireEvent.click(screen.getByLabelText("Second Equipment"));
+    expect(dispatchInteraction).toHaveBeenCalledWith({
+      interactionId: "attachment-interaction",
+      response: { type: "choose", data: { choiceId: "attachment-4" } },
     });
   });
 

@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import type { ObjectId } from "../../adapter/types.ts";
 import { dispatchInteraction } from "../../game/dispatch.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { useAppNotificationStore } from "../../stores/appToastStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { CardImage } from "../card/CardImage.tsx";
@@ -64,6 +65,7 @@ export function AttachmentFan() {
   const hostId = useUiStore((s) => s.attachmentFanHostId);
   const setAttachmentFanHost = useUiStore((s) => s.setAttachmentFanHost);
   const dismissPreview = useUiStore((s) => s.dismissPreview);
+  const showNotification = useAppNotificationStore((s) => s.showNotification);
 
   const objects = useGameStore((s) => s.gameState?.objects);
   const viewerInteraction = useGameStore((s) => s.viewerInteraction);
@@ -110,9 +112,14 @@ export function AttachmentFan() {
     (id: ObjectId) => {
       const child = interactionFan?.children.find((candidate) => candidate.objectId === id);
       if (!child || !viewerInteraction?.canSubmit) return;
-      void dispatchInteraction(child.submission).then(close).catch(() => {});
+      void dispatchInteraction(child.submission).then(close).catch((error: unknown) => {
+        showNotification({
+          title: t("actionError.title", { action: t("permanent.fanPick") }),
+          description: error instanceof Error ? error.message : t("actionError.unknownEngineError"),
+        });
+      });
     },
-    [close, interactionFan, viewerInteraction?.canSubmit],
+    [close, interactionFan, showNotification, t, viewerInteraction?.canSubmit],
   );
 
   if (hostId == null || !host || cardIds.length === 0) return null;
