@@ -397,6 +397,11 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         PendingCostMoveResume::DelveManaPayment { player, .. } => {
             classify_global_root(state, *player)
         }
+        // CR 602.2b: The parked mill leg retains the announced activation's
+        // serialized payment root until the replacement choice completes.
+        PendingCostMoveResume::ActivationMillPayment { player, pending } => {
+            PaymentContinuationState::Affiliated(root_from_pending_cast(pending, *player))
+        }
         // These are distinct cost/resolution continuations. They intentionally
         // retain their existing policies rather than being misidentified from a
         // coincidental PendingCast elsewhere in state.
@@ -618,6 +623,9 @@ fn pending_cost_move_contains_root(
         }
         Some(PendingCostMoveResume::ManaAbilityPayment { pending, cursor }) => {
             pending_mana_contains_root(pending, root) || cursor_contains_root(cursor, root)
+        }
+        Some(PendingCostMoveResume::ActivationMillPayment { pending, .. }) => {
+            pending_matches_root(pending, root)
         }
         Some(PendingCostMoveResume::CollectEvidencePayment { resume, .. }) => match resume.as_ref()
         {
