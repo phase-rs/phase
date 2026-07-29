@@ -14,7 +14,7 @@ fn unsupported_ability_ir_lowering_preserves_generic_and_structural_payloads() {
     };
     assert_eq!(name, "unknown");
     assert_eq!(description.as_deref(), Some("unknown line"));
-    assert_eq!(generic.description, "unknown line");
+    assert_eq!(generic.description.as_deref(), Some("unknown line"));
     assert_eq!(generic.min_x_value, 1);
 
     let structural = lower_unsupported_node(
@@ -33,7 +33,7 @@ fn unsupported_ability_ir_lowering_preserves_generic_and_structural_payloads() {
         description.as_deref(),
         Some("Effect sentence candidate but line failed effect parser: unsupported line")
     );
-    assert_eq!(structural.description, "unsupported line");
+    assert_eq!(structural.description.as_deref(), Some("unsupported line"));
 }
 
 /// CR 122.1 + CR 608.2d + CR 702.62b (Clockspinning): the whole card parses

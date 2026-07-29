@@ -133,6 +133,6 @@ mod tests {
             description.as_deref(),
             Some("Trigger prefix matched but line failed trigger parser: Whenever unsupported trigger structure")
         );
-        assert_eq!(def.description, line);
+        assert_eq!(def.description.as_deref(), Some(line));
     }
 }
