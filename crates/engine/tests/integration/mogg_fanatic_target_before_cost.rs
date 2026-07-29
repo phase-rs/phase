@@ -73,7 +73,7 @@ fn sacrifice(runner: &mut GameRunner, permanent: ObjectId, selected_target: Obje
             runner.state().waiting_for
         );
     };
-    assert_eq!(kind, &PayCostKind::Sacrifice);
+    assert_eq!(kind, PayCostKind::Sacrifice);
     assert!(choices.contains(&permanent));
     assert!(
         runner.state().battlefield.contains(&selected_target),
@@ -95,7 +95,7 @@ fn goblin_bombardment_targets_before_sacrifice_and_cancel_is_lossless() {
     let WaitingFor::PayCost { ref kind, .. } = runner.state().waiting_for else {
         panic!("target selection must lead to the sacrifice prompt");
     };
-    assert_eq!(kind, PayCostKind::Sacrifice);
+    assert_eq!(kind, &PayCostKind::Sacrifice);
     assert!(runner.state().battlefield.contains(&target));
     runner
         .act(GameAction::CancelCast)
