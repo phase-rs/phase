@@ -70,7 +70,9 @@ use super::oracle_ir::doc::{
     OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan, OracleUnitSource,
     PrintedAbilityIndex, PrintedTriggerIndex, SpellPayloadIr, UnsupportedAbilityIr,
 };
-use super::oracle_ir::effect_chain::{AbilityIr, AbilityRootTransform, AbilityShellIr, ShellStage};
+use super::oracle_ir::effect_chain::{
+    AbilityIr, AbilityRootTransform, AbilityShellIr, ResidualConditionPolicy, ShellStage,
+};
 use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
 use super::oracle_ir::replacement::ReplacementIr;
@@ -2858,13 +2860,13 @@ fn ability_word_to_ability_condition(
 fn apply_instead_override_residual_floor(
     ability_ir: &mut AbilityIr,
     effect_line: &str,
-    clear_condition: bool,
+    condition_policy: ResidualConditionPolicy,
 ) {
     ability_ir
         .root_transforms
         .push(AbilityRootTransform::InsteadOverrideResidual {
             fragment: effect_line.to_string(),
-            clear_condition,
+            condition_policy,
         });
 }
 
@@ -6443,7 +6445,11 @@ pub(crate) fn parse_oracle_ir(
                     // Fail honestly instead: the base ability stands as printed and the
                     // unbindable override is reported as unimplemented. This mirrors the
                     // intra-chain `InsteadLowering::ConditionUnlowerable` floor.
-                    apply_instead_override_residual_floor(&mut ability_ir, &effect_line, false);
+                    apply_instead_override_residual_floor(
+                        &mut ability_ir,
+                        &effect_line,
+                        ResidualConditionPolicy::Preserve,
+                    );
                 }
             } else if is_unbindable_self_replacement && emitter.last_ability_node().is_some() {
                 // CR 614.6 + CR 614.15: the residual self-replacement printings — a
@@ -6464,7 +6470,11 @@ pub(crate) fn parse_oracle_ir(
                 // survives in BOTH branches. Until that exists, fail honestly: the base
                 // ability stands exactly as printed and the override is reported
                 // unimplemented. Never an independent ability.
-                apply_instead_override_residual_floor(&mut ability_ir, &effect_line, true);
+                apply_instead_override_residual_floor(
+                    &mut ability_ir,
+                    &effect_line,
+                    ResidualConditionPolicy::Clear,
+                );
             }
             emitter.ability_ir_at(item_line, ability_ir);
             continue;

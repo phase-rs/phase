@@ -432,13 +432,21 @@ pub(crate) enum AbilityRootTransform {
     /// lowered root with the explicit honest-failure floor.
     InsteadOverrideResidual {
         fragment: String,
-        clear_condition: bool,
+        condition_policy: ResidualConditionPolicy,
     },
     /// CR 608.2c: prepend a condition (ability word) before the chain-derived
     /// root condition.
     PrependCondition(AbilityCondition),
     /// CR 608.2c: append a condition extracted from a line-level `instead`.
     AppendCondition(AbilityCondition),
+}
+
+/// Whether an honest unbindable override floor retains the condition the legacy
+/// parser had already lowered, or clears it for a partial replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum ResidualConditionPolicy {
+    Preserve,
+    Clear,
 }
 
 /// CR 608.2c + CR 601.2c: Subject of a "does the same / does so" effect-replication

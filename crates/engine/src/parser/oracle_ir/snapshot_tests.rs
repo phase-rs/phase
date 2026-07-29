@@ -1574,7 +1574,7 @@ fn follow_the_lumarets() {
         1,
         "the Dig override must bind through the document relation"
     );
-    assert!(lowered.abilities[0].sub_ability.is_some());
+    assert!(lowered.abilities[0].else_ability.is_some());
     insta::assert_json_snapshot!("follow_the_lumarets_ir", &ir);
     insta::assert_json_snapshot!("follow_the_lumarets_lowered", &lowered);
 }

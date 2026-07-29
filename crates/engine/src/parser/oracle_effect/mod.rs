@@ -157,7 +157,7 @@ pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr,
     ClauseIrBuilder, DieResultBranchIr, EffectChainIr, OtherwiseKind, PlayerScopeRewrite,
-    PriorModifier, ReplaceMeaningKind, ReplicateKind, ShellStage,
+    PriorModifier, ReplaceMeaningKind, ReplicateKind, ResidualConditionPolicy, ShellStage,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -27042,13 +27042,14 @@ fn apply_ability_root_transforms(def: &mut AbilityDefinition, transforms: &[Abil
             }
             AbilityRootTransform::InsteadOverrideResidual {
                 fragment,
-                clear_condition,
+                condition_policy,
             } => {
-                def.effect = Box::new(Effect::unimplemented("instead_override", fragment));
+                *def.effect = Effect::unimplemented("instead_override", fragment);
                 def.sub_ability = None;
                 def.else_ability = None;
-                if *clear_condition {
-                    def.condition = None;
+                match condition_policy {
+                    ResidualConditionPolicy::Preserve => {}
+                    ResidualConditionPolicy::Clear => def.condition = None,
                 }
             }
             AbilityRootTransform::PrependCondition(condition) => {
