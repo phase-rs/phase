@@ -103,7 +103,7 @@ fn barbarian_ring_ability_word_activated_router_is_ir_native() {
             ir.items[1].node
         );
     };
-    assert!(activated.shell.activation_restrictions.len() > 0);
+    assert!(!activated.shell.activation_restrictions.is_empty());
     assert_eq!(lowered.abilities.len(), 2);
     let ability = &lowered.abilities[1];
     assert!(
