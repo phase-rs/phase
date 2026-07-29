@@ -65,6 +65,11 @@ fn attached_to_source_filter_doubles_equipped_combat_damage() {
     let equipment = scenario
         .add_creature(P0, "Mjolnir", 0, 0)
         .as_artifact()
+        // CR 301.5 + CR 704.5p sentence 2: the real card is an Artifact —
+        // Equipment. Without the subtype it is an attached noncreature permanent
+        // that is neither Aura, Equipment, nor Fortification, which CR 704.5p
+        // unattaches on the next SBA check.
+        .with_subtypes(vec!["Equipment"])
         .with_replacement_definition(double_equipped_replacement())
         .id();
 
@@ -92,6 +97,11 @@ fn unattached_equipment_does_not_double_damage() {
     scenario
         .add_creature(P0, "Mjolnir", 0, 0)
         .as_artifact()
+        // CR 301.5 + CR 704.5p sentence 2: the real card is an Artifact —
+        // Equipment. Without the subtype it is an attached noncreature permanent
+        // that is neither Aura, Equipment, nor Fortification, which CR 704.5p
+        // unattaches on the next SBA check.
+        .with_subtypes(vec!["Equipment"])
         .with_replacement_definition(double_equipped_replacement());
 
     let mut runner = scenario.build();
@@ -135,6 +145,11 @@ fn mjolnir_parsed_line_doubles_equipped_damage() {
     let equipment = scenario
         .add_creature(P0, "Mjolnir", 0, 0)
         .as_artifact()
+        // CR 301.5 + CR 704.5p sentence 2: the real card is an Artifact —
+        // Equipment. Without the subtype it is an attached noncreature permanent
+        // that is neither Aura, Equipment, nor Fortification, which CR 704.5p
+        // unattaches on the next SBA check.
+        .with_subtypes(vec!["Equipment"])
         .with_replacement_definition(repl)
         .id();
 
@@ -176,6 +191,11 @@ fn mjolnir_non_equipped_creature_not_doubled() {
     let equipment = scenario
         .add_creature(P0, "Mjolnir", 0, 0)
         .as_artifact()
+        // CR 301.5 + CR 704.5p sentence 2: the real card is an Artifact —
+        // Equipment. Without the subtype it is an attached noncreature permanent
+        // that is neither Aura, Equipment, nor Fortification, which CR 704.5p
+        // unattaches on the next SBA check.
+        .with_subtypes(vec!["Equipment"])
         .with_replacement_definition(repl)
         .id();
 

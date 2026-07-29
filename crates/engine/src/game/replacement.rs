@@ -1435,10 +1435,21 @@ fn pay_replacement_may_cost(
             let amount =
                 crate::game::quantity::resolve_quantity(state, amount, player, source_id).max(0);
             let amount = u32::try_from(amount).unwrap_or(0);
-            matches!(
-                crate::game::life_costs::pay_life_as_cost(state, player, amount, events),
-                crate::game::life_costs::PayLifeCostResult::Paid { .. }
-            )
+            match crate::game::life_costs::pay_life_as_cost(state, player, amount, events) {
+                crate::game::life_costs::PayLifeCostResult::Paid { .. } => true,
+                crate::game::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution {
+                    ..
+                }
+                | crate::game::life_costs::PayLifeCostResult::DeferredReplacementChoice {
+                    ..
+                } => {
+                    return MayCostOutcome::PausedForChoice {
+                        remaining_cost: None,
+                    };
+                }
+                crate::game::life_costs::PayLifeCostResult::InsufficientLife
+                | crate::game::life_costs::PayLifeCostResult::Prohibited => false,
+            }
         }
         AbilityCost::Composite { costs } => {
             // CR 614.12a: a composite accept-cost pays each sub-cost in order; a
@@ -2840,6 +2851,53 @@ fn draw_replacement_count(
     }
 }
 
+/// CR 614.6 + CR 614.11: does the branch being applied substitute the proposed
+/// draw with a NON-draw chain, so the original draw never happens and no
+/// `GameEvent::CardDrawn` is emitted?
+///
+/// `branch_ability` is the AST of the branch the pipeline is applying (`execute`
+/// on mandatory/accept, `decline` on decline), so an optional replacement's
+/// decline is never classified against the accept-side AST.
+///
+/// A one-shot draw replacement (Words of Worship / Wilding) carries its
+/// substitute in `runtime_execute` while `execute` is `None`, so `branch_ability`
+/// is `None` for those; a non-Draw, non-event-modifier substitute there (GainLife
+/// / Token) must still count, or the card would be drawn AND the substitute would
+/// run. Damage / Jace's WinTheGame / Abundance shapes carry theirs in `execute`,
+/// so `branch_ability` is `Some` and the `runtime_execute` leg never engages.
+///
+/// The `draw_replacement_count` guard preserves the count-modifier path
+/// (Alhammarret's Archive: count -> 2*count, CR 614.11a) — a rescaled draw is a
+/// surviving draw, not a substitution.
+///
+/// Single authority: the live pipeline (`apply_single_replacement`) calls this to
+/// decide whether to pre-zero the proposed count, and the read-only preflight
+/// (`proposed_draw_survives_replacement`) calls it to decide whether a draw can
+/// still deliver a card. Neither may re-derive this classification independently
+/// — a preflight that mirrors the pipeline instead of sharing it will drift.
+fn draw_is_substituted_away(
+    state: &GameState,
+    rid: ReplacementId,
+    repl_def: &ReplacementDefinition,
+    branch_ability: Option<&AbilityDefinition>,
+    proposed: &ProposedEvent,
+) -> bool {
+    if !matches!(proposed, ProposedEvent::Draw { .. }) {
+        return false;
+    }
+    match branch_ability {
+        Some(def) => {
+            !matches!(*def.effect, Effect::Draw { .. })
+                && !EventModifiers::has_only_event_modifier(Some(def))
+                && draw_replacement_count(state, rid, proposed).is_none()
+        }
+        None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+            !matches!(runtime.effect, Effect::Draw { .. })
+                && !EventModifiers::is_event_modifier_effect(&runtime.effect)
+        }),
+    }
+}
+
 // --- 4b. Scry ---
 
 // CR 614.6: A replacement effect applies only once to a given event. The
@@ -3519,39 +3577,87 @@ fn life_reduced_applier(
 
 // --- 6b. LoseLife (oracle-parsed: e.g. Bloodletter of Aclazotz) ---
 
-fn lose_life_matcher(event: &ProposedEvent, source: ObjectId, state: &GameState) -> bool {
-    if let ProposedEvent::LifeLoss { player_id, .. } = event {
-        // Match when opponent loses life during source controller's turn
-        if let Some(obj) = state.objects.get(&source) {
-            *player_id != obj.controller && state.active_player == obj.controller
-        } else {
-            false
-        }
-    } else {
-        false
-    }
+fn lose_life_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::LifeLoss { .. })
 }
 
 fn lose_life_applier(
     event: ProposedEvent,
-    _rid: ReplacementId,
-    _state: &mut GameState,
+    rid: ReplacementId,
+    state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::LifeLoss {
-        player_id,
-        amount,
-        applied,
-    } = event
-    {
-        ApplyResult::Modified(ProposedEvent::LifeLoss {
+    use crate::types::ability::QuantityModification;
+
+    let definition = state
+        .objects
+        .get(&rid.source)
+        .and_then(|obj| obj.replacement_definitions.get(rid.index));
+
+    if let Some(modification) = definition.and_then(|def| def.quantity_modification.clone()) {
+        let ProposedEvent::LifeLoss {
             player_id,
-            amount: amount * 2,
+            amount,
             applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
+        } = event
+        else {
+            return ApplyResult::Modified(event);
+        };
+        let amount = match modification {
+            QuantityModification::Times { factor } => amount.saturating_mul(factor),
+            QuantityModification::Half => amount / 2,
+            QuantityModification::Plus { value } => amount.saturating_add(value),
+            QuantityModification::Minus { value } => amount.saturating_sub(value),
+            QuantityModification::Prevent => return ApplyResult::Prevented,
+        };
+        return ApplyResult::Modified(ProposedEvent::LifeLoss {
+            player_id,
+            amount,
+            applied,
+        });
     }
+
+    let Some(execute) = definition.and_then(|def| def.execute.as_deref()) else {
+        return ApplyResult::Modified(event);
+    };
+    if execute.sub_ability.is_none() {
+        if let (
+            ProposedEvent::LifeLoss {
+                player_id,
+                amount,
+                applied,
+            },
+            Effect::LoseLife {
+                amount: replacement_amount,
+                ..
+            },
+        ) = (&event, &*execute.effect)
+        {
+            if let Some(resolved) = resolve_event_replacement_quantity(replacement_amount, *amount)
+            {
+                return ApplyResult::Modified(ProposedEvent::LifeLoss {
+                    player_id: *player_id,
+                    amount: resolved.max(0) as u32,
+                    applied: applied.clone(),
+                });
+            }
+        }
+    }
+
+    // CR 614.1a + CR 614.6: A typed non-LifeLoss execute chain substitutes
+    // its effect for the life-loss event. The common replacement driver owns
+    // and drains that mandatory post-replacement continuation.
+    if !matches!(
+        &*execute.effect,
+        Effect::LoseLife { .. } | Effect::Unimplemented { .. }
+    ) {
+        if let ProposedEvent::LifeLoss { amount, .. } = event {
+            state.last_effect_count = Some(amount as i32);
+        }
+        return ApplyResult::Prevented;
+    }
+
+    ApplyResult::Modified(event)
 }
 
 // --- 7. AddCounter ---
@@ -6430,6 +6536,7 @@ fn object_replacement_candidate_applies(
         }
     }
     if let ProposedEvent::LifeGain { player_id, .. }
+    | ProposedEvent::LifeLoss { player_id, .. }
     | ProposedEvent::Draw { player_id, .. }
     | ProposedEvent::Scry { player_id, .. }
     | ProposedEvent::Mill { player_id, .. }
@@ -7909,34 +8016,14 @@ fn apply_single_replacement(
                 // draw with a non-Draw chain (Jace's WinTheGame, Abundance's
                 // reveal-until), zero the count here so `draw_applier` and
                 // `apply_draw_after_replacement` see a no-op draw — the original draw
-                // never happens (CR 614.6). Branch-aware via the `ability` binding
-                // above, so an optional replacement's decline never pre-zeros against
-                // the accept-side AST. The `draw_replacement_count` guard preserves
-                // the count-modifier path (Alhammarret's Archive: count -> 2*count).
-                if matches!(proposed, ProposedEvent::Draw { .. }) {
-                    // CR 614.6 + CR 614.11: A one-shot draw replacement
-                    // (Words of Worship/Wilding) carries its substitute in
-                    // `runtime_execute` (`execute` is `None`), so the `ability`
-                    // binding above is `None`. Inspect that slot too — a non-Draw,
-                    // non-event-modifier substitute (GainLife / Token) must still
-                    // pre-zero the draw, or the card is drawn AND the substitute
-                    // runs (double). Damage/Jace/Abundance use `execute`, so
-                    // `ability` is `Some` and this `runtime` branch never engages.
-                    let is_non_draw_substitute = match ability {
-                        Some(def) => {
-                            !matches!(*def.effect, Effect::Draw { .. })
-                                && !EventModifiers::has_only_event_modifier(Some(def))
-                                && draw_replacement_count(state, rid, &proposed).is_none()
-                        }
-                        None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
-                            !matches!(runtime.effect, Effect::Draw { .. })
-                                && !EventModifiers::is_event_modifier_effect(&runtime.effect)
-                        }),
-                    };
-                    if is_non_draw_substitute {
-                        if let ProposedEvent::Draw { count, .. } = &mut proposed {
-                            *count = 0;
-                        }
+                // never happens (CR 614.6). The classification itself lives in
+                // `draw_is_substituted_away`, which is SHARED with the read-only
+                // preflight `proposed_draw_survives_replacement`: an AI preflight
+                // therefore cannot disagree with this pipeline about whether a draw
+                // survives, because both ask the same function.
+                if draw_is_substituted_away(state, rid, repl_def, ability, &proposed) {
+                    if let ProposedEvent::Draw { count, .. } = &mut proposed {
+                        *count = 0;
                     }
                 }
                 // CR 614.6 + CR 111.1: A CreateToken replacement whose execute is
@@ -8697,12 +8784,89 @@ fn is_counter_placement_event(event: &ProposedEvent) -> bool {
         )
 }
 
-fn counter_placement_prevention_applies(state: &GameState, candidates: &[ReplacementId]) -> bool {
+/// CR 614.6: does any already-applicable candidate obligatorily replace the
+/// event away? A `QuantityModification::Prevent` definition kills the event only
+/// when it is MANDATORY — an optional one is offered to a player as an
+/// accept/decline choice (`replacement_mode_is_optional`), so it cannot be
+/// assumed to apply. `events` scopes the check to the
+/// replacement events that actually govern the proposed event, so a differently
+/// evented `Prevent` sibling on the same source can never suppress it.
+///
+/// `candidates` must come from the live applicability authority
+/// (`find_applicable_replacements`), which has already enforced the handler
+/// matcher, source/player scope, condition, and optional-decline gates. Virtual
+/// rules-source candidates carry no definition and are never preventive here.
+fn mandatory_prevention_applies(
+    state: &GameState,
+    candidates: &[ReplacementId],
+    events: &[ReplacementEvent],
+) -> bool {
     candidates.iter().any(|rid| {
         replacement_definition_for_id(state, *rid).is_some_and(|def| {
-            def.event == ReplacementEvent::AddCounter
+            events.contains(&def.event)
                 && def.quantity_modification == Some(QuantityModification::Prevent)
                 && !replacement_mode_is_optional(&def.mode)
+        })
+    })
+}
+
+fn counter_placement_prevention_applies(state: &GameState, candidates: &[ReplacementId]) -> bool {
+    mandatory_prevention_applies(state, candidates, &[ReplacementEvent::AddCounter])
+}
+
+/// CR 121.1 + CR 614.6 + CR 614.11: pure preflight — does a proposed draw survive
+/// the replacement effects currently applicable to it as a *real* draw, one that
+/// puts a card into its player's hand and emits `GameEvent::CardDrawn`?
+///
+/// Three legs of the live pipeline remove a proposed draw, and each is answered
+/// here by the same authority that owns it in the pipeline, never by a
+/// re-derived structural scan:
+/// - a mandatory `QuantityModification::Prevent` — `draw_applier` returns
+///   `ApplyResult::Prevented`, so the replaced event never happens (CR 614.6,
+///   Living Conundrum). Shared via `mandatory_prevention_applies`.
+/// - a mandatory non-Draw substitute carried in `execute` or `runtime_execute` —
+///   `apply_single_replacement` zeroes the proposed count so the original draw is
+///   a no-op and the substitute runs instead (CR 614.11: Words of Worship,
+///   Abundance's reveal-until, Jace's WinTheGame). Shared via
+///   `draw_is_substituted_away`.
+/// - a mandatory count modification that resolves to zero — `draw_applier`
+///   returns `Modified` with `count: 0`, and `apply_draw_after_replacement`
+///   emits `CardDrawn` only inside its per-delivered-card loop, so a zero-count
+///   draw emits none (CR 614.11a). Shared via `draw_replacement_count`.
+///
+/// An OPTIONAL replacement (CR 614.6: "you may") is never assumed to apply — the
+/// player is offered an accept/decline choice, so the draw is still deliverable
+/// and the payoff still stands. A count modification that resolves positive
+/// (Alhammarret's Archive: count -> 2*count) is likewise a surviving draw.
+///
+/// `find_applicable_replacements` is the live applicability authority, so an
+/// unrelated or opponent-scoped source (CR 614.1a), a false conditional
+/// (CR 614.1d), and a recognized-but-stub replacement event are already excluded
+/// before anything is classified here.
+///
+/// Read-only: it consults applicability and definition shape without running any
+/// applier, so preflights (AI candidate scoring) can call it without mutating
+/// state. Non-`Draw` events are outside its remit and always report surviving.
+pub fn proposed_draw_survives_replacement(state: &GameState, event: &ProposedEvent) -> bool {
+    if !matches!(event, ProposedEvent::Draw { .. }) {
+        return true;
+    }
+    let registry = replacement_registry();
+    let candidates = find_applicable_replacements(state, event, registry);
+    let events = replacement_event_keys_for_event(event);
+    if mandatory_prevention_applies(state, &candidates, &events) {
+        return false;
+    }
+    !candidates.iter().any(|rid| {
+        replacement_definition_for_id(state, *rid).is_some_and(|def| {
+            // CR 614.6: only a MANDATORY branch is certain to apply, and the live
+            // pipeline resolves it to `ReplacementBranch::Execute` — so `execute`
+            // is the branch AST to classify, exactly as `apply_single_replacement`
+            // binds it.
+            events.contains(&def.event)
+                && !replacement_mode_is_optional(&def.mode)
+                && (draw_is_substituted_away(state, *rid, def, def.execute.as_deref(), event)
+                    || draw_replacement_count(state, *rid, event) == Some(0))
         })
     })
 }
@@ -9391,8 +9555,8 @@ mod tests {
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric,
-        ChosenAttribute, ControllerRef, Effect, EffectScope, FilterProp, OriginConstraint,
-        PlayerFilter, PtValue, QuantityExpr, QuantityModification, QuantityRef,
+        ChosenAttribute, Comparator, ControllerRef, Effect, EffectScope, FilterProp,
+        OriginConstraint, PlayerFilter, PtValue, QuantityExpr, QuantityModification, QuantityRef,
         ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, TapStateChange,
         TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
@@ -17443,7 +17607,13 @@ mod tests {
         let bloodletter = ObjectId(10);
         let repl = {
             let mut repl = ReplacementDefinition::new(ReplacementEvent::LoseLife)
-                .quantity_modification(QuantityModification::DOUBLE);
+                .quantity_modification(QuantityModification::DOUBLE)
+                .condition(ReplacementCondition::OnlyIfQuantity {
+                    lhs: QuantityExpr::Fixed { value: 0 },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                    active_player_req: Some(ControllerRef::You),
+                });
             repl.valid_player = Some(ReplacementPlayerScope::Opponent);
             repl
         };
@@ -17474,13 +17644,151 @@ mod tests {
         assert_eq!(amount, 6);
     }
 
+    /// CR 109.5 + CR 614.1a: LoseLife recipient scope is independent of turn
+    /// ownership. Turn restrictions belong in `ReplacementCondition`.
+    #[test]
+    fn lose_life_player_scopes_apply_on_either_players_turn() {
+        let cases = [
+            (
+                ReplacementPlayerScope::You,
+                PlayerId(0),
+                true,
+                "You/controller",
+            ),
+            (
+                ReplacementPlayerScope::You,
+                PlayerId(1),
+                false,
+                "You/opponent",
+            ),
+            (
+                ReplacementPlayerScope::Opponent,
+                PlayerId(0),
+                false,
+                "Opponent/controller",
+            ),
+            (
+                ReplacementPlayerScope::Opponent,
+                PlayerId(1),
+                true,
+                "Opponent/opponent",
+            ),
+            (
+                ReplacementPlayerScope::AnyPlayer,
+                PlayerId(0),
+                true,
+                "AnyPlayer/controller",
+            ),
+            (
+                ReplacementPlayerScope::AnyPlayer,
+                PlayerId(1),
+                true,
+                "AnyPlayer/opponent",
+            ),
+        ];
+
+        for active_player in [PlayerId(0), PlayerId(1)] {
+            for (scope, recipient, should_double, label) in &cases {
+                let mut repl = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                    .quantity_modification(QuantityModification::DOUBLE);
+                repl.valid_player = Some(scope.clone());
+                let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+                state.active_player = active_player;
+                let mut events = Vec::new();
+
+                let result = replace_event(
+                    &mut state,
+                    ProposedEvent::LifeLoss {
+                        player_id: *recipient,
+                        amount: 3,
+                        applied: HashSet::new(),
+                    },
+                    &mut events,
+                );
+                let ReplacementResult::Execute(ProposedEvent::LifeLoss { amount, .. }) = result
+                else {
+                    panic!("{label} on P{}'s turn returned {result:?}", active_player.0);
+                };
+                assert_eq!(
+                    amount,
+                    if *should_double { 6 } else { 3 },
+                    "{label} on P{}'s turn",
+                    active_player.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lose_life_quantity_prevent_suppresses_event() {
+        let repl = {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .quantity_modification(QuantityModification::Prevent);
+            repl.valid_player = Some(ReplacementPlayerScope::Opponent);
+            repl
+        };
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        state.active_player = PlayerId(0);
+        let mut events = Vec::new();
+
+        let result = replace_event(
+            &mut state,
+            ProposedEvent::LifeLoss {
+                player_id: PlayerId(1),
+                amount: 3,
+                applied: HashSet::new(),
+            },
+            &mut events,
+        );
+
+        assert!(matches!(result, ReplacementResult::Prevented));
+    }
+
+    #[test]
+    fn lose_life_cross_event_execute_stashes_substitution() {
+        let mut repl =
+            ReplacementDefinition::new(ReplacementEvent::LoseLife).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::EventContextAmount,
+                    },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        repl.valid_player = Some(ReplacementPlayerScope::Opponent);
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        state.active_player = PlayerId(0);
+        let mut events = Vec::new();
+
+        let result = replace_event(
+            &mut state,
+            ProposedEvent::LifeLoss {
+                player_id: PlayerId(1),
+                amount: 3,
+                applied: HashSet::new(),
+            },
+            &mut events,
+        );
+
+        assert!(matches!(result, ReplacementResult::Prevented));
+        assert_eq!(state.last_effect_count, Some(3));
+        assert!(state.has_post_replacement_drain());
+    }
+
     /// CR 614.1a: Bloodletter only doubles during the source controller's turn.
     #[test]
     fn bloodletter_does_not_double_on_opponents_turn() {
         let bloodletter = ObjectId(10);
         let repl = {
             let mut repl = ReplacementDefinition::new(ReplacementEvent::LoseLife)
-                .quantity_modification(QuantityModification::DOUBLE);
+                .quantity_modification(QuantityModification::DOUBLE)
+                .condition(ReplacementCondition::OnlyIfQuantity {
+                    lhs: QuantityExpr::Fixed { value: 0 },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                    active_player_req: Some(ControllerRef::You),
+                });
             repl.valid_player = Some(ReplacementPlayerScope::Opponent);
             repl
         };

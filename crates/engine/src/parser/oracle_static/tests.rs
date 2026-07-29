@@ -24040,6 +24040,43 @@ fn static_life_total_cannot_change_alt_spelling() {
 }
 
 #[test]
+fn static_unspent_mana_loss_causes_equal_life_loss() {
+    let oracle = "A player losing unspent mana causes that player to lose that much life.";
+    let lower = oracle.to_lowercase();
+
+    // Positive reach guard: classifier and parser must agree on the exact
+    // grammar before adjacent negative cases can prove useful.
+    assert!(crate::parser::oracle_classifier::is_static_pattern(&lower));
+    let def = parse_static_line(oracle).expect("Yurlok-class static should parse");
+    assert_eq!(def.mode, StaticMode::UnspentManaLossCausesLifeLoss);
+    assert_eq!(def.affected, Some(TargetFilter::Player));
+    assert!(def.modifications.is_empty());
+}
+
+#[test]
+fn static_unspent_mana_loss_parser_rejects_adjacent_grammars() {
+    let adjacent = [
+        "A player spending unspent mana causes that player to lose that much life.",
+        "A player losing unspent mana makes that player lose that much life.",
+        "A player losing unspent mana causes another player to lose that much life.",
+        "A player losing unspent mana causes that player to gain that much life.",
+        "A player losing unspent mana causes that player to lose 1 life.",
+    ];
+
+    for oracle in adjacent {
+        let lower = oracle.to_lowercase();
+        assert!(
+            !crate::parser::oracle_classifier::is_static_pattern(&lower),
+            "classifier overreached: {oracle}"
+        );
+        assert!(
+            parse_static_line(oracle).is_none(),
+            "static parser overreached: {oracle}"
+        );
+    }
+}
+
+#[test]
 fn static_retain_unspent_colored_mana_across_steps_and_phases() {
     use crate::types::mana::StepEndManaAction;
     let def =

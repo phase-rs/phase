@@ -1470,12 +1470,41 @@ mod tests {
 
     /// Serve reconstruction ≡ planner leaf eval. The harvested `FeatureRow`
     /// weighted by the archetype-adjusted weights the planner actually applies,
-    /// plus the TWO serve-time carve-outs (`energy_offset`, `threat_adjustment`),
-    /// must equal `evaluate_with_strategy` to 1e-9. This pins the train/serve
-    /// invariant: a future `evaluate_with_strategy` term without a matching
-    /// `FeatureRow` field would break this identity loudly. Runs a reach-guard
-    /// pair — one config where `threat_adjustment` is provably nonzero, one where
-    /// it is zero — and asserts the energy term is non-vacuous (`p0.energy > 0`).
+    /// plus the THREE serve-time carve-outs (`energy_offset`,
+    /// `mana_development_offset`, `threat_adjustment`), must equal
+    /// `evaluate_with_strategy` to 1e-9. Runs a reach-guard pair — one config
+    /// where `threat_adjustment` is provably nonzero, one where it is zero — and
+    /// asserts both fixed offsets are non-vacuous (`p0.energy > 0`, and p0
+    /// controls a mana source).
+    ///
+    /// # What this test does and does NOT guarantee
+    ///
+    /// It previously claimed that "a future `evaluate_with_strategy` term without
+    /// a matching `FeatureRow` field would break this identity loudly". **That was
+    /// false as stated**, and the correction matters because the false version
+    /// invited exactly the mistake it appeared to prevent. This test compares two
+    /// numbers on ONE fixture: a new term that happens to be `0.0` here leaves the
+    /// identity holding while the harvested vector silently omits it. The
+    /// guarantee was fixture-dependent, not structural — which is why this unit had
+    /// to add a tapped land to make its own term non-zero.
+    ///
+    /// The structural half now lives in the type system rather than here:
+    ///
+    /// - A term added to **`EvalFeatures`** is caught at compile time. Both
+    ///   `FeatureRow::extract` and `EvaluationBreakdown::total` destructure
+    ///   exhaustively with no `..`, so a new field is an **E0027** rather than a
+    ///   silent drop. This is the shape every term in this unit takes.
+    /// - A term added **directly in `evaluate_with_strategy`** — as
+    ///   `threat_adjustment` is — has no such tie and remains **fixture-dependent**.
+    ///   Nothing forces it onto `FeatureRow`, so if it is zero on this fixture the
+    ///   omission still passes silently. Anyone adding one must extend this
+    ///   fixture to make it provably non-zero, exactly as the `threat_adjustment`
+    ///   reach-guard pair below already does.
+    ///
+    /// State the narrower true guarantee rather than the broad false one: this
+    /// test pins the *arithmetic* of the identity; the compiler pins the
+    /// *completeness* of the `EvalFeatures` half; nothing yet pins the
+    /// completeness of the `evaluate_with_strategy` half.
     #[test]
     fn serve_reconstruction_equals_planner_leaf_eval() {
         use crate::context::AiContext;
@@ -1530,6 +1559,25 @@ mod tests {
             obj.toughness = Some(toughness);
         }
 
+        // Exactly one TAPPED land for p0. It does double duty: `available_mana`
+        // filters `&& !obj.tapped`, so `available_mana(p0)` stays 0 and the
+        // `ai_mana <= 1` counter-tapout reach-guard above is preserved exactly —
+        // while `is_intrinsic_mana_source` deliberately ignores tapped state, so
+        // `mana_development_offset` becomes non-vacuous. Bind the `CardId` before
+        // the `&mut state` borrow (an explicit `&mut` in a free-function argument
+        // list is not a two-phase borrow — inlining it is E0502).
+        let land_card_id = CardId(state.next_object_id);
+        let land_id = create_object(
+            &mut state,
+            land_card_id,
+            PlayerId(0),
+            "Tapped Land".to_string(),
+            Zone::Battlefield,
+        );
+        let land = state.objects.get_mut(&land_id).unwrap();
+        land.card_types.core_types.push(CoreType::Land);
+        land.tapped = true;
+
         let config = create_config(AiDifficulty::Hard, Platform::Native);
         let policies = crate::policies::PolicyRegistry::shared();
 
@@ -1558,12 +1606,19 @@ mod tests {
         let row = FeatureRow::extract(&state, &services.context.session, PlayerId(0))
             .expect("mid-game state is non-terminal");
         let threat_adj = services.threat_adjustment(&state);
-        let reconstructed = row.weighted_total(weights) + row.energy_offset + threat_adj;
+        let reconstructed = row.weighted_total(weights)
+            + row.energy_offset
+            + row.mana_development_offset
+            + threat_adj;
         let planner_eval = services.evaluate_with_strategy(&state);
 
         assert!(
             row.energy_offset > 0.0,
             "energy term must be non-vacuous (p0.energy > 0)"
+        );
+        assert!(
+            row.mana_development_offset > 0.0,
+            "mana-development term must be non-vacuous (p0 controls a tapped land)"
         );
         assert!(
             threat_adj.abs() > 0.0,
@@ -1587,7 +1642,9 @@ mod tests {
         let row_none = FeatureRow::extract(&state, &services_none.context.session, PlayerId(0))
             .expect("non-terminal");
         let threat_adj_none = services_none.threat_adjustment(&state);
-        let reconstructed_none = row_none.weighted_total(weights_none) + row_none.energy_offset;
+        let reconstructed_none = row_none.weighted_total(weights_none)
+            + row_none.energy_offset
+            + row_none.mana_development_offset;
         let planner_eval_none = services_none.evaluate_with_strategy(&state);
 
         assert_eq!(

@@ -14,7 +14,7 @@ license.workspace = true
 # config-only stub at 404 KB raw / 364 KB wasm-opt'd — LTO strips GameState /
 # parser / database, so a `phase-config` split is NOT required.
 [dependencies]
-engine = { path = "../engine" }
+engine = { path = "../engine", package = "phase-engine" }
 serde = { workspace = true }
 serde_json = { version = "1", features = ["raw_value"] }
 tracing = { workspace = true }

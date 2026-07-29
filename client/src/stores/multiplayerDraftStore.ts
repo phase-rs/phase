@@ -424,6 +424,7 @@ function disposeMatchAdapter(set: SetFn): void {
         waitingFor: null,
         legalActions: [],
         autoPassRecommended: false,
+        endContinuousEffectOffers: [],
         spellCosts: {},
         legalActionsByObject: {},
         stateHistory: [],

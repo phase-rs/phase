@@ -1534,6 +1534,59 @@ impl ZoneChangeRecord {
     }
 }
 
+/// The authority state of a record-owned battlefield-departure source context.
+///
+/// `Absent` preserves compatibility with context-free saved/test records;
+/// `Malformed` is a present but incoherent record and must fail closed.
+pub(crate) enum BattlefieldDepartureSourceContext<'a> {
+    Present(&'a TriggerSourceContext),
+    Absent,
+    Malformed,
+}
+
+/// CR 400.7 + CR 603.10a: Returns the authority state for a battlefield
+/// departure's record-owned source context.
+///
+/// A `ZoneChanged` event and its record are one unit of event-time authority. A
+/// later incarnation at the same `ObjectId` (or an overwritten ObjectId-keyed
+/// LKI cache entry) may not answer a question about the object that left the
+/// battlefield. Older saved/test records can lack a source context entirely,
+/// which is distinguishable from a present but malformed context: callers that
+/// retain a documented legacy cache fallback receive `Absent`, while
+/// malformed provenance receives `Malformed` and must fail closed.
+pub(crate) fn battlefield_departure_trigger_source_context(
+    event: &GameEvent,
+) -> BattlefieldDepartureSourceContext<'_> {
+    let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+        record,
+    } = event
+    else {
+        return BattlefieldDepartureSourceContext::Malformed;
+    };
+
+    if *object_id != record.object_id
+        || *from != record.from_zone
+        || *to != record.to_zone
+        || *from != Some(Zone::Battlefield)
+    {
+        return BattlefieldDepartureSourceContext::Malformed;
+    }
+
+    match record.trigger_source_context() {
+        None => BattlefieldDepartureSourceContext::Absent,
+        Some(context)
+            if context.identity.reference.object_id == *object_id
+                && context.identity.expected_zone == Zone::Battlefield =>
+        {
+            BattlefieldDepartureSourceContext::Present(context)
+        }
+        Some(_) => BattlefieldDepartureSourceContext::Malformed,
+    }
+}
+
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
 /// object leaving its current zone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -5372,6 +5425,12 @@ pub struct PendingCast {
     pub card_id: CardId,
     pub ability: Box<ResolvedAbility>,
     pub cost: ManaCost,
+    /// CR 601.2h + CR 616.1: Mana already committed before a life-payment
+    /// replacement's post-effect paused. The resumed cast uses `NoCost` and
+    /// carries this amount into final cast bookkeeping instead of spending or
+    /// measuring the same mana twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepaid_actual_mana_spent: Option<u32>,
     /// CR 601.2f: The tax-inclusive base mana cost captured at announcement,
     /// BEFORE any cost reductions/increases or {X} concretization. Lets the
     /// full concrete cost be recomputed from scratch for any chosen X with
@@ -5537,6 +5596,70 @@ fn default_origin_zone() -> Zone {
     Zone::Hand
 }
 
+/// CR 118.3b + CR 119.4 + CR 616.1: Exact outer cost action suspended after a
+/// life payment committed but its replacement's interactive post-effect did
+/// not finish. The replacement continuation remains the immediate child; this
+/// owner resumes only after that child drains.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DeferredLifeCostResume {
+    /// Continue a spell cast or activated-ability payment without replaying the
+    /// life payment. Mana-payment callers set `cost` to `NoCost` and preserve
+    /// the amount already spent in `prepaid_actual_mana_spent`.
+    Cast {
+        player: PlayerId,
+        /// The announcing caller attaches its complete cast/activation root
+        /// before state returns to a player. `None` exists only during that
+        /// synchronous handoff from the shared payment authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending: Option<Box<PendingCast>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining_life_payments: Vec<u32>,
+        /// Resolution-stack depth that existed before the life-loss event.
+        /// Replacement-produced child frames must retire back to this boundary
+        /// before the cast resumes.
+        resume_at_resolution_depth: usize,
+    },
+    /// Finish a resolution-time "pay any amount of life" choice after its
+    /// replacement post-effect settles, then expose the paid amount to the
+    /// remaining ability chain.
+    PayAmount {
+        player: PlayerId,
+        total: u32,
+        /// Resolution-stack depth containing the outer pay-amount chain.
+        /// The replacement's child work drains above it first.
+        resume_at_resolution_depth: usize,
+    },
+    /// Resume a resolution/special-action mana-payment root after all selected
+    /// Phyrexian life components and their replacement children settle.
+    ManaRoot {
+        player: PlayerId,
+        resume: Box<ManaAbilityResume>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining_life_payments: Vec<u32>,
+        resume_at_resolution_depth: usize,
+    },
+}
+
+impl DeferredLifeCostResume {
+    pub fn resume_at_resolution_depth(&self) -> usize {
+        match self {
+            DeferredLifeCostResume::Cast {
+                resume_at_resolution_depth,
+                ..
+            }
+            | DeferredLifeCostResume::PayAmount {
+                resume_at_resolution_depth,
+                ..
+            }
+            | DeferredLifeCostResume::ManaRoot {
+                resume_at_resolution_depth,
+                ..
+            } => *resume_at_resolution_depth,
+        }
+    }
+}
+
 /// CR 601.2h + CR 616.1: Tail behavior for a sequential cost move that paused
 /// on a replacement choice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5604,6 +5727,11 @@ pub struct ManaAbilityCostParent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManaAbilityCostCursor {
     pub remaining: Vec<AbilityCost>,
+    /// CR 118.3b + CR 119.4 + CR 616.1: Selected Phyrexian life components
+    /// that follow an already-paid component whose replacement post-effect
+    /// paused. They complete before the cursor advances to mana production.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remaining_life_payments: Vec<u32>,
     /// Direct auto-tap resolution has already chosen its production path and
     /// therefore must not surface an output-color prompt after a paused cost
     /// move resumes. Interactive activation retains the prompt.
@@ -5824,6 +5952,7 @@ impl PendingCast {
             card_id,
             ability: Box::new(ability),
             cost,
+            prepaid_actual_mana_spent: None,
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
@@ -5896,6 +6025,17 @@ pub enum ManaAbilityResume {
         player: PlayerId,
         cost: ManaCost,
     },
+    /// CR 116.2c + CR 605.3b + CR 616.1: A pay-to-end special action whose
+    /// auto-tapped mana source paused on a replacement-aware cost move. `cost`
+    /// is the permission's printed cost, latched at action initiation;
+    /// resumption must not re-derive it from a board that may have changed
+    /// while the replacement choice was pending. `group` names the continuous
+    /// effect to end once payment completes.
+    EndContinuousEffect {
+        player: PlayerId,
+        group: EndEffectGroupId,
+        cost: ManaCost,
+    },
     ManaPayment {
         /// The payer of the outer spell/ability cost. This is intentionally
         /// independent from `PendingManaAbility::player`: Assist can activate
@@ -5911,11 +6051,11 @@ pub enum ManaAbilityResume {
         /// from the controller of a helper mana source activated while paying.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outer_player: Option<PlayerId>,
-        /// CR 118.12: Carried-through cost from `WaitingFor::UnlessPayment`.
-        /// See the matching `WaitingFor::UnlessPayment.cost` doc-comment for
-        /// the legacy-shape deserialization contract. Boxed so the
-        /// enclosing `ManaAbilityResume` enum stays compact (other variants
-        /// are zero-sized or carry only an `Option`).
+        /// CR 118.12 + CR 605.3b: Exact concrete outer payment root. A
+        /// mana-source cost pause retries it in full; a deferred Phyrexian
+        /// life replacement removes its already-paid leading mana component
+        /// before resuming any suffix. Boxed so the enclosing enum stays
+        /// compact.
         #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat_boxed")]
         cost: Box<AbilityCost>,
         pending_effect: Box<ResolvedAbility>,
@@ -6118,6 +6258,94 @@ pub struct TargetSelectionSlot {
     /// (CR 115.1) regardless of who announced a slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chooser: Option<PlayerId>,
+    /// CR 115.1: The kind of effect that will affect this target — the game
+    /// fact of *what the spell or ability does to the thing being chosen*.
+    /// Stamped at slot construction from the enclosing ability frame's own
+    /// `Effect`, because the slot is otherwise attribution-free: nothing here
+    /// references the effect, so a consumer cannot recover it later without
+    /// re-walking the effect tree in lockstep with the slot builder.
+    ///
+    /// This is deliberately the game fact and NOT a presentation intent.
+    /// Labelling (e.g. "this prompt is hostile") is a projection-layer
+    /// decision made by `target_intent` in `game::interaction`, mirroring how
+    /// `WaitingFor::EffectZoneChoice` stores `effect_kind` and lets
+    /// `effect_zone_intent` label it.
+    pub effect_kind: EffectKind,
+    /// CR 115.1: The discriminating fact that `effect_kind` does not carry.
+    ///
+    /// `EffectKind` is a unit tag, so two effects that do opposite things to a
+    /// target can share one variant: `Effect::ChangeZone` is the same kind
+    /// whether it exiles or returns to hand, and `Effect::Pump` is the same
+    /// kind for "+3/+3" and "-3/-3". Both hold the deciding value in their
+    /// payload, which is in hand at slot construction and unrecoverable
+    /// afterwards.
+    ///
+    /// One sum type rather than one `Option<T>` field per lossy kind: the axis
+    /// is "what extra fact does this kind need", and a per-kind field would be
+    /// the sibling-cluster smell at struct level. `From<&Effect> for
+    /// EffectKind` already reads payloads this way for `SetTapState`, so
+    /// payload discrimination at this boundary is established practice.
+    #[serde(default)]
+    pub effect_detail: TargetEffectDetail,
+}
+
+/// CR 613.4: Direction of a power/toughness modification. Typed rather than a
+/// signed number so the stored game fact says which way the change goes even
+/// when the magnitude is irrelevant, mirroring [`TapStateChange`] for the
+/// tap/untap axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PtDirection {
+    /// CR 613.4: A modification that raises power and/or toughness.
+    Increase,
+    /// CR 613.4: A modification that lowers power and/or toughness.
+    Decrease,
+}
+
+/// CR 115.1: Effect-kind-specific payload captured alongside a target slot's
+/// [`EffectKind`], for the kinds whose unit tag is ambiguous about what will
+/// happen to the chosen target.
+///
+/// Deliberately a *game fact* and not a presentation intent — a [`Zone`] and a
+/// direction, both read straight off the effect. `target_intent` in
+/// `game::interaction` decides how to label them.
+///
+/// # When a new variant is justified
+///
+/// This enum is a deliberate concession, and a sum type accretes one plausible
+/// variant at a time just as easily as a struct grows `Option` fields. A new
+/// variant must satisfy **all three** of:
+///
+/// 1. It carries a fact the [`EffectKind`] unit tag genuinely **cannot**
+///    express — not merely one it happens not to today.
+/// 2. Its kind actually **reaches a CR 115.1 target announcement**. An effect
+///    that never produces a target slot needs nothing here.
+/// 3. The fact is **available at slot construction**, in
+///    `collect_target_slots`. Anything recoverable later belongs at the
+///    projection layer instead, and anything unknowable at announcement
+///    belongs in [`TargetEffectDetail::None`] rather than being guessed.
+///
+/// If a proposal fails **any** of the three, the answer is a finer
+/// [`EffectKind`] fan-out — see `impl From<&Effect> for EffectKind`'s
+/// `Effect::SetTapState` arm, which reads `scope` and `state` to produce four
+/// distinct kinds — and **not** a new detail variant. Prefer that route
+/// whenever the distinction is intrinsic to the effect rather than to this
+/// one announcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum TargetEffectDetail {
+    /// The kind is self-describing; no extra fact is needed (the default, and
+    /// the honest answer whenever the deciding value is not statically known).
+    #[default]
+    None,
+    /// Destination of a zone-change effect (`ChangeZone`, `ChangeZoneAll`).
+    /// Consumed by reusing the existing `effect_zone_intent(kind, destination)`
+    /// rather than reimplementing zone labelling.
+    Destination(Zone),
+    /// CR 613.4: Direction of a P/T modification (`Pump`, `PumpAll`). Absent
+    /// when the modification is dynamic (X or count-based) or genuinely
+    /// opposing ("+2/-2"), because then no direction is true.
+    Modification(PtDirection),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -11321,6 +11549,13 @@ pub struct GameState {
     pub transient_continuous_effects: im::Vector<TransientContinuousEffect>,
     #[serde(default)]
     pub next_continuous_effect_id: u64,
+    /// CR 116.2c: monotone allocator for [`EndEffectGroupId`]. Starts at 1, so
+    /// `0` is never a valid group. A resolution that allocates a group and then
+    /// installs zero continuous effects (a false `StaticCondition`) simply burns
+    /// the value; monotonicity makes reuse impossible, so no later resolution
+    /// can collide with the burned name.
+    #[serde(default)]
+    pub next_end_effect_group_id: u64,
 
     /// Per-object source-attribution side-table, rebuilt fresh every layers
     /// pass. Records which continuous effects contributed grants/removals to
@@ -11505,7 +11740,13 @@ pub struct GameState {
     /// CR 500.7: Extra turns granted by effects, stored as a LIFO stack.
     /// Most recently created extra turn is taken first (pop from end).
     #[serde(default)]
-    pub extra_turns: Vec<PlayerId>,
+    pub extra_turns: Vec<ExtraTurn>,
+
+    /// CR 500.7: While an extra-turn sequence is in progress, records the
+    /// "specified turn" after which those extras were inserted. Cleared once
+    /// play resumes with the player after that anchor turn.
+    #[serde(default)]
+    pub extra_turn_sequence_anchor: Option<PlayerId>,
 
     /// CR 614.10: Per-player count of turns to skip. When a player would begin their
     /// turn with a non-zero counter, the turn is skipped and the counter is decremented.
@@ -12515,10 +12756,10 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_count: Option<i32>,
 
-    /// CR 608.2c + CR 701.9a: Per-player counts produced by the preceding
-    /// effect in the current ability chain. Used by carried-subject
-    /// continuations like "Each player discards ..., then draws that many ..."
-    /// after all players have completed the discard pass.
+    /// CR 608.2c: Per-player counts from the terminal event window of the
+    /// preceding count-producing effect in the current ability chain. Used by
+    /// carried-subject continuations like "Each player discards ..., then draws
+    /// that many ..." after all players have completed the discard pass.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub last_effect_counts_by_player: HashMap<PlayerId, i32>,
 
@@ -12841,6 +13082,13 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_cost_move_resume: Option<PendingCostMoveResume>,
 
+    /// CR 118.3b + CR 119.4 + CR 616.1: Typed owner for a surrounding cost
+    /// action whose life payment committed before an interactive replacement
+    /// post-effect paused. Serialized with the prompt so restore resumes the
+    /// exact cast or resolution payment without charging it twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_deferred_life_cost_resume: Option<DeferredLifeCostResume>,
+
     /// CR 601.2h + CR 616.1: Resume a sequential discard cost after a
     /// replacement choice. Cost moves use `pending_cost_move_resume` above.
     #[serde(skip)]
@@ -12900,6 +13148,35 @@ pub struct GameState {
     pub combat_prevention_tally: Option<HashMap<AppliedReplacementKey, i32>>,
 }
 
+/// CR 116.2c: names the whole continuous effect ONE resolution created, so a
+/// single payment ends every `TransientContinuousEffect` that resolution
+/// installed rather than one of its layers.
+///
+/// A DISTINCT NAMESPACE from `TransientContinuousEffect::id`. That id is the
+/// per-effect handle later duration/recipient bindings address (see
+/// `ResolvedContinuousEffectCommand`, whose `DuplicateEffectId` invariant exists
+/// because two live effects sharing one id would be indistinguishable). Reusing
+/// it as a group key would overload a namespace with its own uniqueness contract
+/// and make the `GameAction` payload ambiguous on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EndEffectGroupId(pub u64);
+
+/// CR 109.5 + CR 116.2c: a standing permission for the resolving ability's
+/// controller—the player meant by "you"—to end that effect by paying a cost as
+/// a special action any time they have priority.
+///
+/// Rides on the installed effect itself, so it is intrinsically bound to the
+/// exact effect one resolution created — a second activation of the same source
+/// installs a second effect with its own group, and each is ended independently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndEffectPermission {
+    /// CR 116.2c: the group every effect from the creating resolution shares.
+    pub group: EndEffectGroupId,
+    /// CR 118.1: what the controller pays to take the special action.
+    pub cost: ManaCost,
+}
+
 /// A runtime-generated continuous effect stored at state level.
 ///
 /// Unlike `StaticDefinition` (which represents intrinsic/printed card text),
@@ -12934,6 +13211,14 @@ pub struct TransientContinuousEffect {
     /// WASM/multiplayer serialization boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_subject: Option<ObjectId>,
+    /// CR 116.2c: see [`EndEffectPermission`]. `None` for every effect with no
+    /// printed termination permission. Set inside the single construction
+    /// authority (`add_transient_continuous_effect_with_end_permission`), so it
+    /// rides inside the journaled `ResolvedContinuousEffectCommand` rather than
+    /// being post-stamped. Backward-compatible across the WASM/multiplayer
+    /// serialization boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_permission: Option<EndEffectPermission>,
     /// Snapshot of the originating object's name, captured at construction.
     /// The originating spell/ability typically moves to a new zone (graveyard,
     /// stack→exile, etc.) with a new ObjectId per CR 400.7 after resolution,
@@ -13696,12 +13981,51 @@ pub struct StepEndManaScanEntry {
 /// `drain_pending_phase_transition_progress` (commit 2). When all players are
 /// processed (queue empties), the drain calls `finish_enter_phase` to complete
 /// the phase entry (priority reset, LKI clear, `PhaseChanged` emission).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PhaseTransitionDrainState {
+    #[default]
+    Ready,
+    /// CR 614.6: The current player's empty-mana event has already been
+    /// delivered, and its Yurlok-class life-loss event was replaced by an
+    /// interactive substitute. The APNAP cursor resumes only after that
+    /// post-replacement continuation terminally drains.
+    AwaitingPostReplacementContinuation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseTransitionProgress {
     pub remaining_players: VecDeque<PlayerId>,
     pub next_phase: Phase,
     pub in_combat: bool,
     pub entering_cleanup: bool,
+    #[serde(default)]
+    pub drain_state: PhaseTransitionDrainState,
+}
+
+#[cfg(test)]
+mod phase_transition_progress_serde_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_progress_without_drain_state_defaults_to_ready() {
+        let progress = PhaseTransitionProgress {
+            remaining_players: VecDeque::from([PlayerId(1)]),
+            next_phase: Phase::Upkeep,
+            in_combat: false,
+            entering_cleanup: false,
+            drain_state: PhaseTransitionDrainState::AwaitingPostReplacementContinuation,
+        };
+        let mut legacy = serde_json::to_value(progress).expect("phase progress serializes");
+        legacy
+            .as_object_mut()
+            .expect("phase progress is a JSON object")
+            .remove("drain_state");
+
+        let restored: PhaseTransitionProgress =
+            serde_json::from_value(legacy).expect("legacy phase progress still loads");
+
+        assert_eq!(restored.drain_state, PhaseTransitionDrainState::Ready);
+    }
 }
 
 /// Context stored when a permanent spell's ETB replacement needs a player choice
@@ -13770,6 +14094,49 @@ pub struct ScheduledTurnControl {
 pub struct ActivePlayerControl {
     pub controller: PlayerId,
     pub timestamp: u64,
+}
+
+/// CR 500.7: An extra turn queued after a specified turn.
+///
+/// Oracle text "Take an extra turn after this one" inserts the extra turn
+/// directly after the *specified* turn (the turn that was active when the
+/// effect resolved), not after the beneficiary's next natural turn. The
+/// `anchor` field is that specified turn's active-player representative.
+///
+/// LIFO ordering ("the most recently created turn will be taken first") is
+/// preserved by pushing to the end of `GameState.extra_turns` and popping from
+/// the end in `start_next_turn`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ExtraTurnCompat")]
+pub struct ExtraTurn {
+    /// Player who takes the extra turn (team-normalized in 2HG / CR 805.8).
+    pub player: PlayerId,
+    /// The specified turn (CR 500.7) after which this extra turn is inserted.
+    /// When the extra-turn queue drains, natural order resumes at
+    /// `next_turn_representative(anchor)`.
+    pub anchor: PlayerId,
+}
+
+/// Private serde shim: new saves emit `{ player, anchor }`; legacy saves stored
+/// a bare `PlayerId`. Mid-game saves that lost the OOS anchor recover as
+/// `anchor == player` (in-sequence behavior).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ExtraTurnCompat {
+    Full { player: PlayerId, anchor: PlayerId },
+    Legacy(PlayerId),
+}
+
+impl From<ExtraTurnCompat> for ExtraTurn {
+    fn from(c: ExtraTurnCompat) -> Self {
+        match c {
+            ExtraTurnCompat::Full { player, anchor } => Self { player, anchor },
+            ExtraTurnCompat::Legacy(player) => Self {
+                player,
+                anchor: player,
+            },
+        }
+    }
 }
 
 /// CR 500.8: An extra phase added to a turn by an effect, anchored to the
@@ -16171,6 +16538,8 @@ impl GameState {
             state_revision: 0,
             transient_continuous_effects: im::Vector::new(),
             next_continuous_effect_id: 1,
+            // CR 116.2c: 0 is never a valid `EndEffectGroupId`.
+            next_end_effect_group_id: 1,
             attribution: im::HashMap::new(),
             remote_type_layer_recipients: im::HashSet::new(),
             day_night: None,
@@ -16192,6 +16561,7 @@ impl GameState {
             commander_cast_count: HashMap::new(),
             commander_cast_owners: HashMap::new(),
             extra_turns: Vec::new(),
+            extra_turn_sequence_anchor: None,
             turns_to_skip: vec![0; player_count as usize],
             steps_to_skip: vec![HashMap::new(); player_count as usize],
             combat_phase_skip_next_turn: vec![
@@ -16355,6 +16725,7 @@ impl GameState {
             pending_taps_for_mana_overrides: std::collections::HashMap::new(),
             current_triggered_mana_override: None,
             pending_cost_move_resume: None,
+            pending_deferred_life_cost_resume: None,
             pending_discard_for_cost: None,
             pending_cast: None,
             ring_level: HashMap::new(),
@@ -16630,6 +17001,44 @@ impl GameState {
         self.priority_yields.retain(|y| y.player != player);
     }
 
+    /// CR 116.2c: draw the next group name. See
+    /// [`GameState::next_end_effect_group_id`].
+    ///
+    /// Legacy saves deserialize the counter as `0` (`#[serde(default)]`), so
+    /// this clamps to `max(1, …)` — a legacy save must not be able to mint the
+    /// never-valid group `0`.
+    pub(crate) fn next_end_effect_group(&mut self) -> EndEffectGroupId {
+        let group = self.next_end_effect_group_id.max(1);
+        self.next_end_effect_group_id = group + 1;
+        EndEffectGroupId(group)
+    }
+
+    /// CR 116.2c: end the continuous effect named by `group`, removing EVERY
+    /// transient effect that one resolution installed.
+    ///
+    /// Matches on `end_permission.group` — NEVER on
+    /// [`TransientContinuousEffect::id`], which is a per-effect handle in a
+    /// different namespace and would leave a multi-effect group half-ended.
+    /// Returns whether anything was removed.
+    ///
+    /// Characteristics restore themselves — they are derived from this list by
+    /// `evaluate_layers`, so removal IS the restoration (CR 613.1). Mirrors the
+    /// `layers.rs` prunes: `retain` + `layers_dirty.mark_full()`, unjournaled,
+    /// because replay re-executes the deterministic sweep.
+    pub fn end_continuous_effect(&mut self, group: EndEffectGroupId) -> bool {
+        let before = self.transient_continuous_effects.len();
+        self.transient_continuous_effects.retain(|tce| {
+            !tce.end_permission
+                .as_ref()
+                .is_some_and(|p| p.group == group)
+        });
+        let removed = self.transient_continuous_effects.len() != before;
+        if removed {
+            self.layers_dirty.mark_full();
+        }
+        removed
+    }
+
     /// Register a transient continuous effect and mark layers dirty.
     ///
     /// SINGLE AUTHORITY for adding to `transient_continuous_effects`. Resolves
@@ -16643,6 +17052,59 @@ impl GameState {
         affected: TargetFilter,
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
+    ) -> u64 {
+        self.add_transient_continuous_effect_inner(
+            source_id,
+            controller,
+            duration,
+            affected,
+            modifications,
+            condition,
+            None,
+        )
+    }
+
+    /// CR 116.2c: install a continuous effect that carries a pay-to-end
+    /// permission. The permission is threaded into the construction authority
+    /// (rather than post-stamped like `duration_subject`) so it rides INSIDE
+    /// the journaled `ResolvedContinuousEffectCommand` and survives replay.
+    ///
+    /// One argument wider than the plain constructor by construction — it is the
+    /// same installation carrying one extra piece of provenance. Collapsing the
+    /// pair into a single `Option`-taking function would churn every existing
+    /// caller of the plain form for no gain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_transient_continuous_effect_with_end_permission(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: Duration,
+        affected: TargetFilter,
+        modifications: Vec<ContinuousModification>,
+        condition: Option<StaticCondition>,
+        end_permission: EndEffectPermission,
+    ) -> u64 {
+        self.add_transient_continuous_effect_inner(
+            source_id,
+            controller,
+            duration,
+            affected,
+            modifications,
+            condition,
+            Some(end_permission),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_transient_continuous_effect_inner(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: Duration,
+        affected: TargetFilter,
+        modifications: Vec<ContinuousModification>,
+        condition: Option<StaticCondition>,
+        end_permission: Option<EndEffectPermission>,
     ) -> u64 {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
@@ -16674,10 +17136,12 @@ impl GameState {
                 modifications,
                 condition,
                 duration_subject: None,
+                end_permission,
                 source_name,
             },
             expected_installed_count: self.transient_continuous_effects.len(),
             resulting_next_continuous_effect_id: self.next_continuous_effect_id,
+            resulting_next_end_effect_group_id: self.next_end_effect_group_id,
             resulting_next_timestamp: self.next_timestamp,
             cause: self.current_or_begin_rules_execution_node(),
         };
@@ -16725,6 +17189,16 @@ impl GameState {
                 },
             );
         }
+        if let Some(permission) = &command.effect.end_permission {
+            if permission.group.0 >= command.resulting_next_end_effect_group_id {
+                return Err(
+                    ResolvedContinuousEffectReplayInvariantError::EndEffectGroupAboveHighWater {
+                        group: permission.group.0,
+                        high_water: command.resulting_next_end_effect_group_id,
+                    },
+                );
+            }
+        }
         // Two live effects sharing one id are indistinguishable to every later
         // id-addressed lookup, so reject before mutating anything.
         if self
@@ -16743,6 +17217,9 @@ impl GameState {
         self.next_continuous_effect_id = self
             .next_continuous_effect_id
             .max(command.resulting_next_continuous_effect_id);
+        self.next_end_effect_group_id = self
+            .next_end_effect_group_id
+            .max(command.resulting_next_end_effect_group_id);
         self.next_timestamp = self.next_timestamp.max(command.resulting_next_timestamp);
         self.layers_dirty.mark_full();
         Ok(())
@@ -17507,6 +17984,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         state_revision: _,
         transient_continuous_effects: _,
         next_continuous_effect_id: _,
+        next_end_effect_group_id: _,
         attribution: _,
         remote_type_layer_recipients: _,
         day_night: _,
@@ -17532,6 +18010,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         commander_declined_zone_return: _,
         objects_that_dealt_damage: _,
         extra_turns: _,
+        extra_turn_sequence_anchor: _,
         turns_to_skip: _,
         steps_to_skip: _,
         combat_phase_skip_next_turn: _,
@@ -17698,6 +18177,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_taps_for_mana_overrides: _,
         current_triggered_mana_override: _,
         pending_cost_move_resume: _,
+        pending_deferred_life_cost_resume: _,
         pending_discard_for_cost: _,
         pending_cast: _,
         ring_level: _,
@@ -17829,6 +18309,7 @@ impl PartialEq for GameState {
             && self.commander_declined_zone_return == other.commander_declined_zone_return
             && self.objects_that_dealt_damage == other.objects_that_dealt_damage
             && self.extra_turns == other.extra_turns
+            && self.extra_turn_sequence_anchor == other.extra_turn_sequence_anchor
             && self.turns_to_skip == other.turns_to_skip
             && self.steps_to_skip == other.steps_to_skip
             && self.combat_phase_skip_next_turn == other.combat_phase_skip_next_turn
@@ -20724,6 +21205,7 @@ mod tests {
                     PlayerId(0),
                 )),
                 cost: ManaCost::NoCost,
+                prepaid_actual_mana_spent: None,
                 base_cost: None,
                 declared_mana_additions: Vec::new(),
                 activation_cost: None,
@@ -20926,6 +21408,8 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(ObjectId(1))],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: vec![],
@@ -21130,6 +21614,7 @@ mod tests {
                 PlayerId(0),
             )),
             cost: ManaCost::NoCost,
+            prepaid_actual_mana_spent: None,
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
@@ -21340,6 +21825,8 @@ mod tests {
                 ],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: vec![],
@@ -22286,6 +22773,46 @@ mod tests {
     }
 
     #[test]
+    fn persisted_extra_turns_deserialize_legacy_bare_player_id() {
+        let mut raw = serde_json::to_value(GameState::new(
+            crate::types::format::FormatConfig::free_for_all(),
+            4,
+            42,
+        ))
+        .expect("serialize baseline");
+        raw["extra_turns"] = serde_json::json!([0]);
+
+        let mut restored = serde_json::from_value::<PersistedGameState>(raw)
+            .expect("legacy bare PlayerId extra turn must deserialize")
+            .into_game_state();
+        assert_eq!(
+            restored.extra_turns,
+            vec![ExtraTurn {
+                player: PlayerId(0),
+                anchor: PlayerId(0),
+            }],
+            "legacy saves recover in-sequence behavior via anchor == player"
+        );
+
+        restored.active_player = PlayerId(0);
+        let mut events = Vec::new();
+        crate::game::turns::start_next_turn(&mut restored, &mut events);
+        assert_eq!(
+            restored.active_player,
+            PlayerId(0),
+            "legacy extra must consume on the beneficiary's next turn boundary"
+        );
+
+        let mut events = Vec::new();
+        crate::game::turns::start_next_turn(&mut restored, &mut events);
+        assert_eq!(
+            restored.active_player,
+            PlayerId(1),
+            "after legacy in-sequence extra, resume natural next player"
+        );
+    }
+
+    #[test]
     fn game_state_deserialize_materializes_proven_legacy_printed_trigger_payload() {
         let object_id = ObjectId(991);
         let trigger = crate::types::ability::TriggerDefinition::new(
@@ -23044,5 +23571,89 @@ mod tests {
             !state.is_priority_yielded(PlayerId(0), &other_trigger),
             "same card but different trigger description must remain held"
         );
+    }
+
+    /// CR 116.2c: `end_continuous_effect` names a GROUP, so one payment must end
+    /// EVERY transient effect the creating resolution installed — never just one
+    /// of its layers, and never anything from a different resolution.
+    ///
+    /// This is the building-block test for the group predicate. The thirteen
+    /// shipped Licids all install exactly one effect per activation, so the
+    /// multi-member path has no card-level coverage; without this row the group
+    /// semantics would be untested machinery.
+    #[test]
+    fn end_continuous_effect_removes_every_member_of_the_named_group() {
+        let mut state = GameState::new_two_player(42);
+        let group = state.next_end_effect_group();
+        let other_group = state.next_end_effect_group();
+        assert_ne!(
+            group, other_group,
+            "the allocator is monotone, so two draws are never equal"
+        );
+
+        let permission = EndEffectPermission {
+            group,
+            cost: ManaCost::NoCost,
+        };
+        // Two effects sharing one group — the two-`StaticDefinition` clause shape.
+        state.add_transient_continuous_effect_with_end_permission(
+            ObjectId(1),
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SelfRef,
+            vec![ContinuousModification::AddPower { value: 1 }],
+            None,
+            permission.clone(),
+        );
+        state.add_transient_continuous_effect_with_end_permission(
+            ObjectId(1),
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SelfRef,
+            vec![ContinuousModification::AddToughness { value: 1 }],
+            None,
+            permission,
+        );
+        // A third effect from a DIFFERENT resolution must be untouched.
+        state.add_transient_continuous_effect_with_end_permission(
+            ObjectId(2),
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SelfRef,
+            vec![ContinuousModification::AddPower { value: 2 }],
+            None,
+            EndEffectPermission {
+                group: other_group,
+                cost: ManaCost::NoCost,
+            },
+        );
+        assert_eq!(state.transient_continuous_effects.len(), 3);
+
+        assert!(
+            state.end_continuous_effect(group),
+            "ending a live group must report that something was removed"
+        );
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "BOTH members of the named group must go — matching on \
+             `TransientContinuousEffect::id` instead would leave the group \
+             half-ended"
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0]
+                .end_permission
+                .as_ref()
+                .map(|p| p.group),
+            Some(other_group),
+            "the surviving effect is the one from the other resolution"
+        );
+
+        // An unknown group removes nothing and says so.
+        assert!(
+            !state.end_continuous_effect(EndEffectGroupId(9999)),
+            "an unknown group must report that nothing was removed"
+        );
+        assert_eq!(state.transient_continuous_effects.len(), 1);
     }
 }

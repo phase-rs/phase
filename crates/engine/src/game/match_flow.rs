@@ -451,6 +451,17 @@ fn restart_between_games_with_starting_player(
     next_state.debug_mode = state.debug_mode;
     next_state.debug_permitted = state.debug_permitted.clone();
 
+    // Interaction authority is likewise a property of the match, not of a single
+    // game, and has the identical failure shape: `GameState::new` leaves
+    // `interaction_session_id` as `None`, and while it is unset
+    // `derive_viewer_interaction` yields no opportunities at all — so without this
+    // carry every interaction surface silently goes dark from game 2 onward.
+    //
+    // Captured before the rebuild overwrites `state`, and re-applied after
+    // `waiting_for` is final (below) rather than copied field-by-field, so the
+    // slots the engine binds match the new game's pause.
+    let interaction_session = state.interaction_session_id.clone();
+
     load_deck_into_state(&mut next_state, &payload);
     let start = super::engine::start_game_with_starting_player(&mut next_state, starting_player);
     events.extend(start.events);
@@ -458,6 +469,12 @@ fn restart_between_games_with_starting_player(
     let waiting_for = start.waiting_for.clone();
     *state = next_state;
     state.waiting_for = waiting_for.clone();
+    if let Some(session) = interaction_session {
+        // Same `debug_assert` discipline as `ensure_interaction_authority`: the only
+        // failure is decimal-serial exhaustion, which must not fail a live match.
+        let bound = super::interaction::bind_interaction_authority(state, session);
+        debug_assert!(bound.is_ok(), "between-games interaction rebind failed");
+    }
     Ok(waiting_for)
 }
 
@@ -1220,5 +1237,78 @@ mod tests {
             CommanderBracketTier::Cedh,
             "AI seat bracket_tier (Cedh) must be propagated — not silently dropped"
         );
+    }
+
+    /// Game 2 of a Bo3 is a fresh `GameState::new`, which defaults
+    /// `interaction_session_id` to `None`. Without an explicit carry, every
+    /// interaction surface reports `AuthorityUnbound` from game 2 onward — the
+    /// same silent-from-game-2 failure the `debug_mode` carry above exists to
+    /// prevent.
+    #[test]
+    fn between_games_restart_carries_interaction_authority() {
+        use crate::game::interaction::bind_interaction_authority;
+        use crate::types::game_state::PlayerDeckPool;
+        use crate::types::interaction::InteractionSessionId;
+
+        let mut state = GameState::new_two_player(21);
+        state.match_config.match_type = MatchType::Bo3;
+        state.match_phase = MatchPhase::BetweenGames;
+        state.next_game_chooser = Some(PlayerId(0));
+        state.deck_pools = vec![
+            PlayerDeckPool {
+                player: PlayerId(0),
+                current_main: std::sync::Arc::new(vec![entry("P0", 40)]),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(1),
+                current_main: std::sync::Arc::new(vec![entry("P1", 40)]),
+                ..Default::default()
+            },
+        ];
+
+        let session = InteractionSessionId("match-authority-carry".to_string());
+        bind_interaction_authority(&mut state, session.clone())
+            .expect("game 1 binds authority the way its creator does");
+
+        let mut events = Vec::new();
+        handle_choose_play_draw(&mut state, PlayerId(0), true, &mut events)
+            .expect("game 2 of the Bo3 must start");
+
+        // The rebuild replaces `state` wholesale with a `GameState::new`, so if
+        // that constructor ever started binding authority itself the assertion
+        // below would pass without the carry existing at all.
+        assert_eq!(
+            GameState::new(state.format_config.clone(), 2, 1).interaction_session_id,
+            None,
+            "probe is vacuous: a freshly constructed state is already bound, so \
+             the carry is no longer what makes the next assertion hold"
+        );
+
+        assert_eq!(
+            state.interaction_session_id.as_ref(),
+            Some(&session),
+            "the rebuilt game must keep the match's session; `GameState::new` \
+             leaves it None, so this is None without the carry"
+        );
+
+        // The carry re-binds rather than copying the old slots, so the slots must
+        // describe game 2's pause — stale game-1 slots would authorize decisions
+        // that no longer exist.
+        let acting = state.waiting_for.acting_players();
+        assert!(
+            !acting.is_empty(),
+            "fixture must land on a pause with an acting player, or the slot \
+             assertions below prove nothing"
+        );
+        for owner in acting {
+            assert!(
+                state
+                    .active_interaction_slots
+                    .iter()
+                    .any(|slot| slot.semantic_owner == owner.0),
+                "no slot bound for {owner:?}, who is acting in game 2"
+            );
+        }
     }
 }

@@ -122,6 +122,7 @@
     "blockWithNoneConfirm": "Naciśnij ponownie: Nie blokuj nikim",
     "selectAttackerForBlocker": "Wybierz atakującego, przed którym ten blokujący ma bronić",
     "companionToHand": "Towarzysz do ręki",
+    "endContinuousEffect": "Zakończ efekt {{source}} —",
     "resolve": "Rozpatrz",
     "resolveTooltip": "Przekaż priorytet, aby górny element na stosie mógł zostać rozpatrzony, jeśli każdy gracz również przekaże priorytet. Skrót: Spacja.",
     "resolveAll": "Rozpatrz wszystko",

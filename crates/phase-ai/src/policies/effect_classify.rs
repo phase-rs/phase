@@ -1143,6 +1143,7 @@ mod grant_trigger_polarity_tests {
                 }])],
             target: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
             duration: None,
+            end_cost: None,
         }
     }
 

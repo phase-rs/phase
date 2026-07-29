@@ -1682,6 +1682,7 @@ fn trigger_life_of_the_party_etb_goads_created_tokens() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(*target, Some(TargetFilter::LastCreated));
             assert_eq!(*duration, Some(Duration::Permanent));
@@ -14080,6 +14081,70 @@ fn trigger_necropotence_you_discard_exile_from_graveyard() {
         }
         other => panic!("expected ChangeZone (graveyard → exile), got {other:?}"),
     }
+}
+
+/// CR 701.23a + CR 608.2k: a search result is the parent target of its
+/// delivery continuation, even inside an ETB whose event source would
+/// otherwise lift `ParentTarget` to `TriggeringSource`. That protection ends
+/// at an independent sibling: a later "that creature" still denotes the
+/// entering creature.
+#[test]
+fn event_source_lift_skips_search_delivery_but_resumes_at_independent_sibling() {
+    let sponsor = parse_trigger_line(
+        "When this creature enters, each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, puts those cards onto the battlefield tapped, then shuffles.",
+        "Scholarship Sponsor",
+    );
+    let sponsor_search = sponsor
+        .execute
+        .as_deref()
+        .expect("Scholarship Sponsor ETB must have an execute chain");
+    assert!(matches!(
+        sponsor_search.effect.as_ref(),
+        Effect::SearchLibrary { .. }
+    ));
+    let sponsor_delivery = sponsor_search
+        .sub_ability
+        .as_deref()
+        .expect("Scholarship Sponsor search must retain its delivery");
+    assert!(
+        matches!(
+            sponsor_delivery.effect.as_ref(),
+            Effect::ChangeZone {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "the search-result delivery must remain ParentTarget"
+    );
+
+    let synthetic = parse_trigger_line(
+        "When this creature enters, search your library for a basic land card, put it onto the battlefield, then shuffle. Then exile that creature.",
+        "Search Boundary Fixture",
+    );
+    let mut node = synthetic.execute.as_deref();
+    let mut saw_search = false;
+    let mut independent_exile_target = None;
+    while let Some(ability) = node {
+        match ability.effect.as_ref() {
+            Effect::SearchLibrary { .. } => saw_search = true,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } => independent_exile_target = Some(target.clone()),
+            _ => {}
+        }
+        node = ability.sub_ability.as_deref();
+    }
+    assert!(
+        saw_search,
+        "the synthetic trigger must retain its search root"
+    );
+    assert_eq!(
+        independent_exile_target,
+        Some(TargetFilter::TriggeringSource),
+        "the independent post-search sibling must still bind to the entering creature"
+    );
 }
 
 /// CR 701.9a + CR 603.2c: type qualifier on the discarded card must be

@@ -311,6 +311,7 @@ pub fn room_effects(
                     ])],
                     duration: None,
                     target: Some(TargetFilter::Typed(TypedFilter::creature())),
+                    end_cost: None,
                 },
                 source_id,
                 controller,

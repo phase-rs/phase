@@ -11,6 +11,41 @@ use crate::types::statics::StaticMode;
 #[cfg(test)]
 use crate::types::zones::Zone;
 
+/// CR 121.1 + CR 704.5b + CR 614.6: would drawing a card actually put a card into
+/// `player_id`'s hand right now, emitting a `GameEvent::CardDrawn`? False when:
+/// - a `CantDraw` static applies or a `PerTurnDrawLimit` is exhausted (no draw
+///   permitted); or
+/// - the library is empty — an empty-library draw only records an attempted
+///   draw (CR 704.5b) and delivers no card; or
+/// - the replacement pipeline removes the draw before it happens (CR 614.6) —
+///   prevented, substituted with a non-Draw chain, or rescaled to zero.
+///
+/// In each case the draw fires no "whenever you draw" trigger. Every leg delegates
+/// to the authority that owns it rather than re-deriving it: `allowed_draw_count`
+/// for draw restrictions, `select_cards_to_draw` for library delivery, and
+/// `replacement::proposed_draw_survives_replacement` — which shares its
+/// applicability and substitution classifiers with the live pipeline — for the
+/// replacement leg. The individual draw is modeled as the same
+/// `ProposedEvent::Draw` shape `draw_through_replacement_with_applied` proposes,
+/// so the preflight and the resolver ask the identical question.
+///
+/// The single engine authority an AI draw-payoff preflight consults so it never
+/// credits a no-op draw.
+pub fn can_draw_at_least_one(state: &GameState, player_id: crate::types::player::PlayerId) -> bool {
+    let allowed = allowed_draw_count(state, player_id, 1);
+    if select_cards_to_draw(state, player_id, allowed as usize).is_empty() {
+        return false;
+    }
+    // CR 121.2: the individual draw the payoff would ride on — the same event
+    // shape `draw_through_replacement_with_applied` proposes for one card.
+    let proposed = ProposedEvent::Draw {
+        player_id,
+        count: 1,
+        applied: HashSet::new(),
+    };
+    replacement::proposed_draw_survives_replacement(state, &proposed)
+}
+
 pub(crate) fn allowed_draw_count(
     state: &GameState,
     player_id: crate::types::player::PlayerId,

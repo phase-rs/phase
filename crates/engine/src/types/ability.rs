@@ -11319,6 +11319,23 @@ pub enum Effect {
         duration: Option<Duration>,
         #[serde(default)]
         target: Option<TargetFilter>,
+        /// CR 116.2c + CR 118.1: the mana cost a later SPECIAL ACTION may pay to
+        /// end the continuous effect this resolution creates ("You may pay {W}
+        /// to end this effect" — the Licid cycle). `None` for every other
+        /// continuous-effect grant.
+        ///
+        /// A PERMISSION, not a duration: `duration` above stays `Permanent`
+        /// (CR 611.2a) whether or not anyone ever pays. Read once by
+        /// `game::effects::effect::resolve`, which mints an `EndEffectGroupId`
+        /// and stamps an `EndEffectPermission` onto every
+        /// `TransientContinuousEffect` that resolution installs. `layers.rs`
+        /// never reads it.
+        ///
+        /// `ManaCost`, not `AbilityCost`: `SpecialAction` admits only actions
+        /// paid through the mana pool with a restriction-aware `PaymentContext`
+        /// (see the type doc on `types::mana::SpecialAction`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_cost: Option<crate::types::mana::ManaCost>,
     },
     Cleanup {
         #[serde(default)]
@@ -25024,6 +25041,7 @@ mod tests {
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
+            end_cost: None,
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();

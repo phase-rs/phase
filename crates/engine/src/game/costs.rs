@@ -262,8 +262,8 @@ fn payment_failed(reason: impl Into<String>) -> PaymentOutcome {
 pub enum PaymentOutcome {
     /// The cost was paid in full.
     Paid,
-    /// CR 616.1: a replacement-effect choice interrupted payment. Reserved
-    /// exclusively for the `pause_cost_payment_for_replacement_choice` path.
+    /// CR 614.6 + CR 616.1: replacement processing interrupted payment,
+    /// either for replacement ordering or for an interactive substitute.
     Paused { remaining_cost: Option<AbilityCost> },
     /// CR 601.2h / CR 118.12: the cost was not (fully) paid. The caller maps
     /// this to the scope-appropriate failure channel (see [`PaymentScope`]).
@@ -311,6 +311,26 @@ fn resume_cost_with_concrete_mana(
     }
     *first = concrete;
     combine_remaining_costs(None, &flattened).expect("a concrete mana suffix is never empty")
+}
+
+/// CR 118.12 + CR 605.3b + CR 616.1: A deferred Phyrexian-style life
+/// replacement begins only after the leading mana component was spent. Remove
+/// that committed prefix while retaining every later composite component.
+pub(crate) fn remaining_cost_after_paid_mana_prefix(cost: &AbilityCost) -> Option<AbilityCost> {
+    let mut flattened = Vec::new();
+    flatten_cost_components(cost, &mut flattened);
+    let first = flattened
+        .first()
+        .expect("a deferred mana-payment root is never empty");
+    assert!(
+        matches!(
+            first,
+            AbilityCost::Mana { .. } | AbilityCost::ManaDynamic { .. }
+        ),
+        "a deferred mana-payment root must begin with mana"
+    );
+    flattened.remove(0);
+    combine_remaining_costs(None, &flattened)
 }
 
 /// Flatten nested Composite nodes only while constructing a serialized payment
@@ -762,8 +782,9 @@ fn pay_ability_cost_inner(
                 ability_index,
                 ..
             } => {
-                if excluded_sources.is_empty() {
-                    pay_ability_mana_cost(state, player, source_id, *ability_index, cost, events)?;
+                let resume_at_resolution_depth = state.resolution_stack.len();
+                let payment = if excluded_sources.is_empty() {
+                    pay_ability_mana_cost(state, player, source_id, *ability_index, cost, events)?
                 } else {
                     pay_ability_mana_cost_excluding(
                         state,
@@ -775,7 +796,29 @@ fn pay_ability_cost_inner(
                         excluded_sources,
                         // Top-level ability cost payment: no outer cost on the stack.
                         None,
-                    )?;
+                    )?
+                };
+                match payment {
+                    super::casting::ManaCostPayment::Paid(()) => {}
+                    super::casting::ManaCostPayment::Paused {
+                        remaining_life_payments,
+                        ..
+                    } => {
+                        // CR 107.4f + CR 118.3b + CR 119.4 + CR 616.1: The
+                        // announcing caller attaches its complete activation
+                        // root before returning control to a player.
+                        state.pending_deferred_life_cost_resume = Some(
+                            crate::types::game_state::DeferredLifeCostResume::Cast {
+                                player,
+                                pending: None,
+                                remaining_life_payments,
+                                resume_at_resolution_depth,
+                            },
+                        );
+                        return Ok(PaymentOutcome::Paused {
+                            remaining_cost: None,
+                        });
+                    }
                 }
             }
             // CR 118.12: Resolution-time mana payment uses the effect-context
@@ -804,7 +847,9 @@ fn pay_ability_cost_inner(
                     // CR 118.12 + CR 605.3b + CR 616.1: The mana ability
                     // cursor, rather than the unless-payment handler, owns
                     // the replacement choice and exact resume state.
-                    if mana_ability_cost_payment_is_paused(state) {
+                    if mana_ability_cost_payment_is_paused(state)
+                        || state.pending_deferred_life_cost_resume.is_some()
+                    {
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
                         });
@@ -848,7 +893,9 @@ fn pay_ability_cost_inner(
                     // CR 118.12 + CR 605.3b + CR 616.1: See the concrete
                     // mana-cost arm above; the replacement-aware cursor owns
                     // this pause as well.
-                    if mana_ability_cost_payment_is_paused(state) {
+                    if mana_ability_cost_payment_is_paused(state)
+                        || state.pending_deferred_life_cost_resume.is_some()
+                    {
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
                         });
@@ -902,7 +949,8 @@ fn pay_ability_cost_inner(
                         // continuation: it would retry a paid prefix or let the
                         // rider run before the unpaid cost is settled.
                         if matches!(scope, PaymentScope::Resolution { .. })
-                            && mana_ability_cost_payment_is_paused(state)
+                            && (mana_ability_cost_payment_is_paused(state)
+                                || state.pending_deferred_life_cost_resume.is_some())
                         {
                             return Ok(PaymentOutcome::Paused {
                                 remaining_cost: None,
@@ -942,6 +990,12 @@ fn pay_ability_cost_inner(
             };
             match result {
                 super::life_costs::PayLifeCostResult::Paid { .. } => {}
+                super::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution { .. }
+                | super::life_costs::PayLifeCostResult::DeferredReplacementChoice { .. } => {
+                    return Ok(PaymentOutcome::Paused {
+                        remaining_cost: None,
+                    });
+                }
                 super::life_costs::PayLifeCostResult::InsufficientLife
                 | super::life_costs::PayLifeCostResult::Prohibited => {
                     return Ok(payment_failed("Cannot pay life cost"));

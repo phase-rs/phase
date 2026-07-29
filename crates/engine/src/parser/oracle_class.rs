@@ -1,23 +1,30 @@
-use super::oracle_ir::doc::{OracleNodeIr, PrintedTriggerIndex};
+use super::oracle_ir::doc::{OracleNodeIr, PrintedTriggerIndex, UnsupportedAbilityIr};
 use crate::parser::oracle_nom::error::OracleError;
 use nom::bytes::complete::tag;
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ActivationRestriction, Effect, ReplacementCondition,
-    ReplacementDefinition, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition,
+    AbilityKind, ActivationRestriction, Effect, ReplacementCondition, ReplacementDefinition,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition,
 };
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
-use super::oracle::{has_unimplemented, make_unimplemented};
+use super::oracle::has_unimplemented;
 use super::oracle_classifier::{
     is_effect_sentence_candidate, is_granted_static_line, is_replacement_pattern, is_static_pattern,
 };
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::{lower_ability_ir, parse_ability_ir_standalone, parse_effect_chain};
+use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::effect_chain::{
+    AbilityIr, AbilityShellIr, EffectChainIr, PlayerScopeRewrite,
+};
+use super::oracle_ir::replacement::ReplacementIr;
+use super::oracle_ir::static_ir::StaticIr;
+use super::oracle_ir::trigger::TriggerNodeIr;
 use super::oracle_keyword::extract_granted_keyword_list;
 use super::oracle_modal::strip_ability_word;
 use super::oracle_nom::primitives as nom_primitives;
@@ -109,24 +116,60 @@ pub(crate) fn parse_class_oracle_text(
     for section in &sections {
         // Generate the "{cost}: Level N" activated ability
         if let Some((level_line, cost_text, description)) = &section.level_up {
-            let cost = parse_oracle_cost(cost_text);
-            let mut def = AbilityDefinition::new(
+            // Plan 05b T8-A4, recipe R2: the hand-built definition becomes a
+            // one-clause `EffectChainIr` body plus a CR 602.1 activation shell,
+            // lowered through the single authority `lower_ability_ir`. Phase A
+            // still emits the pre-lowered node, so this is the same value the
+            // hand-built path produced; T9 swaps the payload for the IR itself.
+            //
+            // `source_text` is the whole printed level line, which is also the
+            // chain text and therefore the single clause's fragment: the clause
+            // IS the whole ability body here, so its span is the line's own
+            // `0..len` and nothing about the provenance is invented.
+            let mut body = EffectChainIr::single_clause(
+                description,
                 AbilityKind::Activated,
-                Effect::SetClassLevel {
+                parsed_clause(Effect::SetClassLevel {
                     level: section.level,
-                },
+                }),
+                None,
+                None,
+                false,
             );
-            def.cost = Some(cost);
-            def.description = Some(description.clone());
-            // CR 602.5d + CR 716.4: Level N+1 can only activate at sorcery speed
-            // and only when at level N.
-            def.activation_restrictions
-                .push(ActivationRestriction::AsSorcery);
-            def.activation_restrictions
-                .push(ActivationRestriction::ClassLevelIs {
-                    level: section.level - 1,
-                });
-            items.push((*level_line, OracleNodeIr::PreLoweredSpell(def)));
+            // The hand-built definition never ran `apply_player_scope_rewrites`,
+            // so `Preserve` — not `single_clause`'s `Apply` default — is what
+            // reproduces it. This is also T8's mandated R2 mitigation: it removes
+            // the one rewrite family that is not inert on shape alone.
+            body.player_scope_rewrite = PlayerScopeRewrite::Preserve;
+            let ir = AbilityIr {
+                source_text: description.clone(),
+                body,
+                shell: AbilityShellIr {
+                    // CR 602.1a: the activation cost, everything before the colon.
+                    cost: Some(parse_oracle_cost(cost_text)),
+                    description: Some(description.clone()),
+                    // CR 602.1b + CR 716.2a: "[Cost]: Level N" means "Activate
+                    // only if this Class is level N-1 and only as a sorcery"
+                    // (CR 602.5d supplies the sorcery-speed timing). The vec is
+                    // applied verbatim, so it is built in the order the
+                    // hand-built site pushed them — which is the REVERSE of the
+                    // order CR 716.2a states them in. That order is a
+                    // pre-existing property of this site, preserved here rather
+                    // than quietly changed inside a byte-identical conversion.
+                    activation_restrictions: vec![
+                        ActivationRestriction::AsSorcery,
+                        ActivationRestriction::ClassLevelIs {
+                            level: section.level - 1,
+                        },
+                    ],
+                    ..AbilityShellIr::default()
+                },
+                die_results: vec![],
+            };
+            items.push((
+                *level_line,
+                OracleNodeIr::PreLoweredSpell(lower_ability_ir(&ir)),
+            ));
         }
 
         // Parse ability lines for this level section
@@ -138,7 +181,16 @@ pub(crate) fn parse_class_oracle_text(
             // Check for "When this Class becomes level N" trigger pattern
             if is_class_level_trigger(&lower, card_name) {
                 if let Some(trigger) = parse_class_level_trigger(line, card_name, section.level) {
-                    items.push((line_index, OracleNodeIr::PreLoweredTrigger(trigger)));
+                    // The `ClassLevelGained` mode, the `AtClassLevel { level }`
+                    // constraint and the `"When ~ becomes level N"` description
+                    // are all stamped by the recognizer.
+                    // `lower_trigger_node_ir` is the identity on `Assembled`, so
+                    // none of them is re-derived — in particular the description
+                    // is not overwritten with `source_text`.
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Trigger(TriggerNodeIr::from_definition(line, trigger)),
+                    ));
                     continue;
                 }
             }
@@ -190,7 +242,10 @@ pub(crate) fn parse_class_oracle_text(
                     if section.level > 1 {
                         static_def = wrap_static_with_class_level(static_def, section.level);
                     }
-                    items.push((line_index, OracleNodeIr::PreLoweredStatic(static_def)));
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Static(StaticIr::from_definition(&static_line, static_def)),
+                    ));
                     continue;
                 }
             }
@@ -201,7 +256,10 @@ pub(crate) fn parse_class_oracle_text(
                     if section.level > 1 {
                         static_def = wrap_static_with_class_level(static_def, section.level);
                     }
-                    items.push((line_index, OracleNodeIr::PreLoweredStatic(static_def)));
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Static(StaticIr::from_definition(&static_line, static_def)),
+                    ));
                     continue;
                 }
             }
@@ -218,7 +276,10 @@ pub(crate) fn parse_class_oracle_text(
                     if section.level > 1 {
                         rep_def = wrap_replacement_with_class_level(rep_def, section.level);
                     }
-                    items.push((line_index, OracleNodeIr::PreLoweredReplacement(rep_def)));
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Replacement(ReplacementIr::from_definition(line, rep_def)),
+                    ));
                     continue;
                 }
             }
@@ -257,25 +318,65 @@ pub(crate) fn parse_class_oracle_text(
                         if section.level > 1 {
                             static_def = wrap_static_with_class_level(static_def, section.level);
                         }
-                        items.push((line_index, OracleNodeIr::PreLoweredStatic(static_def)));
+                        items.push((
+                            line_index,
+                            OracleNodeIr::Static(StaticIr::from_definition(
+                                &effect_static,
+                                static_def,
+                            )),
+                        ));
                         continue;
                     }
                 }
             }
 
             // Effect/spell-like lines (e.g., "You may play an additional land...")
+            //
+            // Mode-preserving hoist (Plan 05b U0-61): `parse_effect_chain(t, k)`
+            // **is** `lower_ability_ir(&parse_ability_ir_standalone(t, k))` —
+            // that is the function's body, not a claim about it
+            // (`oracle_effect/mod.rs`). So splitting it into its two halves
+            // moves *where* the lowering happens without changing *what* it
+            // produces: the node now carries the IR, and `lower_oracle_ir`
+            // performs the same `lower_ability_ir` this line used to.
+            //
+            // The gate keeps reading a LOWERED definition, as at U0-12 and
+            // U0-39: whether to emit is control flow, and `has_unimplemented`
+            // is defined over an `AbilityDefinition`, so the predicate must see
+            // the definition this site will actually emit. A second
+            // `has_unimplemented` over `EffectChainIr` would be a rival
+            // authority free to diverge from this one.
             if is_effect_sentence_candidate(&lower) {
-                let def = parse_effect_chain(line, AbilityKind::Spell);
-                if !has_unimplemented(&def) {
-                    items.push((line_index, OracleNodeIr::PreLoweredSpell(def)));
+                let ir = parse_ability_ir_standalone(line, AbilityKind::Spell);
+                if !has_unimplemented(&lower_ability_ir(&ir)) {
+                    items.push((line_index, OracleNodeIr::Spell(ir)));
                     continue;
                 }
             }
 
-            // Fallback: unimplemented
+            // Fallback: the honest-failure residual (Plan 05b U0-62).
+            //
+            // Two routes reach here, and **the discard on the second one is
+            // deliberate and preserved exactly.** Route one is a line no
+            // recognizer above claimed at all. Route two is an effect-sentence
+            // candidate whose chain DID parse, but whose lowered root contains an
+            // `Unimplemented` — that `ir` is thrown away and the residual is
+            // rebuilt from `line`. Keeping the partial chain instead would be a
+            // *behavior* change, not a conversion: it would name the failed
+            // clause rather than the fixed `"unknown"` sentinel and would move
+            // the coverage key. `ir` is scoped inside the `if` block above, so
+            // the discard is structural here rather than a convention a later
+            // edit could quietly drop.
+            //
+            // `min_x_value: 0` is the floor the discarded shape carried:
+            // `AbilityDefinition::new` defaults it to 0 and nothing on either
+            // route raises it before this point.
             items.push((
                 line_index,
-                OracleNodeIr::PreLoweredSpell(make_unimplemented(line)),
+                OracleNodeIr::Unsupported {
+                    unsupported: UnsupportedAbilityIr::unknown(line),
+                    min_x_value: 0,
+                },
             ));
         }
     }

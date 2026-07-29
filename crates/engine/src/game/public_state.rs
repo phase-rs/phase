@@ -420,6 +420,12 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::SpellCountered { .. }
             | GameEvent::EffectResolved { .. }
             | GameEvent::Unattached { .. }
+            // CR 116.2c + CR 613.1: ending a continuous effect DOES change
+            // derived characteristics, but `GameState::end_continuous_effect`
+            // sets `layers_dirty.mark_full()`, so Gate 1 above has already
+            // marked everything and returned before this match is reached. No
+            // additional per-event marking is needed or correct here.
+            | GameEvent::ContinuousEffectEnded { .. }
             | GameEvent::AttackersDeclared { .. }
             | GameEvent::BlockersDeclared { .. }
             | GameEvent::AttackerBecameBlockedByEffect { .. }

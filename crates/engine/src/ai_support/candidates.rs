@@ -4028,6 +4028,28 @@ pub(crate) fn priority_actions_with_probe(
         ));
     }
 
+    // CR 116.2c: pay a continuous effect's printed cost to end it ("You may pay
+    // {W} to end this effect"). No timing gate — the rule grants the action "any
+    // time they have priority, unless that effect specifies another timing
+    // restriction", and no card in this class states one, so unlike
+    // `CompanionToHand` above there is no sorcery-speed window to check.
+    //
+    // This enumeration is the ONLY offering path: `engine.rs`'s dispatcher ends
+    // in a catch-all, so a missing entry here leaves the action legal but
+    // undiscoverable rather than producing a compile error.
+    for offer in crate::game::end_continuous_effect::end_continuous_effect_candidates(state, player)
+    {
+        actions.push(candidate(
+            GameAction::EndContinuousEffect {
+                group: offer.group,
+                source_name: offer.source_name,
+                cost: offer.cost,
+            },
+            TacticalClass::Ability,
+            Some(player),
+        ));
+    }
+
     // CR 702.49: Offer Ninjutsu-family activations during combat
     // CR 702.61a: Ninjutsu is an activated ability — blocked by split second.
     if !split_second_active && state.active_player == player {
@@ -5141,6 +5163,7 @@ fn combinations_generic<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::game_state::TargetEffectDetail;
     use std::sync::Arc;
 
     use super::*;
@@ -5839,6 +5862,8 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),

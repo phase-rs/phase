@@ -3212,6 +3212,9 @@ fn legacy_effect(x: &Effect) -> bool {
             duration,
             target,
             static_abilities,
+            // CR 116.2c: a `ManaCost` carries no target filter and no duration,
+            // so the termination permission contributes nothing to this walk.
+            end_cost: _,
         } => odur(duration) || otf(target) || static_abilities.iter().any(legacy_static_definition),
         Effect::CreateEmblem { statics, triggers } => {
             statics.iter().any(legacy_static_definition)
@@ -5041,6 +5044,9 @@ fn rw_effect(
             static_abilities,
             duration,
             target,
+            // CR 116.2c: the termination permission names no object and reads no
+            // game state, so it declares no read/write scope of its own.
+            end_cost: _,
         } => {
             // CR 611.2c: the player-chosen `target` slot names the affected object
             // when present; otherwise transient static grants (Stonehoof #5335)

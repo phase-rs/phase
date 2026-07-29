@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 182,
+      "date": "2026-07-28",
+      "title": "Yurlok brings mana burn back",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Yurlok of Scorch Thrash now brings its three-player mana burst and life loss for unspent mana to the battlefield\n• Scholarship Sponsor, Enigma Ridges, Felisa, Fang of Silverquill, Orzhov Advokist, The Temporal Anchor, and Hidetsugu and Kairi join the supported pool\n\n🛠️ Cards That Now Work Right\n• Molten Psyche, Relic of Progenitus, Circle of Power, Licids, Aven Courier, Orcish Farmer, Elrond, Master of Healing, Moonmist, and Waterbend cards now follow their printed targets, durations, costs, or effects\n• Effects that scry multiple times in one resolution now preserve every resulting trigger; face-down exile piles and zero-target divided triggers resolve without the hangs and crashes they could cause\n\n⚔️ Combat & Gameplay\n• Extra-turn sequences resume with the right player, and multiplayer games accept legal attack declarations split across defenders\n• Sideboarding accepts legal main-deck sizes for the selected format, while the deck builder makes adjusting that size easier\n\n🖥️ Interface\n• Target prompts now distinguish helpful selections from hostile ones, instead of treating every target as an attack\n• Mana choices retain their individual costs and restrictions, hover previews behave reliably across pointer types, and desktop solo games regain their sandbox, checkpoint, and reconnect options\n\n🤖 AI\n• AI better recognizes draw-payoff and devotion strategies, chooses more effective removal, and makes sounder choices around mana development, self-bounce, and costly trades\n\n🌐 Multiplayer\n• Private lobby hosts stay private, and the server more reliably preserves legal actions and manual payment choices across multiplayer games",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1531741229509775480"
+    },
+    {
       "id": 181,
       "date": "2026-07-25",
       "title": "Kamigawa flip cards arrive",

@@ -15,13 +15,15 @@ use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, Tac
 use engine::game::game_object::GameObject;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, QuantityExpr,
+    DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, EffectKind, QuantityExpr,
     ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
+use engine::types::game_state::{
+    GameState, PendingCast, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
+};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
@@ -237,6 +239,8 @@ fn with_pending<R>(
                 legal_targets: Vec::new(),
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: Default::default(),

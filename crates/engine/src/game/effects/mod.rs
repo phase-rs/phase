@@ -1685,6 +1685,28 @@ pub(crate) fn prepend_remaining_pay_cost_continuation(
     prepend_to_pending_continuation(state, remaining_payment);
 }
 
+/// CR 118.12 + CR 608.2c: A deferred life-payment root resumes after the
+/// original chain walker has already parked the PayCost rider. Prepend only
+/// the unpaid cost suffix here so that parked rider remains exactly once.
+pub(crate) fn prepend_remaining_pay_cost_before_parked_rider(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    payer: PlayerId,
+    remaining_cost: AbilityCost,
+) {
+    let mut remaining_payment = ability.clone();
+    remaining_payment.controller = payer;
+    remaining_payment.optional = false;
+    remaining_payment.optional_for = None;
+    remaining_payment.effect = Effect::PayCost {
+        cost: remaining_cost,
+        scale: None,
+        payer: TargetFilter::Controller,
+    };
+    remaining_payment.sub_ability = None;
+    prepend_to_pending_continuation(state, remaining_payment);
+}
+
 pub(crate) fn parent_referent_context_from_events(
     state: &GameState,
     events: &[GameEvent],
@@ -3153,7 +3175,11 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
     }
 }
 
-fn is_player_scope_local_continuation(parent: &Effect, child: &Effect) -> bool {
+fn is_player_scope_local_continuation(
+    parent: &Effect,
+    child: &Effect,
+    scope: &PlayerFilter,
+) -> bool {
     // CR 109.5 + CR 608.2c: Compound-subject distribution — when the parent
     // and child effects of a player_scope-tagged ability both reference an
     // iteration-bound recipient (`OriginalController` or `ScopedPlayer`), the
@@ -3165,7 +3191,7 @@ fn is_player_scope_local_continuation(parent: &Effect, child: &Effect) -> bool {
     if effect_has_iteration_bound_recipient(parent) && effect_has_iteration_bound_recipient(child) {
         return true;
     }
-    matches!(
+    let generic_local_continuation = matches!(
         (parent, child),
         (
             Effect::SearchLibrary { .. },
@@ -3194,7 +3220,31 @@ fn is_player_scope_local_continuation(parent: &Effect, child: &Effect) -> bool {
                     ..
                 }
             )
-    )
+    );
+    if generic_local_continuation {
+        return true;
+    }
+
+    // CR 608.2c + CR 701.24a: "Each player shuffles the cards from their hand
+    // into their library" is one per-player move/shuffle instruction only for
+    // an all-player scope. Keep the terminal shuffle with its immediately
+    // preceding ChangeZoneAll; a following Draw remains the detached
+    // all-player instruction.
+    matches!(scope, PlayerFilter::All)
+        && matches!(
+            (parent, child),
+            (
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Library,
+                    target: TargetFilter::ScopedPlayer,
+                    ..
+                },
+                Effect::Shuffle {
+                    target: TargetFilter::ScopedPlayer,
+                }
+            )
+        )
 }
 
 /// CR 109.5 + CR 115.10 + CR 119.3: Detect that an effect's recipient is bound
@@ -3393,14 +3443,14 @@ fn detach_after_player_scope_local_chain(
         || next_is_zone_change_this_way_gated
         || next_is_co_scoped_anaphoric_consumer
         || next_is_optional_clause_continuation
-        || (is_player_scope_local_continuation(&node.effect, &next.effect)
+        || (is_player_scope_local_continuation(&node.effect, &next.effect, scope)
             && !next_is_scoped_search_shuffle_tail)
     {
         // CR 608.2c: co-scoped continuations kept inside the scoped template
         // inherit the outer iteration — redundant `player_scope` on the child
         // would re-enter the fan-out driver mid-instruction (Grave Sifter:
         // Choose → graveyard ChangeZone must run once per outer iteration).
-        if is_player_scope_local_continuation(&node.effect, &next.effect) {
+        if is_player_scope_local_continuation(&node.effect, &next.effect, scope) {
             next.player_scope = None;
         }
         let tail = detach_after_player_scope_local_chain(&mut next, scope, referent_in_scope);
@@ -6695,17 +6745,127 @@ fn previous_effect_excess_amount_from_events(
 
 fn previous_effect_counts_by_player_from_events(
     effect: &Effect,
+    source_id: ObjectId,
     events: &[GameEvent],
-) -> HashMap<PlayerId, i32> {
+) -> Option<HashMap<PlayerId, i32>> {
+    let kind = match effect {
+        Effect::Discard { .. } | Effect::DiscardCard { .. } | Effect::ChangeZoneAll { .. } => {
+            EffectKind::from(effect)
+        }
+        _ => return None,
+    };
+    // CR 608.2c: An effect's terminal marker bounds exactly its own completed
+    // instruction. The supplied slice is already scoped to the current parent
+    // or player-scope pass; events later in that slice belong to later work and
+    // cannot contribute to this effect's "that many" result.
+    let resolved_index = events.iter().rposition(|event| {
+        matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: event_kind,
+                source_id: event_source,
+                ..
+            } if *event_kind == kind && *event_source == source_id
+        )
+    })?;
+
     let mut counts = HashMap::new();
-    if matches!(effect, Effect::Discard { .. } | Effect::DiscardCard { .. }) {
-        for event in events {
-            if let GameEvent::Discarded { player_id, .. } = event {
-                *counts.entry(*player_id).or_insert(0) += 1;
+    match effect {
+        // CR 701.9a: `Discarded::source_id` is the causal source authority.
+        // A same-window discard from another effect cannot be attributed to
+        // this instruction merely because it happened before this marker.
+        Effect::Discard { .. } | Effect::DiscardCard { .. } => {
+            for event in &events[..=resolved_index] {
+                if let GameEvent::Discarded {
+                    player_id,
+                    source_id: Some(event_source),
+                    ..
+                } = event
+                {
+                    if *event_source == source_id {
+                        *counts.entry(*player_id).or_insert(0) += 1;
+                    }
+                }
             }
         }
+        // CR 608.2c: A mass zone move's recipients are the owners recorded at
+        // the move event. This collects all cards moved by the completed
+        // ChangeZoneAll instruction, including zero-card players as an empty
+        // map when the terminal marker is present.
+        Effect::ChangeZoneAll { .. } => {
+            for event in &events[..=resolved_index] {
+                if let GameEvent::ZoneChanged { record, .. } = event {
+                    *counts.entry(record.owner).or_insert(0) += 1;
+                }
+            }
+        }
+        _ => unreachable!("producer kind was selected above"),
     }
-    counts
+    Some(counts)
+}
+
+/// CR 608.2c: Install the terminal-window per-player counts for a completed
+/// instruction. `Some(empty)` is a real zero-result producer and must replace
+/// an older table; `None` means this effect has no such count channel, so clear
+/// the old table before callers preserve their ordinary scalar/excess fallback.
+fn install_previous_effect_counts_by_player(
+    state: &mut GameState,
+    counts_by_player: Option<HashMap<PlayerId, i32>>,
+    preserve_counts_for_current_consumer: bool,
+) -> bool {
+    match counts_by_player {
+        Some(counts_by_player) => {
+            let amount = counts_by_player.values().copied().max().unwrap_or(0);
+            state.last_effect_count = Some(amount);
+            state.last_effect_amount = Some(amount);
+            state.last_effect_counts_by_player = counts_by_player;
+            true
+        }
+        None => {
+            // CR 608.2c + CR 109.5: A player-scope fan-out resolves its
+            // `EventContextAmount` consumer once per player. Keep the prior
+            // recipient table while those detached inner invocations run; the
+            // outer fan-out postlude clears it after every player has consumed
+            // their own entry. Any other non-producer immediately invalidates
+            // the table before scalar fallback.
+            if !preserve_counts_for_current_consumer {
+                state.last_effect_counts_by_player.clear();
+            }
+            false
+        }
+    }
+}
+
+fn effect_consumes_event_context_amount(effect: &Effect) -> bool {
+    let mut consumes = false;
+    effect.for_each_quantity_expr(&mut |quantity| {
+        consumes |= quantity_expr_references_event_context_amount(quantity);
+    });
+    consumes
+}
+
+fn quantity_expr_references_event_context_amount(quantity: &QuantityExpr) -> bool {
+    match quantity {
+        QuantityExpr::Ref { qty } => matches!(qty, QuantityRef::EventContextAmount),
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. } => {
+            quantity_expr_references_event_context_amount(inner)
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
+            .iter()
+            .any(quantity_expr_references_event_context_amount),
+        QuantityExpr::UpTo { max } => quantity_expr_references_event_context_amount(max),
+        QuantityExpr::Power { exponent, .. } => {
+            quantity_expr_references_event_context_amount(exponent)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_references_event_context_amount(left)
+                || quantity_expr_references_event_context_amount(right)
+        }
+        QuantityExpr::Fixed { .. } => false,
+    }
 }
 
 fn mark_exile_choice_tracks_by_source(state: &mut GameState, source: ObjectId) {
@@ -8171,22 +8331,37 @@ fn resolve_chain_body(
             }
         }
         let scoped_events = &events[scoped_events_before..];
-        let counts_by_player =
-            previous_effect_counts_by_player_from_events(&scoped_template.effect, scoped_events);
-        if !counts_by_player.is_empty() {
-            state.last_effect_count = counts_by_player.values().copied().max();
-            state.last_effect_amount = state.last_effect_count;
-            state.last_effect_counts_by_player = counts_by_player;
-        } else if let Some(amount) =
-            previous_effect_amount_from_events(state, &scoped_template, scoped_events)
-        {
-            state.last_effect_amount = Some(amount);
-            // CR 120.10: stamp the resolution-local excess channel alongside the
-            // CR 120.6 total so a follow-up "if excess damage was dealt this way"
-            // condition reads overkill-beyond-lethal.
-            let excess =
-                previous_effect_excess_amount_from_events(state, &scoped_template, scoped_events);
-            state.last_effect_excess_amount = excess;
+        let counts_by_player = previous_effect_counts_by_player_from_events(
+            &scoped_template.effect,
+            scoped_template.source_id,
+            scoped_events,
+        );
+        // CR 608.2c: A completed scoped count producer that moved/discarded
+        // nothing still produced a zero for every player in this fan-out. Keep
+        // that provenance distinct from the absence of a count producer: the
+        // nonempty zero table takes precedence over an enclosing scalar event
+        // when the detached scoped "that many" consumer resolves.
+        let counts_by_player = counts_by_player.map(|mut counts_by_player| {
+            if counts_by_player.is_empty() {
+                counts_by_player.extend(matching_players.iter().copied().map(|player| (player, 0)));
+            }
+            counts_by_player
+        });
+        if !install_previous_effect_counts_by_player(state, counts_by_player, false) {
+            if let Some(amount) =
+                previous_effect_amount_from_events(state, &scoped_template, scoped_events)
+            {
+                state.last_effect_amount = Some(amount);
+                // CR 120.10: stamp the resolution-local excess channel alongside the
+                // CR 120.6 total so a follow-up "if excess damage was dealt this way"
+                // condition reads overkill-beyond-lethal.
+                let excess = previous_effect_excess_amount_from_events(
+                    state,
+                    &scoped_template,
+                    scoped_events,
+                );
+                state.last_effect_excess_amount = excess;
+            }
         }
         let affected_with_causes =
             if next_sub_needs_tracked_set(ability) || after_scope_needs_linked_exile {
@@ -9231,19 +9406,26 @@ fn resolve_chain_body(
     // discard accounting so controller-only "discard your hand, then draw that
     // many" chains (Tolarian Winds) stamp `last_effect_count`.
     let parent_events = &events[events_before..];
-    let counts_by_player =
-        previous_effect_counts_by_player_from_events(&ability.effect, parent_events);
-    if !counts_by_player.is_empty() {
-        state.last_effect_count = counts_by_player.values().copied().max();
-        state.last_effect_amount = state.last_effect_count;
-        state.last_effect_counts_by_player = counts_by_player;
-    } else if let Some(amount) = previous_effect_amount_from_events(state, ability, parent_events) {
-        state.last_effect_amount = Some(amount);
-        // CR 120.10: stamp the resolution-local excess channel alongside the
-        // CR 120.6 total so a follow-up "if excess damage was dealt this way"
-        // condition reads overkill-beyond-lethal.
-        let excess = previous_effect_excess_amount_from_events(state, ability, parent_events);
-        state.last_effect_excess_amount = excess;
+    let counts_by_player = previous_effect_counts_by_player_from_events(
+        &ability.effect,
+        ability.source_id,
+        parent_events,
+    );
+    let preserve_counts_for_current_consumer =
+        ability.player_scope.is_none() && effect_consumes_event_context_amount(&ability.effect);
+    if !install_previous_effect_counts_by_player(
+        state,
+        counts_by_player,
+        preserve_counts_for_current_consumer,
+    ) {
+        if let Some(amount) = previous_effect_amount_from_events(state, ability, parent_events) {
+            state.last_effect_amount = Some(amount);
+            // CR 120.10: stamp the resolution-local excess channel alongside the
+            // CR 120.6 total so a follow-up "if excess damage was dealt this way"
+            // condition reads overkill-beyond-lethal.
+            let excess = previous_effect_excess_amount_from_events(state, ability, parent_events);
+            state.last_effect_excess_amount = excess;
+        }
     }
 
     // CR 608.2c: Populate last_zone_changed_ids for ZoneChangedThisWay condition evaluation.
@@ -11605,10 +11787,11 @@ mod tests {
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
         CardPredicateChoice, CastingPermission, ChoiceType, ChoiceValue, Chooser, ChosenAttribute,
         ChosenCounterCountCondition, Comparator, ContinuousModification, ControllerRef,
-        DelayedTriggerCondition, Duration, EffectScope, FilterProp, ManaSpendPermission,
-        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-        QuantityRef, SpellContext, StaticDefinition, TapStateChange, TargetFilter, TargetRef,
-        TargetSelectionMode, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+        DelayedTriggerCondition, Duration, EffectKind, EffectScope, FilterProp,
+        ManaSpendPermission, ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
+        QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TapStateChange, TargetFilter,
+        TargetRef, TargetSelectionMode, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
+        ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -11617,7 +11800,7 @@ mod tests {
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, LKISnapshot, LinkedExileSnapshot,
-        MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind,
+        MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
@@ -12462,6 +12645,7 @@ mod tests {
                     static_abilities: vec![],
                     duration: None,
                     target: None,
+                    end_cost: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -14948,6 +15132,7 @@ mod tests {
                     }])],
                 duration: None,
                 target: Some(TargetFilter::ParentTarget),
+                end_cost: None,
             },
             vec![],
             source,
@@ -16620,6 +16805,7 @@ mod tests {
                     player: PlayerScope::Controller,
                 }),
                 target: None,
+                end_cost: None,
             },
             vec![],
             source,
@@ -16672,6 +16858,7 @@ mod tests {
                     }])],
                 duration: Some(Duration::Permanent),
                 target: Some(TargetFilter::LastCreated),
+                end_cost: None,
             },
             vec![],
             source,
@@ -16692,6 +16879,7 @@ mod tests {
                     }])],
                 duration: Some(Duration::Permanent),
                 target: Some(TargetFilter::LastCreated),
+                end_cost: None,
             },
             vec![],
             source,
@@ -20375,6 +20563,102 @@ mod tests {
             return_in_scope.player_scope.is_none(),
             "the kept ChangeZone's redundant player_scope is cleared"
         );
+    }
+
+    /// Scholarship Sponsor / Enigma Ridges lower one scoped search with a
+    /// ParentTarget delivery and a ledger-scoped shuffle tail. Trigger setup
+    /// recursively stamps provenance on both children, but that provenance is
+    /// not delivery behavior: after splitting, the plain delivery must still
+    /// enter the simultaneous-search protocol and the shuffle must be its
+    /// once-after-all-searches tail.
+    #[test]
+    fn triggered_uneven_land_search_detaches_shuffle_before_batch_admission() {
+        const ORACLE: &str = "When this creature enters, each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, puts those cards onto the battlefield tapped, then shuffles.";
+
+        // Use the real ETB lowerer, not merely a standalone effect parse. A
+        // `ChangesZone` trigger carries an event source, so this exercises the
+        // event-source anaphor rewrite that must leave a SearchLibrary
+        // delivery's ParentTarget intact.
+        let trigger =
+            crate::parser::oracle_trigger::parse_trigger_line(ORACLE, "Scholarship Sponsor");
+        let definition = trigger
+            .execute
+            .as_deref()
+            .expect("Scholarship Sponsor ETB has an execute chain");
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Scoped trigger source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = build_resolved_from_def(definition, source, PlayerId(0));
+        let trigger_source = {
+            let source_object = state
+                .objects
+                .get(&source)
+                .expect("trigger source exists for provenance capture");
+            crate::game::triggers::trigger_source_context_for_latch(&state, source_object)
+        };
+        let definition_ref = crate::types::ability::TriggerDefinitionRef {
+            source: trigger_source.identity.reference,
+            occurrence: crate::types::ability::TriggerDefinitionOccurrenceRef::Unmaterialized,
+        };
+        ability.set_trigger_source_recursive(trigger_source);
+        ability.set_trigger_definition_ref_recursive(definition_ref);
+
+        let scope = ability
+            .player_scope
+            .clone()
+            .expect("uneven-land search retains its player scope");
+        assert!(
+            scoped_library_search::has_only_detachable_shuffle_tail(&ability),
+            "the raw chain has only the searched-this-way shuffle after delivery"
+        );
+
+        let (scoped, after_scope) = split_player_scope_chain(&ability, &scope);
+        assert!(
+            scoped.player_scope.is_none(),
+            "the split template owns one scoped iteration rather than re-entering it"
+        );
+        let delivery = scoped
+            .sub_ability
+            .as_deref()
+            .expect("the search keeps its ParentTarget delivery");
+        assert!(
+            matches!(
+                &delivery.effect,
+                Effect::ChangeZone {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "the ETB event-source rewrite must not capture the search-result delivery"
+        );
+        assert!(
+            delivery.trigger_source.is_some() && delivery.trigger_definition_ref.is_some(),
+            "trigger provenance is recursively present on the otherwise plain delivery"
+        );
+        assert!(
+            delivery.sub_ability.is_none() && delivery.sub_link == SubAbilityLink::ContinuationStep,
+            "the scoped template is exactly SearchLibrary followed by plain delivery"
+        );
+        assert!(
+            scoped_library_search::supports_simultaneous_delivery(&scoped),
+            "trigger provenance must not reject an otherwise batch-safe delivery"
+        );
+
+        let shuffle = after_scope.expect("the searched-this-way shuffle detaches after scope");
+        assert!(matches!(shuffle.effect, Effect::Shuffle { .. }));
+        assert!(matches!(
+            shuffle.player_scope,
+            Some(PlayerFilter::PerformedActionThisWay {
+                action: PlayerActionKind::SearchedLibrary,
+                ..
+            })
+        ));
+        assert_eq!(shuffle.sub_link, SubAbilityLink::SequentialSibling);
     }
 
     #[test]
@@ -26553,5 +26837,486 @@ mod tests {
                 "2HG: opposing-team member {pid:?} is an opponent of the caster and must match"
             );
         }
+    }
+
+    fn discard_count_effect() -> Effect {
+        Effect::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            unless_filter: None,
+            filter: None,
+        }
+    }
+
+    fn hand_to_library_effect(target: TargetFilter) -> Effect {
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Hand),
+            destination: Zone::Library,
+            target,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            random_order: false,
+        }
+    }
+
+    fn zone_to_library_effect(origin: Zone, target: TargetFilter) -> Effect {
+        Effect::ChangeZoneAll {
+            origin: Some(origin),
+            destination: Zone::Library,
+            target,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            random_order: false,
+        }
+    }
+
+    fn resolved_event(kind: EffectKind, source_id: ObjectId) -> GameEvent {
+        GameEvent::EffectResolved {
+            kind,
+            source_id,
+            subject: None,
+        }
+    }
+
+    fn zone_changed_event(object_id: ObjectId, owner: PlayerId) -> GameEvent {
+        let record = ZoneChangeRecord {
+            owner,
+            ..ZoneChangeRecord::test_minimal(object_id, Some(Zone::Hand), Zone::Library)
+        };
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Hand),
+            to: Zone::Library,
+            record: Box::new(record),
+        }
+    }
+
+    /// CR 608.2c + CR 701.9a: Discard accounting is bounded by the final
+    /// matching terminal marker and filters the event's causal source.
+    #[test]
+    fn previous_effect_counts_discard_uses_its_terminal_window_and_causal_source() {
+        let source = ObjectId(10);
+        let other_source = ObjectId(11);
+        let events = vec![
+            GameEvent::Discarded {
+                player_id: PlayerId(0),
+                object_id: ObjectId(1),
+                source_id: Some(source),
+            },
+            GameEvent::Discarded {
+                player_id: PlayerId(1),
+                object_id: ObjectId(2),
+                source_id: Some(other_source),
+            },
+            resolved_event(EffectKind::Discard, source),
+            GameEvent::Discarded {
+                player_id: PlayerId(1),
+                object_id: ObjectId(3),
+                source_id: Some(source),
+            },
+        ];
+
+        let counts =
+            previous_effect_counts_by_player_from_events(&discard_count_effect(), source, &events)
+                .expect("the exact discard terminal marker is present");
+        assert_eq!(counts, HashMap::from([(PlayerId(0), 1)]));
+
+        assert!(
+            previous_effect_counts_by_player_from_events(
+                &discard_count_effect(),
+                source,
+                &[resolved_event(EffectKind::ChangeZoneAll, source)],
+            )
+            .is_none(),
+            "a terminal marker of the wrong effect kind must not open a count window"
+        );
+        assert!(
+            previous_effect_counts_by_player_from_events(
+                &discard_count_effect(),
+                source,
+                &[resolved_event(EffectKind::Discard, other_source)],
+            )
+            .is_none(),
+            "a matching kind from another source must not open a count window"
+        );
+        assert!(
+            previous_effect_counts_by_player_from_events(
+                &discard_count_effect(),
+                source,
+                &events[..2],
+            )
+            .is_none(),
+            "a producer without its terminal marker has no completed count"
+        );
+    }
+
+    /// CR 608.2c: ChangeZoneAll counts owners only through its final marker;
+    /// repeated same-source moves aggregate through the final completed window,
+    /// while a marker with no moves is an explicit empty result.
+    #[test]
+    fn previous_effect_counts_change_zone_all_uses_terminal_window_and_empty_map() {
+        let source = ObjectId(10);
+        let effect = hand_to_library_effect(TargetFilter::ScopedPlayer);
+        let before_then_after = vec![
+            zone_changed_event(ObjectId(1), PlayerId(0)),
+            resolved_event(EffectKind::ChangeZoneAll, source),
+            zone_changed_event(ObjectId(2), PlayerId(1)),
+        ];
+        assert_eq!(
+            previous_effect_counts_by_player_from_events(&effect, source, &before_then_after),
+            Some(HashMap::from([(PlayerId(0), 1)])),
+            "zone changes after the final marker belong to later work"
+        );
+
+        let two_same_source_moves = vec![
+            zone_changed_event(ObjectId(1), PlayerId(0)),
+            resolved_event(EffectKind::ChangeZoneAll, source),
+            zone_changed_event(ObjectId(2), PlayerId(1)),
+            resolved_event(EffectKind::ChangeZoneAll, source),
+        ];
+        assert_eq!(
+            previous_effect_counts_by_player_from_events(&effect, source, &two_same_source_moves),
+            Some(HashMap::from([(PlayerId(0), 1), (PlayerId(1), 1)])),
+            "the final same-source marker aggregates the completed scoped moves"
+        );
+
+        assert_eq!(
+            previous_effect_counts_by_player_from_events(
+                &effect,
+                source,
+                &[resolved_event(EffectKind::ChangeZoneAll, source)],
+            ),
+            Some(HashMap::new()),
+            "a completed no-move ChangeZoneAll must replace stale counts with an empty map"
+        );
+    }
+
+    fn assert_scalar_fallback_after_stale_per_player_counts(player_scope: Option<PlayerFilter>) {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(10);
+        let scoped_player = PlayerId(1);
+        state.last_effect_counts_by_player = HashMap::from([(scoped_player, 9)]);
+        for card in 0..2 {
+            create_object(
+                &mut state,
+                CardId(100 + card),
+                scoped_player,
+                format!("Draw {card}"),
+                Zone::Library,
+            );
+        }
+
+        let mut scalar = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: if player_scope.is_some() {
+                    TargetFilter::ScopedPlayer
+                } else {
+                    TargetFilter::Controller
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        scalar.player_scope = player_scope;
+        let mut events = Vec::new();
+        // Depth one keeps the preloaded map live until the postlude under test.
+        resolve_ability_chain(&mut state, &scalar, &mut events, 1).unwrap();
+        assert!(
+            state.last_effect_counts_by_player.is_empty(),
+            "a non-count scalar producer must clear stale per-player counts"
+        );
+        assert_eq!(state.last_effect_amount, Some(2));
+
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::Opponent);
+        resolve_ability_chain(&mut state, &draw, &mut events, 1).unwrap();
+        assert_eq!(
+            state.players[scoped_player.0 as usize].cards_drawn_this_turn, 2,
+            "scoped EventContextAmount must use the scalar 2, not the stale 9"
+        );
+    }
+
+    /// CR 608.2c: The ordinary resolution postlude clears stale recipient
+    /// tables before preserving a scalar fallback.
+    #[test]
+    fn ordinary_postlude_clears_stale_per_player_counts_before_scalar_fallback() {
+        assert_scalar_fallback_after_stale_per_player_counts(None);
+    }
+
+    /// CR 608.2c + CR 109.5: The player-scope postlude uses the same installer
+    /// and must not leave a previous scope's recipient table live.
+    #[test]
+    fn scoped_postlude_clears_stale_per_player_counts_before_scalar_fallback() {
+        assert_scalar_fallback_after_stale_per_player_counts(Some(PlayerFilter::Opponent));
+    }
+
+    /// CR 608.2c + CR 603.2c: A scoped completed count producer that affects
+    /// no cards still supplies zero to every player in its fan-out. That
+    /// explicit zero must outrank a scalar amount from the enclosing trigger.
+    #[test]
+    fn scoped_zero_count_producer_prevents_scalar_event_context_fallback() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source = ObjectId(900);
+        let players = [PlayerId(0), PlayerId(1), PlayerId(2)];
+        state.current_trigger_event = Some(GameEvent::CardsDrawn {
+            player_id: PlayerId(0),
+            count: 7,
+        });
+        for player in players {
+            for card in 0..7 {
+                create_object(
+                    &mut state,
+                    CardId(3_000 + u64::from(player.0) * 100 + card),
+                    player,
+                    format!("P{} library {card}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+
+        let mut move_hand = ResolvedAbility::new(
+            hand_to_library_effect(TargetFilter::ScopedPlayer),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        move_hand.player_scope = Some(PlayerFilter::All);
+        let mut shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::All);
+        shuffle.sub_ability = Some(Box::new(draw));
+        move_hand.sub_ability = Some(Box::new(shuffle));
+
+        resolve_ability_chain(&mut state, &move_hand, &mut Vec::new(), 0).unwrap();
+
+        for player in players {
+            assert_eq!(
+                state.players[player.0 as usize].cards_drawn_this_turn, 0,
+                "P{} must use the scoped zero instead of the trigger's scalar seven",
+                player.0
+            );
+            assert_eq!(
+                state.players[player.0 as usize].library.len(),
+                7,
+                "P{}'s library reach guard proves no scalar fallback draw occurred",
+                player.0
+            );
+        }
+        assert_eq!(state.last_effect_count, Some(0));
+    }
+
+    /// CR 608.2c + CR 701.24a: The runtime keeps only the exact immediate
+    /// scoped hand-to-library move and its scoped shuffle in one player pass.
+    #[test]
+    fn hand_to_library_shuffle_local_continuation_requires_exact_scoped_pair() {
+        let scoped_move = hand_to_library_effect(TargetFilter::ScopedPlayer);
+        let scoped_shuffle = Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer,
+        };
+        assert!(is_player_scope_local_continuation(
+            &scoped_move,
+            &scoped_shuffle,
+            &PlayerFilter::All,
+        ));
+
+        assert!(
+            !is_player_scope_local_continuation(
+                &scoped_move,
+                &scoped_shuffle,
+                &PlayerFilter::Opponent,
+            ),
+            "a non-All player scope must not enter the all-player hand shuffle continuation"
+        );
+
+        let non_hand_move = zone_to_library_effect(Zone::Graveyard, TargetFilter::ScopedPlayer);
+        assert!(
+            !is_player_scope_local_continuation(
+                &non_hand_move,
+                &scoped_shuffle,
+                &PlayerFilter::All,
+            ),
+            "a non-hand move must not be treated as a local whole-hand shuffle"
+        );
+        let controller_move = hand_to_library_effect(TargetFilter::Controller);
+        assert!(
+            !is_player_scope_local_continuation(
+                &controller_move,
+                &scoped_shuffle,
+                &PlayerFilter::All,
+            ),
+            "an unrebound move target must not enter the scoped local continuation"
+        );
+        let controller_shuffle = Effect::Shuffle {
+            target: TargetFilter::Controller,
+        };
+        assert!(
+            !is_player_scope_local_continuation(
+                &scoped_move,
+                &controller_shuffle,
+                &PlayerFilter::All,
+            ),
+            "an unrebound shuffle target must not enter the scoped local continuation"
+        );
+
+        let intervening_move = zone_to_library_effect(Zone::Graveyard, TargetFilter::ScopedPlayer);
+        assert!(
+            !is_player_scope_local_continuation(
+                &scoped_move,
+                &intervening_move,
+                &PlayerFilter::All,
+            ),
+            "an intervening library move must remain a separate instruction"
+        );
+        let intervening_draw = Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ScopedPlayer,
+        };
+        assert!(
+            !is_player_scope_local_continuation(
+                &scoped_move,
+                &intervening_draw,
+                &PlayerFilter::All,
+            ),
+            "an intervening draw must remain a separate instruction"
+        );
+    }
+
+    /// CR 608.2c + CR 701.24a + CR 701.24c/d: Each player's whole-hand move
+    /// and terminal shuffle stay local to that player, while the draw tail is
+    /// detached until every player has completed the shuffle process.
+    #[test]
+    fn all_player_hand_shuffle_keeps_shuffle_local_and_draws_after_the_scope() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source = ObjectId(900);
+        let players = [PlayerId(0), PlayerId(1), PlayerId(2)];
+        for (player, hand_count) in players.into_iter().zip([9, 3, 7]) {
+            for card in 0..hand_count {
+                create_object(
+                    &mut state,
+                    CardId(1_000 + u64::from(player.0) * 100 + card as u64),
+                    player,
+                    format!("P{} hand {card}", player.0),
+                    Zone::Hand,
+                );
+            }
+            for card in 0..10 {
+                create_object(
+                    &mut state,
+                    CardId(2_000 + u64::from(player.0) * 100 + card as u64),
+                    player,
+                    format!("P{} library {card}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+
+        let mut move_hand = ResolvedAbility::new(
+            hand_to_library_effect(TargetFilter::ScopedPlayer),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        move_hand.player_scope = Some(PlayerFilter::All);
+        let mut shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::All);
+        shuffle.sub_ability = Some(Box::new(draw));
+        move_hand.sub_ability = Some(Box::new(shuffle));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &move_hand, &mut events, 0).unwrap();
+
+        for (player, expected_draws) in players.into_iter().zip([9, 3, 7]) {
+            assert_eq!(
+                state.players[player.0 as usize].cards_drawn_this_turn, expected_draws,
+                "P{} must draw exactly the number of cards they moved",
+                player.0
+            );
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        player_id,
+                        action: PlayerActionKind::ShuffledLibrary,
+                        ..
+                    } if *player_id == player
+                )),
+                "P{} must shuffle their own library",
+                player.0
+            );
+        }
+        let last_shuffle = events
+            .iter()
+            .rposition(|event| {
+                matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        action: PlayerActionKind::ShuffledLibrary,
+                        ..
+                    }
+                )
+            })
+            .expect("the local shuffle chain emitted shuffle actions");
+        let first_draw = events
+            .iter()
+            .position(|event| matches!(event, GameEvent::CardDrawn { .. }))
+            .expect("the detached draw tail emitted card-draw events");
+        assert!(
+            last_shuffle < first_draw,
+            "the draw tail must start only after every scoped move/shuffle pass"
+        );
     }
 }

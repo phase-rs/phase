@@ -8,6 +8,7 @@ use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
 use engine::game::finalize_public_state;
+use engine::game::interaction::bind_interaction_authority;
 use engine::game::preview::preview_auto_payment_sources;
 use engine::game::{load_and_hydrate_decks, rehydrate_game_from_card_db};
 use engine::types::actions::GameAction;
@@ -15,6 +16,7 @@ use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, PersistedGameState};
 use engine::types::identifiers::ObjectId;
+use engine::types::interaction::InteractionSessionId;
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
@@ -30,6 +32,37 @@ use crate::persist::{PersistedLobbyMeta, PersistedSession};
 use crate::protocol::PlayerSlotInfo;
 use crate::reconnect::ReconnectManager;
 use crate::takeback::PendingTakeback;
+
+/// Bind the engine's interaction authority to a freshly created or restored state.
+///
+/// Every server-side `GameState` must pass through here. `GameState::new` leaves
+/// `interaction_session_id` as `None`, and while it is unset
+/// `derive_viewer_interaction` short-circuits to `AuthorityUnbound` with zero
+/// opportunities — so every interaction-driven client surface silently goes dark.
+/// `ensure_interaction_authority` cannot repair this: it only *maintains* slots for
+/// an already-bound session, and clears them when the session is absent.
+///
+/// The game code is a sound session id: non-empty and far under the 128-byte limit.
+/// Uniqueness only has to hold *within* a state — the id namespaces that state's
+/// interaction ids and detects stale ones — so `generate_game_code`'s lack of a
+/// collision check (6 random chars) is not a concern here. Nor is guessability:
+/// `slot_for_submission` authorizes against the authenticated actor, never this id.
+///
+/// Always re-bind on restore rather than trusting an id carried in a persisted blob,
+/// matching how this module re-stamps `hosting` and revokes unentitled debug capability.
+fn bind_interaction_session(state: &mut GameState, game_code: &str) {
+    if let Err(error) =
+        bind_interaction_authority(state, InteractionSessionId(game_code.to_string()))
+    {
+        // Reachable only on decimal-serial exhaustion, so failing the game would be
+        // disproportionate — but degrading silently is the very defect this fixes.
+        warn!(
+            game = %game_code,
+            code = ?error.code,
+            "failed to bind interaction authority; interaction surfaces unavailable for this session"
+        );
+    }
+}
 
 /// Result of handling a game action: raw state snapshot, events, legal actions, log entries,
 /// auto-pass flag, spell costs, and per-object action grouping.
@@ -361,6 +394,9 @@ impl GameSession {
         };
         self.state.set_match_config(match_config);
         self.seed_debug_capability();
+        // `GameState::new` above reset the authority to `None`, exactly as it reset
+        // the debug capability that `seed_debug_capability` restores.
+        bind_interaction_session(&mut self.state, &self.game_code);
     }
 
     /// Seeds `debug_mode` / `debug_permitted` for the state just built by
@@ -784,6 +820,10 @@ impl GameSession {
         state.rng_seed = fresh_seed;
         state.rng = rand_chacha::ChaCha20Rng::seed_from_u64(fresh_seed);
         finalize_public_state(&mut state);
+        // Re-bind rather than trusting any id the blob carries, on the same
+        // principle that `restore_session` re-stamps `hosting` and revokes an
+        // unentitled debug capability: a persisted blob never drives authority.
+        bind_interaction_session(&mut state, &ps.game_code);
 
         let ai_seats: HashSet<PlayerId> = ps.ai_seats.iter().map(|&s| PlayerId(s)).collect();
 
@@ -942,6 +982,8 @@ impl SessionManager {
                 state.debug_permitted.insert(PlayerId(i));
             }
         }
+
+        bind_interaction_session(&mut state, &game_code);
 
         let session = GameSession {
             game_code: game_code.clone(),
@@ -1440,6 +1482,7 @@ mod tests {
     use engine::database::card_db::CardDatabase;
     use engine::game::deck_loading::DeckEntry;
     use engine::game::engine::apply;
+    use engine::game::interaction::derive_viewer_interaction;
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::ability::TargetRef;
@@ -1447,6 +1490,7 @@ mod tests {
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;
     use engine::types::game_state::{CastPaymentMode, PersistedGameState, WaitingFor};
+    use engine::types::interaction::{InteractionAvailability, InteractionReasonCode};
     use engine::types::mana::ManaCost;
     use engine::types::phase::{Phase, PhaseStop, PhaseStopScope};
     use engine::types::zones::Zone;
@@ -1518,6 +1562,98 @@ mod tests {
         assert!(result.is_ok());
         let (token2, _state) = result.unwrap();
         assert_eq!(token2.len(), 32);
+    }
+
+    /// `GameState::new` leaves `interaction_session_id` as `None`, and while it is
+    /// unset every `derive_viewer_interaction` call returns `AuthorityUnbound` with
+    /// zero opportunities. Nothing self-heals it: `ensure_interaction_authority`
+    /// only maintains slots for an already-bound session.
+    #[test]
+    fn created_session_binds_interaction_authority() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck());
+
+        assert_eq!(
+            mgr.sessions
+                .get(&code)
+                .unwrap()
+                .state
+                .interaction_session_id,
+            Some(InteractionSessionId(code.clone())),
+            "a created session must carry interaction authority"
+        );
+    }
+
+    /// The behavioural half: authority actually reaches `derive_viewer_interaction`.
+    ///
+    /// Guarded against vacuity in-test. `derive_viewer_interaction` checks terminal
+    /// and `can_submit` *before* the authority check, so a state that never reaches
+    /// the third guard would pass this trivially. Clearing the binding on a copy and
+    /// asserting the unbound verdict *does* appear proves the assertion discriminates.
+    #[test]
+    fn bound_session_does_not_report_authority_unbound() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck());
+        mgr.join_game(&code, make_deck())
+            .expect("second seat joins");
+
+        let state = mgr.sessions.get(&code).unwrap().state.clone();
+        let filtered = filter_state_for_player(&state, PlayerId(0));
+
+        let unbound_reason = InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::AuthorityUnbound,
+        };
+
+        let bound = derive_viewer_interaction(&state, &filtered, PlayerId(0));
+        assert_ne!(
+            bound.availability, unbound_reason,
+            "a bound session must not report AuthorityUnbound"
+        );
+
+        // Clearing the slots alongside the session is not cosmetic: the engine
+        // asserts that an unbound state holds no slots
+        // (`debug_assert_interaction_consistency`), and clearing them is exactly
+        // what the unbound production path did before this fix
+        // (`ensure_interaction_authority`). Dropping only the session id builds a
+        // state the engine considers impossible.
+        let mut stripped = state.clone();
+        stripped.interaction_session_id = None;
+        stripped.active_interaction_slots.clear();
+        let unbound = derive_viewer_interaction(&stripped, &filtered, PlayerId(0));
+        assert_eq!(
+            unbound.availability, unbound_reason,
+            "probe is vacuous: this state does not reach the authority check at all, \
+             so the assertion above proves nothing"
+        );
+    }
+
+    /// A restored blob must be re-bound, not trusted. Mirrors how `restore_session`
+    /// re-stamps `hosting` and revokes an unentitled debug capability.
+    ///
+    /// The blob is deliberately poisoned with a foreign session id first. Without
+    /// that step the test would be vacuous: `interaction_session_id` is an ordinary
+    /// serialized field, so a snapshot of an already-bound session round-trips its
+    /// id and the assertion would hold whether or not `from_persisted` re-binds.
+    #[test]
+    fn restored_session_rebinds_interaction_authority() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck());
+        mgr.sessions
+            .get_mut(&code)
+            .unwrap()
+            .state
+            .interaction_session_id = Some(InteractionSessionId("some-other-game".to_string()));
+        let persisted = mgr.sessions.get(&code).unwrap().to_persisted();
+
+        let db = CardDatabase::default();
+        let restored = GameSession::from_persisted(persisted, &db);
+
+        assert_eq!(
+            restored.state.interaction_session_id,
+            Some(InteractionSessionId(code)),
+            "the restored session's authority must come from the game code, not \
+             from whatever id the persisted blob happened to carry"
+        );
     }
 
     #[test]

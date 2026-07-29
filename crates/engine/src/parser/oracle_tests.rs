@@ -1,9 +1,75 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
+use crate::parser::oracle_ir::doc::{UnsupportedAbilityCategory, UnsupportedAbilityIr};
 use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment, DoorLockOp,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+
+#[test]
+fn unsupported_ability_ir_lowering_preserves_generic_and_structural_payloads() {
+    let generic = lower_unsupported_node(&UnsupportedAbilityIr::unknown("unknown line"), 1);
+    let Effect::Unimplemented { name, description } = generic.effect.as_ref() else {
+        panic!("expected unimplemented generic residual: {generic:?}");
+    };
+    assert_eq!(name, "unknown");
+    assert_eq!(description.as_deref(), Some("unknown line"));
+    assert_eq!(generic.description.as_deref(), Some("unknown line"));
+    assert_eq!(generic.min_x_value, 1);
+
+    let structural = lower_unsupported_node(
+        &UnsupportedAbilityIr::new(
+            UnsupportedAbilityCategory::EffectStructure,
+            "Effect sentence candidate but line failed effect parser: unsupported line",
+            "unsupported line",
+        ),
+        0,
+    );
+    let Effect::Unimplemented { name, description } = structural.effect.as_ref() else {
+        panic!("expected unimplemented structural residual: {structural:?}");
+    };
+    assert_eq!(name, "effect_structure");
+    assert_eq!(
+        description.as_deref(),
+        Some("Effect sentence candidate but line failed effect parser: unsupported line")
+    );
+    assert_eq!(structural.description.as_deref(), Some("unsupported line"));
+}
+
+#[test]
+fn nominal_dispatch_preserves_precomputed_x_floor_for_spells_and_residuals() {
+    let types = ["Creature".to_string()];
+    let spell = parse_oracle_text(
+        "~ deals 2 damage. X can't be 0.",
+        "X Damage",
+        &[],
+        &types,
+        &[],
+    );
+    assert_eq!(spell.abilities.len(), 1);
+    assert_eq!(spell.abilities[0].min_x_value, 1);
+    assert!(
+        !matches!(
+            spell.abilities[0].effect.as_ref(),
+            Effect::Unimplemented { .. }
+        ),
+        "nominal dispatch must retain a parsed spell"
+    );
+
+    let residual = parse_oracle_text(
+        "Frobnicate target creature. X can't be 0.",
+        "X Residual",
+        &[],
+        &types,
+        &[],
+    );
+    assert_eq!(residual.abilities.len(), 1);
+    assert_eq!(residual.abilities[0].min_x_value, 1);
+    assert!(matches!(
+        residual.abilities[0].effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+}
 
 /// CR 122.1 + CR 608.2d + CR 702.62b (Clockspinning): the whole card parses
 /// with zero `Unimplemented` — buyback consumed as a keyword line, sentence 1
@@ -630,6 +696,7 @@ fn azure_beastbinder_attack_trigger_has_no_unimplemented() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(
                 *target,
@@ -7572,6 +7639,7 @@ fn teferi_time_raveler_loyalty_abilities_parse() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*r.abilities[0].effect
     else {
         panic!(
@@ -10534,6 +10602,7 @@ fn triggered_modal_block_routes_modes_through_effect_parser() {
             ref static_abilities,
             duration: None,
             target: None,
+            end_cost: _,
         } if static_abilities.is_empty()
     ));
     let modal = execute.modal.as_ref().expect("execute should be modal");
@@ -16627,6 +16696,7 @@ fn activated_target_player_cant_play_lands_pardic_miner() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*ab.effect
     else {
         panic!("expected GenericEffect, got {:?}", ab.effect);
@@ -16727,6 +16797,7 @@ fn roiling_vortex_parses_trigger_lines_and_opponent_life_lock_activation() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*ab.effect
     else {
         panic!("expected GenericEffect, got {:?}", ab.effect);
@@ -17355,6 +17426,7 @@ fn karn_sydri_artifact_animation_has_dynamic_mana_value_pt_no_warning() {
                 target: Some(TargetFilter::Typed(tf)),
                 static_abilities,
                 duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
+                end_cost: _,
             } = r.abilities[0].effect.as_ref()
             else {
                 panic!("{name}: expected UEOT GenericEffect, got {:?}", r.abilities[0].effect);
@@ -20235,6 +20307,7 @@ fn helm_of_the_host_emits_remove_supertype_legendary() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(
                 *target,
@@ -22907,4 +22980,102 @@ fn throne_of_eldraine_parses_all_chosen_color_mana_riders() {
         draw.activation_mana_payment_restriction,
         Some(ActivationManaPaymentRestriction::OnlySourceChosenColor),
     );
+}
+
+/// Helper: count `Effect::Unimplemented` markers carrying `key` anywhere in a
+/// parsed card, so the honesty tests below assert on the pattern-class key
+/// rather than on a Debug substring.
+fn unimplemented_keys(parsed: &ParsedAbilities) -> Vec<String> {
+    fn walk(def: &AbilityDefinition, out: &mut Vec<String>) {
+        if let Effect::Unimplemented { name, .. } = &*def.effect {
+            out.push(name.to_string());
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            walk(sub, out);
+        }
+        if let Some(els) = def.else_ability.as_deref() {
+            walk(els, out);
+        }
+    }
+    let mut out = Vec::new();
+    for def in &parsed.abilities {
+        walk(def, &mut out);
+    }
+    for trig in &parsed.triggers {
+        if let Some(exec) = trig.execute.as_deref() {
+            walk(exec, &mut out);
+        }
+    }
+    out
+}
+
+/// CR 603.7a + CR 603.7c + CR 400.7: The impulse-cleanup sweep must stay HONESTLY
+/// unsupported. `demote_unbound_delayed_sweeps` replaces a delayed graveyard
+/// move whose swept objects were never bound to a concrete set with an
+/// `Effect::unimplemented`, because that shape provably strands the swept card
+/// (its `ParentTarget` resolves to the parent instruction's target — for
+/// Grinning Totem the targeted OPPONENT, not the exiled card) while the card
+/// would otherwise report as fully supported.
+///
+/// Three cards share the shape, so this is a class guard, not a card special
+/// case. Reverting the pass drops every key here and silently re-promotes all
+/// three to "supported".
+#[test]
+fn unbound_delayed_graveyard_sweep_stays_honestly_unimplemented() {
+    let cases = [
+        (
+            "Grinning Totem",
+            "{2}, {T}, Sacrifice this artifact: Search target opponent's library for a card and exile it. Then that player shuffles. Until the beginning of your next upkeep, you may play that card. At the beginning of your next upkeep, if you haven't played it, put it into its owner's graveyard.",
+        ),
+        (
+            "Bank Job",
+            "At the beginning of your upkeep, exile the bottom creature card of your library. You may cast that card this turn. At the beginning of the next end step, if that card is still exiled, put it into your graveyard and create a Treasure token.",
+        ),
+        (
+            "Glimpse the Impossible",
+            "Exile the top three cards of your library. You may play those cards this turn. At the beginning of the next end step, if any of those cards remain exiled, put them into your graveyard, then create a 0/1 colorless Eldrazi Spawn creature token for each card put into your graveyard this way.",
+        ),
+    ];
+    for (name, text) in cases {
+        let parsed = parse_oracle_text(text, name, &[], &[], &[]);
+        assert!(
+            unimplemented_keys(&parsed)
+                .iter()
+                .any(|k| k == "delayed_unplayed_exile_sweep"),
+            "{name} must keep an honest `delayed_unplayed_exile_sweep` marker; \
+             keys={:?}",
+            unimplemented_keys(&parsed),
+        );
+    }
+}
+
+/// The honesty net is narrow: a delayed recall/sweep that DOES bind its objects
+/// must be left alone. Both negatives carry a positive reach-guard — each card
+/// parses with zero `Unimplemented` of any kind — so neither assertion can pass
+/// vacuously by the card having failed to parse at all.
+#[test]
+fn bound_delayed_recalls_are_not_demoted() {
+    let cases = [
+        // Necropotence class: delayed recall to HAND, tracked-set bound. Works
+        // end to end today, so demoting it would be a false negative.
+        (
+            "Necropotence",
+            "{2}: Exile the top card of your library face down. Put that card into your hand at the beginning of your next end step.",
+        ),
+        // Valakut Exploration: its sweep names the cards via an
+        // exiled-with-this-source filter, not an unbound anaphor.
+        (
+            "Valakut Exploration",
+            "Landfall — Whenever a land you control enters, exile the top card of your library. You may play that card for as long as it remains exiled. At the beginning of your end step, if there are cards exiled with this enchantment, put them into their owner's graveyard, then this enchantment deals that much damage to each opponent.",
+        ),
+    ];
+    for (name, text) in cases {
+        let parsed = parse_oracle_text(text, name, &[], &[], &[]);
+        let keys = unimplemented_keys(&parsed);
+        // Positive reach-guard: the card parsed, with no gaps at all.
+        assert!(
+            keys.is_empty(),
+            "{name} is expected to parse with zero Unimplemented; keys={keys:?}",
+        );
+    }
 }

@@ -1,7 +1,7 @@
 //! Serialization adapter between this repo's MTG engine (`GameState` /
 //! `GameAction`) and the external ManaBrew wire protocol.
 //!
-//! Pinned upstream: `manabrew-protocol` **2.0.0** (crates.io, 2026-07-24).
+//! Pinned upstream: `manabrew-protocol` **3.0.0** (crates.io, 2026-07-28).
 //! [`PROTOCOL_VERSION`] is the crate major, which is how upstream defines the
 //! wire version.
 //!
@@ -18,37 +18,464 @@ use engine::game::derived::derive_display_state;
 use engine::game::derived_views::{derive_views, DerivedViews};
 use engine::game::filter_state_for_viewer;
 use engine::game::game_object::{AttachTarget, GameObject};
+use engine::game::interaction::{derive_viewer_interaction, resolve_interaction_response};
 use engine::game::turn_control;
 use engine::types::ability::TargetRef;
 use engine::types::card::CardFace;
 use engine::types::game_state::{
     GameState, ManaChoice, ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction,
-    StackEntryKind, WaitingFor,
+    ShardChoice, StackEntryKind, WaitingFor,
+};
+use engine::types::interaction::{
+    InteractionChoice, InteractionIntentCode, InteractionOpportunity,
+    InteractionOpportunityResponse, InteractionPresentationSurface, InteractionResponse,
+    InteractionResponseSpec, InteractionRoleCode, InteractionSubmission, SelectionConstraint,
+    ViewerInteraction,
 };
 use engine::types::mana::{ManaColor as EngineManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
 use engine::types::{GameAction, ObjectId};
+pub use manabrew_protocol::display::DisplayEvent;
+pub use manabrew_protocol::game::{
+    CardDto, CardIdentity, CardView, ClassLevelDto, CombatAssignmentDto, DayTime, GameViewDto,
+    PlayerDto, PlayerStatus, SagaChapterDto, StackObjectDto, StepKind, TargetingIntent, ZoneDto,
+    ZoneKind,
+};
+/// Wire vocabulary keeps `Dto` suffixes where the engine already owns the
+/// unqualified type names.
+pub use manabrew_protocol::game::{
+    Mana as ManaDto, ManaColor as ManaColorDto, PlayerCounterKind as PlayerCounterKindDto,
+};
+pub use manabrew_protocol::prompts::choose_attackers::AttackerOptionDto;
+pub use manabrew_protocol::prompts::choose_blockers::BlockableAttackerDto;
+pub use manabrew_protocol::prompts::common::{
+    ActivatableAbilityInfo, AlternativeCostKind, AttackAssignment, AttackTargetDto,
+    AttackTargetKind, AvailableAction, AvailableActionKind, BlockAssignment,
+    CombatDamageAssignmentEntry, PaymentAction, PaymentActionKind, PaymentResourceKind,
+    PlayCardMode, PromptPresentation,
+};
+/// Target wire references use `Dto` suffixes to remain distinct from the
+/// engine's target types.
+pub use manabrew_protocol::prompts::common::{
+    TargetKind as TargetKindDto, TargetRef as TargetRefDto,
+};
+pub use manabrew_protocol::prompts::scry::ScryDestination;
+pub use manabrew_protocol::prompts::{
+    ChooseActionInput, ChooseActionOutput, ChooseAttackersInput, ChooseAttackersOutput,
+    ChooseBlockersInput, ChooseBlockersOutput, ChooseBoardTargetsInput, ChooseBoardTargetsOutput,
+    ChooseBooleanInput, ChooseBooleanOutput, ChooseCardsInput, ChooseCardsOutput, ChooseColorInput,
+    ChooseColorOutput, ChooseCombatDamageAssignmentInput, ChooseCombatDamageAssignmentOutput,
+    ChooseDamageAssignmentOrderInput, ChooseDamageAssignmentOrderOutput, ChooseFromSelectionInput,
+    ChooseFromSelectionOutput, ChooseNumberInput, ChooseNumberOutput, DiceRollEntry,
+    DiceRolledInput, DiceRolledOutput, GameOverInput, MulliganInput, MulliganPutBackOutput,
+    PassUntil, PayManaCostInput, PayManaCostOutput, ReorderInput, ReorderItem, ReorderOutput,
+    ResponseViolation, RevealCardsInput, RevealCardsOutput, ScryInput, ScryOutput, SelectionOption,
+};
+use manabrew_protocol::prompts::{
+    PromptInput as UpstreamPromptInput, PromptOutput as UpstreamPromptOutput,
+};
+pub use manabrew_protocol::transport::{
+    DirectiveInput, ProtocolError, ProtocolErrorCode, StateUpdate,
+};
 use serde::{Deserialize, Serialize};
 
+/// Deliberate local extension of upstream's mulligan answer.
+///
+/// `MulliganUseSerumPowder` is absent from `manabrew-protocol` 3.0.0, but
+/// Phase models `MulliganChoice::UseSerumPowder` and needs the committed object
+/// id. It is safe because this client-to-engine answer is exchanged only
+/// between this adapter and its paired client; third-party clients are not
+/// expected to emit the local variant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum MulliganOutput {
+    MulliganDecision { keep: bool },
+    MulliganUseSerumPowder { card_id: String },
+}
+
+/// Deliberate local extension of upstream's mulligan put-back prompt.
+///
+/// `excluded_card_id` marks the Serum Powder object committed to a pending
+/// `UseSerumPowder` continuation, so the paired client cannot offer it in the
+/// bottom-cards picker. `None` preserves the upstream v3 wire exactly; peers
+/// that do not know the additive field may drop it. `cards` remains upstream's
+/// [`CardDto`], not a local mirror.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MulliganPutBackInput {
+    pub hand_card_ids: Vec<String>,
+    pub cards: Vec<CardDto>,
+    pub count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_card_id: Option<String>,
+}
+
+/// Extension-aware prompt input.
+///
+/// Every non-Serum-Powder family stays as an upstream value. This wrapper is
+/// necessary because upstream's closed `PromptInput` cannot carry the one
+/// deliberate local [`MulliganPutBackInput`] superset.
+#[derive(Debug, Clone)]
+pub enum PromptInput {
+    Upstream(UpstreamPromptInput),
+    MulliganPutBack(MulliganPutBackInput),
+}
+
+impl PromptInput {
+    #[allow(non_snake_case)]
+    pub fn Mulligan(input: MulliganInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::Mulligan(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseAction(input: ChooseActionInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseAction(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseAttackers(input: ChooseAttackersInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseAttackers(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBlockers(input: ChooseBlockersInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseBlockers(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBoardTargets(input: ChooseBoardTargetsInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseBoardTargets(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBoolean(input: ChooseBooleanInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseBoolean(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseFromSelection(input: ChooseFromSelectionInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseFromSelection(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn GameOver(input: GameOverInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::GameOver(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn RevealCards(input: RevealCardsInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::RevealCards(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Scry(input: ScryInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::Scry(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseColor(input: ChooseColorInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseColor(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseNumber(input: ChooseNumberInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseNumber(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseDamageAssignmentOrder(input: ChooseDamageAssignmentOrderInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseDamageAssignmentOrder(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseCombatDamageAssignment(input: ChooseCombatDamageAssignmentInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseCombatDamageAssignment(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn PayManaCost(input: PayManaCostInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::PayManaCost(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseCards(input: ChooseCardsInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseCards(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Reorder(input: ReorderInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::Reorder(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn DiceRolled(input: DiceRolledInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::DiceRolled(input))
+    }
+
+    pub fn validate_response(
+        &self,
+        output: &PromptOutput,
+    ) -> std::result::Result<(), ResponseViolation> {
+        match (self, output) {
+            (
+                Self::MulliganPutBack(_),
+                PromptOutput::Upstream(UpstreamPromptOutput::MulliganPutBack(_)),
+            ) => Ok(()),
+            (Self::Upstream(UpstreamPromptInput::Mulligan(_)), PromptOutput::Mulligan(_)) => Ok(()),
+            (Self::Upstream(input), PromptOutput::Upstream(output)) => {
+                input.validate_response(output)
+            }
+            _ => Err(ResponseViolation::WrongPromptType),
+        }
+    }
+}
+
+impl From<UpstreamPromptInput> for PromptInput {
+    fn from(input: UpstreamPromptInput) -> Self {
+        match input {
+            UpstreamPromptInput::MulliganPutBack(input) => {
+                Self::MulliganPutBack(MulliganPutBackInput {
+                    hand_card_ids: input.hand_card_ids,
+                    cards: input.cards,
+                    count: input.count,
+                    excluded_card_id: None,
+                })
+            }
+            input => Self::Upstream(input),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum PromptInputWire<'a> {
+    MulliganPutBack(&'a MulliganPutBackInput),
+}
+
+impl Serialize for PromptInput {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Upstream(input) => input.serialize(serializer),
+            Self::MulliganPutBack(input) => {
+                PromptInputWire::MulliganPutBack(input).serialize(serializer)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PromptInput {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("mulliganPutBack") {
+            serde_json::from_value(value)
+                .map(Self::MulliganPutBack)
+                .map_err(<D::Error as serde::de::Error>::custom)
+        } else {
+            serde_json::from_value::<UpstreamPromptInput>(value)
+                .map(Self::from)
+                .map_err(<D::Error as serde::de::Error>::custom)
+        }
+    }
+}
+
+/// Extension-aware prompt output.
+///
+/// Every non-Serum-Powder family stays as an upstream value. This wrapper is
+/// necessary because upstream's closed `PromptOutput` cannot carry the one
+/// deliberate local [`MulliganOutput`] superset.
+#[derive(Debug, Clone)]
+pub enum PromptOutput {
+    Mulligan(MulliganOutput),
+    Upstream(UpstreamPromptOutput),
+}
+
+impl PromptOutput {
+    #[allow(non_snake_case)]
+    pub fn MulliganPutBack(output: MulliganPutBackOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::MulliganPutBack(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseAction(output: ChooseActionOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseAction(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseAttackers(output: ChooseAttackersOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseAttackers(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBlockers(output: ChooseBlockersOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseBlockers(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBoardTargets(output: ChooseBoardTargetsOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseBoardTargets(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBoolean(output: ChooseBooleanOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseBoolean(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseFromSelection(output: ChooseFromSelectionOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseFromSelection(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn RevealCards(output: RevealCardsOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::RevealCards(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Scry(output: ScryOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::Scry(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseColor(output: ChooseColorOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseColor(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseNumber(output: ChooseNumberOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseNumber(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseDamageAssignmentOrder(output: ChooseDamageAssignmentOrderOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseDamageAssignmentOrder(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseCombatDamageAssignment(output: ChooseCombatDamageAssignmentOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseCombatDamageAssignment(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn PayManaCost(output: PayManaCostOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::PayManaCost(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseCards(output: ChooseCardsOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseCards(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Reorder(output: ReorderOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::Reorder(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn DiceRolled(output: DiceRolledOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::DiceRolled(output))
+    }
+}
+
+impl From<UpstreamPromptOutput> for PromptOutput {
+    fn from(output: UpstreamPromptOutput) -> Self {
+        match output {
+            UpstreamPromptOutput::Mulligan(
+                manabrew_protocol::prompts::MulliganOutput::MulliganDecision { keep },
+            ) => Self::Mulligan(MulliganOutput::MulliganDecision { keep }),
+            output => Self::Upstream(output),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "output", rename_all = "camelCase")]
+enum PromptOutputWire<'a> {
+    Mulligan(&'a MulliganOutput),
+}
+
+impl Serialize for PromptOutput {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Mulligan(output) => PromptOutputWire::Mulligan(output).serialize(serializer),
+            Self::Upstream(output) => output.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PromptOutput {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("mulligan") {
+            let output = value
+                .get("output")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            serde_json::from_value(output)
+                .map(Self::Mulligan)
+                .map_err(<D::Error as serde::de::Error>::custom)
+        } else {
+            serde_json::from_value::<UpstreamPromptOutput>(value)
+                .map(Self::from)
+                .map_err(<D::Error as serde::de::Error>::custom)
+        }
+    }
+}
+
+/// Extension-aware transport envelope. Its fields are upstream protocol types
+/// except for the prompt wrapper required to carry the two documented local
+/// mulligan members above.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentPrompt {
+    pub prompt_id: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub deciding_player_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_card: Option<CardDto>,
+    pub input: PromptInput,
+}
+
+/// Extension-aware client message. Directives retain the upstream type; only
+/// responses need the local prompt-output wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ClientToServerMessage {
+    Response {
+        prompt_id: u32,
+        action: PromptOutput,
+    },
+    Directive {
+        directive: DirectiveInput,
+    },
+}
+
 /// Wire version of the pinned upstream protocol. Upstream defines the wire
-/// version as the `manabrew-protocol` crate major, so 2.0.0 => 2.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// version as the `manabrew-protocol` crate major, so 3.0.0 => 3.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub type Result<T> = std::result::Result<T, AdapterError>;
-
-/// Why a [`PromptOutput`] is not a legal answer to a given [`PromptInput`].
-///
-/// Distinct from [`AdapterError`]: this is the formal prompt/response contract
-/// check, and maps onto exactly two of the five wire [`ProtocolErrorCode`]s.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResponseViolation {
-    /// The output's prompt family is not the open prompt's family.
-    WrongPromptType,
-    /// The echoed action id was never advertised by the open prompt.
-    UnknownActionId(String),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterError {
@@ -134,6 +561,20 @@ pub struct PreparedManabrewSnapshot {
     /// object here is what lets `build_prompt` construct the `CardDto` later,
     /// where a `CardTextLookup` is finally in scope.
     pub source_card_object: Option<GameObject>,
+    /// The engine's own projection of what this viewer may answer right now.
+    ///
+    /// Captured here because it is derivable only from **raw** state, which
+    /// `build_prompt_input` no longer has: `derive_viewer_interaction` reads
+    /// authorization and capability identity from the authoritative state and
+    /// every presentation surface from the filtered one, and collapsing that to
+    /// a single filtered state would silently change what the viewer is told.
+    ///
+    /// Derived unconditionally rather than on demand. One projection per prompt
+    /// is proportionate — a prompt is a human decision point, not a search-tree
+    /// node — and making it conditional would mean deciding *here* which waiting
+    /// states the generic path serves, which is precisely the per-variant
+    /// bookkeeping this projection exists to remove.
+    pub interaction: ViewerInteraction,
 }
 
 impl PreparedManabrewSnapshot {
@@ -194,6 +635,9 @@ pub fn prepare_snapshot_with_prompt_id(
         .and_then(|id| raw_state.objects.get(&id))
         .cloned();
     let mut state = filter_state_for_viewer(raw_state, viewer);
+    // Projected from the plain viewer filter, before `derive_display_state`, so
+    // the adapter sees exactly what every other interaction consumer sees.
+    let interaction = derive_viewer_interaction(raw_state, &state, viewer);
     derive_display_state(&mut state);
     let derived = derive_views(&state, Some(viewer));
 
@@ -207,1111 +651,9 @@ pub fn prepare_snapshot_with_prompt_id(
         spell_costs,
         legal_actions_by_object,
         source_card_object,
+        interaction,
     })
 }
-
-/// CR 500: turn steps and phases, as the protocol enumerates them.
-///
-/// Thirteen variants against the engine's twelve `Phase`s:
-/// `CombatFirstStrikeDamage` has no engine counterpart (the engine models a
-/// single `Phase::CombatDamage`), so this adapter never produces it. Recorded
-/// as `local.first-strike-damage-step-unproducible`.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum StepKind {
-    #[default]
-    Untap,
-    Upkeep,
-    Draw,
-    Main1,
-    CombatBegin,
-    CombatDeclareAttackers,
-    CombatDeclareBlockers,
-    CombatFirstStrikeDamage,
-    CombatDamage,
-    CombatEnd,
-    Main2,
-    EndOfTurn,
-    Cleanup,
-}
-
-/// CR 400.1: the six zones the protocol models. The engine's `Zone::Stack` has
-/// no counterpart — stack contents travel as `GameViewDto.stack`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum ZoneKind {
-    Battlefield,
-    Hand,
-    Library,
-    Graveyard,
-    Exile,
-    Command,
-}
-
-/// CR 731.1: the day/night designation. The engine models this as
-/// `Option<DayNight>`, where `None` means neither.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum DayTime {
-    #[default]
-    Neither,
-    Day,
-    Night,
-}
-
-/// A seat's standing in the game.
-///
-/// The engine records only `Player::is_eliminated` — it never persists *why* a
-/// player left — so this adapter emits `Playing` or `Lost` and **never**
-/// `Conceded`. See `local.player-concede-status-unsourceable`.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PlayerStatus {
-    #[default]
-    Playing,
-    Lost,
-    Conceded,
-}
-
-/// CR 122: player-borne counters. Named `Dto` to avoid colliding with the
-/// engine's own `PlayerCounterKind`, whose variant set differs (the engine
-/// tracks energy as a plain field, and spells `Radiation` as `Rad`).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum PlayerCounterKindDto {
-    Poison,
-    Energy,
-    Experience,
-    Radiation,
-    Ticket,
-}
-
-/// A non-mana resource tapped or released to help pay a cost.
-///
-/// Only `Convoke` is reachable from this engine (`GameAction::TapForConvoke`);
-/// there is no engine action for Delve or Improvise, and none for releasing any
-/// of the three. See `local.payment-resource-actions-missing`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PaymentResourceKind {
-    Convoke,
-    Improvise,
-    Delve,
-}
-
-/// The five conformance failure modes a conforming engine must be able to
-/// report (`conformance.mdx:28-33, :50`).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum ProtocolErrorCode {
-    StalePrompt,
-    WrongPlayer,
-    WrongPromptType,
-    UnknownActionId,
-    InvalidShape,
-}
-
-/// A wire-level rejection sent back to one client.
-///
-/// Distinct from [`AdapterError`], which is this crate's internal Rust failure
-/// type; [`protocol_error_for`] maps one onto the other.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProtocolError {
-    pub code: ProtocolErrorCode,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_id: Option<u32>,
-}
-
-/// CR 118.9 / 601.2b: alternative costs a spell may be cast for.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum AlternativeCostKind {
-    Flashback,
-    Spectacle,
-    Evoke,
-    Dash,
-    Blitz,
-    Escape,
-    Overload,
-    Madness,
-    Foretell,
-    Emerge,
-    Suspend,
-    Morph,
-    Megamorph,
-    Bestow,
-    Warp,
-    SacrificeAlt,
-    Plot,
-    Awaken,
-    Disturb,
-    Harmonize,
-    Freerunning,
-    Impending,
-    Mayhem,
-    #[serde(rename = "moreThanMeetsTheEye")]
-    MTMtE,
-    Mutate,
-    Prowl,
-    Sneak,
-    Surge,
-    WebSlinging,
-    Plotted,
-}
-
-/// How a card is being put onto the stack or the battlefield.
-///
-/// Display-only: the client echoes just `action_id`, which resolves through
-/// [`ActionTableEntry`] back to the original `GameAction`, so `mode` never
-/// round-trips. `BackFaceLand` is **unproducible** here — `GameAction::PlayLand`
-/// carries no face discriminator (the MDFC face is a separate, later
-/// `ChooseModalFace`), and inferring it from card data would be game logic in a
-/// serialization boundary.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum PlayCardMode {
-    Normal,
-    BackFaceLand,
-    RoomRightSplit,
-    Alternative { cost: AlternativeCostKind },
-    StaticAlternative,
-    ForetellExile,
-    UnlockDoor,
-}
-
-/// A client decision that is not an answer to any open prompt.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum DirectiveInput {
-    Concede,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StateUpdate {
-    pub game_view: GameViewDto,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentPrompt {
-    pub prompt_id: u32,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub deciding_player_id: String,
-    /// The full source card, not just its id — so the recipient can render it
-    /// even when the source lies outside their visible state. Built from raw
-    /// engine state; see `PreparedManabrewSnapshot::source_card_object`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_card: Option<CardDto>,
-    pub input: PromptInput,
-}
-
-/// One `(zone, owner)` bucket. Battlefield entries are bucketed by
-/// **controller** rather than owner (CR 110.2), matching upstream.
-///
-/// `count` is the truthful total and may exceed `cards.len()` when the
-/// recipient may not identify every card in the zone.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ZoneDto {
-    pub zone: ZoneKind,
-    pub owner_id: String,
-    /// Engine order. The library is top-first (the engine stores it front-first
-    /// and the top card is `library.front()`), so index 0 is the top card.
-    /// Every other zone is passed through in the engine's own order — notably
-    /// the graveyard, which the engine appends to, so index 0 is the *oldest*
-    /// card rather than the top of the pile.
-    pub cards: Vec<CardView>,
-    pub count: usize,
-}
-
-/// A card as one recipient may see it.
-///
-/// `Hidden` is for cards in a **hidden zone** whose identity the recipient may
-/// not learn (a face-down exile, CR 406.3). A face-down *battlefield* permanent
-/// is never `Hidden` — the permanent itself is public (CR 400.2 / CR 708.2), so
-/// it travels as a `Visible` entry whose identity fields are redacted while its
-/// public state (tapped, counters, damage) survives.
-// `Visible` is the dominant variant — most cards in most zones are visible —
-// and these views are built once per state update, serialized, and dropped.
-// Boxing to even out the variants would trade one `Vec` allocation for a heap
-// allocation per card, so the flat layout is deliberate.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "visibility",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum CardView {
-    Visible(CardDto),
-    Hidden { id: String },
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct GameViewDto {
-    pub game_id: String,
-    pub turn: u32,
-    pub step: StepKind,
-    pub combat_assignments: Vec<CombatAssignmentDto>,
-    pub active_player_id: String,
-    pub priority_player_id: String,
-    pub players: Vec<PlayerDto>,
-    pub zones: Vec<ZoneDto>,
-    pub stack: Vec<StackObjectDto>,
-    pub game_over: bool,
-    pub winner_id: Option<String>,
-    pub monarch_id: Option<String>,
-    pub initiative_holder_id: Option<String>,
-    pub day_time: DayTime,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CombatAssignmentDto {
-    pub blocker_id: String,
-    pub attacker_id: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PlayerDto {
-    pub id: String,
-    pub name: String,
-    pub status: PlayerStatus,
-    pub is_human: bool,
-    pub life: i32,
-    pub counters: BTreeMap<PlayerCounterKindDto, u32>,
-    pub mana_pool: BTreeMap<ManaColorDto, u32>,
-    pub commander_damage: HashMap<String, i32>,
-    pub has_city_blessing: bool,
-    pub ring_level: i32,
-    pub speed: i32,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CardIdentity {
-    pub name: String,
-    pub set_code: String,
-    pub card_number: String,
-    pub is_token: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CardDto {
-    pub id: String,
-    pub identity: CardIdentity,
-    pub color: String,
-    pub mana_cost: String,
-    pub cmc: i32,
-    pub types: Vec<String>,
-    pub subtypes: Vec<String>,
-    pub supertypes: Vec<String>,
-    pub power: Option<String>,
-    pub toughness: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_power: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_toughness: Option<i32>,
-    pub text: String,
-    pub controller_id: String,
-    pub owner_id: String,
-    pub tapped: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_crewed: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_attacking: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attacking_player_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attack_target_id: Option<String>,
-    pub keywords: Vec<String>,
-    /// Keyed by the engine's canonical `CounterType` serialization key
-    /// ("P1P1", "M1M1", "loyalty", …) — **not** its `display_phrase()` prose
-    /// form ("+1/+1"), which is for player-facing text.
-    pub counters: BTreeMap<String, u32>,
-    pub damage: i32,
-    pub summoning_sick: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_copy: bool,
-    pub is_double_faced: bool,
-    pub is_transformed: bool,
-    pub is_face_down: bool,
-    pub is_bestowed: bool,
-    pub phased_out: bool,
-    pub exerted: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_ring_bearer: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attached_to: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachment_ids: Vec<String>,
-    /// CR 712.4a / CR 730.2: the card ids merged under this top card — the
-    /// engine's `GameObject::merged_components`, covering mutate and meld.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub merged_card_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub flashback_cost: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kicker_cost: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effective_mana_cost: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub madness_cost: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_madness_exiled: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_plotted: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_warp_exiled: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub foil: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub would_die_in_combat: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct StackObjectDto {
-    pub id: String,
-    pub source_id: String,
-    pub controller_id: String,
-    pub identity: CardIdentity,
-    pub text: String,
-    pub is_permanent_spell: bool,
-    pub is_casting: bool,
-    pub targets: Vec<TargetRefDto>,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum TargetingIntent {
-    #[default]
-    Damage,
-    Destroy,
-    Sacrifice,
-    Exile,
-    Bounce,
-    Mill,
-    Discard,
-    Counter,
-    Tap,
-    Untap,
-    Copy,
-    Buff,
-    Debuff,
-    Heal,
-    LoseLife,
-    Reveal,
-    Draw,
-    Fetch,
-    GainControl,
-    Fight,
-    Attach,
-    Attack,
-    Block,
-    Hostile,
-    Friendly,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum TargetKindDto {
-    Player,
-    Card,
-    Spell,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct TargetRefDto {
-    pub kind: TargetKindDto,
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent: Option<TargetingIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oracle: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum PromptInput {
-    ChooseAction(ChooseActionInput),
-    PayManaCost(PayManaCostInput),
-    Mulligan(MulliganInput),
-    MulliganPutBack(MulliganPutBackInput),
-    ChooseAttackers(ChooseAttackersInput),
-    ChooseBlockers(ChooseBlockersInput),
-    ChooseBoardTargets(ChooseBoardTargetsInput),
-    ChooseBoolean(ChooseBooleanInput),
-    ChooseCards(ChooseCardsInput),
-    ChooseColor(ChooseColorInput),
-    ChooseCombatDamageAssignment(ChooseCombatDamageAssignmentInput),
-    ChooseDamageAssignmentOrder(ChooseDamageAssignmentOrderInput),
-    ChooseFromSelection(ChooseFromSelectionInput),
-    ChooseNumber(ChooseNumberInput),
-    RevealCards(RevealCardsInput),
-    Scry(ScryInput),
-    Reorder(ReorderInput),
-    DiceRolled(DiceRolledInput),
-    GameOver(GameOverInput),
-}
-
-/// A client's answer to an open prompt, as a **two-level** union: the outer tag
-/// names the prompt family, and the family's own output nests under `output`.
-///
-/// Wire form: `{"type":"chooseNumber","output":{"type":"numberDecision","chosenNumber":3}}`
-///
-/// The nesting is deliberate and **asymmetric with [`PromptInput`]**, which is
-/// internally tagged with no `content` and therefore *flattens*
-/// (`{"type":"chooseAction","actions":[…]}`). Adding `content` to `PromptInput`
-/// for symmetry would silently break every prompt.
-///
-/// Carrying the family in the tag is also what removes the old
-/// `state.waiting_for` sniffing: an `act` output no longer has to be guessed
-/// between priority and mana payment.
-///
-/// There is no `GameOver` arm — that prompt is terminal and takes no response.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", content = "output", rename_all = "camelCase")]
-pub enum PromptOutput {
-    Mulligan(MulliganOutput),
-    MulliganPutBack(MulliganPutBackOutput),
-    ChooseAction(ChooseActionOutput),
-    ChooseAttackers(ChooseAttackersOutput),
-    ChooseBlockers(ChooseBlockersOutput),
-    ChooseBoardTargets(ChooseBoardTargetsOutput),
-    ChooseBoolean(ChooseBooleanOutput),
-    ChooseFromSelection(ChooseFromSelectionOutput),
-    RevealCards(RevealCardsOutput),
-    Scry(ScryOutput),
-    ChooseColor(ChooseColorOutput),
-    ChooseNumber(ChooseNumberOutput),
-    ChooseDamageAssignmentOrder(ChooseDamageAssignmentOrderOutput),
-    ChooseCombatDamageAssignment(ChooseCombatDamageAssignmentOutput),
-    PayManaCost(PayManaCostOutput),
-    ChooseCards(ChooseCardsOutput),
-    Reorder(ReorderOutput),
-    DiceRolled(DiceRolledOutput),
-}
-
-/// Everything a client can send the engine.
-///
-/// This is the single client→engine union: a prompt answer, or a directive that
-/// belongs to no prompt.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ClientToServerMessage {
-    Response {
-        prompt_id: u32,
-        /// Upstream names this field `action`, not `output`.
-        action: PromptOutput,
-    },
-    Directive {
-        directive: DirectiveInput,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PromptPresentation {
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub targets: Vec<TargetRefDto>,
-}
-
-/// CR 105.1: the five colors plus colorless. Ordered/hashable because it keys
-/// `PlayerDto::mana_pool`'s `BTreeMap`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ManaColorDto {
-    #[serde(rename = "W")]
-    White,
-    #[serde(rename = "U")]
-    Blue,
-    #[serde(rename = "B")]
-    Black,
-    #[serde(rename = "R")]
-    Red,
-    #[serde(rename = "G")]
-    Green,
-    #[serde(rename = "C")]
-    Colorless,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ManaDto {
-    pub color: ManaColorDto,
-    pub amount: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivatableAbilityInfo {
-    pub card_id: String,
-    pub ability_index: usize,
-    pub description: String,
-    pub is_mana_ability: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub produced_mana: Option<Vec<ManaDto>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum AvailableActionKind {
-    Cast {
-        card_id: String,
-        mode: PlayCardMode,
-        label: String,
-    },
-    ActivateAbility(ActivatableAbilityInfo),
-    UndoMana {
-        card_id: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AvailableAction {
-    pub id: String,
-    #[serde(flatten)]
-    pub kind: AvailableActionKind,
-}
-
-/// A single move available *while paying a cost* — the mana-payment analogue of
-/// [`AvailableActionKind`].
-///
-/// `PayLife` is defined for wire completeness but **never emitted**: the engine
-/// has no pay-life action, and advertising an id the engine would then reject
-/// violates the `UnknownActionId` obligation. See
-/// `local.phyrexian-payment-unsupported`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum PaymentActionKind {
-    ActivateManaAbility(ActivatableAbilityInfo),
-    UndoMana {
-        card_id: String,
-    },
-    UseResource {
-        card_id: String,
-        resource: PaymentResourceKind,
-    },
-    ReleaseResource {
-        card_id: String,
-        resource: PaymentResourceKind,
-    },
-    PayLife {
-        amount: u32,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PaymentAction {
-    pub id: String,
-    #[serde(flatten)]
-    pub kind: PaymentActionKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum AttackTargetKind {
-    Player,
-    Planeswalker,
-    Battle,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AttackTargetDto {
-    pub id: String,
-    pub label: String,
-    pub kind: AttackTargetKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AttackAssignment {
-    pub attacker_id: String,
-    pub target_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BlockAssignment {
-    pub blocker_id: String,
-    pub attacker_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CombatDamageAssignmentEntry {
-    pub assignee_id: String,
-    pub damage: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseActionInput {
-    pub actions: Vec<AvailableAction>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PassUntil {
-    pub player_id: String,
-    pub phase: StepKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseActionOutput {
-    Pass {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        until: Option<PassUntil>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        exhaust_stack: bool,
-    },
-    RestoreSnapshot {
-        checkpoint_id: u64,
-    },
-    Act {
-        action_id: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PayManaCostInput {
-    pub presentation: PromptPresentation,
-    pub card_id: String,
-    pub card_name: String,
-    pub mana_cost: String,
-    pub can_confirm_from_pool: bool,
-    pub actions: Vec<PaymentAction>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum PayManaCostOutput {
-    Act {
-        action_id: String,
-    },
-    Pay {
-        #[serde(default)]
-        auto: bool,
-    },
-    Cancel,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct MulliganInput {
-    pub hand_card_ids: Vec<String>,
-    pub mulligan_count: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum MulliganOutput {
-    MulliganDecision { keep: bool },
-    MulliganUseSerumPowder { card_id: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct MulliganPutBackInput {
-    pub hand_card_ids: Vec<String>,
-    pub cards: Vec<CardDto>,
-    pub count: usize,
-    /// The earmarked Serum Powder object committed to a pending
-    /// `UseSerumPowder` continuation, if any — the client must not offer it
-    /// as selectable in the bottom-cards picker. `None` for both `Keep`
-    /// resolutions and the (unrelated) `OpeningHandBottomCards` phase.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub excluded_card_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum MulliganPutBackOutput {
-    MulliganPutBackDecision { card_ids: Vec<String> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AttackerOptionDto {
-    pub attacker_id: String,
-    pub valid_target_ids: Vec<String>,
-    pub must_attack: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseAttackersInput {
-    pub attackers: Vec<AttackerOptionDto>,
-    pub attack_targets: Vec<AttackTargetDto>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseAttackersOutput {
-    DeclareAttackers { assignments: Vec<AttackAssignment> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BlockableAttackerDto {
-    pub attacker_id: String,
-    pub valid_blocker_ids: Vec<String>,
-    pub min_blockers: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_blockers: Option<u32>,
-    pub must_be_blocked: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseBlockersInput {
-    pub attackers: Vec<BlockableAttackerDto>,
-    pub available_blocker_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseBlockersOutput {
-    DeclareBlockers { assignments: Vec<BlockAssignment> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseBoardTargetsInput {
-    pub presentation: PromptPresentation,
-    pub candidates: Vec<TargetRefDto>,
-    #[serde(default)]
-    pub hostile: bool,
-    pub intent: TargetingIntent,
-    pub min_targets: i32,
-    pub max_targets: i32,
-    pub chosen_targets: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseBoardTargetsOutput {
-    BoardTargets { chosen: Vec<TargetRefDto> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseBooleanInput {
-    pub presentation: PromptPresentation,
-    pub confirm_label: String,
-    pub deny_label: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseBooleanOutput {
-    Decision { value: bool },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseCardsInput {
-    pub presentation: PromptPresentation,
-    pub cards: Vec<CardDto>,
-    pub min: usize,
-    pub max: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseCardsOutput {
-    ChooseCardsDecision { chosen_card_ids: Vec<String> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseColorInput {
-    pub presentation: PromptPresentation,
-    pub valid_colors: Vec<String>,
-    pub amount: u32,
-    pub repeat_allowed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseColorOutput {
-    ColorDecision {
-        chosen_colors: BTreeMap<String, u32>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseCombatDamageAssignmentInput {
-    pub attacker_id: String,
-    pub blocker_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub defender_id: Option<String>,
-    pub total_damage: i32,
-    pub attacker_has_deathtouch: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseCombatDamageAssignmentOutput {
-    CombatDamageAssignmentDecision {
-        assignments: Vec<CombatDamageAssignmentEntry>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseDamageAssignmentOrderInput {
-    pub attacker_id: String,
-    pub blocker_ids: Vec<String>,
-    pub blocker_cards: Vec<CardDto>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseDamageAssignmentOrderOutput {
-    DamageAssignmentOrderDecision { ordered_blocker_ids: Vec<String> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SelectionOption {
-    pub label: String,
-    pub weight: usize,
-    pub can_repeat: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseFromSelectionInput {
-    pub presentation: PromptPresentation,
-    pub options: Vec<SelectionOption>,
-    pub min_total: usize,
-    pub max_total: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseFromSelectionOutput {
-    SelectionDecision { chosen_indices: Vec<usize> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseNumberInput {
-    pub presentation: PromptPresentation,
-    pub min: i32,
-    pub max: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseNumberOutput {
-    NumberDecision { chosen_number: Option<i32> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct RevealCardsInput {
-    pub presentation: PromptPresentation,
-    pub cards: Vec<CardDto>,
-    pub zone: ZoneKind,
-    pub owner_player_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum RevealCardsOutput {
-    RevealCardsAcknowledged,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum ScryDestination {
-    LibraryTop,
-    LibraryBottom,
-    Graveyard,
-    Exile,
-    Hand,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ScryInput {
-    pub presentation: PromptPresentation,
-    pub cards: Vec<CardDto>,
-    pub zones: Vec<ScryDestination>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ScryOutput {
-    ScryDecision { zone_card_ids: Vec<Vec<String>> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ReorderItem {
-    pub id: String,
-    pub card: CardDto,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oracle: Option<String>,
-}
-
-/// Renamed from `ReorderCardsInput`: the wire tag changed from `reorderCards`
-/// to `reorder` in v2, and the Rust name should not contradict it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ReorderInput {
-    pub presentation: PromptPresentation,
-    pub items: Vec<ReorderItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ReorderOutput {
-    ReorderDecision { ordered_ids: Vec<String> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DiceRollEntry {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub player_id: Option<String>,
-    pub natural_results: Vec<i32>,
-    pub final_results: Vec<i32>,
-    pub ignored_rolls: Vec<i32>,
-    #[serde(default)]
-    pub highlighted: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DiceRolledInput {
-    pub presentation: PromptPresentation,
-    pub sides: i32,
-    pub rolls: Vec<DiceRollEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_card_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum DiceRolledOutput {
-    DiceRolledAcknowledged,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GameOverInput {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1326,11 +668,13 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
     &UNSUPPORTED_PROTOCOL_CAPABILITIES
 }
 
-/// Gaps between this engine and protocol 2.0.0, machine-readable.
+/// Gaps and deliberate local wire divergences from protocol 3.0.0,
+/// machine-readable.
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
-/// `local.` = the protocol has the primitive but this engine cannot source it.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 29] = [
+/// `local.` = the protocol has the primitive but this engine cannot source it,
+/// or a documented adapter-local extension is intentionally in use.
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 87] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1340,8 +684,8 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 29] = [
     UnsupportedCapability {
         code: "upstream.multi-destination-partition-missing",
         area: "prompts",
-        reason: "Narrowed after verification: the protocol DOES carry destination metadata — ScryDestination is LibraryTop | LibraryBottom | Graveyard | Exile | Hand and ScryInput::zones takes it as a parameter, which is why surveil (CR 701.42a) now maps exactly and discard maps to ChooseCards. What remains unrepresentable is a partition across THREE OR MORE destinations in one prompt, since ScryOutput::ScryDecision's zone_card_ids is positional against a zone list the engine never varies beyond two.",
-        suggested_protocol_extension: "None needed for two-destination workflows. For 3+ destinations, define whether zones/zone_card_ids may exceed length two and how a client learns the per-zone count constraints.",
+        reason: "Re-derived; the arity framing was wrong twice over, and the code name is kept only because renaming a published capability code is itself a contract break. (a) Arity is not the constraint: ScryInput::zones is an unbounded Vec<ScryDestination> and ScryOutput::ScryDecision::zone_card_ids is a Vec<Vec<String>> positional against it, with no length validation anywhere in the pinned crate, so N destinations are already expressible. (b) Phase has no 3+-destination prompt to express: its only partitioning pauses are WaitingFor::SearchPartitionChoice { primary_destination: Zone, rest_destination: Zone } (CR 701.23a + CR 608.2c, cultivate-class) and WaitingFor::EffectZoneChoice { zone: Zone, destination: Option<Zone> }, both binary. The real gap is the destination VOCABULARY: ScryDestination has five values (LibraryTop | LibraryBottom | Graveyard | Exile | Hand) while the engine's Zone has seven (Library, Hand, Battlefield, Graveyard, Stack, Exile, Command). Cultivate-class searches send the primary cards to the BATTLEFIELD, which ScryDestination cannot name — so SearchPartitionChoice cannot ride Scry regardless of arity. (The earlier surveil citation here read CR 701.42a; 701.42 is Meld. Surveil is CR 701.25a.)",
+        suggested_protocol_extension: "Widen ScryDestination to cover Battlefield (and state whether an entering-tapped rider belongs on the destination or on a sibling field), rather than defining new arity rules that nothing needs. Battlefield is the one destination that turns a look-then-distribute prompt into an unrepresentable one.",
     },
     UnsupportedCapability {
         code: "upstream.mana-pool-entries-missing",
@@ -1376,8 +720,14 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 29] = [
     UnsupportedCapability {
         code: "local.prompt-family-display-acks-unsupported",
         area: "prompts",
-        reason: "RevealCards and DiceRolled acknowledgements are modeled but not emitted unless Phase has a matching WaitingFor state.",
-        suggested_protocol_extension: "Treat acknowledgement prompts as display events with audience and sequencing metadata.",
+        reason: "Corrected: the previous text claimed Phase has no matching WaitingFor for RevealCards. It does — WaitingFor::RevealChoice { cards, filter, optional, decline_runs_continuation } (game_state.rs). The mismatch is the response payload, not the state's existence. RevealChoice is answered by GameAction::SelectCards { cards }: a normal reveal picks exactly one card, and under `optional` an EMPTY selection is not a no-op but an explicit decline that runs the source's decline branch (CR 701.20a). RevealCardsOutput has exactly one variant, RevealCardsAcknowledged, a bare ack with no card payload — so routing RevealChoice through RevealCards would submit an empty selection every time, silently declining every optional reveal and submitting an illegal count for every mandatory one. Re-verified: this is a FIDELITY gap, not a coverage one. RevealChoice does NOT fall to local.prompt-unsupported — it classifies as HumanResponseModel::ExactCandidates (interaction.rs), so the generic projection serves it as ChooseFromSelection: one labelled option per revealable card at min/max 1, plus a third option carrying the empty decline when `optional`, each resolving back to the SelectCards above. What is lost is presentation — every card reaches the client as its name, where ChooseCards would carry the card itself. The card family is unreachable from here because only a Select schema is reclassified as cards (card_selection_candidates) and a one-of list is not one. Both halves are exhibited by a_mandatory_reveal_renders_as_a_selection_and_answers_with_the_chosen_card and an_optional_reveal_offers_the_decline_as_an_empty_selection rather than asserted here. DiceRolled is a separate case and is genuinely unreachable: none of the 127 WaitingFor variants reports a die roll, and game/effects/roll_die.rs sets no waiting_for at all — die results are applied inline, so there is no decision point to acknowledge.",
+        suggested_protocol_extension: "None needed upstream for reveals — the prompt is already answerable, and raising it from labels to cards is local work: either a bespoke ChooseCards arm here (as DiscardChoice has, with its matching gate entry) or an engine projection that classifies the reveal as a card selection. For DiceRolled, treat it as a display event with audience and sequencing metadata rather than a prompt, since no engine pause backs it.",
+    },
+    UnsupportedCapability {
+        code: "local.targeting-intent-neutral-inexpressible",
+        area: "prompts",
+        reason: "Fidelity, narrowed twice. ChooseBoardTargetsInput.intent is now COMPUTED, not a placeholder. TargetSelectionSlot carries the announcing ability's EffectKind AND the discriminating payload that the unit tag cannot hold (TargetEffectDetail: a zone-change Destination or a P/T Modification direction), both stamped per CR 601.2c announcement frame by collect_target_slots in game/ability_utils.rs; game/interaction.rs projects the pair with target_intent (delegating to the pre-existing effect_zone_intent for the zone family) into InteractionIntentCode; this adapter renames that answer with targeting_intent_dto. hostile is derived from the same value, so the two fields no longer contradict each other. The earlier claim that Phase cannot source targeting intent was WRONG and has been retracted. Measured against data/card-data.json: of 21,077 targeting links in the card corpus, 61.4% resolved from EffectKind alone, and stamping the destination lifts that to roughly 70% by resolving 1,016 exiles and 865 bounces that previously shared one ChangeZone tag. What survives is a protocol-shape gap, not an engine gap: TargetingIntent's 25 variants (Damage, Destroy, Sacrifice, Exile, Bounce, Mill, Discard, Counter, Tap, Untap, Copy, Buff, Debuff, Heal, LoseLife, Reveal, Draw, Fetch, GainControl, Fight, Attach, Attack, Block, Hostile, Friendly) contain NO neutral or unknown member, and the field is required (no serde default), so a choice with no effect-semantic disposition must still claim one. Two populations land here. (1) Genuinely neutral picks, which the engine projects as InteractionIntentCode::Choose - about 30% of targeting links, led by GenericEffect (1,560), Shuffle (871) and TargetOnly (424), plus mutate targets (CR 702.140a), which the casting pipeline resolves without an Effect at all and which therefore carry EffectKind::NoOp. These fall back to Hostile. That is a LEAST-WRONG choice and NOT a safe one: an unlabelled pick still reads as hostile, which is the residue of the original defect rather than a fix for it, and a client must not read Hostile as an assertion. (2) Modifications whose direction is genuinely unknowable - a dynamic X or count-based magnitude (193 links) or a genuinely opposing '+2/-2' (83 links), together about 16% of the 1,679 targeted pumps. These project as InteractionIntentCode::Modify and resolve to Debuff, the adverse member, on an asymmetric-loss argument: Buff would be right more often, since pump is more often positive, but it is the one direction whose error is unrecoverable - it would mark 'target creature gets -4/-4' as harmless, while a caution affordance on a genuine combat trick is recoverable by the player. The other 84% of pumps (1,079 buff, 324 debuff) now resolve to their true direction and do not reach this arm. Exhibited by a_damage_target_prompt_and_a_regenerate_target_prompt_carry_opposite_intents, an_unsigned_pump_target_prompt_fails_cautious_as_debuff, a_signed_pump_resolves_to_its_actual_direction and a_zone_change_target_resolves_by_destination rather than asserted here.",
+        suggested_protocol_extension: "Preferred, unchanged in shape and now much narrower in scope: make ChooseBoardTargetsInput.intent an Option<TargetingIntent>, matching TargetRefDto.intent one field away - the protocol already models a declinable targeting intent and already spells it `#[serde(default, skip_serializing_if = \"Option::is_none\")] Option<TargetingIntent>`. That would let population (1) decline rather than fall back to Hostile, which is the single highest-value change upstream could make here. Population (2) is better served by a direction-neutral modification member (e.g. Modify alongside Buff/Debuff) so an engine that knows the action but not the direction can say exactly that instead of guessing. Align hostile's optionality with whichever is chosen. Either shape is breaking for older readers (the transport envelope sets deny_unknown_fields and no family enum is non_exhaustive), so it belongs in a major bump.",
     },
     UnsupportedCapability {
         code: "local.library-arrangement-reorder-unsupported",
@@ -1443,8 +793,8 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 29] = [
     UnsupportedCapability {
         code: "local.first-strike-damage-step-unproducible",
         area: "state",
-        reason: "StepKind has thirteen steps including combatFirstStrikeDamage, but Phase models the whole of CR 510 as a single Phase::CombatDamage, so the first-strike damage step (CR 510.4) can never be reported.",
-        suggested_protocol_extension: "None needed upstream — closing this requires Phase to split its combat damage step.",
+        reason: "Corrected: the previous text said Phase models the whole of CR 510 as one step and inferred the first-strike step is unmodelled. Phase models it. CR 510.4 does not define a distinct step — when a first/double striker is in combat the phase gets a SECOND combat damage step, i.e. two instances of the same step — and the engine mirrors that exactly: one Phase::CombatDamage entered twice, discriminated by CombatState::first_strike_done (combat.rs, pub, reachable via the pub GameState::combat) plus a private SubStep::FirstStrike. What blocks emission is narrower: phase_step() receives only a Phase and cannot see that flag, and deciding whether a first-strike step is PENDING needs the participant set from combat_first_strike_participants(), which is private. Re-deriving participants here would be game logic in a serialization boundary.",
+        suggested_protocol_extension: "None needed upstream — and no Phase split either. Closing this needs one engine accessor exposing the current combat-damage sub-step (the state already exists), after which phase_step's Phase-only signature is the last thing in the way.",
     },
     UnsupportedCapability {
         code: "local.play-card-mode-fidelity-gaps",
@@ -1477,12 +827,6 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 29] = [
         suggested_protocol_extension: "None needed upstream — closing this requires Phase to add delve, improvise, and release actions.",
     },
     UnsupportedCapability {
-        code: "local.phyrexian-payment-unsupported",
-        area: "mana",
-        reason: "Both ends model this; only the adapter is missing. Phase has GameAction::SubmitPhyrexianChoices and WaitingFor::PhyrexianPayment { shards } (annotated CR 107.4f + CR 601.2f), and the protocol has PaymentActionKind::PayLife { amount } — upstream's own agent implements choose_phyrexian_pay_life against it. The wiring (one PayLife{amount:2} payment action per Phyrexian shard, answered by SubmitPhyrexianChoices) is unwritten because payment_actions() receives only &[GameAction] and cannot see the pending shard list.",
-        suggested_protocol_extension: "None needed upstream — this is adapter work: thread the snapshot into payment action construction and emit one PayLife per shard.",
-    },
-    UnsupportedCapability {
         code: "local.dungeon-room-unsupported",
         area: "actions",
         reason: "ChooseDungeon, ChooseDungeonRoom, UnlockRoomDoor, and ChooseRoomDoor are all unsupported, and available_actions filters unsupported actions out — so a Room's door can never be unlocked through this adapter. PlayCardMode::UnlockDoor is consequently never produced either. Deferred with the Rooms/dungeon feature rather than partially mapped.",
@@ -1495,16 +839,388 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 29] = [
         suggested_protocol_extension: "Clarify whether roomRightSplit is decided at advertisement time; if so the engine must resolve the half before offering the play.",
     },
     UnsupportedCapability {
-        code: "local.ninjutsu-cast-unsupported",
-        area: "actions",
-        reason: "Ninjutsu needs no alternative-cost kind: CR 702.49a defines it as an ACTIVATED ABILITY, not an alternative cost, and Phase models it that way — synthesize_ninjutsu_family pushes an AbilityKind::Activated definition carrying AbilityCost::NinjutsuFamily onto the card's ability list. AvailableActionKind::ActivateAbility is therefore the correct and already-existing home. It is not emitted only because convert_available_action() receives &GameAction with no GameState, so the ability's index cannot be looked up; each (ninjutsu card, returned attacker) pair would take a distinct action id with the attacker named in the description.",
-        suggested_protocol_extension: "None needed upstream — asking for AlternativeCostKind::Ninjutsu would encode a rules error (CR 702.49a). This is adapter work: thread GameState into available-action conversion.",
-    },
-    UnsupportedCapability {
         code: "local.counter-key-vocabulary-unverifiable",
         area: "state",
         reason: "CardDto.counters keys are only partially verifiable against upstream. P1P1 and M1M1 are confirmed aligned. Every other key is unverifiable: upstream derives its keys with format!(\"{k:?}\") over a CounterType enum that is not published, and that enum carries a Named(String) variant plus further unnamed variants, so its documented example key form contradicts what its own producer emits. Phase emits its canonical CounterType::as_str() rather than guessing upstream identifiers or reproducing a Debug-formatted wrapper.",
         suggested_protocol_extension: "Give CardDto.counters a typed key (or a documented string vocabulary) instead of Debug-formatting a private enum, so both ends can agree on counter names beyond +1/+1 and -1/-1.",
+    },
+    // --- Codes the adapter emits that were previously undeclared -------------
+    //
+    // Every entry below was measured, not guessed: `rg -o '"(local|upstream)\.
+    // [a-z0-9-]+"'` over this file found 67 codes emitted at live call sites
+    // against 29 declared, leaving 51 that a client could receive and then fail
+    // to look up. An undeclared code is worse than no code — it resolves to
+    // nothing at the far end.
+    //
+    // Two facts hold for the whole block and are not repeated in each reason.
+    // (1) `AvailableActionKind` has exactly three variants (Cast,
+    //     ActivateAbility, UndoMana) and `PromptInput` exactly nineteen
+    //     families; "no home" below always means "not among those".
+    // (2) `available_actions()` is built only for `WaitingFor::Priority`, and it
+    //     drops Unsupported conversions. So a code from a `convert_available_
+    //     action` arm whose action answers a NON-priority decision reaches a
+    //     client only through `advertised_action_by_id` — i.e. when a stale or
+    //     invented action id is echoed. Codes whose action IS a priority-window
+    //     play (equip/crew/station/saddle, the planar die, the companion special
+    //     action, and the two copy-casts) say so explicitly, because for those
+    //     the filtering is real functional loss rather than a stale-id guard.
+    //
+    // None of these say "Phase does not support X". Each names the population
+    // searched. Where Phase has a `GameAction` for a mechanic, that action's
+    // existence is itself the proof Phase models it.
+    UnsupportedCapability {
+        code: "local.prompt-unsupported",
+        area: "prompts",
+        reason: "Narrowed: this is no longer the wildcard arm's blanket answer. The wildcard now routes to interaction_prompt(), which serves any waiting state the engine projects as a finite ExactChoices list — the largest response class by far — so an unnamed WaitingFor is no longer unmapped by default. What remains here is the degenerate projection: no opportunity for this viewer, or an opportunity whose choice list is empty. Neither is a missing protocol shape; both mean there is nothing for this seat to answer, which is an engine or sequencing condition rather than a capability gap.",
+        suggested_protocol_extension: "None needed upstream. If this is observed while the seat genuinely owes a decision, it is an interaction-projection defect to fix, not a family to add.",
+    },
+    UnsupportedCapability {
+        code: "local.interaction-simultaneous-decisions-unmapped",
+        area: "prompts",
+        reason: "The engine opens one interaction slot per semantic owner, and a single viewer can be the authorized submitter for more than one of them — a decision both seats owe at once, answered independently. The protocol carries one prompt per message and one answer per prompt, so there is no shape for 'here are two decisions, answer both'. Serving only the first would answer one seat and silently drop the other, which is why this fails closed instead. Note this is a projection-level count, not a mechanic: the same waiting state produces one opportunity in the ordinary case and lands here only when authority for several owners collapses onto one viewer.",
+        suggested_protocol_extension: "Either allow a batch of prompts to be outstanding for one recipient with independent prompt ids, or state that the server must serialize simultaneous decisions into successive prompts. The second needs no wire change and is likely the cheaper answer.",
+    },
+    UnsupportedCapability {
+        code: "local.interaction-schema-response-unmapped",
+        area: "prompts",
+        reason: "The engine projects a decision either as a finite ExactChoices list or as a schema: a response spec plus candidates. interaction_prompt() now maps four generically — ExactChoices (a one-of list), Select (an unordered subset, whose count bounds ChooseFromSelection's min/max totals express exactly), Sequence (an ordered subset; chosen_indices is itself ordered, so the order survives), and Number (a range, which is ChooseNumber verbatim). What remains fails closed because its payload is none of those things: not a count over a list, not an order over a list, not a scalar. AssignAmounts distributes a total across candidates — a per-candidate amount, which ChooseCombatDamageAssignment shapes but names as damage, so reusing it would misdescribe counter distribution. GroupedSequence carries per-group min/max, DeckPartition splits a pool in two, and ManaGroups, Text, Shortcut and ShortcutReply have no current family at all. Flattening any of them into a selection would drop the very constraint that makes the answer legal.",
+        suggested_protocol_extension: "Two shapes would close most of it: a per-candidate amount distribution with a required total (covers AssignAmounts, and generalizes ChooseCombatDamageAssignment rather than competing with it), and per-option group constraints on ChooseFromSelection (covers GroupedSequence, and DeckPartition as the two-group case). The Text and Shortcut families are genuinely absent and need their own design conversation.",
+    },
+    UnsupportedCapability {
+        code: "local.interaction-aggregate-bound-unmapped",
+        area: "prompts",
+        reason: "A Select schema whose SelectionConstraint is Aggregate rather than Count. The bound is a sum over a chosen attribute of the selected objects — 'keep permanents with total power 4 or less' — not a number of objects, so no min/max count is equivalent to it. ChooseFromSelection carries min_total/max_total as counts only, and rendering an aggregate bound as an unbounded count would advertise illegal selections as legal, which is worse than refusing. Distinct from local.interaction-schema-response-unmapped because the spec IS mapped: only this one constraint variant within it is not.",
+        suggested_protocol_extension: "Give ChooseFromSelection an optional aggregate bound over a named option weight — SelectionOption already carries `weight`, so the wire is one comparator and one amount away from expressing this without a new family.",
+    },
+    UnsupportedCapability {
+        code: "local.target-slot-missing",
+        area: "prompts",
+        reason: "Structural guard, not a gap. TargetSelection/TriggerTargetSelection advance one slot at a time and the prompt is built for target_slots[selection.selected_slots.len()]. This code fires only if that index is out of range, which means the engine handed the adapter a selection already past its slot list. No protocol shape is missing.",
+        suggested_protocol_extension: "None needed upstream — if this is ever observed it is an engine or ordering defect to fix, not a capability to add.",
+    },
+    UnsupportedCapability {
+        code: "local.reserved-prompt-id-zero",
+        area: "prompts",
+        reason: "Protocol conformance guard. Prompt id 0 is reserved upstream for engine-synthesized absent-player defaults (timeout/disconnect) and may never be accepted as a real answer, so build_prompt() refuses to emit a prompt carrying it rather than emitting one no client could answer. Callers using prepare_snapshot() (which defaults to id 0) get this; prepare_snapshot_with_prompt_id() with a non-zero id does not.",
+        suggested_protocol_extension: "None needed upstream — the reservation is upstream's and this honors it.",
+    },
+    UnsupportedCapability {
+        code: "local.named-choice-unsupported",
+        area: "prompts",
+        reason: "Split by vocabulary after reading the enum rather than assuming. Both WaitingFor::NamedChoice and WaitingFor::CostTypeChoice carry { choice_type: ChoiceType, options: Vec<String> }, and ChoiceType has eighteen variants. Most are CLOSED sets the engine already enumerates into `options` — CreatureType, Color, CardType, LandType, BasicLandType, Keyword, CounterKind, Opponent, Player, OddOrEven, TwoColors, Labeled, NumberRange — and every one of those fits ChooseFromSelection (or ChooseColor / ChooseNumber) with no extension at all; CostTypeChoice is entirely in this group. Only CardName, Word, Artist, CardPredicate, and CardPredicateGuess are open vocabularies, and for those none of the nineteen families carries a free-text answer: ChooseCards needs CardDtos, ChooseFromSelection needs enumerated labels, ChooseBoardTargets needs TargetRefs. So this is mostly unwritten mapping and only partly a missing shape.",
+        suggested_protocol_extension: "None needed for the closed-vocabulary majority — that is adapter work. For CardName / Word / Artist, add a text-answer family (or specify that the producer must supply a bounded candidate list, which is only possible where the card's Oracle text restricts the name set).",
+    },
+    UnsupportedCapability {
+        code: "local.dig-unsupported",
+        area: "prompts",
+        reason: "WaitingFor::DigChoice (look at the top N, keep up to keep_count, the rest go elsewhere) is a look-then-distribute decision, which is the Scry family's shape. Whether it maps depends on the two destination fields, both typed as the full engine Zone: kept_destination: Option<Zone> and rest_destination: Option<Zone>. A dig whose destinations fall inside ScryDestination's five values maps today with no extension; a dig whose kept_destination is Battlefield (the enter_tapped field exists precisely for those) does not, because ScryDestination cannot name it. Same root cause as upstream.multi-destination-partition-missing. `selectable_cards` is an additional wrinkle: Scry has no per-card selectability flag, so an unfiltered client could pick a greyed-out card.",
+        suggested_protocol_extension: "Widen ScryDestination to cover Battlefield (see upstream.multi-destination-partition-missing) and give ScryInput a per-card selectable flag so filtered digs cannot be answered illegally.",
+    },
+    UnsupportedCapability {
+        code: "local.keep-with-total-power-unsupported",
+        area: "prompts",
+        reason: "WaitingFor::KeepWithinTotalPowerChoice selects permanents under an AGGREGATE bound (keep creatures with total power N or less). ChooseBoardTargets and ChooseCards both carry only min/max COUNTS, so a client cannot be told the constraint it must satisfy and the engine would have to reject otherwise well-formed answers. Same root cause as local.non-target-selection-unsupported, which is the entry carrying the proposed extension.",
+        suggested_protocol_extension: "Give ChooseBoardTargets an optional aggregate constraint (attribute + comparator + value); see local.non-target-selection-unsupported.",
+    },
+    UnsupportedCapability {
+        code: "local.keep-exact-permanents-unsupported",
+        area: "prompts",
+        reason: "WaitingFor::KeepExactPermanentsChoice is the count-exact sibling of the aggregate case above. It is listed separately because it emits a separate code, not because it is a separate gap: both are selection-under-constraint over battlefield permanents.",
+        suggested_protocol_extension: "Covered by the aggregate-constraint extension proposed on local.non-target-selection-unsupported.",
+    },
+    UnsupportedCapability {
+        code: "local.cost-prevention-unsupported",
+        area: "prompts",
+        reason: "Emitted from two sites for one gap: the WaitingFor::UnlessPaymentChooseCost prompt and the GameAction::ChooseUnlessCostBranch answer. CR 118.12's plain form IS mapped — it is a yes/no and rides ChooseBoolean. What is not is the branching form, where the player picks AMONG several offered costs. That is a selection, and folding it into ChooseBoolean would misreport the question by silently collapsing three or more branches into two.",
+        suggested_protocol_extension: "None needed upstream — ChooseFromSelection already takes labelled options with min/max totals and is the right home. This is adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.pay-combat-cost-unsupported",
+        area: "combat",
+        reason: "Emitted from two sites for one gap: the WaitingFor::CombatTaxPayment prompt and the GameAction::PayCombatTax answer. Phase models the attack/block tax pause; the protocol's payment vocabulary (PaymentActionKind, five variants) is reachable only from the PayManaCost family, which upstream scopes to a spell's cost via its required cardId/cardName/manaCost fields. A combat tax has no spell to name.",
+        suggested_protocol_extension: "Make PayManaCost's card fields optional so the payment family can carry a non-spell cost, or specify that combat taxes are presented as ChooseBoolean plus an ordinary payment round.",
+    },
+    UnsupportedCapability {
+        code: "local.mana-combination-choice-unsupported",
+        area: "mana",
+        reason: "ManaChoicePrompt has three forms and two map exactly: SingleColor and AnyCombination both become ChooseColor (amount plus repeat_allowed covers them). The third, Combination, constrains WHICH multisets are legal rather than just how many picks are allowed, and ChooseColorInput carries only { valid_colors, amount, repeat_allowed } — there is nowhere to express the permitted combinations, so a client would be free to answer with an illegal one.",
+        suggested_protocol_extension: "Let ChooseColorInput carry an explicit list of legal combinations (or reuse ChooseFromSelection with one option per legal combination, which needs no upstream change).",
+    },
+    UnsupportedCapability {
+        code: "local.invalid-color-decision",
+        area: "mana",
+        reason: "Inbound validation, not a gap. A colorDecision answer is parsed against the six mana symbols W/U/B/R/G/C; anything else is rejected here rather than being mapped to a guess. The wire has no closed color enum, so this is the boundary check that a closed engine type requires.",
+        suggested_protocol_extension: "Give the color fields a closed enum on the wire so an invalid symbol fails at deserialization rather than in translation.",
+    },
+    UnsupportedCapability {
+        code: "local.cancel-mana-payment-unavailable",
+        area: "mana",
+        reason: "Emitted when a client sends PayManaCostOutput::Cancel but the engine's current legal-action set contains no GameAction::CancelCast — i.e. the cast is past the point where CR 601.2 rollback is offered. The adapter refuses rather than synthesizing a cancel the engine would reject. The protocol models cancel unconditionally; whether it is legal is engine state.",
+        suggested_protocol_extension: "Let PayManaCostInput advertise whether cancel is currently available (a `canCancel` sibling to the existing canConfirmFromPool), so a conforming client never offers an illegal cancel.",
+    },
+    UnsupportedCapability {
+        code: "local.stack-target-ref-unsupported",
+        area: "responses",
+        reason: "TargetKindDto has three kinds (Player, Card, Spell) but the engine's TargetRef has exactly two variants, Object(ObjectId) and Player(PlayerId) — a spell on the stack is an Object there. Inbound Spell refs are refused rather than silently coerced to Object, because the two id spaces are different wire prefixes (`stack-` vs `card-`) and a mis-coerced ref would resolve against the wrong permanent. Outbound is unaffected: encode_stack_id already emits the `stack-` prefix upstream's parser expects.",
+        suggested_protocol_extension: "None needed upstream — this is adapter work: accept Spell by parsing the `stack-` prefix into the same ObjectId space Card uses.",
+    },
+    UnsupportedCapability {
+        code: "local.choose-untap-unsupported",
+        area: "prompts",
+        reason: "GameAction::ChooseUntap { object_id, untap } is a per-permanent boolean, and WaitingFor::UntapChoice carries a candidate list the engine projects as candidates.len() x 2 separate one-at-a-time answers (interaction.rs). ChooseBoolean is the matching family, one prompt per candidate; what is unmapped is the sequencing, not the shape.",
+        suggested_protocol_extension: "None needed upstream — ChooseBoolean fits. This is adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.enlist-unsupported",
+        area: "combat",
+        reason: "CR 702.154: enlist taps an untapped non-attacking creature as an attacker is declared. Phase models it (GameAction::ChooseEnlist). It is a choice of one permanent from a candidate set, which is ChooseCards or ChooseBoardTargets depending on whether it is a CR 115 target (it is not — enlist chooses, it does not target). Unmapped, not unrepresentable.",
+        suggested_protocol_extension: "None needed upstream — ChooseCards fits a non-targeting permanent choice. This is adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.clash-unsupported",
+        area: "prompts",
+        reason: "CR 701.30a: clashing reveals the top card and its owner may bottom it. Phase models the opponent-picking half (GameAction::ChooseClashOpponent). Choosing which opponent clashes is a player choice, which is ChooseBoardTargets with TargetKind::Player — the same shape local.zone-opponent-chooser-unsupported describes for CR 608.2d. Unmapped, not unrepresentable.",
+        suggested_protocol_extension: "None needed upstream — ChooseBoardTargets carries player candidates. This is adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.announcing-opponent-unsupported",
+        area: "prompts",
+        reason: "CR 601.2c + CR 115.1: GameAction::ChooseAnnouncingOpponent { opponent } is the caster's answer to which opponent announces an 'of an opponent's choice' target slot. Structurally identical to local.clash-unsupported and local.zone-opponent-chooser-unsupported: a choice over player candidates, which ChooseBoardTargets already carries via TargetKind::Player. Three codes, one shape — they are listed separately only because three separate emit sites exist.",
+        suggested_protocol_extension: "None needed upstream — this is adapter work, and the three opponent-picker codes should close together.",
+    },
+    UnsupportedCapability {
+        code: "local.gift-recipient-unsupported",
+        area: "prompts",
+        reason: "GameAction::ChooseGiftRecipient { opponent } picks which opponent receives the gift. Same player-choice shape as the other opponent pickers above; ChooseBoardTargets with TargetKind::Player is the home.",
+        suggested_protocol_extension: "None needed upstream — adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.pile-opponent-unsupported",
+        area: "prompts",
+        reason: "GameAction::ChoosePileOpponent picks which opponent separates the piles (CR 608.2d division of labour). Player choice again — ChooseBoardTargets with TargetKind::Player. Note this is distinct from the pile decisions themselves: separating is SubmitPilePartition and picking a pile is ChoosePile, both covered by their own codes.",
+        suggested_protocol_extension: "None needed upstream — adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.assist-unsupported",
+        area: "mana",
+        reason: "CR 702.132a: assist lets another player pay part of a spell's generic cost. Phase models both halves and both prompts: WaitingFor::AssistChoosePlayer { candidates, max_generic } (the CASTER picks, answered by ChooseAssistPlayer) and WaitingFor::AssistPayment { chosen, max_generic } (the CHOSEN player decides how much, answered by CommitAssistPayment). Both fit existing families without any extension — the first is ChooseBoardTargets over player candidates, the second is ChooseNumber with min 0 and max max_generic. Nor is authorization the obstacle: AssistPayment's acting_player() returns `chosen`, so decidingPlayerId already routes the step to the right seat, and this is NOT the submitter-vs-subject gap recorded as upstream.controlled-turn-subject-missing. Purely unwritten mapping.",
+        suggested_protocol_extension: "None needed upstream — ChooseBoardTargets then ChooseNumber. This is adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.reorder-hand-unsupported",
+        area: "prompts",
+        reason: "GameAction::ReorderHand is a pure ordering, which is exactly the Reorder family — the same family trigger ordering (CR 603.3b) already uses. It is unmapped rather than unrepresentable, and it is low value: hand order is not game state any rule reads, so a client's local ordering is normally sufficient.",
+        suggested_protocol_extension: "None needed upstream — Reorder fits. Adapter work, and arguably not worth doing.",
+    },
+    UnsupportedCapability {
+        code: "local.counter-cost-distribution-unsupported",
+        area: "prompts",
+        reason: "GameAction::ChooseRemoveCounterCostDistribution spreads a counter-removal COST across several permanents. The protocol's only distribution shapes are the two combat-damage families, which are damage-specific (attacker/blocker ids, total_damage). There is no generic 'assign N units across these objects' family, which is the same hole recorded for local.distribution-unsupported and local.counter-move-distribution-unsupported.",
+        suggested_protocol_extension: "Add one generic amount-distribution family (objects + total + per-object min/max) and retire the special-casing; see local.distribution-unsupported.",
+    },
+    UnsupportedCapability {
+        code: "local.counter-removal-unsupported",
+        area: "prompts",
+        reason: "GameAction::ChooseCountersToRemove picks WHICH counters (by kind and quantity) come off. The wire's counter vocabulary is itself unsettled — see local.counter-key-vocabulary-unverifiable, where only P1P1 and M1M1 are confirmed aligned — so even a correct family choice could not name the counter kinds unambiguously today.",
+        suggested_protocol_extension: "Settle CardDto.counters' key vocabulary first (see local.counter-key-vocabulary-unverifiable); the selection itself then fits ChooseFromSelection.",
+    },
+    UnsupportedCapability {
+        code: "local.coin-flip-unsupported",
+        area: "prompts",
+        reason: "CR 705: Phase models coin flips and the re-flip/keep decision (GameAction::SelectCoinFlips, WaitingFor::CoinFlipKeepChoice). Choosing which flips to keep is a bounded subset selection over abstract items — ChooseFromSelection's shape — but its options carry only a label, so the flips would be distinguished by prose alone. That is the general prompt-discriminator problem noted under upstream.display-sequencing-missing rather than a coin-specific gap.",
+        suggested_protocol_extension: "None needed upstream — ChooseFromSelection fits. Adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.outside-game-selection-unsupported",
+        area: "prompts",
+        reason: "Half of this is a real id gap and half is not, so it is stated per branch. CR 400.11 / CR 701.23j: Phase models the choice as WaitingFor::OutsideGameChoice { choices: Vec<OutsideGameChoiceEntry>, count, up_to, destination }, and OutsideGameChoiceSource is exactly two variants. FaceUpExile { object_id } already carries an ObjectId and is encodable as a `card-` id today — for that branch ChooseCards fits with nothing missing. Sideboard { sideboard_index, card: CardFace } carries no ObjectId, and every card-carrying family (ChooseCards, ChooseBoardTargets, Scry, Reorder) is keyed on the `card-` id space, so only the sideboard branch is blocked. Related: local.deck-dto-not-implemented.",
+        suggested_protocol_extension: "None needed upstream — the FaceUpExile branch fits ChooseCards now, and closing the sideboard branch needs a stable id for sideboard entries, which is a Phase-side decision rather than a wire shape.",
+    },
+    UnsupportedCapability {
+        code: "local.replacement-choice-unsupported",
+        area: "prompts",
+        reason: "CR 616.1: when two or more replacement effects would apply to the same event, the affected object's controller (or the affected player) chooses one to apply first. Phase models it (GameAction::ChooseReplacement). It is a pick-one from a labelled list — ChooseFromSelection — but each option is an effect, not a card or a target, so the label is the only handle a client gets. Unmapped, not unrepresentable.",
+        suggested_protocol_extension: "None needed upstream — ChooseFromSelection fits. Adapter work, and worth ranking high: unlike most entries here it is not tied to one keyword, so any board with two interacting replacement effects can reach it.",
+    },
+    UnsupportedCapability {
+        code: "local.selection-unsupported",
+        area: "prompts",
+        reason: "One code shared by seven engine actions that are all pick-one-or-more from a labelled set: ChooseOption, SubmitVoteCandidate (CR 701.38 voting), SubmitSpellbookDraft, ChoosePile (PileSide = A|B), ChooseBranch, SubmitLifeRedistribution, ChooseDamageSource. Every one of them is ChooseFromSelection's shape — labelled options with min/max totals. They are collapsed under one code because they share one cause (no mapping written), not because they share one obstacle.",
+        suggested_protocol_extension: "None needed upstream — ChooseFromSelection is the generic escape hatch and covers all seven. This is the largest single adapter-work item in this registry.",
+    },
+    UnsupportedCapability {
+        code: "local.pile-partition-unsupported",
+        area: "prompts",
+        reason: "GameAction::SubmitPilePartition { pile_a } is NOT a partition primitive despite the name: the engine derives pile B as (eligible \\ pile_a), so the decision is 'pick a subset', which is exactly ChooseCards with min 0 and max eligible.len(). Recorded as a gap only because the mapping is unwritten. The sibling decision — choosing which pile to take — is ChoosePile and rides local.selection-unsupported.",
+        suggested_protocol_extension: "None needed upstream — ChooseCards fits exactly. Adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.optional-trigger-unsupported",
+        area: "prompts",
+        reason: "Narrow scope. CR 603.12's plain 'you may' IS mapped — GameAction::DecideOptionalEffect answers a ChooseBoolean. This code covers only two siblings that carry extra payload: DecideOptionalCost and DecideOptionalEffectAndRemember. Both are still yes/no questions, so ChooseBoolean is the right family; what is unwritten is the response-translation dispatch that would tell them apart from the plain form, which per this crate's rules must key on the current WaitingFor.",
+        suggested_protocol_extension: "None needed upstream — adapter work in translate_response, not a new family.",
+    },
+    UnsupportedCapability {
+        code: "local.cast-choice-unsupported",
+        area: "prompts",
+        reason: "Five cast-time sub-decisions share this code: ChooseAdventureFace, ChooseModalFace (CR 712.12), ChooseAlternativeCast, ChooseCastingVariant, ChoosePermanentTypeSlot. All are pick-one-of-a-few, so ChooseFromSelection fits every one on shape. They are grouped with local.mdfc-face-choice-unsupported, which records the same hole from the prompt side for the modal-face case specifically.",
+        suggested_protocol_extension: "None needed upstream — ChooseFromSelection covers all five; a namespaced prompt `kind` discriminator (see the crate docs' one upstream ask) would let a programmatic client tell them apart without parsing prose.",
+    },
+    UnsupportedCapability {
+        code: "local.retarget-unsupported",
+        area: "prompts",
+        reason: "CR 707.10c / CR 722.3c: a copied spell's controller may change its targets. Phase models both the keep-all shortcut (GameAction::KeepAllCopyTargets) and the per-slot change (GameAction::RetargetSpell). ChooseBoardTargets is the family for the change, and ChooseBoolean for the shortcut; the pair is unmapped, not unrepresentable.",
+        suggested_protocol_extension: "None needed upstream — adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.splice-unsupported",
+        area: "prompts",
+        reason: "CR 702.47: splice reveals a card in hand and adds its text to a spell being cast. Phase models the offer (GameAction::RespondToSpliceOffer). It is a yes/no per offered card, so ChooseBoolean fits, with the spliced card carried as the prompt's sourceCard. Unmapped, not unrepresentable.",
+        suggested_protocol_extension: "None needed upstream — adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.activation-cost-choice-unsupported",
+        area: "prompts",
+        reason: "GameAction::ChooseActivationCostBranch picks among several costs an activated ability offers. Same shape and same cause as local.cost-prevention-unsupported's branching half: a pick-one over labelled costs, which is ChooseFromSelection. Two codes exist because the engine has two states; the gap is one.",
+        suggested_protocol_extension: "None needed upstream — adapter work; close it together with local.cost-prevention-unsupported.",
+    },
+    UnsupportedCapability {
+        code: "local.board-action-unsupported",
+        area: "actions",
+        reason: "REAL FUNCTIONAL LOSS, not a stale-id guard: these are priority-window plays, so available_actions() filtering them out means a ManaBrew client can never equip (CR 702.6), crew (CR 702.122), station (CR 702.184), saddle (CR 702.171), transform, or turn a face-down permanent face up. Phase models all six as dedicated GameActions rather than as indexed ability activations, and AvailableActionKind::ActivateAbility requires an ability_index the action does not carry — which is the same shape of blocker that kept ninjutsu unadvertised until GameState was threaded into convert_available_action. That threading now exists, so the index is sourceable the same way; the work is simply not done.",
+        suggested_protocol_extension: "None needed upstream — CR 702.6a and CR 702.122a make equip and crew activated abilities, so ActivateAbility is already the rules-correct home. This is adapter work now unblocked by the threaded GameState.",
+    },
+    UnsupportedCapability {
+        code: "local.play-draw-unsupported",
+        area: "actions",
+        reason: "CR 103.1: before the first turn a player chooses whether to play or draw. Phase models it (GameAction::ChoosePlayDraw). It is a two-option choice and ChooseBoolean fits, but the framing matters — a boolean's confirm/deny labels would have to read 'Play'/'Draw', which is exactly what confirm_label and deny_label are for. Unmapped, not unrepresentable.",
+        suggested_protocol_extension: "None needed upstream — ChooseBoolean with explicit labels. Adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.planar-die-unsupported",
+        area: "actions",
+        reason: "CR 901.9: rolling the planar die is a special action the active player may take at priority with an empty stack during their main phase. It is therefore a priority-window play, and filtering it out means Planechase cannot be played through this adapter. The obstacle is that AvailableActionKind has no 'special action' kind — the three variants are Cast, ActivateAbility, and UndoMana, and the roll is neither a cast nor an ability activation (CR 901.9d explicitly distinguishes the roll from abilities that trigger on it).",
+        suggested_protocol_extension: "Add a special-action kind to AvailableActionKind (or a generic labelled action). CR 116.1 defines special actions as priority-window actions that do not use the stack, and CR 116.2 lists twelve of them — so this is a class, not one card.",
+    },
+    UnsupportedCapability {
+        code: "local.companion-unsupported",
+        area: "actions",
+        reason: "CR 702.139: Phase models both halves (GameAction::DeclareCompanion at the start of the game, GameAction::CompanionToHand for the {3} special action). CompanionToHand is a priority-window special action and hits the same hole as the planar die: no special-action kind exists in AvailableActionKind's three variants. DeclareCompanion is a pre-game declaration and has no prompt family either.",
+        suggested_protocol_extension: "Covered by the special-action kind proposed on local.planar-die-unsupported; the pre-game declaration additionally needs a prompt point before the first turn.",
+    },
+    UnsupportedCapability {
+        code: "local.end-continuous-effect-unsupported",
+        area: "actions",
+        reason: "Phase exposes GameAction::EndContinuousEffect with the exact effect group and cost, but AvailableActionKind has no special-action kind, so the adapter cannot advertise that choice without misclassifying it as a cast or activated ability.",
+        suggested_protocol_extension: "Add a special-action available-action kind carrying the effect-group identity and displayed cost, or a generic labelled special action with equivalent typed payload.",
+    },
+    UnsupportedCapability {
+        code: "local.cast-offer-unsupported",
+        area: "actions",
+        reason: "Five 'you may cast this now' offers share this code: DiscoverChoice (CR 701.57), CascadeChoice (CR 702.85), RippleChoice (CR 702.60), GraveyardPaidCastChoice, and FreeCastWindowChoice. Every one is a yes/no on casting a specific revealed card, so ChooseBoolean is the family and the card rides the prompt's sourceCard. They are grouped because they are one shape with one cause. Note the sibling that IS mapped: the miracle offer (CR 702.94a) takes exactly this treatment already, which is the proof the shape works.",
+        suggested_protocol_extension: "None needed upstream — ChooseBoolean, exactly as the miracle offer already does. Adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.top-bottom-unsupported",
+        area: "prompts",
+        reason: "GameAction::ChooseTopOrBottom { top: bool } sends a revealed card to the top or the bottom of a library. Two homes fit and neither needs an extension: ChooseBoolean, because the payload is literally a bool; or Scry with zones [libraryTop, libraryBottom] and one card, the identical treatment scry and surveil (CR 701.25a) already receive. Unmapped, and the cheapest item in this block to close.",
+        suggested_protocol_extension: "None needed upstream — ChooseBoolean or a one-card Scry. Adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.mutate-unsupported",
+        area: "prompts",
+        reason: "CR 702.140: mutate merges a creature over or under a target creature, and the controller picks which. Phase models it (GameAction::ChooseMutateMergeSide). Pick-one-of-two, so ChooseBoolean with 'Over'/'Under' labels fits. Unmapped, not unrepresentable.",
+        suggested_protocol_extension: "None needed upstream — adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.cipher-unsupported",
+        area: "prompts",
+        reason: "CR 702.99: ciphering exiles the spell card encoded on a creature the caster controls. Phase models it (GameAction::CipherEncode). Choosing which creature is a non-targeting permanent choice — ChooseCards. Unmapped, not unrepresentable.",
+        suggested_protocol_extension: "None needed upstream — adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.autopass-settings-unsupported",
+        area: "responses",
+        reason: "Deliberate and permanent, not a coverage gap. SetAutoPass, CancelAutoPass, SetPhaseStops, SetPriorityPassingMode, SetPriorityYield, SetMayTriggerAutoChoice, and SetTriggerOrderTemplate are client PREFERENCES that happen to travel as GameActions in Phase; none of them changes game state or answers a rules decision. Advertising them as protocol actions would invite a client to treat UI configuration as a play. The related protocol-side intents (pass.until, pass.exhaustStack) have their own entries.",
+        suggested_protocol_extension: "None wanted upstream — see local.pass-until-unsupported and local.exhaust-stack-pass-unsupported for the two intents that DO need a contract decision.",
+    },
+    UnsupportedCapability {
+        code: "local.distribution-unsupported",
+        area: "prompts",
+        reason: "GameAction::DistributeAmong assigns N units (damage, counters, life) across chosen objects. The protocol's only distribution families are ChooseCombatDamageAssignment and ChooseDamageAssignmentOrder, both hard-wired to combat (attacker id, blocker ids, total_damage). A generic 'divide N as you choose' (CR 601.2d) has no family, and encoding it as repeated single-target prompts would change the decision's semantics, since CR 601.2d fixes the division at announcement.",
+        suggested_protocol_extension: "Add one generic amount-distribution family — objects, total, and per-object min/max — and let the combat families become uses of it. This closes local.counter-cost-distribution-unsupported and local.counter-move-distribution-unsupported at the same time.",
+    },
+    UnsupportedCapability {
+        code: "local.counter-move-distribution-unsupported",
+        area: "prompts",
+        reason: "GameAction::ChooseCounterMoveDistribution moves counters between permanents in chosen quantities. Same missing primitive as local.distribution-unsupported: an amount-per-object assignment with no combat framing.",
+        suggested_protocol_extension: "Covered by the generic amount-distribution family proposed on local.distribution-unsupported.",
+    },
+    UnsupportedCapability {
+        code: "local.pay-amount-unsupported",
+        area: "prompts",
+        reason: "GameAction::SubmitPayAmount answers 'pay any amount of X'. The value itself is ChooseNumber's shape (min/max), and the reason it is unmapped is that the bounds are engine-computed per effect; the adapter must read them from the state rather than derive them, which the current mapping does not do for this state.",
+        suggested_protocol_extension: "None needed upstream — ChooseNumber fits. Adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.learn-unsupported",
+        area: "prompts",
+        reason: "CR 701.48: learning is a choice between fetching a Lesson from outside the game and discarding-then-drawing (or doing nothing). Phase models it (GameAction::LearnDecision). The branch choice is ChooseFromSelection, but the sideboard branch runs into local.outside-game-selection-unsupported: Lesson cards outside the game are DeckEntry values with no ObjectId to encode.",
+        suggested_protocol_extension: "Covered by local.outside-game-selection-unsupported — the branch choice itself needs no extension.",
+    },
+    UnsupportedCapability {
+        code: "local.copy-cast-unsupported",
+        area: "actions",
+        reason: "Priority-window plays, so this is functional loss like local.board-action-unsupported — and, checked rather than assumed, there is no id obstacle. Both GameAction::CastPreparedCopy { source: ObjectId } and CastParadigmCopy { source: ObjectId } name an ordinary object (a prepared battlefield permanent; an exiled card), which encode_object_id already renders under the `card-` prefix, so AvailableActionKind::Cast's cardId is satisfiable today. What is genuinely absent is a mode: PlayCardMode's seven variants have nothing for 'cast a token copy of this object's other face / of this exiled card', so the play would have to be advertised as Normal. That is the same labelling-only situation as local.play-card-mode-fidelity-gaps, not an unrepresentable one — and unlike the fidelity gaps these are still filtered out entirely, which is the actual defect.",
+        suggested_protocol_extension: "None needed upstream to make the plays reachable — Cast with mode Normal and a descriptive label is enough, exactly as CastSpellAsMiracle is handled. A cast-a-copy PlayCardMode would restore programmatic mode discrimination; note both keywords are pre-CR (the engine annotates them 'CR 702.xxx, assign when WotC publishes the SOS update'), so an upstream ask should wait for the rules text.",
+    },
+    UnsupportedCapability {
+        code: "local.specialize-unsupported",
+        area: "prompts",
+        reason: "GameAction::ChooseSpecializeColor picks the color a specializing permanent takes. A pick-one over at most five labelled colors — ChooseColor's shape, with amount 1 and repeat_allowed false. Unmapped, not unrepresentable.",
+        suggested_protocol_extension: "None needed upstream — ChooseColor fits. Adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.paradigm-offer-unsupported",
+        area: "actions",
+        reason: "GameAction::PassParadigmOffer declines a paradigm-copy offer. It is the decline half of the pair whose accept half is local.copy-cast-unsupported, and like the cast offers above it is a yes/no that ChooseBoolean expresses. It is recorded separately only because it emits a separate code from a separate arm.",
+        suggested_protocol_extension: "None needed upstream — close with local.copy-cast-unsupported.",
+    },
+    UnsupportedCapability {
+        code: "local.debug-action-unsupported",
+        area: "actions",
+        reason: "Deliberate and permanent. GameAction::Debug, GrantDebugPermission, and RevokeDebugPermission are development affordances that mutate state outside the rules; advertising them to an external client would hand it a cheat channel. This code exists so that an echoed debug id is refused with a named reason rather than silently ignored.",
+        suggested_protocol_extension: "None wanted upstream — this must stay unsupported.",
+    },
+    UnsupportedCapability {
+        code: "local.loop-shortcut-unsupported",
+        area: "responses",
+        reason: "CR 732: the interactive loop-shortcut protocol (DeclareShortcut, RespondToShortcut, DeclineShortcut, PrecastCopyShortcut) is opt-in behind Phase's LoopDetectionMode::Interactive, which a ManaBrew client never sets — so these actions are not reachable through this adapter rather than being unmappable. Left unsupported deliberately: mapping a shortcut negotiation a client cannot opt into would advertise a play it can never legally make.",
+        suggested_protocol_extension: "None needed upstream until a client can opt into interactive loop detection; CR 732.1 shortcuts are a table convention the protocol has no reason to model first.",
+    },
+    UnsupportedCapability {
+        code: "local.serum-powder-mulligan-vendor-extension",
+        area: "mulligan",
+        reason: "Deliberate adapter-local divergence from manabrew-protocol 3.0.0, not an unsupported capability. MulliganOutput::MulliganUseSerumPowder carries the committed Serum Powder card id from client to engine, and MulliganPutBackInput::excluded_card_id prevents that committed card from appearing in the following bottom-cards picker. The first is safe only for the paired client and adapter; the second is an additive field that older peers may drop.",
+        suggested_protocol_extension: "None required for this paired deployment. Keep both member names under review whenever the upstream protocol version changes.",
+    },
+    UnsupportedCapability {
+        code: "local.class-level-details-unsourceable",
+        area: "card-view",
+        reason: "CardDto::class_levels requires ordered ClassLevelDto values containing each level's printed oracle and cost. GameObject exposes only the current class_level; GameState and DerivedViews do not retain the printed Class section boundaries, source text, or costs after parsing. Reading raw card text and reconstructing sections here would derive game data at the serialization boundary, so class_levels is empty.",
+        suggested_protocol_extension: "No protocol change: the engine must expose an ordered Class presentation view with level, oracle, and optional cost.",
+    },
+    UnsupportedCapability {
+        code: "local.saga-chapter-details-unsourceable",
+        area: "card-view",
+        reason: "CardDto::saga_chapters requires each printed chapter group and its oracle text. GameObject exposes final_chapter_number but GameState and DerivedViews do not retain printable Saga chapter groups or source text after lowering trigger definitions. Re-parsing raw card text in this adapter would violate the serialization-boundary contract, so saga_chapters is empty.",
+        suggested_protocol_extension: "No protocol change: the engine must expose a Saga presentation view with chapter groups and oracle text.",
+    },
+    UnsupportedCapability {
+        code: "local.class-level-up-flag-unsourceable",
+        area: "actions",
+        reason: "ActivatableAbilityInfo::is_class_level_up has no direct engine source. GameAction::ActivateAbility carries only source_id and ability_index; classifying an activation by inspecting its lowered ability definition would re-interpret engine state in this adapter. The field is therefore left None.",
+        suggested_protocol_extension: "No protocol change: have the engine include an explicit class-level-up presentation flag with each activatable ability.",
     },
 ];
 
@@ -1607,28 +1323,6 @@ pub fn build_prompt(
 /// defaults (timeout / disconnect). It must never be accepted as a real answer.
 pub const RESERVED_ABSENT_PLAYER_PROMPT_ID: u32 = 0;
 
-/// A narration event broadcast to every seat. Purely informational — no
-/// response is expected.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum DisplayEvent {
-    CardPlayed {
-        card_id: String,
-        card_name: String,
-        set_code: String,
-        player_id: String,
-    },
-    TurnChanged {
-        active_player_id: String,
-        active_player_name: String,
-        turn_number: u32,
-    },
-}
-
 fn build_prompt_input(
     prepared: &PreparedManabrewSnapshot,
     card_lookup: &impl CardTextLookup,
@@ -1636,7 +1330,7 @@ fn build_prompt_input(
     let waiting_for = &prepared.state.waiting_for;
     match waiting_for {
         WaitingFor::Priority { .. } => Ok(PromptInput::ChooseAction(ChooseActionInput {
-            actions: available_actions(&prepared.actions),
+            actions: available_actions(&prepared.state, &prepared.actions),
         })),
         WaitingFor::MulliganDecision { pending, .. } => {
             let entry = pending_entry_for_viewer(&prepared.state, prepared.viewer, pending)?;
@@ -1757,6 +1451,7 @@ fn build_prompt_input(
                     waiting_for_type: waiting_for_type(waiting_for),
                     code: "local.target-slot-missing",
                 })?;
+            let intent = targeting_intent_dto(projected_target_intent(prepared));
             Ok(PromptInput::ChooseBoardTargets(ChooseBoardTargetsInput {
                 // v2 removed the flat `label`; the slot's mode label is the
                 // presentation title.
@@ -1767,8 +1462,21 @@ fn build_prompt_input(
                         .unwrap_or_else(|| "Choose target".to_string()),
                 ),
                 candidates: target_refs(&slot.legal_targets),
-                hostile: false,
-                intent: TargetingIntent::Hostile,
+                // COMPUTED, not placeholders. The engine stamps the announcing
+                // ability's `EffectKind` on each target slot (CR 601.2c: one
+                // slot per announced target) and `game::interaction`'s
+                // `target_intent` projects it to an `InteractionIntentCode`;
+                // this adapter only renames that answer into the wire
+                // vocabulary. `hostile` is derived from the same value, so the
+                // two fields can no longer contradict each other.
+                //
+                // Two residues remain, both declared as
+                // `local.targeting-intent-neutral-inexpressible`: a genuinely
+                // neutral pick and an unsigned P/T modification have no honest
+                // `TargetingIntent`, because the protocol's 25 variants contain
+                // no neutral member. See `targeting_intent_dto`.
+                hostile: targeting_is_hostile(intent),
+                intent,
                 min_targets: if slot.optional { 0 } else { 1 },
                 max_targets: 1,
                 chosen_targets: 0,
@@ -1852,7 +1560,7 @@ fn build_prompt_input(
             }))
         }
         WaitingFor::GameOver { .. } => Ok(PromptInput::GameOver(GameOverInput {})),
-        // CR 701.42a: Surveil puts each looked-at card on top of the library or
+        // CR 701.25a: Surveil puts each looked-at card on top of the library or
         // into the graveyard — the same "partition these cards across ordered
         // destinations" shape as scry, differing only in the second destination.
         // `ScryInput::zones` is that parameter, so surveil needs no new prompt
@@ -1868,9 +1576,9 @@ fn build_prompt_input(
             }))
         }
         WaitingFor::DigChoice { .. } => unsupported_prompt(waiting_for, "local.dig-unsupported"),
-        // CR 701.8a: Discard N cards from hand — a bounded selection over a
+        // CR 701.9a: Discard N cards from hand — a bounded selection over a
         // known card set, which is exactly `ChooseCardsInput`. `up_to` (CR
-        // 701.8b "discard up to N") lowers the floor to zero rather than
+        // 701.9b "discard up to N") lowers the floor to zero rather than
         // needing a distinct prompt family.
         WaitingFor::DiscardChoice {
             count,
@@ -1979,7 +1687,7 @@ fn build_prompt_input(
         WaitingFor::CombatTaxPayment { .. } => {
             unsupported_prompt(waiting_for, "local.pay-combat-cost-unsupported")
         }
-        _ => unsupported_prompt(waiting_for, "local.prompt-unsupported"),
+        _ => interaction_prompt(prepared, card_lookup),
     }
 }
 
@@ -1990,61 +1698,413 @@ fn unsupported_prompt<T>(waiting_for: &WaitingFor, code: &'static str) -> Result
     })
 }
 
-impl PromptInput {
-    /// The formal prompt/response contract: a response is valid only if its
-    /// output family matches this prompt **and** every echoed action id was
-    /// advertised by it.
-    ///
-    /// These are two of the five conformance obligations; the other three
-    /// (stale prompt id, wrong player, unparseable shape) are enforced by
-    /// [`translate_client_message`] and by deserialization respectively.
-    pub fn validate_response(
-        &self,
-        output: &PromptOutput,
-    ) -> std::result::Result<(), ResponseViolation> {
-        match (self, output) {
-            (PromptInput::ChooseAction(input), PromptOutput::ChooseAction(out)) => match out {
-                ChooseActionOutput::Act { action_id }
-                    if !input.actions.iter().any(|a| a.id == *action_id) =>
-                {
-                    Err(ResponseViolation::UnknownActionId(action_id.clone()))
-                }
-                _ => Ok(()),
+/// Build a prompt from the engine's own interaction projection.
+///
+/// The fallback for every waiting state with no bespoke arm above, and
+/// deliberately generic. The engine classifies all of its waiting states into a
+/// small set of response models, and for the finite ones it hands back concrete
+/// labelled choices it has already validated. Hand-writing one mapping per
+/// waiting state instead would re-derive bounds the engine has computed — game
+/// logic duplicated inside a serialization boundary, and the exact drift the
+/// interaction subsystem exists to prevent.
+///
+/// Scope is `ExactChoices` only. A finite, pre-materialized candidate list is
+/// precisely `ChooseFromSelection`'s shape, so the mapping is total and needs no
+/// per-variant judgement. The schema-valued specs (sequences, numbers, amount
+/// assignments, relations) carry an unbounded response space that no single
+/// prompt family expresses; they still fail closed under a declared code.
+///
+/// One projection shape leaves the labelled-option family: an unordered subset
+/// over a list of objects is a card selection, and [`card_selection_objects`]
+/// routes it to `ChooseCards` so the client renders the cards themselves.
+fn interaction_prompt(
+    prepared: &PreparedManabrewSnapshot,
+    card_lookup: &impl CardTextLookup,
+) -> Result<PromptInput> {
+    let waiting_for = &prepared.state.waiting_for;
+    // One opportunity per interaction slot this viewer may submit for, and a
+    // viewer can be the authorized submitter for more than one semantic owner —
+    // a simultaneous decision both seats owe. The wire carries a single prompt,
+    // so serving `.first()` would answer one seat and silently drop the other.
+    let [opportunity] = prepared.interaction.opportunities.as_slice() else {
+        return unsupported_prompt(
+            waiting_for,
+            if prepared.interaction.opportunities.is_empty() {
+                "local.prompt-unsupported"
+            } else {
+                "local.interaction-simultaneous-decisions-unmapped"
             },
-            (PromptInput::PayManaCost(input), PromptOutput::PayManaCost(out)) => match out {
-                PayManaCostOutput::Act { action_id }
-                    if !input.actions.iter().any(|a| a.id == *action_id) =>
-                {
-                    Err(ResponseViolation::UnknownActionId(action_id.clone()))
-                }
-                _ => Ok(()),
-            },
-            (PromptInput::Mulligan(_), PromptOutput::Mulligan(_))
-            | (PromptInput::MulliganPutBack(_), PromptOutput::MulliganPutBack(_))
-            | (PromptInput::ChooseAttackers(_), PromptOutput::ChooseAttackers(_))
-            | (PromptInput::ChooseBlockers(_), PromptOutput::ChooseBlockers(_))
-            | (PromptInput::ChooseBoardTargets(_), PromptOutput::ChooseBoardTargets(_))
-            | (PromptInput::ChooseBoolean(_), PromptOutput::ChooseBoolean(_))
-            | (PromptInput::ChooseFromSelection(_), PromptOutput::ChooseFromSelection(_))
-            | (PromptInput::RevealCards(_), PromptOutput::RevealCards(_))
-            | (PromptInput::Scry(_), PromptOutput::Scry(_))
-            | (PromptInput::ChooseColor(_), PromptOutput::ChooseColor(_))
-            | (PromptInput::ChooseNumber(_), PromptOutput::ChooseNumber(_))
-            | (
-                PromptInput::ChooseDamageAssignmentOrder(_),
-                PromptOutput::ChooseDamageAssignmentOrder(_),
-            )
-            | (
-                PromptInput::ChooseCombatDamageAssignment(_),
-                PromptOutput::ChooseCombatDamageAssignment(_),
-            )
-            | (PromptInput::ChooseCards(_), PromptOutput::ChooseCards(_))
-            | (PromptInput::Reorder(_), PromptOutput::Reorder(_))
-            | (PromptInput::DiceRolled(_), PromptOutput::DiceRolled(_)) => Ok(()),
-            // Includes every `GameOver` pairing: that prompt is terminal and
-            // `PromptOutput` has no matching arm.
-            _ => Err(ResponseViolation::WrongPromptType),
+        );
+    };
+    // A numeric range is not a choice over candidates at all, so it leaves the
+    // selection family entirely: `ChooseNumber` carries exactly this and nothing
+    // else. Handled before the candidate branches because its candidate list is
+    // empty by construction, which the emptiness guard below would reject.
+    if let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Number { min, max, .. },
+        ..
+    } = &opportunity.response
+    {
+        return Ok(PromptInput::ChooseNumber(ChooseNumberInput {
+            presentation: presentation("Choose a number"),
+            // The engine's bounds are unsigned and the wire's are signed. Every
+            // engine bound is representable, and the widening keeps the protocol
+            // free to express a negative range this engine never produces.
+            min: *min as i32,
+            max: *max as i32,
+        }));
+    }
+    let (choices, min_total, max_total) = match &opportunity.response {
+        // A one-of list: the engine materialized each entry as a complete answer
+        // to the whole decision, so exactly one is chosen.
+        InteractionOpportunityResponse::ExactChoices { choices } => (choices, 1, 1),
+        // A subset choice over the same kind of candidate list, differing only
+        // in how many may be taken — which the constraint carries, so
+        // `ChooseFromSelection`'s min/max totals express it exactly.
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Select { constraint, .. },
+            candidates,
+        } => match constraint {
+            // `EngineValidatedCount` bounds the count identically. The extra
+            // legality the engine reserves to itself is rechecked on submit and
+            // is not expressible to a client either way, so advertising the
+            // count is the whole of what this family can honestly say.
+            SelectionConstraint::Count { min, max }
+            | SelectionConstraint::EngineValidatedCount { min, max } => {
+                (candidates, *min as usize, *max as usize)
+            }
+            // An aggregate bound — "keep permanents with total power 4 or less"
+            // — constrains a sum over a chosen attribute, not a count. No family
+            // carries it, and flattening it to an unbounded count would
+            // advertise illegal answers as legal.
+            SelectionConstraint::Aggregate { .. } => {
+                return unsupported_prompt(
+                    waiting_for,
+                    "local.interaction-aggregate-bound-unmapped",
+                )
+            }
+        },
+        // An ordered subset of the same candidate list. `chosen_indices` is a
+        // sequence, so the order the client sends survives to the engine, which
+        // fills its target slots in exactly that order.
+        //
+        // Fidelity gap, recorded rather than hidden: this family cannot *tell*
+        // the client that order is significant — it renders as a selection. The
+        // ordering family, `Reorder`, is not a substitute, because it orders the
+        // whole list and a target sequence is usually a proper subset.
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Sequence { min, max, .. },
+            candidates,
+        } => (candidates, *min as usize, *max as usize),
+        InteractionOpportunityResponse::Schema { .. } => {
+            return unsupported_prompt(waiting_for, "local.interaction-schema-response-unmapped")
         }
+    };
+    if choices.is_empty() {
+        return unsupported_prompt(waiting_for, "local.prompt-unsupported");
+    }
+    // A subset over a list of objects is a card selection, which `ChooseCards`
+    // renders as the cards themselves rather than as opaque labels. The bounds
+    // are the same ones the labelled family would have carried, so nothing the
+    // engine computed is re-derived to get here.
+    if let Some(object_ids) = card_selection_objects(&opportunity.response) {
+        let ctx = CardBuildContext { card_lookup };
+        return Ok(PromptInput::ChooseCards(ChooseCardsInput {
+            presentation: presentation("Choose cards"),
+            cards: object_vec_from_slice(&prepared.state, &object_ids, &ctx)?,
+            min: min_total,
+            max: max_total,
+        }));
+    }
+    Ok(PromptInput::ChooseFromSelection(ChooseFromSelectionInput {
+        presentation: presentation("Choose"),
+        options: choices
+            .iter()
+            .map(|choice| selection_option(choice_label(choice)))
+            .collect(),
+        min_total,
+        max_total,
+    }))
+}
+
+/// Answer a generically-projected prompt by handing the pick back to the engine.
+///
+/// The index is positional into the same `ExactChoices` list `interaction_prompt`
+/// rendered. That list is re-derived here rather than carried through
+/// `PromptContext` because the projection is a pure function of state, and
+/// staleness is already the prompt id's obligation — [`translate_response`]
+/// rejects a mismatched id before reaching this point.
+///
+/// The engine, not a local index→action table, turns the pick into a
+/// `GameAction`. Response→action is game logic, and the engine's matcher is
+/// exhaustive over its response models; a table built here would keep compiling
+/// while silently going stale as models are added.
+fn interaction_selection_action(
+    state: &GameState,
+    actor: PlayerId,
+    chosen_indices: &[usize],
+) -> Result<GameAction> {
+    let illegal = |kind: &'static str| AdapterError::IllegalResponseForPrompt {
+        response_kind: kind,
+    };
+    let opportunity = sole_open_opportunity(state, actor)?;
+    // The response variant is not interchangeable with the spec: a `Select`
+    // schema submitted as `Choose` is rejected as malformed and vice versa, so
+    // this must mirror whichever shape `interaction_prompt` rendered.
+    let id_at = |index: &usize, list: &[InteractionChoice]| {
+        list.get(*index)
+            .map(|choice| choice.id.clone())
+            .ok_or_else(|| illegal("selectionDecision index outside the offered choices"))
+    };
+    let response = match &opportunity.response {
+        InteractionOpportunityResponse::ExactChoices { choices } => {
+            let [index] = chosen_indices else {
+                return Err(illegal(
+                    "selectionDecision over a one-of list expects exactly one pick",
+                ));
+            };
+            InteractionResponse::Choose {
+                choice_id: id_at(index, choices)?,
+            }
+        }
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Select { .. },
+            candidates,
+        } => InteractionResponse::Select {
+            // Count bounds are not rechecked here. The engine owns them and
+            // rejects a violating submission; duplicating the check would put a
+            // second, drifting authority on the same constraint.
+            choice_ids: chosen_indices
+                .iter()
+                .map(|index| id_at(index, candidates))
+                .collect::<Result<Vec<_>>>()?,
+        },
+        // Distinct from `Select` on the wire even though the prompt looks the
+        // same: the engine fills its slots in the order given, so the indices
+        // must stay in the order the client sent them.
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Sequence { .. },
+            candidates,
+        } => InteractionResponse::Sequence {
+            choice_ids: chosen_indices
+                .iter()
+                .map(|index| id_at(index, candidates))
+                .collect::<Result<Vec<_>>>()?,
+        },
+        InteractionOpportunityResponse::Schema { .. } => {
+            return Err(illegal(
+                "selectionDecision against a schema this family cannot express",
+            ))
+        }
+    };
+    resolve_interaction_response(
+        state,
+        actor,
+        &InteractionSubmission {
+            interaction_id: opportunity.interaction_id.clone(),
+            response,
+        },
+    )
+    .map_err(|_| illegal("selectionDecision the engine refused to materialize"))
+}
+
+/// The one interaction this viewer may answer right now, re-derived from
+/// authoritative state.
+///
+/// Shared by every generic response path. Each prompt is built for a lone
+/// opportunity — see [`interaction_prompt`] — so anything else means the
+/// projection moved and the client's answer no longer denotes what it was shown.
+fn sole_open_opportunity(state: &GameState, actor: PlayerId) -> Result<InteractionOpportunity> {
+    let filtered = filter_state_for_viewer(state, actor);
+    let mut view = derive_viewer_interaction(state, &filtered, actor);
+    if view.opportunities.len() != 1 {
+        return Err(AdapterError::IllegalResponseForPrompt {
+            response_kind: "a response without exactly one open interaction",
+        });
+    }
+    Ok(view.opportunities.remove(0))
+}
+
+/// Answer a generically-projected numeric prompt.
+///
+/// Split from the selection path because the two share no payload: this one
+/// carries a value, not indices into a candidate list. What they do share —
+/// finding the lone open opportunity, and letting the engine name the answering
+/// action — lives in [`sole_open_opportunity`] and
+/// [`resolve_interaction_response`].
+fn interaction_number_action(state: &GameState, actor: PlayerId, value: u32) -> Result<GameAction> {
+    let illegal = |kind: &'static str| AdapterError::IllegalResponseForPrompt {
+        response_kind: kind,
+    };
+    let opportunity = sole_open_opportunity(state, actor)?;
+    if !matches!(
+        opportunity.response,
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Number { .. },
+            ..
+        }
+    ) {
+        return Err(illegal(
+            "numberDecision against an interaction that is not a numeric range",
+        ));
+    }
+    // The engine range-checks the value; re-checking it here would be a second
+    // authority on the same bound, free to drift from the one that decides.
+    resolve_interaction_response(
+        state,
+        actor,
+        &InteractionSubmission {
+            interaction_id: opportunity.interaction_id,
+            response: InteractionResponse::Number { value },
+        },
+    )
+    .map_err(|_| illegal("numberDecision the engine refused to materialize"))
+}
+
+/// The objects a projected response is a selection *of*, when it is one.
+///
+/// `Some` identifies the decision as a non-targeting card selection — the
+/// `ChooseCards` shape — and carries the object behind each candidate, in the
+/// order the engine offered them.
+///
+/// Both halves of the classification are read from the projection, never from a
+/// `WaitingFor` list:
+///
+/// - **Not targeting.** CR 601.2c announces targets one slot at a time, and the
+///   engine projects that ordered fill as the `Sequence` schema. `Select` is the
+///   unordered subset schema, which cannot express a slot order, so a target
+///   choice never arrives in this shape.
+/// - **Cards.** Every candidate must be exactly one object and nothing else, per
+///   [`candidate_object`]. A candidate carrying a player, an extra discriminator,
+///   or a concealed object (whose object surface the engine withholds) fails the
+///   whole list back to the labelled-option family rather than rendering a
+///   partial or misleading card list.
+fn card_selection_objects(response: &InteractionOpportunityResponse) -> Option<Vec<ObjectId>> {
+    card_selection_candidates(response)?
+        .iter()
+        .map(candidate_object)
+        .collect()
+}
+
+/// The candidate list of a card selection, unresolved.
+///
+/// The half of [`card_selection_objects`] that identifies the *schema*. The
+/// response path needs the choices themselves (it answers by choice id, not by
+/// object), so the two halves are separated rather than duplicated.
+fn card_selection_candidates(
+    response: &InteractionOpportunityResponse,
+) -> Option<&[InteractionChoice]> {
+    match response {
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Select { .. },
+            candidates,
+        } => Some(candidates),
+        _ => None,
+    }
+}
+
+/// The one object a projected choice denotes, when the choice *is* that object.
+///
+/// `Summary` surfaces are skipped because they carry a classification code, not
+/// an identity. Everything else must amount to a single `Object` in the
+/// `Candidate` role: any second identity surface means the choice denotes an
+/// object *plus* something the card list cannot show, and the caller must not
+/// treat it as a card.
+fn candidate_object(choice: &InteractionChoice) -> Option<ObjectId> {
+    let mut identities = choice
+        .surfaces
+        .iter()
+        .filter(|surface| !matches!(surface, InteractionPresentationSurface::Summary { .. }));
+    let InteractionPresentationSurface::Object {
+        role: InteractionRoleCode::Candidate,
+        reference,
+        ..
+    } = identities.next()?
+    else {
+        return None;
+    };
+    if identities.next().is_some() {
+        return None;
+    }
+    // The engine writes the raw `ObjectId` here; the wire's `card-` prefix is
+    // this crate's encoding and is applied on the way out.
+    reference.parse().ok().map(ObjectId)
+}
+
+/// Answer a generically-projected card prompt.
+///
+/// Split from [`interaction_selection_action`] because `ChooseCards` answers by
+/// card id, not by position: the ids are resolved back through the very
+/// [`candidate_object`] surface the prompt rendered them from, so a card the
+/// prompt did not offer cannot be smuggled in by index arithmetic.
+///
+/// The submitted response is `Select`, matching the schema
+/// [`card_selection_objects`] required — the engine rejects a `Choose` or
+/// `Sequence` against a `Select` schema as malformed.
+fn interaction_cards_action(
+    state: &GameState,
+    actor: PlayerId,
+    chosen_card_ids: &[String],
+) -> Result<GameAction> {
+    let illegal = |kind: &'static str| AdapterError::IllegalResponseForPrompt {
+        response_kind: kind,
+    };
+    let opportunity = sole_open_opportunity(state, actor)?;
+    let Some(candidates) = card_selection_candidates(&opportunity.response) else {
+        return Err(illegal(
+            "chooseCardsDecision against an interaction that is not a card selection",
+        ));
+    };
+    // Bounds are not rechecked. The engine owns them and rejects a violating
+    // submission; a second check here would be a drifting authority.
+    let choice_ids = chosen_card_ids
+        .iter()
+        .map(|card_id| {
+            let object_id = parse_object_id(card_id)?;
+            candidates
+                .iter()
+                .find(|candidate| candidate_object(candidate) == Some(object_id))
+                .map(|candidate| candidate.id.clone())
+                .ok_or_else(|| illegal("chooseCardsDecision naming an unoffered card"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    resolve_interaction_response(
+        state,
+        actor,
+        &InteractionSubmission {
+            interaction_id: opportunity.interaction_id,
+            response: InteractionResponse::Select { choice_ids },
+        },
+    )
+    .map_err(|_| illegal("chooseCardsDecision the engine refused to materialize"))
+}
+
+/// Label one projected choice, from the strings the engine already put on it.
+///
+/// Every naming surface is joined rather than taking the first, because choices
+/// in one list can share an object and differ only in a `Value` surface — the
+/// priority projection offers auto-payment and manual-payment casts of the same
+/// spell that way. Taking only the object name would render those two as the
+/// same label, and the client picks by label even though it answers by index.
+fn choice_label(choice: &InteractionChoice) -> String {
+    let parts = choice
+        .surfaces
+        .iter()
+        .filter_map(|surface| match surface {
+            InteractionPresentationSurface::Object {
+                name, reference, ..
+            } => Some(name.clone().unwrap_or_else(|| reference.clone())),
+            InteractionPresentationSurface::Value { value, .. } => Some(value.clone()),
+            InteractionPresentationSurface::Player { seat, .. } => Some(format!("Player {seat}")),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        // No naming surface at all. The opaque id is a poor label but a correct
+        // one; it is never empty, so the option stays distinguishable.
+        choice.id.as_str().to_string()
+    } else {
+        parts.join(" — ")
     }
 }
 
@@ -2179,87 +2239,115 @@ pub fn translate_response(
         });
     }
 
-    match output {
-        PromptOutput::ChooseAction(out) => translate_choose_action_output(out, context),
-        PromptOutput::PayManaCost(out) => translate_pay_mana_output(out, context),
-        PromptOutput::Mulligan(MulliganOutput::MulliganDecision { keep }) => {
-            Ok(GameAction::MulliganDecision {
-                choice: if keep {
-                    engine::types::actions::MulliganChoice::Keep
-                } else {
-                    engine::types::actions::MulliganChoice::Mulligan
-                },
-            })
-        }
+    let output = match output {
         PromptOutput::Mulligan(MulliganOutput::MulliganUseSerumPowder { card_id }) => {
-            Ok(GameAction::MulliganDecision {
+            return Ok(GameAction::MulliganDecision {
                 choice: engine::types::actions::MulliganChoice::UseSerumPowder {
                     object_id: parse_object_id(&card_id)?,
                 },
-            })
+            });
         }
-        PromptOutput::MulliganPutBack(MulliganPutBackOutput::MulliganPutBackDecision {
+        PromptOutput::Mulligan(MulliganOutput::MulliganDecision { keep }) => {
+            UpstreamPromptOutput::Mulligan(
+                manabrew_protocol::prompts::MulliganOutput::MulliganDecision { keep },
+            )
+        }
+        PromptOutput::Upstream(output) => output,
+    };
+
+    match output {
+        UpstreamPromptOutput::ChooseAction(out) => {
+            translate_choose_action_output(out, context, state)
+        }
+        UpstreamPromptOutput::PayManaCost(out) => translate_pay_mana_output(out, context),
+        UpstreamPromptOutput::Mulligan(
+            manabrew_protocol::prompts::MulliganOutput::MulliganDecision { keep },
+        ) => Ok(GameAction::MulliganDecision {
+            choice: if keep {
+                engine::types::actions::MulliganChoice::Keep
+            } else {
+                engine::types::actions::MulliganChoice::Mulligan
+            },
+        }),
+        UpstreamPromptOutput::MulliganPutBack(MulliganPutBackOutput::MulliganPutBackDecision {
             card_ids,
         }) => Ok(GameAction::SelectCards {
             cards: parse_object_ids(&card_ids)?,
         }),
-        PromptOutput::ChooseAttackers(ChooseAttackersOutput::DeclareAttackers { assignments }) => {
-            Ok(GameAction::DeclareAttackers {
-                attacks: assignments
-                    .iter()
-                    .map(|assignment| {
-                        Ok((
-                            parse_object_id(&assignment.attacker_id)?,
-                            parse_attack_target_id(&assignment.target_id)?,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-                bands: Vec::new(),
-            })
-        }
-        PromptOutput::ChooseBlockers(ChooseBlockersOutput::DeclareBlockers { assignments }) => {
-            Ok(GameAction::DeclareBlockers {
-                assignments: assignments
-                    .iter()
-                    .map(|assignment| {
-                        Ok((
-                            parse_object_id(&assignment.blocker_id)?,
-                            parse_object_id(&assignment.attacker_id)?,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            })
-        }
-        PromptOutput::ChooseBoardTargets(ChooseBoardTargetsOutput::BoardTargets { chosen }) => {
-            Ok(GameAction::SelectTargets {
-                targets: chosen
-                    .iter()
-                    .map(target_ref_from_dto)
-                    .collect::<Result<Vec<_>>>()?,
-            })
-        }
-        PromptOutput::ChooseNumber(ChooseNumberOutput::NumberDecision { chosen_number }) => {
+        UpstreamPromptOutput::ChooseAttackers(ChooseAttackersOutput::DeclareAttackers {
+            assignments,
+        }) => Ok(GameAction::DeclareAttackers {
+            attacks: assignments
+                .iter()
+                .map(|assignment| {
+                    Ok((
+                        parse_object_id(&assignment.attacker_id)?,
+                        parse_attack_target_id(&assignment.target_id)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            bands: Vec::new(),
+        }),
+        UpstreamPromptOutput::ChooseBlockers(ChooseBlockersOutput::DeclareBlockers {
+            assignments,
+        }) => Ok(GameAction::DeclareBlockers {
+            assignments: assignments
+                .iter()
+                .map(|assignment| {
+                    Ok((
+                        parse_object_id(&assignment.blocker_id)?,
+                        parse_object_id(&assignment.attacker_id)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        }),
+        UpstreamPromptOutput::ChooseBoardTargets(ChooseBoardTargetsOutput::BoardTargets {
+            chosen,
+        }) => Ok(GameAction::SelectTargets {
+            targets: chosen
+                .iter()
+                .map(target_ref_from_dto)
+                .collect::<Result<Vec<_>>>()?,
+        }),
+        UpstreamPromptOutput::ChooseNumber(ChooseNumberOutput::NumberDecision {
+            chosen_number,
+        }) => {
             match chosen_number {
                 // CR 107.3 + CR 107.1b: X is a value its controller chooses, and
                 // a negative number can never be chosen — so a declined or
                 // negative answer is not a legal X.
-                Some(value) if value >= 0 => Ok(GameAction::ChooseX {
-                    value: value as u32,
-                }),
+                Some(value) if value >= 0 => match &state.waiting_for {
+                    WaitingFor::ChooseXValue { .. } => Ok(GameAction::ChooseX {
+                        value: value as u32,
+                    }),
+                    // Every other numeric pause reaches the client through the
+                    // projection, and its answering action is the engine's to
+                    // name — `ChooseX` is specific to X, not to numbers.
+                    _ => interaction_number_action(state, context.deciding_player, value as u32),
+                },
                 _ => Err(AdapterError::IllegalResponseForPrompt {
                     response_kind: "numberDecision",
                 }),
             }
         }
-        PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
-            chosen_indices,
-        }) => Ok(GameAction::SelectModes {
-            indices: chosen_indices,
-        }),
-        PromptOutput::ChooseColor(ChooseColorOutput::ColorDecision { chosen_colors }) => {
+        UpstreamPromptOutput::ChooseFromSelection(
+            ChooseFromSelectionOutput::SelectionDecision { chosen_indices },
+        ) => match &state.waiting_for {
+            // The two bespoke producers of this family. Their answer is a list
+            // of mode indices — one response covering several picks — which is
+            // not the one-choice-per-answer shape the projection returns, so it
+            // cannot route through `ExactChoices`.
+            WaitingFor::ModeChoice { .. } | WaitingFor::AbilityModeChoice { .. } => {
+                Ok(GameAction::SelectModes {
+                    indices: chosen_indices,
+                })
+            }
+            _ => interaction_selection_action(state, context.deciding_player, &chosen_indices),
+        },
+        UpstreamPromptOutput::ChooseColor(ChooseColorOutput::ColorDecision { chosen_colors }) => {
             translate_color_decision(&state.waiting_for, chosen_colors)
         }
-        PromptOutput::ChooseCombatDamageAssignment(
+        UpstreamPromptOutput::ChooseCombatDamageAssignment(
             ChooseCombatDamageAssignmentOutput::CombatDamageAssignmentDecision { assignments },
         ) => Ok(GameAction::AssignCombatDamage {
             mode: Default::default(),
@@ -2275,7 +2363,7 @@ pub fn translate_response(
             trample_damage: 0,
             controller_damage: 0,
         }),
-        PromptOutput::Scry(ScryOutput::ScryDecision { zone_card_ids }) => {
+        UpstreamPromptOutput::Scry(ScryOutput::ScryDecision { zone_card_ids }) => {
             let bottom = zone_card_ids.get(1).cloned().unwrap_or_default();
             Ok(GameAction::SelectCards {
                 cards: parse_object_ids(&bottom)?,
@@ -2286,7 +2374,7 @@ pub fn translate_response(
         // `output_family_matches_waiting` has already established that the
         // pairing is legal, so any other state here is unreachable rather than
         // merely unhandled.
-        PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value }) => {
+        UpstreamPromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value }) => {
             match &state.waiting_for {
                 // CR 603.12: accept or decline the optional trigger.
                 WaitingFor::OptionalEffectChoice { .. } | WaitingFor::OpponentMayChoice { .. } => {
@@ -2321,16 +2409,28 @@ pub fn translate_response(
                 }),
             }
         }
-        // CR 701.8a: the chosen cards are the ones discarded.
-        PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision { chosen_card_ids }) => {
-            Ok(GameAction::SelectCards {
-                cards: parse_object_ids(&chosen_card_ids)?,
-            })
+        UpstreamPromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision {
+            chosen_card_ids,
+        }) => {
+            match &state.waiting_for {
+                // CR 701.9b: an effect that causes a discard lets the affected
+                // player choose which cards, so the chosen cards are exactly the
+                // discarded ones. The one bespoke producer of this family, whose
+                // answer is already the card list the engine's action wants.
+                WaitingFor::DiscardChoice { .. } => Ok(GameAction::SelectCards {
+                    cards: parse_object_ids(&chosen_card_ids)?,
+                }),
+                // Every other card selection reaches the client through the
+                // projection, and its answering action is the engine's to name —
+                // `SelectCards` is one of several the `Select` schema
+                // materializes into.
+                _ => interaction_cards_action(state, context.deciding_player, &chosen_card_ids),
+            }
         }
         // CR 603.3b: `ReorderItem::id` is the trigger's index in the prompt's
         // list (see the `OrderTriggers` prompt arm), so the answer parses back
         // into `GameAction::OrderTriggers { order: Vec<usize> }` directly.
-        PromptOutput::Reorder(ReorderOutput::ReorderDecision { ordered_ids }) => {
+        UpstreamPromptOutput::Reorder(ReorderOutput::ReorderDecision { ordered_ids }) => {
             let order = ordered_ids
                 .iter()
                 .map(|id| {
@@ -2345,15 +2445,26 @@ pub fn translate_response(
         // Families the adapter models on the wire but cannot yet drive into the
         // engine. `output_family_matches_waiting` already rejects these, so this
         // arm is the belt-and-braces leg of the same contract.
-        PromptOutput::ChooseDamageAssignmentOrder(_)
-        | PromptOutput::RevealCards(_)
-        | PromptOutput::DiceRolled(_) => Err(AdapterError::IllegalResponseForPrompt {
+        UpstreamPromptOutput::ChooseDamageAssignmentOrder(_)
+        | UpstreamPromptOutput::RevealCards(_)
+        | UpstreamPromptOutput::DiceRolled(_) => Err(AdapterError::IllegalResponseForPrompt {
             response_kind: "unsupportedOutput",
         }),
     }
 }
 
-pub fn convert_available_action(action: &GameAction, id: String) -> AvailableActionConversion {
+/// Convert one engine action into the protocol action that advertises it.
+///
+/// `state` is the snapshot the action was drawn from
+/// ([`PreparedManabrewSnapshot::state`]). It is read, never interpreted: the
+/// only questions asked of it are "what is this object's name" and "which
+/// ability slot holds this object's ninjutsu marker", both of which are lookups
+/// the engine already answers.
+pub fn convert_available_action(
+    state: &GameState,
+    action: &GameAction,
+    id: String,
+) -> AvailableActionConversion {
     match action {
         GameAction::CastSpell { object_id, .. } => AvailableActionConversion::Available(
             cast_available_action(id, *object_id, PlayCardMode::Normal, "Cast"),
@@ -2429,6 +2540,7 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
                 ability_index: *ability_index,
                 description: String::new(),
                 is_mana_ability: false,
+                is_class_level_up: None,
                 cost: None,
                 produced_mana: None,
             }),
@@ -2441,6 +2553,7 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
                     ability_index: selection.ability_index.unwrap_or(0),
                     description: "Activate mana ability".to_string(),
                     is_mana_ability: true,
+                    is_class_level_up: None,
                     cost: None,
                     produced_mana: None,
                 }),
@@ -2566,11 +2679,42 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::KeepAllCopyTargets | GameAction::RetargetSpell { .. } => {
             AvailableActionConversion::Unsupported("local.retarget-unsupported")
         }
-        // Ninjutsu stays unsupported: there is no `Ninjutsu` among the thirty
-        // `AlternativeCostKind`s.
-        GameAction::ActivateNinjutsu { .. } => {
-            AvailableActionConversion::Unsupported("local.ninjutsu-cast-unsupported")
-        }
+        // CR 702.49a: ninjutsu is an ACTIVATED ABILITY, not an alternative cost,
+        // so its absence from `AlternativeCostKind` says nothing — the home is
+        // `ActivateAbility`, which already exists. The engine agrees: the
+        // keyword is synthesized as an `AbilityKind::Activated` carrying
+        // `AbilityCost::NinjutsuFamily`, and the engine enumerates one
+        // `ActivateNinjutsu` per (ninjutsu card, returned attacker) pair
+        // (CR 702.49d covers the commander variant with the same action), so
+        // this arm converts pairs one-for-one rather than fanning out.
+        //
+        // `ability_index` is descriptive metadata only: the answer round-trips
+        // by echoed action id through `advertised_action_by_id`, which hands
+        // back the original `ActivateNinjutsu`. That matters, because the
+        // engine explicitly forbids driving the marker slot through
+        // `GameAction::ActivateAbility` — its `NinjutsuFamily` cost arm is a
+        // no-op in `pay_ability_cost`, so that route would stack the ability
+        // without paying mana.
+        GameAction::ActivateNinjutsu {
+            ninjutsu_object_id,
+            creature_to_return,
+        } => AvailableActionConversion::Available(AvailableAction {
+            id,
+            kind: AvailableActionKind::ActivateAbility(ActivatableAbilityInfo {
+                card_id: encode_object_id(*ninjutsu_object_id),
+                ability_index: ninjutsu_marker_ability_index(state, *ninjutsu_object_id),
+                // CR 702.49c: the returned creature fixes what the ninja enters
+                // attacking, so naming it is what distinguishes the pairs.
+                description: format!(
+                    "Ninjutsu — return {}",
+                    object_name(state, *creature_to_return)
+                ),
+                is_mana_ability: false,
+                is_class_level_up: None,
+                cost: None,
+                produced_mana: None,
+            }),
+        }),
         GameAction::RespondToSpliceOffer { .. } => {
             AvailableActionConversion::Unsupported("local.splice-unsupported")
         }
@@ -2619,6 +2763,10 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::DeclareCompanion { .. } | GameAction::CompanionToHand => {
             AvailableActionConversion::Unsupported("local.companion-unsupported")
         }
+        // CR 116.2c: the pay-to-end special action has no Manabrew counterpart.
+        GameAction::EndContinuousEffect { .. } => {
+            AvailableActionConversion::Unsupported("local.end-continuous-effect-unsupported")
+        }
         GameAction::DiscoverChoice { .. }
         | GameAction::GraveyardPaidCastChoice { .. }
         | GameAction::CascadeChoice { .. }
@@ -2661,9 +2809,11 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
             AvailableActionConversion::Unsupported("local.learn-unsupported")
         }
         GameAction::ChooseX { .. } => AvailableActionConversion::Skip,
-        GameAction::SubmitPhyrexianChoices { .. } => {
-            AvailableActionConversion::Unsupported("local.phyrexian-payment-unsupported")
-        }
+        // CR 107.4f + CR 601.2h: a Phyrexian shard is a payment move, not a
+        // priority action — it is advertised through `PaymentActionKind::PayLife`
+        // while the payment prompt is open. Same contract as `TapForConvoke`.
+        // See `convert_payment_action` / `payment_actions`.
+        GameAction::SubmitPhyrexianChoices { .. } => AvailableActionConversion::Skip,
         GameAction::ChooseManaColor { .. } | GameAction::PayManaAbilityMana { .. } => {
             AvailableActionConversion::Skip
         }
@@ -2755,10 +2905,16 @@ fn player_index(state: &GameState, player_id: PlayerId) -> Result<usize> {
 /// CR 500–514: the engine's twelve `Phase`s onto the protocol's thirteen
 /// `StepKind`s.
 ///
-/// `StepKind::CombatFirstStrikeDamage` is the unmatched thirteenth: CR 510.4
-/// creates a first-strike damage step only when a first/double strike creature
-/// is in combat, and the engine models the whole of CR 510 as one
-/// `Phase::CombatDamage`. It is therefore unproducible here.
+/// `StepKind::CombatFirstStrikeDamage` is the unmatched thirteenth, but not
+/// because the engine leaves CR 510.4 unmodelled. It models it as a second
+/// entry into `Phase::CombatDamage`, discriminated by
+/// `CombatState::first_strike_done` — which is exactly what CR 510.4
+/// describes ("the phase gets a second combat damage step").
+///
+/// This signature is what makes the variant unproducible: a `Phase` alone
+/// cannot carry that flag, and deciding whether a first-strike step is
+/// *pending* additionally needs the private participant set. Computing it
+/// here would put game logic in a serialization boundary.
 fn phase_step(phase: Phase) -> StepKind {
     match phase {
         Phase::Untap => StepKind::Untap,
@@ -3052,6 +3208,18 @@ fn build_card_dto<L: CardTextLookup>(
         base_toughness: board_state_visible
             .then_some(object.base_toughness)
             .flatten(),
+        // The engine derives this from the Saga's own trigger definitions.
+        final_chapter: identity_visible
+            .then(|| object.final_chapter_number().map(|chapter| chapter as i32))
+            .flatten(),
+        // The current Class level is an engine-owned object characteristic.
+        class_level: identity_visible
+            .then(|| object.class_level.map(i32::from))
+            .flatten(),
+        // The engine does not expose the printable Class/Saga sections; the
+        // capability registry records both omissions.
+        class_levels: Vec::new(),
+        saga_chapters: Vec::new(),
         text,
         controller_id: encode_player_id(object.controller),
         owner_id: encode_player_id(object.owner),
@@ -3265,6 +3433,143 @@ fn target_refs(targets: &[TargetRef]) -> Vec<TargetRefDto> {
     targets.iter().filter_map(target_ref_dto).collect()
 }
 
+/// The engine's projected intent for the viewer's single open target
+/// opportunity, or `Choose` if there is none.
+///
+/// Read from the interaction projection rather than from the slot's
+/// `effect_kind` directly: mapping an `EffectKind` to a disposition is game
+/// semantics, which belongs in `engine::game::interaction::target_intent`, not
+/// in this adapter. The adapter's job is only to rename the engine's answer
+/// into the wire vocabulary.
+fn projected_target_intent(prepared: &PreparedManabrewSnapshot) -> InteractionIntentCode {
+    prepared
+        .interaction
+        .opportunities
+        .iter()
+        .find_map(|opportunity| {
+            opportunity.surfaces.iter().find_map(|surface| {
+                if let InteractionPresentationSurface::Selection { intent, .. } = surface {
+                    Some(*intent)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or(InteractionIntentCode::Choose)
+}
+
+/// Rename an engine intent into the wire's `TargetingIntent` vocabulary.
+///
+/// Every arm below is a pure rename of a value the engine computed. The two
+/// lossy arms are called out because the protocol forces a choice the engine
+/// deliberately does not make:
+///
+/// * `Modify` — a P/T change whose direction is genuinely not knowable at
+///   announcement (a dynamic X / count-based magnitude, or an opposing
+///   "+2/-2"). `TargetingIntent` has only `Buff` and `Debuff`, so this resolves
+///   to the ADVERSE member on the asymmetric-loss argument the arm below
+///   states. Declared as `local.targeting-intent-neutral-inexpressible`.
+///   Directional modifications do NOT arrive here — the engine resolves those
+///   to `Buff`/`Debuff` from the direction stamped on the slot at
+///   construction, so this arm now serves only the ~16% of targeted pumps
+///   whose direction is genuinely unknowable.
+/// * `Choose` — a genuinely neutral pick. `TargetingIntent` has no neutral
+///   member, so this falls back to `Hostile`. That is a LEAST-WRONG choice and
+///   not a safe one: an unlabelled pick still reads as hostile, which is the
+///   residue of the original defect rather than a fix for it. Same declaration.
+fn targeting_intent_dto(intent: InteractionIntentCode) -> TargetingIntent {
+    match intent {
+        InteractionIntentCode::Damage => TargetingIntent::Damage,
+        InteractionIntentCode::Destroy => TargetingIntent::Destroy,
+        InteractionIntentCode::Sacrifice => TargetingIntent::Sacrifice,
+        InteractionIntentCode::Exile => TargetingIntent::Exile,
+        InteractionIntentCode::Return => TargetingIntent::Bounce,
+        InteractionIntentCode::Mill => TargetingIntent::Mill,
+        InteractionIntentCode::Discard => TargetingIntent::Discard,
+        InteractionIntentCode::Counter => TargetingIntent::Counter,
+        InteractionIntentCode::Tap => TargetingIntent::Tap,
+        InteractionIntentCode::Untap => TargetingIntent::Untap,
+        InteractionIntentCode::Copy => TargetingIntent::Copy,
+        InteractionIntentCode::GainLife => TargetingIntent::Heal,
+        InteractionIntentCode::LoseLife => TargetingIntent::LoseLife,
+        InteractionIntentCode::Reveal => TargetingIntent::Reveal,
+        InteractionIntentCode::Draw => TargetingIntent::Draw,
+        InteractionIntentCode::GainControl => TargetingIntent::GainControl,
+        InteractionIntentCode::Fight => TargetingIntent::Fight,
+        InteractionIntentCode::Attach => TargetingIntent::Attach,
+        InteractionIntentCode::Attack => TargetingIntent::Attack,
+        InteractionIntentCode::Block => TargetingIntent::Block,
+        // CR 701.19: a regeneration shield only ever helps its target, and
+        // `Friendly` is the protocol's disposition member for exactly that.
+        InteractionIntentCode::Regenerate => TargetingIntent::Friendly,
+        // Lossy, declared: see the doc comment above. `EffectKind` is a unit tag
+        // and `Effect::Pump` is the same variant for "+3/+3" and "-4/-4" (the
+        // sign lives in `PtValue` and may be dynamic), so this bucket cannot
+        // tell a combat trick from removal. It resolves to the ADVERSE member
+        // for the same asymmetric-loss reason `targeting_is_hostile` gives for
+        // the neutral bucket: a caution affordance on a genuine buff is
+        // recoverable, whereas marking "target creature gets -4/-4" as harmless
+        // is not. Mapping to `Buff` would be the more frequently correct guess
+        // and the one unrecoverable kind of wrong.
+        InteractionIntentCode::Modify => TargetingIntent::Debuff,
+        // CR 613.4: direction IS known for these — read off `Effect::Pump`'s
+        // `PtValue` payload at slot construction — so they are exact renames,
+        // not guesses. This is what shrinks the lossy arm above from the whole
+        // pump family to just its unknowable tail: 1,079 buff and 324 debuff
+        // targeted links in the card corpus now resolve correctly, where
+        // before every one of them took a single guess.
+        InteractionIntentCode::Buff => TargetingIntent::Buff,
+        InteractionIntentCode::Debuff => TargetingIntent::Debuff,
+        // These never reach a CR 115.1 target announcement — they belong to the
+        // board-selection and cost-payment models — but the match stays
+        // exhaustive so a new intent code cannot silently fall into `Hostile`.
+        InteractionIntentCode::Choose
+        | InteractionIntentCode::Keep
+        | InteractionIntentCode::Crew
+        | InteractionIntentCode::Saddle
+        | InteractionIntentCode::Station
+        | InteractionIntentCode::RingBearer
+        | InteractionIntentCode::Blight
+        | InteractionIntentCode::Pay => TargetingIntent::Hostile,
+    }
+}
+
+/// CR 115.1: whether the announcement is adverse to the thing being chosen.
+///
+/// Derived from the same engine intent that fills `intent`, so the two fields
+/// agree instead of contradicting each other. The neutral bucket resolves to
+/// `true` only because `Choose` was already renamed to `Hostile` one step
+/// earlier — a least-wrong protocol fallback, NOT a safety property.
+fn targeting_is_hostile(intent: TargetingIntent) -> bool {
+    match intent {
+        TargetingIntent::Damage
+        | TargetingIntent::Destroy
+        | TargetingIntent::Sacrifice
+        | TargetingIntent::Exile
+        | TargetingIntent::Bounce
+        | TargetingIntent::Mill
+        | TargetingIntent::Discard
+        | TargetingIntent::Counter
+        | TargetingIntent::Tap
+        | TargetingIntent::Debuff
+        | TargetingIntent::LoseLife
+        | TargetingIntent::GainControl
+        | TargetingIntent::Fight
+        | TargetingIntent::Attack
+        | TargetingIntent::Block
+        | TargetingIntent::Hostile => true,
+        TargetingIntent::Untap
+        | TargetingIntent::Copy
+        | TargetingIntent::Buff
+        | TargetingIntent::Heal
+        | TargetingIntent::Reveal
+        | TargetingIntent::Draw
+        | TargetingIntent::Fetch
+        | TargetingIntent::Attach
+        | TargetingIntent::Friendly => false,
+    }
+}
+
 fn combat_assignments(state: &GameState) -> Vec<CombatAssignmentDto> {
     state
         .combat
@@ -3316,16 +3621,47 @@ fn attack_target_id(state: &GameState, object_id: ObjectId) -> Option<String> {
         })
 }
 
-fn available_actions(actions: &[GameAction]) -> Vec<AvailableAction> {
+/// Display name for an object, read straight from the snapshot.
+///
+/// An id the viewer-filtered state does not carry falls back to the wire id
+/// rather than to a guess, so a description never invents a card.
+fn object_name(state: &GameState, object_id: ObjectId) -> String {
+    state
+        .objects
+        .get(&object_id)
+        .map(|object| object.name.clone())
+        .unwrap_or_else(|| encode_object_id(object_id))
+}
+
+/// CR 702.49a: index of the object's synthesized ninjutsu-family marker ability.
+///
+/// The predicate is the engine's (`game::keywords::is_ninjutsu_family_marker_ability`),
+/// not a local re-derivation. `0` when the object is out of the viewer's
+/// filtered state: the field is descriptive only — see the `ActivateNinjutsu`
+/// arm of [`convert_available_action`] for why the round-trip does not use it.
+fn ninjutsu_marker_ability_index(state: &GameState, object_id: ObjectId) -> usize {
+    state
+        .objects
+        .get(&object_id)
+        .and_then(|object| {
+            object
+                .abilities
+                .iter()
+                .position(engine::game::keywords::is_ninjutsu_family_marker_ability)
+        })
+        .unwrap_or(0)
+}
+
+fn available_actions(state: &GameState, actions: &[GameAction]) -> Vec<AvailableAction> {
     actions
         .iter()
         .enumerate()
-        .filter_map(
-            |(index, action)| match convert_available_action(action, action_id(index)) {
+        .filter_map(|(index, action)| {
+            match convert_available_action(state, action, action_id(index)) {
                 AvailableActionConversion::Available(action) => Some(action),
                 AvailableActionConversion::Skip | AvailableActionConversion::Unsupported(_) => None,
-            },
-        )
+            }
+        })
         .collect()
 }
 
@@ -3344,7 +3680,11 @@ fn action_id(index: usize) -> String {
     format!("action-{index}")
 }
 
-fn advertised_action_by_id(context: &PromptContext, action_id: &str) -> Result<GameAction> {
+fn advertised_action_by_id(
+    context: &PromptContext,
+    state: &GameState,
+    action_id: &str,
+) -> Result<GameAction> {
     let entry = context
         .action_table
         .iter()
@@ -3353,7 +3693,7 @@ fn advertised_action_by_id(context: &PromptContext, action_id: &str) -> Result<G
             action_id: action_id.to_string(),
         })?;
 
-    match convert_available_action(&entry.action, entry.id.clone()) {
+    match convert_available_action(state, &entry.action, entry.id.clone()) {
         AvailableActionConversion::Available(_) => Ok(entry.action.clone()),
         AvailableActionConversion::Skip => Err(AdapterError::IllegalResponseForPrompt {
             response_kind: "act",
@@ -3389,16 +3729,40 @@ pub enum PaymentActionConversion {
 /// Convert one engine action into the payment move it represents.
 ///
 /// The mana-payment analogue of [`convert_available_action`], for the actions
-/// the engine offers while `WaitingFor::ManaPayment` is open.
+/// the engine offers while `WaitingFor::ManaPayment` or
+/// `WaitingFor::PhyrexianPayment` is open.
 ///
-/// **`PaymentActionKind::PayLife` is never produced.** The engine has no
-/// pay-life action at all (`types/actions.rs` has only
-/// `SubmitLifeRedistribution` and the debug `SetLife`), so synthesizing one
-/// would advertise an id the engine then rejects — violating the
-/// `UnknownActionId` obligation. Likewise `UseResource` for Delve or Improvise,
-/// and every `ReleaseResource` form: no engine action exists for any of them.
+/// `UseResource` for Delve or Improvise and every `ReleaseResource` form stay
+/// unproduced: no engine action exists for any of them, so advertising one
+/// would hand the client an id the engine then rejects.
 pub fn convert_payment_action(action: &GameAction, id: String) -> PaymentActionConversion {
     match action {
+        // CR 107.4f: a Phyrexian shard is payable with one mana of its color or
+        // with 2 life, so a route's life price is exactly `2 × PayLife shards`.
+        // The engine enumerates the routes (`WaitingFor::PhyrexianPayment` legal
+        // actions are one `SubmitPhyrexianChoices` per combination), so each
+        // advertised entry is a complete, already-legal answer — the adapter
+        // never assembles a route of its own. A single pending shard therefore
+        // advertises exactly one `PayLife { amount: 2 }`.
+        //
+        // The all-mana route is skipped rather than advertised as
+        // `PayLife { amount: 0 }`: paying no life is not a pay-life move, and
+        // `PaymentActionKind::PayLife` carries no other discriminator.
+        GameAction::SubmitPhyrexianChoices { choices } => {
+            let amount: u32 = choices
+                .iter()
+                .filter(|choice| matches!(choice, ShardChoice::PayLife))
+                .map(|_| 2)
+                .sum();
+            if amount == 0 {
+                PaymentActionConversion::Skip
+            } else {
+                PaymentActionConversion::Available(PaymentAction {
+                    id,
+                    kind: PaymentActionKind::PayLife { amount },
+                })
+            }
+        }
         GameAction::TapLandForMana { selection } => {
             PaymentActionConversion::Available(PaymentAction {
                 id,
@@ -3407,6 +3771,7 @@ pub fn convert_payment_action(action: &GameAction, id: String) -> PaymentActionC
                     ability_index: selection.ability_index.unwrap_or(0),
                     description: "Activate mana ability".to_string(),
                     is_mana_ability: true,
+                    is_class_level_up: None,
                     cost: None,
                     produced_mana: None,
                 }),
@@ -3431,6 +3796,7 @@ pub fn convert_payment_action(action: &GameAction, id: String) -> PaymentActionC
                 ability_index: *ability_index,
                 description: String::new(),
                 is_mana_ability: true,
+                is_class_level_up: None,
                 cost: None,
                 produced_mana: None,
             }),
@@ -3579,13 +3945,32 @@ fn output_family_matches_waiting(
     state: &GameState,
     viewer: PlayerId,
 ) -> bool {
+    match output {
+        PromptOutput::Mulligan(_) => match &state.waiting_for {
+            WaitingFor::MulliganDecision { pending, .. } => {
+                pending_entry_for_viewer(state, viewer, pending)
+                    .is_ok_and(|entry| matches!(entry.phase, MulliganDecisionPhase::Declare))
+            }
+            _ => false,
+        },
+        PromptOutput::Upstream(output) => output_family_matches_upstream(output, state, viewer),
+    }
+}
+
+fn output_family_matches_upstream(
+    output: &UpstreamPromptOutput,
+    state: &GameState,
+    viewer: PlayerId,
+) -> bool {
     let waiting_for = &state.waiting_for;
     match output {
-        PromptOutput::ChooseAction(_) => matches!(waiting_for, WaitingFor::Priority { .. }),
-        PromptOutput::PayManaCost(_) => matches!(waiting_for, WaitingFor::ManaPayment { .. }),
-        // A declare-point response (keep/mulligan or use Serum Powder) is only
-        // legal while the viewer's own entry is in the `Declare` phase.
-        PromptOutput::Mulligan(_) => match waiting_for {
+        UpstreamPromptOutput::ChooseAction(_) => matches!(waiting_for, WaitingFor::Priority { .. }),
+        UpstreamPromptOutput::PayManaCost(_) => {
+            matches!(waiting_for, WaitingFor::ManaPayment { .. })
+        }
+        // A declare-point response (keep or mulligan) is only legal while the
+        // viewer's own entry is in the `Declare` phase.
+        UpstreamPromptOutput::Mulligan(_) => match waiting_for {
             WaitingFor::MulliganDecision { pending, .. } => {
                 pending_entry_for_viewer(state, viewer, pending)
                     .is_ok_and(|entry| matches!(entry.phase, MulliganDecisionPhase::Declare))
@@ -3595,7 +3980,7 @@ fn output_family_matches_waiting(
         // A bottom-cards selection is legal while the viewer's own entry is in
         // the `BottomCards` sub-phase, or during the unrelated
         // `OpeningHandBottomCards` phase.
-        PromptOutput::MulliganPutBack(_) => match waiting_for {
+        UpstreamPromptOutput::MulliganPutBack(_) => match waiting_for {
             WaitingFor::MulliganDecision { pending, .. } => {
                 pending_entry_for_viewer(state, viewer, pending).is_ok_and(|entry| {
                     matches!(entry.phase, MulliganDecisionPhase::BottomCards { .. })
@@ -3606,32 +3991,51 @@ fn output_family_matches_waiting(
             }
             _ => false,
         },
-        PromptOutput::ChooseAttackers(_) => {
+        UpstreamPromptOutput::ChooseAttackers(_) => {
             matches!(waiting_for, WaitingFor::DeclareAttackers { .. })
         }
-        PromptOutput::ChooseBlockers(_) => {
+        UpstreamPromptOutput::ChooseBlockers(_) => {
             matches!(waiting_for, WaitingFor::DeclareBlockers { .. })
         }
-        PromptOutput::ChooseBoardTargets(_) => matches!(
+        UpstreamPromptOutput::ChooseBoardTargets(_) => matches!(
             waiting_for,
             WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
         ),
-        PromptOutput::ChooseNumber(_) => matches!(waiting_for, WaitingFor::ChooseXValue { .. }),
-        PromptOutput::ChooseFromSelection(_) => matches!(
-            waiting_for,
-            WaitingFor::ModeChoice { .. } | WaitingFor::AbilityModeChoice { .. }
-        ),
-        PromptOutput::ChooseColor(_) => matches!(waiting_for, WaitingFor::ChooseManaColor { .. }),
-        PromptOutput::ChooseCombatDamageAssignment(_) => {
+        // Like `ChooseFromSelection`, reachable both bespoke (X, CR 107.3) and
+        // generically, so the open-prompt check carries it rather than a list.
+        UpstreamPromptOutput::ChooseNumber(_) => {
+            matches!(waiting_for, WaitingFor::ChooseXValue { .. })
+                || open_prompt_is_generic_number(state, viewer)
+        }
+        // The one family with no fixed `WaitingFor` list, because it is now
+        // reachable two ways: the two bespoke modal arms, and the generic
+        // projection path that serves any state the engine renders as a finite
+        // choice list. Enumerating the latter would reintroduce exactly the
+        // per-variant bookkeeping the projection removes, and would rot the
+        // moment the engine reclassifies a state.
+        //
+        // So ask the real question — would the prompt currently open be a
+        // `ChooseFromSelection`? — by consulting the builder itself. It cannot
+        // drift from the builder because it *is* the builder. Checking the
+        // projection alone would be wrong: `WaitingFor::Priority` also projects
+        // a finite list, and would then accept a `chooseFromSelection` answer to
+        // a `chooseAction` prompt.
+        UpstreamPromptOutput::ChooseFromSelection(_) => {
+            open_prompt_is_generic_selection(state, viewer)
+        }
+        UpstreamPromptOutput::ChooseColor(_) => {
+            matches!(waiting_for, WaitingFor::ChooseManaColor { .. })
+        }
+        UpstreamPromptOutput::ChooseCombatDamageAssignment(_) => {
             matches!(waiting_for, WaitingFor::AssignCombatDamage { .. })
         }
         // CR 701.42a: surveil shares scry's partition shape, differing only in
         // the second destination carried by `ScryInput::zones`.
-        PromptOutput::Scry(_) => matches!(
+        UpstreamPromptOutput::Scry(_) => matches!(
             waiting_for,
             WaitingFor::ScryChoice { .. } | WaitingFor::SurveilChoice { .. }
         ),
-        PromptOutput::ChooseBoolean(_) => matches!(
+        UpstreamPromptOutput::ChooseBoolean(_) => matches!(
             waiting_for,
             WaitingFor::OptionalEffectChoice { .. }
                 | WaitingFor::OpponentMayChoice { .. }
@@ -3639,43 +4043,99 @@ fn output_family_matches_waiting(
                 | WaitingFor::ExertChoice { .. }
                 | WaitingFor::UnlessPayment { .. }
         ),
-        PromptOutput::ChooseCards(_) => matches!(waiting_for, WaitingFor::DiscardChoice { .. }),
-        PromptOutput::Reorder(_) => matches!(waiting_for, WaitingFor::OrderTriggers { .. }),
+        // Reachable both bespoke (discard, CR 701.9b) and generically, so the
+        // bespoke match stays primary and the open-prompt check carries the rest
+        // rather than a list that would rot as the engine reclassifies states.
+        UpstreamPromptOutput::ChooseCards(_) => {
+            matches!(waiting_for, WaitingFor::DiscardChoice { .. })
+                || open_prompt_is_generic_cards(state, viewer)
+        }
+        UpstreamPromptOutput::Reorder(_) => matches!(waiting_for, WaitingFor::OrderTriggers { .. }),
         // Modeled on the wire, but this adapter emits no prompt that accepts
         // them, so no `WaitingFor` can legally receive one.
-        PromptOutput::ChooseDamageAssignmentOrder(_)
-        | PromptOutput::RevealCards(_)
-        | PromptOutput::DiceRolled(_) => false,
+        UpstreamPromptOutput::ChooseDamageAssignmentOrder(_)
+        | UpstreamPromptOutput::RevealCards(_)
+        | UpstreamPromptOutput::DiceRolled(_) => false,
     }
+}
+
+/// Rebuild the prompt currently open for this viewer, to ask which family it is.
+///
+/// The gate for every family the generic path can emit. Those families have no
+/// fixed `WaitingFor` list — the projection decides — and enumerating one would
+/// reintroduce exactly the per-variant bookkeeping the projection removes.
+/// Rebuilding cannot drift from the builder because it *is* the builder. One
+/// extra prompt build per answer is proportionate: this runs once per decision.
+///
+/// The lookup yields *empty* card text on purpose. Which family a state builds
+/// into never depends on the text, only on whether text can be had at all — so
+/// supplying an empty string keeps every state answerable here while leaking
+/// nothing. Yielding `None` instead would make `MissingCardText` swallow the
+/// card-bearing families (`ChooseCards`, mulligan, scry, reorder) into "no
+/// family", silently gating a legal answer to a card prompt as illegal.
+fn open_prompt(state: &GameState, viewer: PlayerId) -> Option<PromptInput> {
+    let prepared = prepare_snapshot(state, viewer, "").ok()?;
+    build_prompt_input(
+        &prepared,
+        &(|_: &GameObject| -> Option<String> { Some(String::new()) }),
+    )
+    .ok()
+}
+
+fn open_prompt_is_generic_selection(state: &GameState, viewer: PlayerId) -> bool {
+    matches!(
+        open_prompt(state, viewer),
+        Some(PromptInput::Upstream(
+            UpstreamPromptInput::ChooseFromSelection(_)
+        ))
+    )
+}
+
+fn open_prompt_is_generic_cards(state: &GameState, viewer: PlayerId) -> bool {
+    matches!(
+        open_prompt(state, viewer),
+        Some(PromptInput::Upstream(UpstreamPromptInput::ChooseCards(_)))
+    )
+}
+
+fn open_prompt_is_generic_number(state: &GameState, viewer: PlayerId) -> bool {
+    matches!(
+        open_prompt(state, viewer),
+        Some(PromptInput::Upstream(UpstreamPromptInput::ChooseNumber(_)))
+    )
 }
 
 /// The output's family tag, for diagnostics.
 fn output_family(output: &PromptOutput) -> &'static str {
     match output {
         PromptOutput::Mulligan(_) => "mulligan",
-        PromptOutput::MulliganPutBack(_) => "mulliganPutBack",
-        PromptOutput::ChooseAction(_) => "chooseAction",
-        PromptOutput::ChooseAttackers(_) => "chooseAttackers",
-        PromptOutput::ChooseBlockers(_) => "chooseBlockers",
-        PromptOutput::ChooseBoardTargets(_) => "chooseBoardTargets",
-        PromptOutput::ChooseBoolean(_) => "chooseBoolean",
-        PromptOutput::ChooseFromSelection(_) => "chooseFromSelection",
-        PromptOutput::RevealCards(_) => "revealCards",
-        PromptOutput::Scry(_) => "scry",
-        PromptOutput::ChooseColor(_) => "chooseColor",
-        PromptOutput::ChooseNumber(_) => "chooseNumber",
-        PromptOutput::ChooseDamageAssignmentOrder(_) => "chooseDamageAssignmentOrder",
-        PromptOutput::ChooseCombatDamageAssignment(_) => "chooseCombatDamageAssignment",
-        PromptOutput::PayManaCost(_) => "payManaCost",
-        PromptOutput::ChooseCards(_) => "chooseCards",
-        PromptOutput::Reorder(_) => "reorder",
-        PromptOutput::DiceRolled(_) => "diceRolled",
+        PromptOutput::Upstream(output) => match output {
+            UpstreamPromptOutput::Mulligan(_) => "mulligan",
+            UpstreamPromptOutput::MulliganPutBack(_) => "mulliganPutBack",
+            UpstreamPromptOutput::ChooseAction(_) => "chooseAction",
+            UpstreamPromptOutput::ChooseAttackers(_) => "chooseAttackers",
+            UpstreamPromptOutput::ChooseBlockers(_) => "chooseBlockers",
+            UpstreamPromptOutput::ChooseBoardTargets(_) => "chooseBoardTargets",
+            UpstreamPromptOutput::ChooseBoolean(_) => "chooseBoolean",
+            UpstreamPromptOutput::ChooseFromSelection(_) => "chooseFromSelection",
+            UpstreamPromptOutput::RevealCards(_) => "revealCards",
+            UpstreamPromptOutput::Scry(_) => "scry",
+            UpstreamPromptOutput::ChooseColor(_) => "chooseColor",
+            UpstreamPromptOutput::ChooseNumber(_) => "chooseNumber",
+            UpstreamPromptOutput::ChooseDamageAssignmentOrder(_) => "chooseDamageAssignmentOrder",
+            UpstreamPromptOutput::ChooseCombatDamageAssignment(_) => "chooseCombatDamageAssignment",
+            UpstreamPromptOutput::PayManaCost(_) => "payManaCost",
+            UpstreamPromptOutput::ChooseCards(_) => "chooseCards",
+            UpstreamPromptOutput::Reorder(_) => "reorder",
+            UpstreamPromptOutput::DiceRolled(_) => "diceRolled",
+        },
     }
 }
 
 fn translate_choose_action_output(
     output: ChooseActionOutput,
     context: &PromptContext,
+    state: &GameState,
 ) -> Result<GameAction> {
     match output {
         ChooseActionOutput::Pass {
@@ -3700,7 +4160,9 @@ fn translate_choose_action_output(
                 code: "local.room-relay-not-implemented",
             })
         }
-        ChooseActionOutput::Act { action_id } => advertised_action_by_id(context, &action_id),
+        ChooseActionOutput::Act { action_id } => {
+            advertised_action_by_id(context, state, &action_id)
+        }
     }
 }
 
@@ -4022,7 +4484,7 @@ fn mana_shard_symbol(shard: &ManaCostShard) -> &'static str {
 // variants would only add indirection to the payload the relay is about to
 // serialize anyway. Upstream makes the same call on its `AgentMessage`.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -4147,14 +4609,20 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    use engine::game::interaction::bind_interaction_authority;
     use engine::game::zones::create_object;
-    use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{
+        CounterTriggerFilter, Effect, EffectKind, ResolvedAbility, TargetFilter, TriggerDefinition,
+    };
     use engine::types::counter::CounterType;
     use engine::types::game_state::{
-        MulliganDecisionEntry, MulliganDecisionPhase, PendingCast, PendingMulliganAction,
-        TargetSelectionProgress, TargetSelectionSlot,
+        MulliganDecisionEntry, MulliganDecisionPhase, OutsideGameChoiceEntry,
+        OutsideGameChoiceSource, PayableResource, PendingCast, PendingMulliganAction, PtDirection,
+        TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
     };
     use engine::types::identifiers::CardId;
+    use engine::types::interaction::InteractionSessionId;
+    use engine::types::triggers::TriggerMode;
     use pretty_assertions::assert_eq;
 
     fn lookup(_: &GameObject) -> Option<String> {
@@ -4193,6 +4661,15 @@ mod tests {
         );
         state.waiting_for = waiting_for;
         prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap()
+    }
+
+    /// A snapshot with no objects, for conversions that read nothing from it.
+    ///
+    /// Named for what it asserts: any arm that needs a real board must build
+    /// one, so a test using this is declaring that its conversion is
+    /// state-independent.
+    fn empty_state() -> GameState {
+        GameState::new_two_player(7)
     }
 
     fn context_with(actions: Vec<GameAction>) -> PromptContext {
@@ -4251,7 +4728,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_the_pinned_crate_major() {
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 3);
     }
 
     // -------------------------------------------------------------- state ---
@@ -4366,10 +4843,8 @@ mod tests {
             };
             let until_json = serde_json::to_value(&until).unwrap();
             assert_eq!(until_json["phase"], expected);
-            assert_eq!(
-                serde_json::from_value::<PassUntil>(until_json).unwrap(),
-                until
-            );
+            let round_trip: PassUntil = serde_json::from_value(until_json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(round_trip).unwrap(), until_json);
         }
     }
 
@@ -4723,6 +5198,8 @@ mod tests {
                 legal_targets: vec![TargetRef::Player(PlayerId(1))],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::DealDamage,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4758,6 +5235,8 @@ mod tests {
                     ],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::DealDamage,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
@@ -4773,6 +5252,194 @@ mod tests {
         // v2 removed the flat `label` in favour of `presentation`.
         assert!(json["input"].get("label").is_none());
         assert_eq!(json["input"]["presentation"]["title"], "Choose target");
+    }
+
+    /// Build a `TargetSelection` board-target prompt whose single slot carries
+    /// `effect_kind`, driving the real engine projection
+    /// (`derive_viewer_interaction` -> `target_intent`) and the real adapter
+    /// mapping. Returns the serialized prompt.
+    fn board_target_prompt_for(effect_kind: EffectKind) -> serde_json::Value {
+        board_target_prompt_detailed(effect_kind, TargetEffectDetail::None)
+    }
+
+    /// As above, with the discriminating payload the effect kind cannot carry.
+    fn board_target_prompt_detailed(
+        effect_kind: EffectKind,
+        effect_detail: TargetEffectDetail,
+    ) -> serde_json::Value {
+        let mut state = GameState::new_two_player(7);
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let legal = vec![TargetRef::Object(target)];
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: PlayerId(0),
+            pending_cast: dummy_pending_cast(),
+            target_slots: vec![TargetSelectionSlot {
+                legal_targets: legal.clone(),
+                optional: false,
+                chooser: None,
+                effect_kind,
+                effect_detail,
+            }],
+            mode_labels: Vec::new(),
+            selection: TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets: legal,
+            },
+        };
+        // The intent rides the engine's interaction projection, which only
+        // produces opportunities once authority is bound. Without this the
+        // adapter sees no opportunity and falls back to neutral, which would
+        // make the assertions below pass for the wrong reason.
+        bind_interaction_authority(&mut state, InteractionSessionId("intent".to_string()))
+            .expect("valid interaction authority binding");
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        assert!(
+            !prepared.interaction.opportunities.is_empty(),
+            "reach guard: the viewer must actually own an open target opportunity, \
+             otherwise the intent assertions below are vacuous"
+        );
+        serde_json::to_value(build_prompt(&prepared, &lookup).unwrap()).unwrap()
+    }
+
+    /// CR 115.1: the defect this fixes — every target prompt used to be
+    /// advertised as `Hostile` with a contradicting `hostile: false`, so
+    /// targeting your own creature to regenerate it looked exactly like a kill
+    /// spell.
+    ///
+    /// Both halves of each pair flip if the derivation is reverted to the old
+    /// hardcoded `intent: TargetingIntent::Hostile, hostile: false`.
+    #[test]
+    fn a_damage_target_prompt_and_a_regenerate_target_prompt_carry_opposite_intents() {
+        // CR 120.1: damage is adverse to whatever is chosen.
+        let damage = board_target_prompt_for(EffectKind::DealDamage);
+        assert_eq!(damage["input"]["type"], "chooseBoardTargets");
+        assert_eq!(damage["input"]["intent"], "damage");
+        assert_eq!(damage["input"]["hostile"], true);
+
+        // CR 701.19: a regeneration shield only ever helps its target.
+        let regenerate = board_target_prompt_for(EffectKind::Regenerate);
+        assert_eq!(regenerate["input"]["intent"], "friendly");
+        assert_eq!(regenerate["input"]["hostile"], false);
+
+        assert_ne!(
+            damage["input"]["intent"], regenerate["input"]["intent"],
+            "a kill spell and a protective spell must not advertise the same intent"
+        );
+    }
+
+    /// The declared residue of `local.targeting-intent-neutral-inexpressible`.
+    ///
+    /// `EffectKind` is a unit tag, so `Effect::Pump` is the same variant for
+    /// "+3/+3" and "-3/-3"; the engine honestly projects `Modify`, and the
+    /// protocol — which has only `Buff`/`Debuff` and no neutral member — forces
+    /// a guess. It resolves to `Debuff`, the ADVERSE member, for the same
+    /// asymmetric-loss reason the neutral bucket does: `Buff` would be right
+    /// more often, since pump is more often positive, but it is the direction
+    /// whose error cannot be recovered — it marks "target creature gets -4/-4"
+    /// as harmless. Pinning it here means the lossy step is visible rather than
+    /// discovered later by a client.
+    #[test]
+    fn an_unsigned_pump_target_prompt_fails_cautious_as_debuff() {
+        let pump = board_target_prompt_for(EffectKind::Pump);
+        assert_eq!(pump["input"]["intent"], "debuff");
+        assert_eq!(
+            pump["input"]["hostile"], true,
+            "an unsigned modification must not claim to be harmless"
+        );
+
+        // The pair that makes "every prompt is Hostile" impossible to
+        // reintroduce: an unsigned modification and a burn spell are both
+        // adverse, so `hostile` agrees — but they must still be distinguishable,
+        // which is what a constant `intent` would destroy.
+        let damage = board_target_prompt_for(EffectKind::DealDamage);
+        assert_ne!(pump["input"]["intent"], damage["input"]["intent"]);
+
+        // A genuinely neutral pick (mutate carries `NoOp` — no `Effect` backs
+        // it) has no honest protocol value at all. It resolves to `Hostile`,
+        // which is a least-wrong fallback and not a fix: an unlabelled pick
+        // still reads as hostile.
+        let neutral = board_target_prompt_for(EffectKind::NoOp);
+        assert_eq!(neutral["input"]["intent"], "hostile");
+        assert_eq!(neutral["input"]["hostile"], true);
+    }
+
+    /// CR 613.4: a signed modification resolves to its true direction.
+    ///
+    /// This is the payoff of stamping the discriminating payload alongside the
+    /// kind. Before it, every `Effect::Pump` — 1,679 targeted links in the card
+    /// corpus — took one guess; 324 of them were targeted DEBUFFS being shown
+    /// under a single label with 1,079 buffs. Both halves below flip to the
+    /// lossy `Modify` arm if `TargetEffectDetail::Modification` is dropped.
+    #[test]
+    fn a_signed_pump_resolves_to_its_actual_direction() {
+        let buff = board_target_prompt_detailed(
+            EffectKind::Pump,
+            TargetEffectDetail::Modification(PtDirection::Increase),
+        );
+        assert_eq!(buff["input"]["intent"], "buff");
+        assert_eq!(
+            buff["input"]["hostile"], false,
+            "a combat trick on your own creature is not adverse"
+        );
+
+        let debuff = board_target_prompt_detailed(
+            EffectKind::Pump,
+            TargetEffectDetail::Modification(PtDirection::Decrease),
+        );
+        assert_eq!(debuff["input"]["intent"], "debuff");
+        assert_eq!(debuff["input"]["hostile"], true);
+
+        assert_ne!(
+            buff["input"]["intent"], debuff["input"]["intent"],
+            "+3/+3 and -3/-3 share one EffectKind; only the stamped direction \
+             separates them"
+        );
+        // And the unknowable tail still declines to claim a direction.
+        let unsigned = board_target_prompt_for(EffectKind::Pump);
+        assert_eq!(unsigned["input"]["intent"], "debuff");
+    }
+
+    /// CR 115.1: a zone-change target resolves by DESTINATION, reusing the
+    /// engine's existing `effect_zone_intent` rather than a second labeller.
+    ///
+    /// `EffectKind::ChangeZone` is the single largest targeting family (2,828
+    /// links) and its tag says only "a zone change happened". Exile and
+    /// return-to-hand are opposite dispositions under one kind.
+    #[test]
+    fn a_zone_change_target_resolves_by_destination() {
+        let exile = board_target_prompt_detailed(
+            EffectKind::ChangeZone,
+            TargetEffectDetail::Destination(Zone::Exile),
+        );
+        assert_eq!(exile["input"]["intent"], "exile");
+        assert_eq!(exile["input"]["hostile"], true);
+
+        let bounce = board_target_prompt_detailed(
+            EffectKind::ChangeZone,
+            TargetEffectDetail::Destination(Zone::Hand),
+        );
+        assert_eq!(bounce["input"]["intent"], "bounce");
+
+        assert_ne!(
+            exile["input"]["intent"], bounce["input"]["intent"],
+            "both are EffectKind::ChangeZone; only the stamped destination \
+             separates them"
+        );
+
+        // Destinations `effect_zone_intent` deliberately leaves unlabelled stay
+        // neutral rather than inventing a disposition.
+        let battlefield = board_target_prompt_detailed(
+            EffectKind::ChangeZone,
+            TargetEffectDetail::Destination(Zone::Battlefield),
+        );
+        assert_eq!(battlefield["input"]["intent"], "hostile");
     }
 
     /// Grounds the capability registry in behaviour rather than prose.
@@ -5040,6 +5707,689 @@ mod tests {
         ));
     }
 
+    /// The generic path: a waiting state with no bespoke arm is now prompted
+    /// from the engine's own projection instead of being refused.
+    ///
+    /// `TopOrBottomChoice` is chosen deliberately. It is one of the 85 variants
+    /// this adapter never names, and its projected choices differ only by a
+    /// `Value` surface — so this also pins that `choice_label` reads the
+    /// surfaces rather than falling back to the opaque choice id.
+    ///
+    /// Indices are compared by looking the label up rather than by assuming a
+    /// candidate order the engine never promised; the assertion that matters is
+    /// that the index the client echoes round-trips to the action that label
+    /// stands for.
+    #[test]
+    fn an_unmapped_waiting_state_prompts_from_the_interaction_projection() {
+        let mut state = GameState::new_two_player(7);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scried Card".to_string(),
+            Zone::Library,
+        );
+        state.waiting_for = WaitingFor::TopOrBottomChoice {
+            player: PlayerId(0),
+            object_id,
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("generic-path".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("an unmapped waiting state is served by the projection, not refused");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("a finite candidate list is ChooseFromSelection's shape, got {prompt:?}");
+        };
+        let labels = input
+            .options
+            .iter()
+            .map(|option| option.label.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            labels.iter().any(|label| label == "top")
+                && labels.iter().any(|label| label == "bottom"),
+            "the projection labels each choice from its Value surface, got {labels:?}"
+        );
+        assert_eq!((input.min_total, input.max_total), (1, 1));
+
+        let top_index = labels.iter().position(|label| label == "top").unwrap();
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices: vec![top_index],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("the echoed index resolves back through the engine");
+        assert_eq!(action, GameAction::ChooseTopOrBottom { top: true });
+    }
+
+    /// The `Select` half of the generic path: a subset choice, not a one-of.
+    ///
+    /// `DiscardToHandSize` (CR 514.1) is the clearest case — discard exactly
+    /// `count` of the cards in hand — so it pins the two things that distinguish
+    /// this from the `ExactChoices` path: the count bounds reach the prompt as
+    /// the family's own min/max instead of the hardcoded 1/1, and the answer must
+    /// go back as `InteractionResponse::Select`, since the engine rejects a
+    /// `Choose` against a `Select` schema as malformed.
+    ///
+    /// The family is `ChooseCards`, not `ChooseFromSelection`: an unordered
+    /// subset over a list of objects is a card selection, and the client is owed
+    /// the cards rather than three opaque labels.
+    #[test]
+    fn a_select_schema_carries_its_count_bounds_and_answers_as_a_subset() {
+        let mut state = GameState::new_two_player(7);
+        let cards = ["Discard A", "Discard B", "Discard C"]
+            .into_iter()
+            .map(|name| {
+                create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(0),
+                    name.to_string(),
+                    Zone::Hand,
+                )
+            })
+            .collect::<Vec<_>>();
+        state.waiting_for = WaitingFor::DiscardToHandSize {
+            player: PlayerId(0),
+            count: 2,
+            cards: cards.clone(),
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("select-path".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("a Select schema is served by the projection");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseCards(input)) = prompt else {
+            panic!("a subset choice over objects is ChooseCards, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min, input.max),
+            (2, 2),
+            "the engine's count bounds must survive, not the one-of path's 1/1"
+        );
+        assert_eq!(
+            input
+                .cards
+                .iter()
+                .map(|card| card.identity.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Discard A", "Discard B", "Discard C"],
+            "every hand card is a candidate, named — not a labelled option"
+        );
+
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision {
+                chosen_card_ids: vec![input.cards[0].id.clone(), input.cards[1].id.clone()],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("a two-card subset resolves back through the engine");
+        assert_eq!(
+            action,
+            GameAction::SelectCards {
+                cards: vec![cards[0], cards[1]],
+            },
+            "a discard subset answers with the engine-materialized SelectCards"
+        );
+    }
+
+    /// The card family is wired at all three sites, not just at the prompt.
+    ///
+    /// `ChooseRingBearer` (CR 701.54a) is chosen over a discard because its
+    /// answering action is *not* `SelectCards`: the bespoke discard arm, which
+    /// this family already had, would have answered it with the wrong action
+    /// entirely. So a green here means prompt construction, response
+    /// translation, and the gate all reached the generic path.
+    ///
+    /// The gate is exercised by construction: `translate_response` runs
+    /// `output_family_matches_waiting` first, and `ChooseRingBearer` is not in
+    /// the bespoke `matches!`, so without `open_prompt_is_generic_cards` this
+    /// legal answer is rejected as `IllegalResponseForPrompt` before any
+    /// translation runs.
+    #[test]
+    fn a_card_selection_prompts_as_cards_and_answers_the_engines_own_action() {
+        let mut state = GameState::new_two_player(7);
+        let candidates = ["Frodo Baggins", "Samwise Gamgee"]
+            .into_iter()
+            .map(|name| {
+                create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(0),
+                    name.to_string(),
+                    Zone::Battlefield,
+                )
+            })
+            .collect::<Vec<_>>();
+        state.waiting_for = WaitingFor::ChooseRingBearer {
+            player: PlayerId(0),
+            candidates: candidates.clone(),
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("ring-bearer".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("a Select schema over objects is served by the projection");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseCards(input)) = prompt else {
+            panic!("a non-targeting selection over objects is ChooseCards, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min, input.max),
+            (1, 1),
+            "CR 701.54a: the Ring tempts you, so choose one creature you control"
+        );
+        assert_eq!(
+            input
+                .cards
+                .iter()
+                .map(|card| (card.id.clone(), card.identity.name.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (encode_object_id(candidates[0]), "Frodo Baggins".to_string()),
+                (
+                    encode_object_id(candidates[1]),
+                    "Samwise Gamgee".to_string()
+                ),
+            ],
+            "the candidates reach the client as cards, keyed by the wire id the answer echoes"
+        );
+
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision {
+                chosen_card_ids: vec![encode_object_id(candidates[1])],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("the echoed card id resolves back through the engine");
+        assert_eq!(
+            action,
+            GameAction::ChooseRingBearer {
+                target: candidates[1],
+            },
+            "the engine names the action; the bespoke discard arm would have said SelectCards"
+        );
+    }
+
+    /// An unoffered card is refused, and the refusal is not vacuous.
+    ///
+    /// The positive leg proves the fixture reaches the generic card path at all
+    /// — without it, a rejection could equally mean the prompt never became a
+    /// `ChooseCards` in the first place.
+    #[test]
+    fn a_card_answer_naming_an_unoffered_card_is_refused() {
+        let mut state = GameState::new_two_player(7);
+        let offered = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Frodo Baggins".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gollum".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::ChooseRingBearer {
+            player: PlayerId(0),
+            candidates: vec![offered],
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("ring-guard".to_string()))
+            .expect("valid interaction authority binding");
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+
+        // Reach-guard: the offered card really does answer this prompt.
+        assert!(translate_response(
+            42,
+            PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision {
+                chosen_card_ids: vec![encode_object_id(offered)],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .is_ok());
+
+        assert!(matches!(
+            translate_response(
+                42,
+                PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision {
+                    chosen_card_ids: vec![encode_object_id(bystander)],
+                }),
+                &prepared.prompt_context(),
+                &state,
+            ),
+            Err(AdapterError::IllegalResponseForPrompt { .. })
+        ));
+    }
+
+    /// An ordered sequence over objects is **not** reclassified as cards.
+    ///
+    /// The schema leg of the classifier, isolated: `ProliferateChoice` (CR
+    /// 701.29a) projects every eligible permanent through the same
+    /// `Object`/`Candidate` surface a card selection uses, so the candidates
+    /// alone would pass. Only the schema keeps it out — widening
+    /// [`card_selection_candidates`] to accept `Sequence` turns this red.
+    ///
+    /// The bounds and candidate count are the reach-guard: a state that failed
+    /// to build at all would produce nothing to count.
+    #[test]
+    fn an_ordered_sequence_over_objects_is_not_a_card_selection() {
+        let mut state = GameState::new_two_player(7);
+        let permanent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Bearer".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::ProliferateChoice {
+            player: PlayerId(0),
+            eligible: vec![TargetRef::Object(permanent)],
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("proliferate".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("a Sequence schema is served by the projection");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("an ordered sequence stays in the labelled family, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min_total, input.max_total, input.options.len()),
+            (0, 1, 1),
+            "the sequence bounds and the candidate survive"
+        );
+    }
+
+    /// A subset whose candidates are not plain candidates is **not** cards.
+    ///
+    /// The surface leg, isolated: `OutsideGameChoice` (CR 400.11a / CR 406.3) is
+    /// a `Select` schema — the very schema the card classifier keys on — but its
+    /// candidates are projected in the `FaceUpExile` role, because a card
+    /// outside the game is not interchangeable with one the client can render
+    /// from the battlefield snapshot. Dropping the role test in
+    /// [`candidate_object`] turns this red.
+    #[test]
+    fn a_subset_whose_candidates_are_not_plain_objects_is_not_a_card_selection() {
+        let mut state = GameState::new_two_player(7);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Learn Source".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Lesson Card".to_string(),
+            Zone::Exile,
+        );
+        state.waiting_for = WaitingFor::OutsideGameChoice {
+            player: PlayerId(0),
+            source_id,
+            choices: vec![OutsideGameChoiceEntry {
+                source: OutsideGameChoiceSource::FaceUpExile { object_id: exiled },
+                count: 1,
+                name: "Lesson Card".to_string(),
+            }],
+            count: 1,
+            reveal: false,
+            up_to: true,
+            destination: Zone::Hand,
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("outside-game".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("a Select schema is served by the projection");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("a non-candidate role stays in the labelled family, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min_total, input.max_total, input.options.len()),
+            (0, 1, 1),
+            "the selection bounds and the candidate survive"
+        );
+    }
+
+    /// A `Number` schema leaves the selection family entirely.
+    ///
+    /// `PayAmountChoice` (CR 107.14 — pay any amount of `{E}`) is the only
+    /// unmapped numeric pause. It pins two things: the engine's range reaches
+    /// the client as `ChooseNumber`'s bounds, and the answer resolves to the
+    /// action the *engine* names. That second half is the point —
+    /// `GameAction::ChooseX` is specific to X (CR 107.3), so the bespoke arm
+    /// would have answered this pause with the wrong action entirely.
+    #[test]
+    fn a_number_schema_becomes_choose_number_and_resolves_to_the_engines_action() {
+        let mut state = GameState::new_two_player(7);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Energy Sink".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::PayAmountChoice {
+            player: PlayerId(0),
+            resource: PayableResource::Energy,
+            min: 0,
+            max: 3,
+            accumulated: 0,
+            source_id,
+            pending_mana_ability: None,
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("number-path".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("a Number schema is served by the projection");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseNumber(input)) = prompt else {
+            panic!("a numeric range is ChooseNumber, not a selection, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min, input.max),
+            (0, 3),
+            "the engine's range must survive into the prompt"
+        );
+
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseNumber(ChooseNumberOutput::NumberDecision {
+                chosen_number: Some(2),
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("the chosen number resolves back through the engine");
+        assert_eq!(action, GameAction::SubmitPayAmount { amount: 2 });
+    }
+
+    /// A `Sequence` schema is an *ordered* subset, and the order must survive.
+    ///
+    /// `ProliferateChoice` (CR 701.27) projects min 0 / max = eligible count, so
+    /// it also pins that a zero minimum reaches the prompt intact rather than
+    /// being coerced to the one-of path's 1.
+    ///
+    /// The answer deliberately reverses the offered order. That is the whole
+    /// assertion: the engine fills its slots in the order the client sent, so a
+    /// path that collected indices into a set — or sorted them — would return
+    /// the targets the other way round and fail here.
+    #[test]
+    fn a_sequence_schema_preserves_the_order_the_client_sent() {
+        let mut state = GameState::new_two_player(7);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Holder A".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Holder B".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::ProliferateChoice {
+            player: PlayerId(0),
+            eligible: vec![TargetRef::Object(first), TargetRef::Object(second)],
+        };
+        bind_interaction_authority(
+            &mut state,
+            InteractionSessionId("sequence-path".to_string()),
+        )
+        .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("a Sequence schema is served by the projection");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("an ordered subset still renders as ChooseFromSelection, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min_total, input.max_total),
+            (0, 2),
+            "proliferate is optional, so the zero minimum must survive"
+        );
+
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices: vec![1, 0],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("an ordered subset resolves back through the engine");
+        assert_eq!(
+            action,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(second), TargetRef::Object(first)],
+            },
+            "the engine must receive the targets in the order the client chose"
+        );
+    }
+
+    /// Without a bound interaction authority the projection is empty, so the
+    /// generic path cannot serve the prompt and the adapter must say so rather
+    /// than emit an option-less selection. This is also the non-vacuity guard
+    /// for the test above: it is the same waiting state, differing only in the
+    /// binding, so that test cannot be passing for an unrelated reason.
+    #[test]
+    fn an_unbound_interaction_authority_leaves_the_generic_path_unsupported() {
+        let mut state = GameState::new_two_player(7);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scried Card".to_string(),
+            Zone::Library,
+        );
+        state.waiting_for = WaitingFor::TopOrBottomChoice {
+            player: PlayerId(0),
+            object_id,
+        };
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        assert!(matches!(
+            build_prompt_input(&prepared, &lookup),
+            Err(AdapterError::UnsupportedPrompt {
+                code: "local.prompt-unsupported",
+                ..
+            })
+        ));
+    }
+
+    /// A reveal is answerable today, and the answer is the reveal action.
+    ///
+    /// The exhibit behind `local.prompt-family-display-acks-unsupported`, which
+    /// is a *fidelity* entry rather than a coverage one. `RevealChoice` — the
+    /// engine's pause for a CR 701.20a reveal — classifies as
+    /// `ExactCandidates`, so the generic projection
+    /// serves it: the engine materializes one candidate per revealable card and
+    /// the adapter renders them as labelled options. Both halves of that entry
+    /// are pinned here.
+    ///
+    /// 1. The prompt is `ChooseFromSelection`, not `ChooseCards` — the residual
+    ///    gap, since only the `Select` schema is reclassified as cards
+    ///    ([`card_selection_candidates`]) and a one-of list is not one. Widening
+    ///    that classifier turns this red, which is the intended signal.
+    /// 2. Every offered option resolves to `GameAction::SelectCards` naming one
+    ///    card. That is the assertion that dies if this family is ever routed
+    ///    through `RevealCards` instead: `RevealCardsAcknowledged` is a bare ack
+    ///    with no card payload, so it could only ever submit an empty selection
+    ///    — which a mandatory reveal rejects as an illegal count.
+    ///
+    /// Every index is answered rather than a hand-picked one, so the test does
+    /// not depend on the engine's candidate ordering and cannot pass by
+    /// exercising a single degenerate option.
+    #[test]
+    fn a_mandatory_reveal_renders_as_a_selection_and_answers_with_the_chosen_card() {
+        let mut state = GameState::new_two_player(7);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Land".to_string(),
+            Zone::Hand,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Spell".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards: vec![first, second],
+            filter: TargetFilter::Any,
+            optional: false,
+            decline_runs_continuation: false,
+        };
+        bind_interaction_authority(
+            &mut state,
+            InteractionSessionId("reveal-mandatory".to_string()),
+        )
+        .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt =
+            build_prompt_input(&prepared, &lookup).expect("a reveal is served by the projection");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("a reveal renders as labelled options, got {prompt:?}");
+        };
+        assert_eq!(
+            (input.min_total, input.max_total, input.options.len()),
+            (1, 1, 2),
+            "a mandatory reveal picks exactly one of the two offered cards"
+        );
+
+        let mut revealed: Vec<Vec<ObjectId>> = (0..input.options.len())
+            .map(|index| {
+                let action = translate_response(
+                    42,
+                    PromptOutput::ChooseFromSelection(
+                        ChooseFromSelectionOutput::SelectionDecision {
+                            chosen_indices: vec![index],
+                        },
+                    ),
+                    &prepared.prompt_context(),
+                    &state,
+                )
+                .expect("every offered option resolves back through the engine");
+                match action {
+                    GameAction::SelectCards { cards } => cards,
+                    other => panic!("a reveal is answered by SelectCards, got {other:?}"),
+                }
+            })
+            .collect();
+        revealed.sort();
+        assert_eq!(
+            revealed,
+            vec![vec![first], vec![second]],
+            "the two options must denote the two revealable cards, one card each"
+        );
+    }
+
+    /// The optional branch of the same prompt, which is what makes the
+    /// `RevealCards` family actively wrong rather than merely low-fidelity.
+    ///
+    /// For a "you may reveal" (CR 701.20a) the engine models the decline as an
+    /// empty `SelectCards` — a convention of this engine's, not something the
+    /// rule states — and offers it as its own candidate. So the option count
+    /// rises to three against the same two cards, and exactly one option
+    /// answers with an empty selection.
+    ///
+    /// Paired with the mandatory test above, this is the non-vacuity guard for
+    /// both: the two states differ only in `optional`, so neither can be passing
+    /// for a reason unrelated to the reveal. It is also the concrete cost of
+    /// routing this through `RevealCardsAcknowledged` — a payload-free ack
+    /// collapses all three options onto the one that declines.
+    #[test]
+    fn an_optional_reveal_offers_the_decline_as_an_empty_selection() {
+        let mut state = GameState::new_two_player(7);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Land".to_string(),
+            Zone::Hand,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Spell".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards: vec![first, second],
+            filter: TargetFilter::Any,
+            optional: true,
+            decline_runs_continuation: false,
+        };
+        bind_interaction_authority(
+            &mut state,
+            InteractionSessionId("reveal-optional".to_string()),
+        )
+        .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt =
+            build_prompt_input(&prepared, &lookup).expect("a reveal is served by the projection");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("a reveal renders as labelled options, got {prompt:?}");
+        };
+        assert_eq!(
+            input.options.len(),
+            3,
+            "the decline is offered alongside the two revealable cards"
+        );
+
+        let declines = (0..input.options.len())
+            .filter(|index| {
+                translate_response(
+                    42,
+                    PromptOutput::ChooseFromSelection(
+                        ChooseFromSelectionOutput::SelectionDecision {
+                            chosen_indices: vec![*index],
+                        },
+                    ),
+                    &prepared.prompt_context(),
+                    &state,
+                )
+                .expect("every offered option resolves back through the engine")
+                    == GameAction::SelectCards { cards: vec![] }
+            })
+            .count();
+        assert_eq!(
+            declines, 1,
+            "exactly one option declines the reveal with an empty selection"
+        );
+    }
+
     // ------------------------------------------------------- wire shapes ---
 
     /// The core v2 change: `PromptOutput` is ADJACENTLY tagged, so the family's
@@ -5096,10 +6446,8 @@ mod tests {
                 }
             })
         );
-        assert_eq!(
-            serde_json::from_value::<ClientToServerMessage>(json).unwrap(),
-            message
-        );
+        let round_trip: ClientToServerMessage = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), json);
     }
 
     #[test]
@@ -5285,10 +6633,8 @@ mod tests {
         let update = build_state_update(&prepared, &lookup).unwrap();
 
         let mut value = serde_json::to_value(&update).unwrap();
-        assert_eq!(
-            serde_json::from_value::<StateUpdate>(value.clone()).unwrap(),
-            update
-        );
+        let round_trip: StateUpdate = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
 
         value
             .as_object_mut()
@@ -5308,10 +6654,8 @@ mod tests {
         .unwrap();
 
         let mut value = serde_json::to_value(&prompt).unwrap();
-        assert_eq!(
-            serde_json::from_value::<AgentPrompt>(value.clone()).unwrap(),
-            prompt
-        );
+        let round_trip: AgentPrompt = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
 
         value
             .as_object_mut()
@@ -5350,6 +6694,8 @@ mod tests {
             "kickerCost",
             "effectiveManaCost",
             "madnessCost",
+            "finalChapter",
+            "classLevel",
         ] {
             assert!(
                 !object.contains_key(omitted),
@@ -5360,8 +6706,61 @@ mod tests {
             !object.contains_key("zoneId"),
             "zoneId was removed in v2 — the zone is carried by ZoneDto"
         );
+        assert_eq!(object["classLevels"], serde_json::json!([]));
+        assert_eq!(object["sagaChapters"], serde_json::json!([]));
 
-        assert_eq!(serde_json::from_value::<CardDto>(value).unwrap(), card);
+        let round_trip: CardDto = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
+    }
+
+    #[test]
+    fn card_dto_uses_engine_supplied_saga_and_class_state() {
+        let mut state = GameState::new_two_player(7);
+        let class_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Wizard Class".to_string(),
+            Zone::Battlefield,
+        );
+        let saga_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "The Eldest Reborn".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&class_id).unwrap().class_level = Some(2);
+        let saga = state.objects.get_mut(&saga_id).unwrap();
+        saga.card_types.subtypes.push("Saga".to_string());
+        saga.trigger_definitions = vec![
+            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
+                CounterTriggerFilter {
+                    counter_type: CounterType::Lore,
+                    threshold: Some(1),
+                },
+            ),
+            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
+                CounterTriggerFilter {
+                    counter_type: CounterType::Lore,
+                    threshold: Some(3),
+                },
+            ),
+        ]
+        .into();
+
+        let cards = CardBuildContext {
+            card_lookup: &lookup,
+        };
+        let class = build_card_dto(&state, state.objects.get(&class_id).unwrap(), &cards).unwrap();
+        let saga = build_card_dto(&state, state.objects.get(&saga_id).unwrap(), &cards).unwrap();
+
+        assert_eq!(class.class_level, Some(2));
+        assert_eq!(class.final_chapter, None);
+        assert_eq!(saga.final_chapter, Some(3));
+        assert_eq!(saga.class_level, None);
+        assert!(class.class_levels.is_empty());
+        assert!(saga.saga_chapters.is_empty());
     }
 
     /// One representative instance of every `PromptInput` variant, paired with
@@ -5569,8 +6968,12 @@ mod tests {
         for (tag, input) in &cases {
             let value = serde_json::to_value(input).unwrap();
             assert_eq!(value["type"], *tag, "wrong discriminant tag for {tag}");
-            let back: PromptInput = serde_json::from_value(value).unwrap();
-            assert_eq!(&back, input, "round-trip mismatch for {tag}");
+            let back: PromptInput = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(back).unwrap(),
+                value,
+                "round-trip mismatch for {tag}"
+            );
         }
     }
 
@@ -5678,7 +7081,7 @@ mod tests {
     /// All five `ProtocolErrorCode` variants must have a wire producer.
     #[test]
     fn every_protocol_error_code_has_a_producer() {
-        let produced: HashSet<_> = [
+        let produced: Vec<_> = [
             protocol_error_for(
                 &AdapterError::PromptIdMismatch {
                     expected: 1,
@@ -5713,6 +7116,13 @@ mod tests {
             produced.len(),
             5,
             "each of the five conformance failures must map to a distinct code"
+        );
+        assert!(
+            produced
+                .iter()
+                .enumerate()
+                .all(|(index, code)| !produced[..index].contains(code)),
+            "each conformance failure must map to a distinct code"
         );
         for code in [
             ProtocolErrorCode::StalePrompt,
@@ -5758,10 +7168,8 @@ mod tests {
         let mut value = serde_json::to_value(&error).unwrap();
         assert_eq!(value["code"], "wrongPlayer");
         assert_eq!(value["promptId"], 9);
-        assert_eq!(
-            serde_json::from_value::<ProtocolError>(value.clone()).unwrap(),
-            error
-        );
+        let round_trip: ProtocolError = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
 
         value
             .as_object_mut()
@@ -5973,6 +7381,24 @@ mod tests {
                 choice: engine::types::actions::MulliganChoice::UseSerumPowder { object_id },
             } if object_id == powder
         ));
+
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 1,
+                phase: MulliganDecisionPhase::BottomCards {
+                    count: 1,
+                    then: PendingMulliganAction::UseSerumPowder { object_id: powder },
+                },
+            }],
+            free_first_mulligan: false,
+        };
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 7).unwrap();
+        let PromptInput::MulliganPutBack(input) = build_prompt_input(&prepared, &lookup).unwrap()
+        else {
+            panic!("a Serum Powder continuation must build a mulligan put-back prompt");
+        };
+        assert_eq!(input.excluded_card_id, Some(encode_object_id(powder)));
     }
 
     #[test]
@@ -6219,11 +7645,18 @@ mod tests {
                 object_id: ObjectId(4),
             },
         ];
+        let state = GameState::new_two_player(7);
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
         let prepared = PreparedManabrewSnapshot {
             game_id: "game-a".to_string(),
             viewer: PlayerId(0),
             prompt_id: 7,
-            state: GameState::new_two_player(7),
+            // A real projection rather than a stand-in. This state has no bound
+            // interaction authority, so it comes back empty — which is correct
+            // and irrelevant here: the assertions below concern the payment
+            // action id space, which `pay_mana_cost_input` reads from `actions`.
+            interaction: derive_viewer_interaction(&state, &filtered, PlayerId(0)),
+            state,
             derived: DerivedViews::default(),
             actions: actions.clone(),
             spell_costs: HashMap::new(),
@@ -6279,21 +7712,25 @@ mod tests {
         );
     }
 
-    /// `PaymentActionKind::PayLife` exists for wire completeness but must never
-    /// be advertised: the engine has no pay-life action, so the id would be
-    /// rejected the moment a client echoed it.
+    /// `PayLife` is advertised for exactly one thing — a Phyrexian route that
+    /// actually spends life (CR 107.4f) — and for nothing else.
+    ///
+    /// `SubmitLifeRedistribution` is the trap this pins: it is the other engine
+    /// action with "life" in its name, and it is a pick-one among precomputed
+    /// options (`local.selection-unsupported`), not a payment.
     #[test]
-    fn pay_life_is_never_advertised() {
-        let actions = vec![
+    fn pay_life_is_advertised_only_for_a_life_paying_phyrexian_route() {
+        let non_payments = vec![
+            // CR 107.4f: an all-mana route spends no life, so it is not a
+            // pay-life move and must not be advertised as `PayLife { 0 }`.
             GameAction::SubmitPhyrexianChoices {
-                choices: Vec::new(),
+                choices: vec![ShardChoice::PayMana],
             },
             GameAction::SubmitLifeRedistribution { option_index: 0 },
         ];
-
         assert!(
-            payment_actions(&actions).is_empty(),
-            "no engine action may be advertised as PayLife"
+            payment_actions(&non_payments).is_empty(),
+            "only a life-paying Phyrexian route may be advertised as PayLife"
         );
     }
 
@@ -6307,7 +7744,7 @@ mod tests {
             object_id: ObjectId(3),
             card_id: CardId(1),
         }];
-        let advertised = available_actions(&actions);
+        let advertised = available_actions(&empty_state(), &actions);
 
         assert_eq!(advertised.len(), 1, "a land play must reach the client");
         assert_eq!(
@@ -6340,18 +7777,21 @@ mod tests {
             },
         ]
         .iter()
-        .filter_map(
-            |action| match convert_available_action(action, "action-0".to_string()) {
+        .filter_map(|action| {
+            match convert_available_action(&empty_state(), action, "action-0".to_string()) {
                 AvailableActionConversion::Available(AvailableAction {
                     kind: AvailableActionKind::Cast { mode, .. },
                     ..
                 }) => Some(mode),
                 _ => None,
-            },
-        )
+            }
+        })
         .collect();
 
-        assert_eq!(modes, vec![PlayCardMode::Normal, PlayCardMode::Normal]);
+        assert_eq!(
+            serde_json::to_value(modes).unwrap(),
+            serde_json::json!([{"type": "normal"}, {"type": "normal"}])
+        );
     }
 
     /// Sneak, web-slinging, and foretell have exact v2 counterparts and were
@@ -6399,7 +7839,7 @@ mod tests {
         ];
 
         for (action, expected_mode, expected_card) in cases {
-            let advertised = available_actions(std::slice::from_ref(&action));
+            let advertised = available_actions(&empty_state(), std::slice::from_ref(&action));
             assert_eq!(advertised.len(), 1, "{action:?} must reach the client");
             let json = serde_json::to_value(&advertised[0]).unwrap();
             assert_eq!(json["mode"], expected_mode);
@@ -6407,24 +7847,18 @@ mod tests {
         }
     }
 
-    /// Ninjutsu has no `AlternativeCostKind`, and harmonize is neither a cast
-    /// nor a supported payment resource — both stay unsupported rather than
-    /// being mapped to a near-miss variant.
+    /// CR 702.180b: the harmonize TAP is a cost-reduction tap during payment,
+    /// structurally convoke's analogue, and `PaymentResourceKind` is exactly
+    /// `Convoke | Improvise | Delve`. It stays unsupported rather than being
+    /// mapped to a near-miss variant. (Ninjutsu used to be pinned here on the
+    /// false premise that it needed an `AlternativeCostKind`; CR 702.49a makes
+    /// it an activated ability, and it is now advertised — see
+    /// `ninjutsu_is_advertised_as_an_activated_ability`.)
     #[test]
     fn actions_without_exact_counterparts_stay_unsupported() {
         assert!(matches!(
             convert_available_action(
-                &GameAction::ActivateNinjutsu {
-                    ninjutsu_object_id: ObjectId(1),
-                    creature_to_return: ObjectId(2),
-                },
-                "action-0".to_string(),
-            ),
-            AvailableActionConversion::Unsupported("local.ninjutsu-cast-unsupported")
-        ));
-
-        assert!(matches!(
-            convert_available_action(
+                &empty_state(),
                 &GameAction::HarmonizeTap {
                     creature_id: Some(ObjectId(1)),
                 },
@@ -6434,10 +7868,180 @@ mod tests {
         ));
     }
 
+    /// CR 702.49a: ninjutsu is an ACTIVATED ABILITY, so it belongs on
+    /// `AvailableActionKind::ActivateAbility` — its absence from
+    /// `AlternativeCostKind` was never evidence of anything.
+    ///
+    /// CR 702.49c: the returned creature fixes what the ninja enters attacking,
+    /// so each (ninja, attacker) pair is a distinct play and must be
+    /// distinguishable by more than its opaque action id.
+    #[test]
+    fn ninjutsu_is_advertised_as_an_activated_ability() {
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, NinjutsuVariant, RuntimeHandler,
+        };
+
+        let mut state = GameState::new_two_player(7);
+        let ninja = engine::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Ninja of the Deep Hours".to_string(),
+            Zone::Hand,
+        );
+        let ornithopter = engine::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Ornithopter".to_string(),
+            Zone::Battlefield,
+        );
+        let hasten = engine::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Memnite".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Slot 0 is an ordinary activated ability so a naive `0` cannot pass.
+        state.objects.get_mut(&ninja).unwrap().abilities = std::sync::Arc::new(vec![
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+                .cost(AbilityCost::Tap),
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::RuntimeHandled {
+                    handler: RuntimeHandler::NinjutsuFamily,
+                },
+            )
+            .cost(AbilityCost::NinjutsuFamily {
+                variant: NinjutsuVariant::Ninjutsu,
+                mana_cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 1,
+                },
+            }),
+        ]);
+
+        let pairs = [ornithopter, hasten].map(|attacker| GameAction::ActivateNinjutsu {
+            ninjutsu_object_id: ninja,
+            creature_to_return: attacker,
+        });
+        let advertised = available_actions(&state, &pairs);
+
+        assert_eq!(
+            advertised.len(),
+            2,
+            "one advertised action per (ninjutsu card, returned attacker) pair"
+        );
+        assert_eq!(
+            serde_json::to_value(&advertised[0]).unwrap(),
+            serde_json::json!({
+                "id": "action-0",
+                "type": "activateAbility",
+                "cardId": encode_object_id(ninja),
+                "abilityIndex": 1,
+                "description": "Ninjutsu — return Ornithopter",
+                "isManaAbility": false
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&advertised[1]).unwrap()["description"],
+            "Ninjutsu — return Memnite",
+            "the returned attacker is what distinguishes the pairs (CR 702.49c)"
+        );
+
+        // The echoed id resolves back to the ninjutsu action itself, not to a
+        // reconstructed `ActivateAbility` — which the engine forbids, because
+        // its `NinjutsuFamily` cost arm is a no-op in `pay_ability_cost`.
+        let context = PromptContext {
+            prompt_id: 7,
+            deciding_player: PlayerId(0),
+            action_table: action_table(&pairs),
+        };
+        assert_eq!(
+            advertised_action_by_id(&context, &state, "action-0").unwrap(),
+            GameAction::ActivateNinjutsu {
+                ninjutsu_object_id: ninja,
+                creature_to_return: ornithopter,
+            }
+        );
+    }
+
+    /// CR 107.4f: a Phyrexian shard costs one mana of its color **or 2 life**,
+    /// so a route's life price is exactly `2 x` its `PayLife` shards.
+    ///
+    /// The advertised entries come from the engine's own enumerated routes, so
+    /// every id an echo can carry resolves — the adapter never assembles a
+    /// route of its own.
+    #[test]
+    fn phyrexian_route_is_advertised_as_a_pay_life_payment() {
+        let actions = vec![
+            GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayMana],
+            },
+            GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayLife],
+            },
+            GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayLife, ShardChoice::PayLife],
+            },
+        ];
+        let payments = payment_actions(&actions);
+
+        assert_eq!(
+            payments.len(),
+            2,
+            "the all-mana route spends no life and is not a pay-life move"
+        );
+        assert_eq!(
+            serde_json::to_value(&payments[0]).unwrap(),
+            serde_json::json!({ "id": "action-1", "type": "payLife", "amount": 2 }),
+            "a single pending shard advertises exactly one PayLife of 2"
+        );
+        assert_eq!(
+            serde_json::to_value(&payments[1]).unwrap(),
+            serde_json::json!({ "id": "action-2", "type": "payLife", "amount": 4 }),
+            "two life-paying shards cost 4, not 2 — the amount is per route"
+        );
+
+        // Ids live in the same `action-{index}` space `action_table` enumerates,
+        // which is the only reason an echoed payment id resolves at all.
+        let context = PromptContext {
+            prompt_id: 7,
+            deciding_player: PlayerId(0),
+            action_table: action_table(&actions),
+        };
+        assert_eq!(
+            advertised_payment_action_by_id(&context, "action-1").unwrap(),
+            GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayLife],
+            },
+        );
+    }
+
+    /// A Phyrexian shard is a payment move, not a priority action — so it must
+    /// be `Skip` at the priority layer (like convoke), never `Unsupported`,
+    /// which would make an echoed id fail with a capability code.
+    #[test]
+    fn phyrexian_choices_are_skipped_at_the_priority_layer() {
+        assert!(matches!(
+            convert_available_action(
+                &empty_state(),
+                &GameAction::SubmitPhyrexianChoices {
+                    choices: vec![ShardChoice::PayLife],
+                },
+                "action-0".to_string(),
+            ),
+            AvailableActionConversion::Skip
+        ));
+    }
+
     #[test]
     fn unsupported_actions_are_not_serialized_as_custom_actions() {
         assert!(matches!(
             convert_available_action(
+                &empty_state(),
                 &GameAction::ChooseKeptCreatures {
                     kept: vec![ObjectId(1)]
                 },
@@ -6445,13 +8049,17 @@ mod tests {
             ),
             AvailableActionConversion::Unsupported("local.non-target-selection-unsupported")
         ));
-        assert!(available_actions(&[GameAction::ChooseKeptCreatures {
-            kept: vec![ObjectId(1)]
-        }])
+        assert!(available_actions(
+            &empty_state(),
+            &[GameAction::ChooseKeptCreatures {
+                kept: vec![ObjectId(1)]
+            }]
+        )
         .is_empty());
 
         assert!(matches!(
             convert_available_action(
+                &empty_state(),
                 &GameAction::ChooseAnnouncingOpponent {
                     opponent: PlayerId(1),
                 },
@@ -6465,6 +8073,7 @@ mod tests {
     fn meld_actions_return_stable_unsupported_capability_codes() {
         assert!(matches!(
             convert_available_action(
+                &empty_state(),
                 &GameAction::ChooseMeldPair {
                     source_id: ObjectId(1),
                     partner_id: ObjectId(2),
@@ -6475,6 +8084,7 @@ mod tests {
         ));
         assert!(matches!(
             convert_available_action(
+                &empty_state(),
                 &GameAction::ChooseEntryAttackTarget {
                     target: AttackTarget::Battle(ObjectId(3)),
                 },
@@ -6483,15 +8093,18 @@ mod tests {
             AvailableActionConversion::Unsupported("local.entry-attack-target-choice-unsupported")
         ));
         assert!(
-            available_actions(&[
-                GameAction::ChooseMeldPair {
-                    source_id: ObjectId(1),
-                    partner_id: ObjectId(2),
-                },
-                GameAction::ChooseEntryAttackTarget {
-                    target: AttackTarget::Player(PlayerId(1)),
-                },
-            ])
+            available_actions(
+                &empty_state(),
+                &[
+                    GameAction::ChooseMeldPair {
+                        source_id: ObjectId(1),
+                        partner_id: ObjectId(2),
+                    },
+                    GameAction::ChooseEntryAttackTarget {
+                        target: AttackTarget::Player(PlayerId(1)),
+                    },
+                ]
+            )
             .is_empty(),
             "unsupported meld decisions must never be serialized as generic custom actions"
         );
@@ -6502,13 +8115,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 29);
+        assert_eq!(capabilities.len(), 87);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 29, "capability codes must be unique");
+        assert_eq!(codes.len(), 87, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(
@@ -6521,36 +8134,25 @@ mod tests {
         }
     }
 
-    /// Regression pin for the four codes this migration added to the registry
-    /// after they were found emitted-but-undeclared. It is **not** a guarantee
-    /// for the class.
+    /// Behavioural pin: a representative action per still-unsupported family
+    /// converts to a code the registry declares.
     ///
-    /// An undeclared code is a silent lie — the registry is the machine-readable
-    /// contract a client queries to learn what we cannot do, so a code that
-    /// resolves to nothing at the far end is worse than no code. But
-    /// `unsupported_protocol_capabilities()` is a **curated** set of protocol
-    /// gaps, each carrying a real `suggested_protocol_extension`: a design
-    /// document, not an exhaustive index of every string this adapter can emit.
-    /// Dozens of emitted codes are deliberately absent from it.
-    ///
-    /// So this walks a hand-written list, not the `GameAction` enum, and a new
-    /// arm returning an undeclared code will **not** fail it. Closing the class
-    /// would need either an exhaustive registry (a scope decision, not a test
-    /// change) or compile-time enumeration of the emit sites.
+    /// This walks a hand-written list, so on its own it cannot close the class —
+    /// that is what [`no_emitted_capability_code_is_undeclared`] is for. Its
+    /// value is the inverse assertion: each row must still BE `Unsupported`, so
+    /// a family that quietly becomes supported fails here instead of leaving a
+    /// stale registry entry behind.
     #[test]
     fn every_declared_capability_code_regression_pin() {
         let declared: HashSet<_> = unsupported_protocol_capabilities()
             .iter()
             .map(|capability| capability.code)
             .collect();
+        let state = GameState::new_two_player(7);
 
         let actions = [
             // Stands in for the whole dungeon/room family, which shares one code.
             GameAction::ChooseDungeonRoom { room_index: 0 },
-            GameAction::ActivateNinjutsu {
-                ninjutsu_object_id: ObjectId(1),
-                creature_to_return: ObjectId(2),
-            },
             GameAction::HarmonizeTap {
                 creature_id: Some(ObjectId(1)),
             },
@@ -6574,7 +8176,7 @@ mod tests {
             // an `if let`: were one of these to become supported later, an
             // `if let` would skip its body and this pin would quietly cover one
             // action fewer while still reporting green.
-            match convert_available_action(&action, "action-0".to_string()) {
+            match convert_available_action(&state, &action, "action-0".to_string()) {
                 AvailableActionConversion::Unsupported(code) => assert!(
                     declared.contains(code),
                     "`{code}` is emitted for {action:?} but not declared in \
@@ -6591,10 +8193,91 @@ mod tests {
         }
     }
 
-    /// Every gap this migration introduced or surfaced must be recorded, and
-    /// every entry v2 made obsolete must be gone.
+    /// Closes the class the per-action pin cannot: **every** capability code
+    /// this crate can emit is declared in the registry.
+    ///
+    /// An undeclared code is a silent lie — the registry is the machine-readable
+    /// contract a client queries to learn what we cannot do, so a code that
+    /// resolves to nothing at the far end is worse than no code. The registry
+    /// was a curated design document that covered 29 of the 67 codes then
+    /// emitted; it is now exhaustive, and this keeps it that way without
+    /// requiring anyone to re-run the audit by hand.
+    ///
+    /// It scans the source rather than the `GameAction` enum because the codes
+    /// are `&'static str` literals at ~65 scattered call sites, several of them
+    /// outside `convert_available_action` entirely (prompt construction,
+    /// response translation, id parsing). Only the production half is scanned:
+    /// the test module names retired codes on purpose, to assert they are gone.
     #[test]
-    fn capability_registry_reflects_v2_reality() {
+    fn no_emitted_capability_code_is_undeclared() {
+        let declared: HashSet<_> = unsupported_protocol_capabilities()
+            .iter()
+            .map(|capability| capability.code)
+            .collect();
+
+        let source = include_str!("lib.rs");
+        // The first `mod tests {` in the file is the module header itself, which
+        // precedes this literal, so the split lands on the real boundary.
+        let (production, _) = source
+            .split_once("mod tests {")
+            .expect("lib.rs always contains its test module");
+
+        let mut emitted: Vec<&str> = Vec::new();
+        for prefix in ["\"local.", "\"upstream."] {
+            let mut rest = production;
+            // Read each `"<namespace>.<code>"` literal whole. Codes are
+            // `[a-z0-9-]`, so the charset filter drops any prose that happens to
+            // open a quote with the same prefix without silently dropping a real
+            // code.
+            while let Some(open) = rest.find(prefix) {
+                let after = &rest[open + 1..];
+                let Some(close) = after.find('"') else { break };
+                let literal = &after[..close];
+                if literal
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+                {
+                    emitted.push(literal);
+                }
+                rest = &after[close + 1..];
+            }
+        }
+
+        // Nonvacuity floor. A scanner that silently stops matching reports green
+        // for the wrong reason, so assert it still sees roughly the population
+        // it saw when written (65 distinct codes at 65 live call sites). The
+        // floor only ever needs raising; a drop means the scanner broke, not
+        // that the adapter shrank.
+        let distinct: HashSet<_> = emitted.iter().copied().collect();
+        assert!(
+            distinct.len() >= 50,
+            "the scanner found only {} distinct codes (65 when written) — it has \
+             stopped measuring the population, which reads as a pass but proves \
+             nothing",
+            distinct.len()
+        );
+        assert!(
+            distinct.contains("local.prompt-unsupported"),
+            "the scanner missed a code emitted at a known site — it is not \
+             reading the production half of the file"
+        );
+
+        let undeclared: Vec<&str> = emitted
+            .iter()
+            .copied()
+            .filter(|code| !declared.contains(code))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "these codes are emitted but not declared in \
+             unsupported_protocol_capabilities(): {undeclared:?}"
+        );
+    }
+
+    /// Every gap this migration introduced or surfaced must be recorded, and
+    /// every entry superseded by the current protocol must be gone.
+    #[test]
+    fn capability_registry_reflects_v3_reality() {
         let codes: HashSet<_> = unsupported_protocol_capabilities()
             .iter()
             .map(|capability| capability.code)
@@ -6608,14 +8291,16 @@ mod tests {
             "local.mdfc-face-choice-unsupported",
             "local.harmonize-tap-unsupported",
             "local.payment-resource-actions-missing",
-            "local.phyrexian-payment-unsupported",
             "local.exhaust-stack-pass-unsupported",
             // Every code the adapter can emit must be declared here, or a
             // client that receives it looks it up and finds nothing.
             "local.dungeon-room-unsupported",
             "local.room-right-split-mode-unproducible",
-            "local.ninjutsu-cast-unsupported",
             "local.counter-key-vocabulary-unverifiable",
+            "local.serum-powder-mulligan-vendor-extension",
+            "local.class-level-details-unsourceable",
+            "local.saga-chapter-details-unsourceable",
+            "local.class-level-up-flag-unsourceable",
         ] {
             assert!(codes.contains(expected), "missing new gap `{expected}`");
         }
@@ -6636,6 +8321,15 @@ mod tests {
             // v2 replaced the legacy engine-action wrapper with ClientToServerMessage.
             "local.legacy-engine-action-unsupported",
             "local.legacy-choose-target-card-removed",
+            // Both were adapter-side signature limits, and both are now fixed:
+            // `GameState` is threaded into available-action conversion, so
+            // ninjutsu is advertised as `ActivateAbility` (CR 702.49a), and a
+            // Phyrexian route is advertised as `PayLife` (CR 107.4f).
+            "local.ninjutsu-cast-unsupported",
+            "local.phyrexian-payment-unsupported",
+            // The two local Serum Powder members are intentional vendor
+            // extensions, not an upstream protocol gap.
+            "upstream.serum-powder-mulligan-missing",
         ] {
             assert!(
                 !codes.contains(obsolete),
@@ -6672,6 +8366,25 @@ mod tests {
     /// never emits it.
     #[test]
     fn vendor_extensions_are_deliberate_and_isolated() {
+        let without_extension = serde_json::to_value(MulliganPutBackInput {
+            hand_card_ids: vec![],
+            cards: vec![],
+            count: 1,
+            excluded_card_id: None,
+        })
+        .unwrap();
+        assert!(without_extension.get("excludedCardId").is_none());
+        assert_eq!(
+            serde_json::to_string(&MulliganPutBackInput {
+                hand_card_ids: vec![],
+                cards: vec![],
+                count: 1,
+                excluded_card_id: None,
+            })
+            .unwrap(),
+            r#"{"handCardIds":[],"cards":[],"count":1}"#
+        );
+
         let json = serde_json::to_value(MulliganPutBackInput {
             hand_card_ids: vec![],
             cards: vec![],
@@ -6684,14 +8397,33 @@ mod tests {
         // A peer that does not know the field simply drops it.
         let mut without = json.clone();
         without.as_object_mut().unwrap().remove("excludedCardId");
-        assert!(serde_json::from_value::<MulliganPutBackInput>(without).is_ok());
+        let round_trip = serde_json::from_value::<MulliganPutBackInput>(without).unwrap();
+        assert_eq!(round_trip.excluded_card_id, None);
 
+        let serum_powder = serde_json::to_value(MulliganOutput::MulliganUseSerumPowder {
+            card_id: "card-1".to_string(),
+        })
+        .unwrap();
+        assert_eq!(serum_powder["type"], "mulliganUseSerumPowder");
+        assert_eq!(serum_powder["cardId"], "card-1");
         assert_eq!(
-            serde_json::to_value(MulliganOutput::MulliganUseSerumPowder {
+            serde_json::to_string(&MulliganOutput::MulliganUseSerumPowder {
                 card_id: "card-1".to_string(),
             })
-            .unwrap()["type"],
-            "mulliganUseSerumPowder"
+            .unwrap(),
+            r#"{"type":"mulliganUseSerumPowder","cardId":"card-1"}"#
         );
+    }
+
+    #[test]
+    fn non_extended_mulligan_dtos_remain_upstream_v3_types() {
+        let _: manabrew_protocol::prompts::MulliganInput = MulliganInput {
+            hand_card_ids: vec!["card-1".to_string()],
+            mulligan_count: 1,
+        };
+        let _: manabrew_protocol::prompts::MulliganPutBackOutput =
+            MulliganPutBackOutput::MulliganPutBackDecision {
+                card_ids: vec!["card-1".to_string()],
+            };
     }
 }

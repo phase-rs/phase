@@ -304,6 +304,13 @@ export class EngineWorkerClient {
     );
   }
 
+  async getAiFallbackAction(): Promise<GameAction | null> {
+    return this.request<GameAction | null>(
+      { type: "getAiFallbackAction" },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
   async getAiScoredCandidates(
     difficulty: string,
     playerId: number,

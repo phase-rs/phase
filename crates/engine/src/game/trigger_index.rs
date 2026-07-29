@@ -594,6 +594,13 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::PermanentSacrificed { .. } => push(TriggerEventKey::Sacrificed),
         GameEvent::EffectResolved { kind, .. } => keys_from_effect_kind(*kind, &mut push),
         GameEvent::Unattached { .. } => push(TriggerEventKey::AttachmentChanged),
+        // CR 116.2c + CR 116.1: no printed trigger condition matches "a
+        // continuous effect ended". The special action doesn't use the stack, and
+        // any consequential board change (a Licid reverting to a creature and
+        // being unattached under CR 704.5p) emits its OWN indexed event.
+        // Explicitly inert rather than absent, so a future trigger family must
+        // classify it.
+        GameEvent::ContinuousEffectEnded { .. } => {}
         GameEvent::AttackersDeclared { .. } => push(TriggerEventKey::Attacks),
         GameEvent::BlockersDeclared { .. } => push(TriggerEventKey::Blocks),
         // CR 509.3c: an effect-driven "becomes blocked" is a Blocks-key event so

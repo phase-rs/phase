@@ -396,6 +396,7 @@ fn try_parse_contracted_subject_additive_type_clause(
                             .description(predicate.clone())],
                         duration: Some(Duration::UntilHostLeavesPlay),
                         target: application.target.clone(),
+                        end_cost: None,
                     },
                     duration: Some(Duration::UntilHostLeavesPlay),
                     sub_ability: None,
@@ -558,6 +559,7 @@ fn build_conditional_protection_grant_clause(
             static_abilities,
             duration: duration.clone(),
             target: application.target.clone(),
+            end_cost: None,
         },
         duration,
         sub_ability: None,
@@ -621,6 +623,7 @@ fn build_additive_type_continuous_clause(
                 .description(predicate.to_string())],
             duration: Some(Duration::Permanent),
             target: application.target.clone(),
+            end_cost: None,
         },
         duration: Some(Duration::Permanent),
         sub_ability: None,
@@ -698,6 +701,7 @@ fn try_parse_compound_all_subjects_become_clause(
             static_abilities,
             duration: merged_duration.clone(),
             target: merged_target,
+            end_cost: None,
         },
         duration: merged_duration,
         sub_ability: None,
@@ -816,6 +820,7 @@ fn try_parse_subject_supertype_removal_clause(
             .description(text.to_string())],
         duration: duration.clone(),
         target: application.target.clone(),
+        end_cost: None,
     };
     Some(ClauseAst::SubjectPredicate {
         subject: Box::new(SubjectPhraseAst {
@@ -1231,6 +1236,7 @@ fn try_parse_subject_base_pt_set_clause_ast(
         // the trigger-body path, where it is already stripped upstream) applies.
         duration: leading_duration.clone(),
         target: application.target.clone(),
+        end_cost: None,
     };
 
     Some(ClauseAst::SubjectPredicate {
@@ -1318,6 +1324,7 @@ fn try_parse_combat_tax_effect_clause(text: &str) -> Option<ParsedEffectClause> 
             ])],
             duration: None,
             target: Some(TargetFilter::SelfRef),
+            end_cost: None,
         },
         distribute: None,
         multi_target: None,
@@ -1616,6 +1623,7 @@ fn try_parse_subject_restriction_clause(
                 }])],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: application.target,
+                end_cost: None,
             },
             distribute: None,
             multi_target: None,
@@ -1661,6 +1669,7 @@ fn try_parse_subject_restriction_clause(
                     static_abilities,
                     duration: duration.clone(),
                     target: application.target,
+                    end_cost: None,
                 },
                 distribute: None,
                 multi_target: application.multi_target,
@@ -1693,6 +1702,7 @@ fn try_parse_subject_restriction_clause(
                     ],
                     duration: None,
                     target: application.target,
+                    end_cost: None,
                 },
                 distribute: None,
                 multi_target: application.multi_target,
@@ -1722,6 +1732,7 @@ fn try_parse_subject_restriction_clause(
                     ],
                     duration: duration.clone(),
                     target: application.target,
+                    end_cost: None,
                 },
                 distribute: None,
                 multi_target: application.multi_target,
@@ -1775,6 +1786,7 @@ fn try_parse_subject_restriction_clause(
                     .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
                 duration: duration.clone(),
                 target: application.target,
+                end_cost: None,
             },
             distribute: None,
             multi_target: None,
@@ -1819,6 +1831,7 @@ fn try_parse_subject_restriction_clause(
                     .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: application.target,
+                end_cost: None,
             },
             distribute: None,
             multi_target: None,
@@ -1875,6 +1888,7 @@ fn try_parse_subject_restriction_clause(
                     .modifications(vec![ContinuousModification::AssignNoCombatDamage])],
                 duration: Some(duration.clone()),
                 target: application.target,
+                end_cost: None,
             },
             distribute: None,
             multi_target: None,
@@ -1936,6 +1950,7 @@ fn try_parse_can_attack_with_defender(
                 .description(text.to_string())],
             duration: duration.clone(),
             target: application.target,
+            end_cost: None,
         },
         duration,
         sub_ability: None,
@@ -1997,6 +2012,7 @@ fn try_parse_can_block_additional(
                 .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
             duration: duration.clone(),
             target: application.target,
+            end_cost: None,
         },
         duration,
         sub_ability: None,
@@ -3039,6 +3055,7 @@ pub(super) fn build_cant_be_regenerated_rider(
                 .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
             duration: Some(Duration::UntilEndOfTurn),
             target: application.target.clone(),
+            end_cost: None,
         },
     )
     .duration(Duration::UntilEndOfTurn)
@@ -3480,6 +3497,7 @@ fn keyword_choice_branch(
                 .description(description.clone())],
             duration: duration.clone(),
             target,
+            end_cost: None,
         },
     );
     branch.duration = duration;
@@ -3593,6 +3611,7 @@ fn build_continuous_clause(
                 static_abilities,
                 duration: duration.clone(),
                 target: application.target,
+                end_cost: None,
             },
             duration,
             sub_ability: None,
@@ -3646,6 +3665,36 @@ fn build_continuous_clause(
         duration
     };
 
+    // CR 611.2a + CR 301.5 + CR 303.4: an animate-then-attach grant — the source
+    // itself "becomes an Aura enchantment with enchant creature" (all 12 Licids)
+    // or an Equipment — states no duration, and CR 611.2a says a continuous
+    // effect with no stated duration lasts until the end of the game. Left at
+    // `None` it would flip to `UntilEndOfTurn` in `effect.rs::resolve`, and at
+    // cleanup the source would stop being an Aura while STAYING attached. That
+    // is now cleaned up by `sba::check_illegal_attachment_unattach` (CR 704.5p
+    // sentence 1: a reverted Licid is a Creature, so it unattaches), but the
+    // permanent duration is still the CR 611.2a-correct model — the SBA is a
+    // safety net for an illegal state, not a licence to create one. The source's
+    // "Enchanted creature can't attack" static keys purely on `attached_to`, so
+    // relying on the wrong duration would also leave a one-SBA-check window in
+    // which the victim is locked down. Gated on the affected set
+    // being the source itself, so an Aura that grants the Aura/Equipment subtype
+    // to some OTHER permanent keeps its parsed/default duration. Mirrors the
+    // Suspend and "in addition to its other types" default-permanent precedents
+    // above rather than flipping the global `effect.rs` fallback, which is
+    // deliberately overloaded at that seam.
+    let duration = if duration.is_none()
+        && matches!(
+            static_affected_for_application(&application),
+            TargetFilter::SelfRef
+        )
+        && super::modifications_grant_attachable_subtype(&modifications)
+    {
+        Some(Duration::Permanent)
+    } else {
+        duration
+    };
+
     if let Some((power, toughness)) = extract_pump_modifiers(&modifications) {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {
@@ -3689,6 +3738,7 @@ fn build_continuous_clause(
             static_abilities,
             duration: duration.clone(),
             target: application.target,
+            end_cost: None,
         },
         duration,
         sub_ability: None,
@@ -3973,6 +4023,7 @@ fn build_become_clause(
                 .description(become_text.to_string())],
             duration: duration.clone(),
             target: application.target.clone(),
+            end_cost: None,
         };
         return Some(ParsedEffectClause {
             effect,
@@ -4001,6 +4052,7 @@ fn build_become_clause(
                 .description(become_text.to_string())],
             duration: duration.clone(),
             target: application.target.clone(),
+            end_cost: None,
         };
         return Some(ParsedEffectClause {
             effect,
@@ -4032,6 +4084,7 @@ fn build_become_clause(
                 .description(become_text.to_string())],
             duration: duration.clone(),
             target: application.target.clone(),
+            end_cost: None,
         };
         return Some(ParsedEffectClause {
             effect,
@@ -4246,6 +4299,7 @@ fn build_become_clause(
                 .description(become_text.to_string())],
             duration: duration.clone(),
             target: application.target.clone(),
+            end_cost: None,
         };
         return Some(ParsedEffectClause {
             effect,
@@ -4310,6 +4364,7 @@ fn build_become_clause(
                 .description(predicate.to_string())],
             duration: duration.clone(),
             target: application.target,
+            end_cost: None,
         },
         duration,
         sub_ability: None,
@@ -4428,6 +4483,7 @@ fn try_parse_become_and_attack_if_able(
             .description("attacks if able".to_string())],
         duration: Some(attack_duration.clone()),
         target: application.target.clone(),
+        end_cost: None,
     };
 
     Some(ParsedEffectClause {
@@ -4438,6 +4494,7 @@ fn try_parse_become_and_attack_if_able(
                 .description(animation_text.to_string())],
             duration: Some(animation_duration.clone()),
             target: application.target.clone(),
+            end_cost: None,
         },
         duration: Some(animation_duration),
         sub_ability: Some(Box::new(AbilityDefinition::new(
@@ -4747,6 +4804,7 @@ fn try_parse_become_choice(
             .description(become_text.to_string())],
         duration: duration.clone(),
         target: application.target.clone(),
+        end_cost: None,
     };
     let sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
@@ -4815,6 +4873,7 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
             // instead and don't reach this function.
             duration: None,
             target: None,
+            end_cost: None,
         },
         distribute: None,
         multi_target: None,
@@ -4873,6 +4932,7 @@ fn build_restriction_clause(
                 static_abilities: vec![static_def],
                 duration: duration.clone(),
                 target: application.target,
+                end_cost: None,
             },
             duration,
             sub_ability: None,
@@ -4980,6 +5040,7 @@ fn build_restriction_clause(
             static_abilities,
             duration: duration.clone(),
             target: application.target,
+            end_cost: None,
         },
         duration,
         sub_ability: None,
@@ -6304,6 +6365,7 @@ mod tests {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } = &clause.effect
         else {
             panic!("expected GenericEffect, got {:?}", clause.effect);
@@ -7275,6 +7337,7 @@ mod tests {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } = clause.effect
         else {
             panic!(
@@ -7447,6 +7510,7 @@ mod tests {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } = clause.effect
         else {
             panic!(
@@ -7493,6 +7557,7 @@ mod tests {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } = clause.effect
         else {
             panic!(
@@ -8538,6 +8603,7 @@ mod tests {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } = &*sub.effect
         else {
             panic!("expected GenericEffect, got {:?}", sub.effect);

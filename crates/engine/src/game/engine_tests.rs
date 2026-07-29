@@ -5304,6 +5304,7 @@ fn vorinclex_cant_untap_trigger_fires_on_opponent_tap() {
                                 }])],
                             duration: Some(duration.clone()),
                             target: Some(TargetFilter::TriggeringSource),
+                            end_cost: None,
                         },
                     )
                     .duration(duration),
@@ -7579,6 +7580,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
             PlayerId(0),
         )),
         cost: crate::types::mana::ManaCost::NoCost,
+        prepaid_actual_mana_spent: None,
         base_cost: None,
         declared_mana_additions: Vec::new(),
         activation_cost: None,
@@ -7973,6 +7975,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
             PlayerId(0),
         )),
         cost: crate::types::mana::ManaCost::NoCost,
+        prepaid_actual_mana_spent: None,
         base_cost: None,
         declared_mana_additions: Vec::new(),
         activation_cost: None,

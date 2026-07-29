@@ -9,4 +9,4 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
-cargo run -p engine --features interaction-bindings --bin interaction-bindings -- "$mode"
+cargo run -p phase-engine --features interaction-bindings --bin interaction-bindings -- "$mode"

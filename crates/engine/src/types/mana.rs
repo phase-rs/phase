@@ -423,6 +423,14 @@ pub enum SpecialAction {
     /// CR 901.9 / CR 116.2i: Paying the escalating generic cost to roll the
     /// planar die as a Planechase special action.
     RollPlanarDie,
+    /// CR 116.2c: Paying a continuous effect's printed termination cost to end
+    /// it ("You may pay {W} to end this effect" — the Licid cycle).
+    ///
+    /// The payment is neither a cast nor an activation, so mana restricted to
+    /// spells or to activated abilities MUST be rejected here — that rejection
+    /// is the correctness win this variant buys over charging the cost through
+    /// an unlabelled payment context.
+    EndContinuousEffect,
 }
 
 /// CR 106.6: The ability-activation half of a "spend only to cast [X] spell or
@@ -962,6 +970,7 @@ fn special_action_rank(value: SpecialAction) -> u8 {
         SpecialAction::Plot => 2,
         SpecialAction::TurnFaceUp => 3,
         SpecialAction::RollPlanarDie => 4,
+        SpecialAction::EndContinuousEffect => 5,
     }
 }
 
@@ -1416,7 +1425,7 @@ impl ManaUnit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ManaCostShard {
     // Basic colored
     White,
@@ -1700,7 +1709,7 @@ impl FromStr for ManaCostShard {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ManaCost {
     NoCost,
@@ -2061,28 +2070,33 @@ impl ManaPool {
         self.mana.clear();
     }
 
-    /// CR 500.5 + CR 614.6 + CR 703.4q: Drop only expiry-bound units whose
-    /// explicit rule fires on this transition. Runs FIRST during per-player
-    /// drain in `drain_pending_phase_transition_progress`, before the
-    /// CR 703.4q "empty unspent mana" event is constructed for the
-    /// replacement pipeline. Preserves H2 invariant (commit `e92fd3e19`):
-    /// expiry-bound mana leaves the pool through its own expiry rule, not
-    /// through the step-end empty event — handlers cannot intercept it.
+    /// CR 500.5 + CR 703.4q: End-of-combat retention expires before constructing
+    /// the ordinary "empty unspent mana" event. CR 500.5 orders these operations:
+    /// effects lasting until this boundary expire first, then unspent mana empties.
+    /// Clearing the reached marker makes the still-unspent unit eligible for the
+    /// normal empty-pool pipeline, where another active retention or transformation
+    /// effect may still apply.
     ///
-    /// - `EndOfTurn`: drops at cleanup only.
-    /// - `EndOfCombat`: drops when leaving combat (i.e., `in_combat` false).
-    /// - `None`: untouched — passed through to the replacement pipeline as
-    ///   a `UnitDecision { disposition: Drop }`, where step-end mana
-    ///   handlers (Upwelling, Horizon Stone, Kruphix, …) may flip the
-    ///   disposition to `Keep` (CR 614.6) or `Recolor(_)` (CR 614.1a). The
-    ///   actual emptying / recoloring of `None`-expiry units happens later
-    ///   in `apply_empty_mana_pool_decisions` after the pipeline resolves.
-    pub fn clear_expiring_at_step_end(&mut self, in_combat: bool, entering_cleanup: bool) {
-        self.mana.retain(|u| match u.expiry {
-            Some(ManaExpiry::EndOfTurn) => !entering_cleanup,
-            Some(ManaExpiry::EndOfCombat) => in_combat,
-            None => true,
-        });
+    /// - `EndOfCombat`: marker clears when leaving combat (CR 500.5a).
+    /// - `EndOfTurn`: marker remains until the cleanup action (CR 514.2).
+    /// - `None`: already eligible for the ordinary empty-pool event.
+    pub fn clear_expired_end_of_combat_retention_markers(&mut self, in_combat: bool) {
+        for unit in &mut self.mana {
+            if matches!(unit.expiry, Some(ManaExpiry::EndOfCombat)) && !in_combat {
+                unit.expiry = None;
+            }
+        }
+    }
+
+    /// CR 514.2: “Until end of turn” effects end during the cleanup action.
+    /// Clearing only the marker leaves the unit for the next ordinary
+    /// CR 500.5 / CR 703.4q empty-pool boundary.
+    pub fn clear_expired_end_of_turn_retention_markers(&mut self) {
+        for unit in &mut self.mana {
+            if matches!(unit.expiry, Some(ManaExpiry::EndOfTurn)) {
+                unit.expiry = None;
+            }
+        }
     }
 
     /// Remove all mana units produced by the given source.
@@ -2177,26 +2191,39 @@ pub fn apply_empty_mana_pool_decisions(
     player_id: PlayerId,
     units: &[UnitDecision],
     events: &mut Vec<GameEvent>,
-) {
+) -> u32 {
     let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) else {
-        return;
+        return 0;
     };
     // Descending pool_index order preserves index validity across removes.
     let mut sorted: Vec<&UnitDecision> = units.iter().collect();
     sorted.sort_by_key(|d| std::cmp::Reverse(d.pool_index));
     let mut changed = false;
+    let mut removed_count = 0_u32;
+    let mut seen_indices = std::collections::HashSet::new();
     for decision in sorted {
+        // The action wire is hostile input. A duplicate index or a stale
+        // color/index pair must not rebound to a different mana unit after a
+        // prior descending removal.
+        if !seen_indices.insert(decision.pool_index)
+            || player
+                .mana_pool
+                .mana
+                .get(decision.pool_index)
+                .is_none_or(|unit| unit.color != decision.color)
+        {
+            continue;
+        }
         match decision.disposition {
             UnitDisposition::Drop => {
-                if decision.pool_index < player.mana_pool.mana.len() {
-                    let removed = player.mana_pool.mana.remove(decision.pool_index);
-                    changed = true;
-                    events.push(GameEvent::ManaPoolEmptied {
-                        player_id,
-                        source_id: removed.source_id,
-                        color: removed.color,
-                    });
-                }
+                let removed = player.mana_pool.mana.remove(decision.pool_index);
+                removed_count += 1;
+                changed = true;
+                events.push(GameEvent::ManaPoolEmptied {
+                    player_id,
+                    source_id: removed.source_id,
+                    color: removed.color,
+                });
             }
             UnitDisposition::Keep => {}
             UnitDisposition::Recolor(to) => {
@@ -2216,6 +2243,7 @@ pub fn apply_empty_mana_pool_decisions(
     if changed {
         state.layers_dirty.mark_full();
     }
+    removed_count
 }
 
 #[cfg(test)]
@@ -2270,6 +2298,47 @@ mod tests {
         restrictions: Vec<ManaRestriction>,
     ) -> ManaUnit {
         ManaUnit::new(color, source, false, restrictions)
+    }
+
+    #[test]
+    fn empty_mana_pool_decisions_count_only_valid_unique_drops() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        state.players[0].mana_pool.add(make_unit(ManaType::Black));
+        state.players[0].mana_pool.add(make_unit(ManaType::Red));
+        let decisions = vec![
+            UnitDecision {
+                pool_index: 1,
+                color: ManaType::Red,
+                disposition: UnitDisposition::Drop,
+            },
+            // Hostile duplicate: must not rebound after the first removal.
+            UnitDecision {
+                pool_index: 1,
+                color: ManaType::Red,
+                disposition: UnitDisposition::Drop,
+            },
+            // Hostile stale color/index pair: must not remove the black unit.
+            UnitDecision {
+                pool_index: 0,
+                color: ManaType::Blue,
+                disposition: UnitDisposition::Drop,
+            },
+        ];
+        let mut events = Vec::new();
+
+        let removed =
+            apply_empty_mana_pool_decisions(&mut state, PlayerId(0), &decisions, &mut events);
+
+        assert_eq!(removed, 1);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 1);
+        assert_eq!(state.players[0].mana_pool.mana[0].color, ManaType::Black);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::ManaPoolEmptied { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2364,13 +2433,12 @@ mod tests {
         assert_eq!(pool.total(), 0);
     }
 
-    // CR 500.5 + CR 703.4q: `clear_expiring_at_step_end` is the leading
-    // half of step-end mana resolution — it drops only expiry-bound units
-    // whose own rule fires on this transition. Handler-driven retention /
-    // transformation behavior is exercised end-to-end via the replacement
-    // pipeline in `game::turns` runtime tests, not here.
+    // CR 500.5 + CR 703.4q: retention durations end before the ordinary
+    // empty-pool event. The helper clears only the reached marker; pool
+    // removal and any still-active retention / transformation effects are
+    // exercised end-to-end through `game::turns`.
     #[test]
-    fn mana_pool_clear_expiring_drops_end_of_turn_only_at_cleanup() {
+    fn mana_pool_clears_end_of_turn_marker_only_at_cleanup() {
         let mut pool = ManaPool::default();
         let mut retained = make_unit(ManaType::Green);
         retained.expiry = Some(ManaExpiry::EndOfTurn);
@@ -2379,18 +2447,21 @@ mod tests {
 
         // Non-cleanup transition: EndOfTurn unit survives; non-expiry unit
         // is left in place (the pipeline drives Drop disposition elsewhere).
-        pool.clear_expiring_at_step_end(false, false);
+        pool.clear_expired_end_of_combat_retention_markers(false);
         assert_eq!(pool.count_color(ManaType::Green), 1);
         assert_eq!(pool.count_color(ManaType::Red), 1);
+        assert_eq!(pool.mana[0].expiry, Some(ManaExpiry::EndOfTurn));
 
-        // Cleanup transition: EndOfTurn unit drops; non-expiry unit remains.
-        pool.clear_expiring_at_step_end(false, true);
-        assert_eq!(pool.count_color(ManaType::Green), 0);
+        // Cleanup transition: the duration ends, but the still-unspent unit
+        // remains for the ordinary empty-pool pipeline.
+        pool.clear_expired_end_of_turn_retention_markers();
+        assert_eq!(pool.count_color(ManaType::Green), 1);
         assert_eq!(pool.count_color(ManaType::Red), 1);
+        assert_eq!(pool.mana[0].expiry, None);
     }
 
     #[test]
-    fn mana_pool_clear_expiring_drops_end_of_combat_when_leaving_combat() {
+    fn mana_pool_clears_end_of_combat_marker_when_leaving_combat() {
         let mut pool = ManaPool::default();
         let mut combat_mana = make_unit(ManaType::Red);
         combat_mana.expiry = Some(ManaExpiry::EndOfCombat);
@@ -2398,12 +2469,15 @@ mod tests {
 
         // In-combat transition (e.g., DeclareAttackers → DeclareBlockers):
         // EndOfCombat unit survives.
-        pool.clear_expiring_at_step_end(true, false);
+        pool.clear_expired_end_of_combat_retention_markers(true);
         assert_eq!(pool.count_color(ManaType::Red), 1);
+        assert_eq!(pool.mana[0].expiry, Some(ManaExpiry::EndOfCombat));
 
-        // Leaving combat (EndCombat → PostCombatMain): EndOfCombat unit drops.
-        pool.clear_expiring_at_step_end(false, false);
-        assert_eq!(pool.total(), 0);
+        // Leaving combat ends the retention duration; ordinary empty-pool
+        // processing decides the unit's final disposition.
+        pool.clear_expired_end_of_combat_retention_markers(false);
+        assert_eq!(pool.total(), 1);
+        assert_eq!(pool.mana[0].expiry, None);
     }
 
     #[test]

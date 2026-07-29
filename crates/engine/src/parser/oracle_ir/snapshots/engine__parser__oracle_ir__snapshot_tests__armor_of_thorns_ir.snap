@@ -1,0 +1,177 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 206,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step."
+      },
+      "node": {
+        "CastingOption": {
+          "kind": "AsThoughHadFlash"
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 206,
+          "precision": "Exact",
+          "ordinal_within_span": 1
+        },
+        "fragment": "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step."
+      },
+      "node": {
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "ChangesZone",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "CreateDelayedTrigger",
+                  "condition": {
+                    "type": "AtNextPhase",
+                    "phase": "Cleanup"
+                  },
+                  "effect": {
+                    "kind": "Spell",
+                    "effect": {
+                      "type": "Sacrifice",
+                      "target": {
+                        "type": "SelfRef"
+                      },
+                      "count": {
+                        "type": "Fixed",
+                        "value": 1
+                      }
+                    },
+                    "cost": null,
+                    "sub_ability": null,
+                    "duration": null,
+                    "description": null,
+                    "target_prompt": null,
+                    "condition": null,
+                    "optional_targeting": false,
+                    "optional": false,
+                    "forward_result": false
+                  },
+                  "uses_tracked_set": false
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": "Battlefield",
+              "trigger_zones": [],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.",
+              "constraint": null,
+              "condition": {
+                "type": "CastTimingPermission",
+                "permission": "AsThoughHadFlash"
+              },
+              "batched": false
+            },
+            "source_text": "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step."
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 2,
+          "last_line": 2,
+          "start_byte": 233,
+          "end_byte": 263,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Enchanted creature gets +2/+2."
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": [
+                {
+                  "type": "EnchantedBy"
+                }
+              ]
+            },
+            "modifications": [
+              {
+                "type": "AddPower",
+                "value": 2
+              },
+              {
+                "type": "AddToughness",
+                "value": 2
+              }
+            ],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Enchanted creature gets +2/+2."
+          },
+          "source_text": "Enchanted creature gets +2/+2.",
+          "body_ir": null
+        }
+      }
+    }
+  ],
+  "source_text": "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.\nEnchant nonblack creature\nEnchanted creature gets +2/+2.",
+  "card_name": "Armor of Thorns"
+}

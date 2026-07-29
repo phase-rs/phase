@@ -5,6 +5,41 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 
+/// CR 106.4 + CR 119.3: Parse the Yurlok-class rule modification that turns
+/// mana lost at a step or phase boundary into an equal life loss.
+fn parse_unspent_mana_loss_causes_life_loss(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (input, affected) = alt((
+        value(TargetFilter::Player, tag("a player")),
+        value(TargetFilter::Player, tag("each player")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" losing ").parse(input)?;
+    let (input, _) = tag("unspent mana").parse(input)?;
+    let (input, _) = tag(" causes ").parse(input)?;
+    let (input, _) = tag("that player").parse(input)?;
+    let (input, _) = tag(" to lose ").parse(input)?;
+    let (input, _) = tag("that much").parse(input)?;
+    let (input, _) = tag(" life").parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof(input)?;
+    Ok((input, affected))
+}
+
+pub(crate) fn is_unspent_mana_loss_causes_life_loss_static(lower: &str) -> bool {
+    parse_unspent_mana_loss_causes_life_loss(lower).is_ok()
+}
+
+pub(crate) fn try_parse_unspent_mana_loss_causes_life_loss_static(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    nom_on_lower(text, lower, parse_unspent_mana_loss_causes_life_loss).map(|(affected, _)| {
+        StaticDefinition::new(StaticMode::UnspentManaLossCausesLifeLoss)
+            .affected(affected)
+            .description(text.to_string())
+    })
+}
+
 /// CR 614.1a + CR 703.4q: Parse "If you would lose unspent mana, that mana
 /// becomes [type] instead." — Horizon Stone / Kruphix / Omnath / Ozai class.
 /// Emits the unified `StepEndUnspentMana { filter: None, action: Transform(to) }`

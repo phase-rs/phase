@@ -11112,6 +11112,7 @@ fn transient_activation_cost_reduction_hits_only_controlled_artifact_tokens() {
             }])],
         duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
         target: None,
+        end_cost: None,
     };
     let ability =
         crate::types::ability::ResolvedAbility::new(effect, vec![], dining_car, PlayerId(0));
@@ -25992,6 +25993,91 @@ fn colored_cost_reduction_can_remove_hybrid_symbol_once() {
     );
 }
 
+/// CR 118.7b: a colored reduction shard with no matching component anywhere in
+/// the cost converts to a generic reduction instead of being discarded. Mirrors
+/// Aang, Master of Elements' `{W}{U}{B}{R}{G}` reduction against an all-generic
+/// spell (issue #6405) — none of the five colors are present, so all five
+/// units must spill over to reduce the {5} generic cost to {0}.
+#[test]
+fn colored_cost_reduction_spills_to_generic_when_cost_has_no_matching_color() {
+    let mut cost = ManaCost::Cost {
+        generic: 5,
+        shards: vec![],
+    };
+    let reduction = ManaCost::Cost {
+        generic: 0,
+        shards: vec![
+            ManaCostShard::White,
+            ManaCostShard::Blue,
+            ManaCostShard::Black,
+            ManaCostShard::Red,
+            ManaCostShard::Green,
+        ],
+    };
+    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    assert_eq!(
+        cost,
+        ManaCost::Cost {
+            generic: 0,
+            shards: vec![],
+        }
+    );
+}
+
+/// CR 118.7c: a colored reduction that exceeds the cost's component of that
+/// color reduces the color to nothing, then spills the excess to generic. A
+/// {2}{R} cost hit by Aang's five-color reduction loses its lone red pip (1
+/// unit) and then 4 more units spill to generic, flooring {2} at {0}.
+#[test]
+fn colored_cost_reduction_spills_excess_beyond_matching_color_to_generic() {
+    let mut cost = ManaCost::Cost {
+        generic: 2,
+        shards: vec![ManaCostShard::Red],
+    };
+    let reduction = ManaCost::Cost {
+        generic: 0,
+        shards: vec![
+            ManaCostShard::White,
+            ManaCostShard::Blue,
+            ManaCostShard::Black,
+            ManaCostShard::Red,
+            ManaCostShard::Green,
+        ],
+    };
+    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    assert_eq!(
+        cost,
+        ManaCost::Cost {
+            generic: 0,
+            shards: vec![],
+        }
+    );
+}
+
+/// CR 118.7b: a reduction shard never reduces a mismatched color's pip — a
+/// {G} cost is untouched by a {W} reduction unit (which instead spills to
+/// generic), so the green pip must survive.
+#[test]
+fn colored_cost_reduction_never_touches_mismatched_color_pip() {
+    let mut cost = ManaCost::Cost {
+        generic: 0,
+        shards: vec![ManaCostShard::Green],
+    };
+    let reduction = ManaCost::Cost {
+        generic: 0,
+        shards: vec![ManaCostShard::White],
+    };
+    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    assert_eq!(
+        cost,
+        ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::Green],
+        },
+        "a colored reduction must never cancel a differently-colored pip"
+    );
+}
+
 /// CR 601.2f: "The total cost is the mana cost ... plus all ... cost
 /// increases, and minus all cost reductions. ... If the mana component of the
 /// total cost is reduced to nothing by cost reduction effects, it is considered
@@ -36309,6 +36395,227 @@ mod namor_colored_pip_cast_trigger {
             token_count(&runner, P0)
         );
         outcome.assert_life_delta(P0, 1);
+    }
+}
+
+/// CR 107.4 + CR 202.3 + CR 603.2 (issue #1718): Ovika, Enigma Goliath —
+/// runtime cast-pipeline coverage. "Whenever you cast a noncreature spell,
+/// create X 1/1 red Phyrexian Goblin creature tokens, where X is the mana value
+/// of that spell. They gain haste until end of turn." The count binds the
+/// triggering spell's mana value via the prepositional of-form anaphor
+/// (`ObjectManaValue { EventSource }`). Before the parser fix the token clause
+/// "create X … tokens, where X is the mana value of that spell" dropped to
+/// `Unimplemented`, so the trigger fired but created ZERO tokens — the exact
+/// reported symptom.
+mod ovika_noncreature_spell_token_trigger {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::mana::{ManaCost, ManaUnit};
+
+    const OVIKA_ORACLE: &str = "Flying\nWard—{3}, Pay 3 life.\nWhenever you cast a noncreature spell, create X 1/1 red Phyrexian Goblin creature tokens, where X is the mana value of that spell. They gain haste until end of turn.";
+
+    /// Count token permanents a player controls on the battlefield.
+    fn token_count(runner: &crate::game::scenario::GameRunner, player: PlayerId) -> usize {
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Battlefield && o.controller == player && o.is_token)
+            .count()
+    }
+
+    /// Cast a benign noncreature spell of the given mana value with Ovika on the
+    /// battlefield, resolve the whole stack, and report how many tokens P0 ends
+    /// up controlling.
+    fn cast_noncreature_spell_of_mana_value(mv: u32) -> crate::game::scenario::GameRunner {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature_from_oracle(P0, "Ovika, Enigma Goliath", 7, 7, OVIKA_ORACLE);
+        // A noncreature spell whose only mana is generic, so its mana value is
+        // exactly `mv`. Benign resolution (gain 1 life) keeps the state simple.
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Test Filler", true, "You gain 1 life.")
+            .with_mana_cost(ManaCost::generic(mv))
+            .id();
+        // CR 601.2g-h: fund the generic cost from the pool so the driver
+        // auto-pays (601.2g covers mana abilities/funding, 601.2h the payment;
+        // 601.2f is total-cost determination).
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); mv as usize],
+        );
+        let mut runner = scenario.build();
+        runner.cast(spell).resolve();
+        runner
+    }
+
+    #[test]
+    fn casting_mana_value_three_spell_creates_three_goblins() {
+        let runner = cast_noncreature_spell_of_mana_value(3);
+        assert_eq!(
+            token_count(&runner, P0),
+            3,
+            "X must bind the triggering spell's mana value (3), got {}",
+            token_count(&runner, P0)
+        );
+        // Every created token is a red Phyrexian Goblin, not a generic token.
+        for obj in runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Battlefield && o.is_token && o.controller == P0)
+        {
+            assert_eq!(
+                (obj.power, obj.toughness),
+                (Some(1), Some(1)),
+                "each token must be exactly 1/1 — the mana value drives the token \
+                 COUNT, never the P/T, got {:?}/{:?}",
+                obj.power,
+                obj.toughness
+            );
+            assert!(
+                obj.color.contains(&ManaColor::Red),
+                "token must be red, got colors {:?}",
+                obj.color
+            );
+            assert!(
+                obj.card_types.subtypes.iter().any(|s| s == "Phyrexian"),
+                "token must be a Phyrexian, got subtypes {:?}",
+                obj.card_types.subtypes
+            );
+            assert!(
+                obj.card_types.subtypes.iter().any(|s| s == "Goblin"),
+                "token must be a Goblin, got subtypes {:?}",
+                obj.card_types.subtypes
+            );
+            assert!(
+                obj.keywords.contains(&Keyword::Haste), // allow-raw-authority: asserts the literal keyword set stamped on the freshly created token, not an effective-keyword query
+                "each token must gain haste (\"They gain haste until end of turn\"), \
+                 got keywords {:?}",
+                obj.keywords
+            );
+        }
+    }
+
+    #[test]
+    fn token_count_tracks_spell_mana_value() {
+        // Control: a mana-value-2 spell makes exactly two tokens, proving the
+        // count reads the triggering spell's mana value rather than a fixed
+        // number or the generic (amount-less) SpellCast event context.
+        let runner = cast_noncreature_spell_of_mana_value(2);
+        assert_eq!(
+            token_count(&runner, P0),
+            2,
+            "X must track the spell's mana value (2), got {}",
+            token_count(&runner, P0)
+        );
+    }
+}
+
+/// CR 107.4 + CR 202.3 + CR 603.2 (issue #1718): Pure Reflection — runtime
+/// cast-pipeline coverage for the P/T axis of the mana-value of-form anaphor.
+/// "Whenever a player casts a creature spell, destroy all Reflections. Then
+/// that player creates an X/X white Reflection creature token, where X is the
+/// mana value of that spell." Ovika binds `ObjectManaValue { EventSource }` to
+/// the token COUNT; Pure Reflection binds it to the token's POWER/TOUGHNESS.
+/// Pinning P/T here (with count pinned at one) discriminates a count/P-T axis
+/// confusion that count-only assertions cannot catch.
+mod pure_reflection_mana_value_token_pt {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::mana::{ManaCost, ManaUnit};
+
+    const PURE_REFLECTION_ORACLE: &str = "Whenever a player casts a creature spell, destroy all Reflections. Then that player creates an X/X white Reflection creature token, where X is the mana value of that spell.";
+
+    /// Put Pure Reflection on P0's battlefield, cast a creature spell with the
+    /// given mana cost (funded exactly by `pool`), resolve the whole stack, and
+    /// return the runner for token assertions.
+    fn cast_creature_spell_with_cost(
+        cost: ManaCost,
+        pool: Vec<ManaUnit>,
+    ) -> crate::game::scenario::GameRunner {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Pure Reflection", 0, 0)
+            .as_enchantment()
+            .from_oracle_text(PURE_REFLECTION_ORACLE);
+        let spell = scenario
+            .add_creature_to_hand(P0, "Test Bear", 2, 2)
+            .with_mana_cost(cost)
+            .id();
+        // CR 601.2g-h: fund the cost from the pool so the driver auto-pays.
+        scenario.with_mana_pool(P0, pool);
+        let mut runner = scenario.build();
+        runner.cast(spell).resolve();
+        runner
+    }
+
+    /// Exactly one white Reflection token whose P/T both equal the triggering
+    /// spell's mana value.
+    fn assert_single_reflection_token(
+        runner: &crate::game::scenario::GameRunner,
+        expected_pt: i32,
+    ) {
+        let tokens: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Battlefield && o.controller == P0 && o.is_token)
+            .collect();
+        assert_eq!(
+            tokens.len(),
+            1,
+            "exactly one Reflection token must be created (the mana value drives \
+             P/T, never the count), got {}",
+            tokens.len()
+        );
+        let token = tokens[0];
+        assert_eq!(
+            (token.power, token.toughness),
+            (Some(expected_pt), Some(expected_pt)),
+            "Reflection must be {expected_pt}/{expected_pt} — X binds the \
+             triggering spell's mana value — got {:?}/{:?}",
+            token.power,
+            token.toughness
+        );
+        assert!(
+            token.color.contains(&ManaColor::White),
+            "token must be white, got colors {:?}",
+            token.color
+        );
+        assert!(
+            token.card_types.subtypes.iter().any(|s| s == "Reflection"),
+            "token must be a Reflection, got subtypes {:?}",
+            token.card_types.subtypes
+        );
+    }
+
+    #[test]
+    fn reflection_token_pt_binds_spell_mana_value() {
+        let runner = cast_creature_spell_with_cost(
+            ManaCost::generic(3),
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 3],
+        );
+        assert_single_reflection_token(&runner, 3);
+    }
+
+    #[test]
+    fn reflection_token_pt_sums_generic_and_colored_pips() {
+        // CR 202.3: {1}{R} has mana value 2 — one generic plus one colored pip.
+        // A mana-value computation that ignored colored pips would yield a 1/1
+        // here; the control above cannot catch that (generic-only cost).
+        let runner = cast_creature_spell_with_cost(
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            },
+            vec![
+                ManaUnit::new(ManaType::Red, ObjectId(9_999), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(9_998), false, vec![]),
+            ],
+        );
+        assert_single_reflection_token(&runner, 2);
     }
 }
 

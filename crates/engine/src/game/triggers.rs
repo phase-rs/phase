@@ -1061,22 +1061,6 @@ impl LogicalZoneTriggerCollection<'_> {
     }
 }
 
-/// Returns the record-owned source for a battlefield departure. An absent or
-/// mismatched context is not recoverable from the current object map: that map
-/// may already hold a different incarnation at the same storage id.
-fn ltb_trigger_source_context(
-    record: &crate::types::game_state::ZoneChangeRecord,
-    moved_id: ObjectId,
-) -> Option<&TriggerSourceContext> {
-    (record.object_id == moved_id && record.from_zone == Some(Zone::Battlefield))
-        .then(|| record.trigger_source_context())
-        .flatten()
-        .filter(|context| {
-            context.identity.reference.object_id == moved_id
-                && context.identity.expected_zone == Zone::Battlefield
-        })
-}
-
 fn batched_zone_change_batch(events: &[GameEvent]) -> bool {
     !events.is_empty()
         && events
@@ -1450,7 +1434,7 @@ fn collect_matching_triggers_inner(
                 definition_ref.as_ref(),
                 Some(&source_context),
                 controller,
-                event,
+                Some(event),
             ) {
                 continue;
             }
@@ -2602,7 +2586,7 @@ fn collect_latched_batched_zone_triggers(
                     Some(&latched.definition_ref),
                     Some(source_context),
                     source_context.lki.controller,
-                    event,
+                    Some(event),
                 )
                 || !latched
                     .definition
@@ -3305,12 +3289,14 @@ fn collect_pending_triggers_with_collection(
         if let GameEvent::ZoneChanged {
             object_id: moved_id,
             from: Some(Zone::Battlefield),
-            record,
             ..
         } = event
         {
             let matched_triggers =
-                if let Some(source_context) = ltb_trigger_source_context(record, *moved_id) {
+                if let crate::types::game_state::BattlefieldDepartureSourceContext::Present(
+                    source_context,
+                ) = crate::types::game_state::battlefield_departure_trigger_source_context(event)
+                {
                     collect_matching_triggers_from_context(
                         state,
                         event,
@@ -7981,13 +7967,17 @@ fn delayed_zone_change_filter_matches(
 ///
 /// `event` is the triggering event — needed by `NthSpellThisTurn` to identify
 /// the caster and count their per-player spell total (not the global count).
+/// `event` is `Some` for a real trigger evaluation and `None` for a hypothetical
+/// preflight (e.g. an AI payoff-eligibility query). In the hypothetical case the
+/// event-dependent constraints — which can only be judged against a concrete
+/// triggering event — conservatively report NOT satisfied rather than guess.
 fn check_trigger_constraint_with_ref(
     state: &GameState,
     trig_def: &TriggerDefinition,
     definition_ref: Option<&TriggerDefinitionRef>,
     source_context: Option<&TriggerSourceContext>,
     controller: PlayerId,
-    event: &GameEvent,
+    event: Option<&GameEvent>,
 ) -> bool {
     use crate::types::ability::TriggerConstraint;
 
@@ -8013,7 +8003,7 @@ fn check_trigger_constraint_with_ref(
             // CR 603.2: The trigger event only matches the first life-loss event
             // during that opponent's own turn.
             let opponent_id = match event {
-                GameEvent::LifeChanged { player_id, .. } => *player_id,
+                Some(GameEvent::LifeChanged { player_id, .. }) => *player_id,
                 _ => return false,
             };
             if opponent_id == controller || state.active_player != opponent_id {
@@ -8039,10 +8029,10 @@ fn check_trigger_constraint_with_ref(
             controller: ctrl_ref,
         } => {
             let event_source = match event {
-                GameEvent::Discarded {
+                Some(GameEvent::Discarded {
                     source_id: Some(source_id),
                     ..
-                } => *source_id,
+                }) => *source_id,
                 _ => return false,
             };
             let Some(event_source_controller) = state
@@ -8066,7 +8056,7 @@ fn check_trigger_constraint_with_ref(
         // When `filter` contains `TypeFilter::Non(Creature)`, use the noncreature counter.
         TriggerConstraint::NthSpellThisTurn { n, filter } => {
             let caster = match event {
-                GameEvent::SpellCast { controller: c, .. } => *c,
+                Some(GameEvent::SpellCast { controller: c, .. }) => *c,
                 _ => return false,
             };
             let spells = state.spells_cast_this_turn_by_player.get(&caster);
@@ -8102,7 +8092,7 @@ fn check_trigger_constraint_with_ref(
         // rather than the final per-turn count after a multi-card draw batch.
         TriggerConstraint::NthDrawThisTurn { n } => {
             let nth_in_turn = match event {
-                GameEvent::CardDrawn { nth_in_turn, .. } => *nth_in_turn,
+                Some(GameEvent::CardDrawn { nth_in_turn, .. }) => *nth_in_turn,
                 _ => return false,
             };
             nth_in_turn == *n
@@ -8121,6 +8111,58 @@ fn check_trigger_constraint_with_ref(
                 < *max
         }),
     }
+}
+
+/// CR 603.2-603.4 + CR 603.3d: could `entry`'s trigger on `source` still fire
+/// AND resolve to an effect if its triggering event happened right now? The
+/// single authority an AI policy uses to ask "is this on-battlefield payoff
+/// live?" — reusing the same constraint check the live trigger pipeline runs.
+///
+/// Conservative by construction: an intervening-if `condition` (CR 603.4, not
+/// evaluated in this preflight) and any event-dependent constraint whose
+/// triggering event is unknown at this decision point are treated as NOT
+/// established, so a payoff is never credited value it cannot actually produce.
+pub fn hypothetical_trigger_fireable(
+    state: &GameState,
+    source: &GameObject,
+    entry: &TriggerEntry,
+) -> bool {
+    let def = &entry.definition;
+    // CR 603.4 intervening-if: not preflighted here — treat a conditional
+    // trigger as not-live rather than assume it fires.
+    if def.condition.is_some() {
+        return false;
+    }
+    let definition_ref = source.trigger_definition_ref(entry);
+    // CR 603.2-603.4: the trigger's own constraint, in hypothetical (no-event)
+    // mode — the shared authority the live pipeline also uses. The source
+    // context is supplied (a current snapshot of `source`) so SOURCE-sensitive
+    // constraints like `AtClassLevel` (CR 716) read the real class level; only
+    // the triggering EVENT is withheld (`None`), so event-dependent constraints
+    // stay conservatively not-fireable.
+    let source_context = trigger_source_context_for_latch(state, source);
+    if !check_trigger_constraint_with_ref(
+        state,
+        def,
+        Some(&definition_ref),
+        Some(&source_context),
+        source.controller,
+        None,
+    ) {
+        return false;
+    }
+    // A trigger with no execute — or an unsupported execute — resolves to a
+    // `TriggerNoExecute` / `Effect::Unimplemented` no-op that produces no payoff,
+    // so it is not a live payoff (the shared support authority decides this).
+    let Some(execute) = def.execute.as_deref() else {
+        return false;
+    };
+    if !super::ability_utils::ability_definition_supported(execute) {
+        return false;
+    }
+    // CR 603.3d: a mandatory-target execute with no legal target is removed from
+    // the stack rather than producing its effect.
+    super::ability_utils::execute_targets_satisfiable(state, source, execute)
 }
 
 /// Evaluates the cast-payment facts carried either by the event subject or by
@@ -9154,12 +9196,37 @@ fn evaluate_trigger_condition_with_source(
                 None => lki.counters.values().any(|&count| count > 0),
             };
             match trigger_event {
-                Some(GameEvent::ZoneChanged {
-                    object_id, record, ..
-                }) => match record.trigger_source_context() {
-                    Some(context) => matches_counter(&context.lki),
-                    None => state.lki_cache.get(object_id).is_some_and(matches_counter),
-                },
+                Some(
+                    event @ GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Battlefield),
+                        ..
+                    },
+                ) => {
+                    match crate::types::game_state::battlefield_departure_trigger_source_context(
+                        event,
+                    ) {
+                        crate::types::game_state::BattlefieldDepartureSourceContext::Present(
+                            context,
+                        ) => matches_counter(&context.lki),
+                        // Compatibility for legacy/defaulted records only. A
+                        // present incoherent context is not absent and must
+                        // never be rebound through the ObjectId-keyed cache.
+                        crate::types::game_state::BattlefieldDepartureSourceContext::Absent => {
+                            state.lki_cache.get(object_id).is_some_and(matches_counter)
+                        }
+                        crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => {
+                            false
+                        }
+                    }
+                }
+                // Non-departure ZoneChanged events never had an owned
+                // battlefield LKI requirement. Preserve their established
+                // event-subject cache lookup rather than classifying them as
+                // malformed departures.
+                Some(GameEvent::ZoneChanged { object_id, .. }) => {
+                    state.lki_cache.get(object_id).is_some_and(matches_counter)
+                }
                 Some(event) => {
                     if let Some(event_object_id) =
                         crate::game::targeting::extract_source_from_event(event)
@@ -9819,7 +9886,7 @@ fn check_trigger_constraint(
             .map(|source| trigger_source_context_for_latch(state, source))
             .as_ref(),
         controller,
-        event,
+        Some(event),
     )
 }
 
@@ -10485,7 +10552,7 @@ pub mod tests {
     }
 
     #[test]
-    fn ltb_source_requires_the_record_owned_context_for_the_moved_object() {
+    fn ltb_source_requires_a_coherent_record_owned_context() {
         let object = GameObject::new(
             ObjectId(9),
             CardId(12),
@@ -10495,8 +10562,29 @@ pub mod tests {
         );
         let record =
             object.snapshot_for_zone_change(object.id, Some(Zone::Battlefield), Zone::Graveyard);
-        assert!(ltb_trigger_source_context(&record, object.id).is_some());
-        assert!(ltb_trigger_source_context(&record, ObjectId(10)).is_none());
+        let event = GameEvent::ZoneChanged {
+            object_id: object.id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(record.clone()),
+        };
+        assert!(matches!(
+            crate::types::game_state::battlefield_departure_trigger_source_context(&event),
+            crate::types::game_state::BattlefieldDepartureSourceContext::Present(_)
+        ));
+
+        let mismatched_event = GameEvent::ZoneChanged {
+            object_id: ObjectId(10),
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(record.clone()),
+        };
+        assert!(matches!(
+            crate::types::game_state::battlefield_departure_trigger_source_context(
+                &mismatched_event
+            ),
+            crate::types::game_state::BattlefieldDepartureSourceContext::Malformed
+        ));
 
         let mut post_change_context = record.clone();
         post_change_context
@@ -10505,11 +10593,31 @@ pub mod tests {
             .expect("snapshot context")
             .identity
             .expected_zone = Zone::Graveyard;
-        assert!(ltb_trigger_source_context(&post_change_context, object.id).is_none());
+        let malformed_context_event = GameEvent::ZoneChanged {
+            object_id: object.id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(post_change_context),
+        };
+        assert!(matches!(
+            crate::types::game_state::battlefield_departure_trigger_source_context(
+                &malformed_context_event
+            ),
+            crate::types::game_state::BattlefieldDepartureSourceContext::Malformed
+        ));
 
         let missing_context =
             ZoneChangeRecord::test_minimal(object.id, Some(Zone::Battlefield), Zone::Graveyard);
-        assert!(ltb_trigger_source_context(&missing_context, object.id).is_none());
+        let legacy_event = GameEvent::ZoneChanged {
+            object_id: object.id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(missing_context),
+        };
+        assert!(matches!(
+            crate::types::game_state::battlefield_departure_trigger_source_context(&legacy_event),
+            crate::types::game_state::BattlefieldDepartureSourceContext::Absent
+        ));
     }
 
     #[test]
@@ -16459,6 +16567,113 @@ pub mod tests {
         );
     }
 
+    /// Builds and dispatches a "choose one — deal 3 to target creature; or deal
+    /// 3 to target creature" modal trigger from `source`, returning the live
+    /// dispatch disposition.
+    fn dispatch_two_mode_creature_target_modal(
+        state: &mut GameState,
+        source: ObjectId,
+        controller: PlayerId,
+    ) -> TriggerDispatchDisposition {
+        let mode = || {
+            AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Typed(
+                        TypedFilter::default().with_type(TypeFilter::Creature),
+                    ),
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+        };
+        let pending = PendingTrigger {
+            source_id: source,
+            controller,
+            condition: None,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "modal_placeholder".to_string(),
+                    description: None,
+                },
+                vec![],
+                source,
+                controller,
+            )),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: Some(GameEvent::SpellCast {
+                controller,
+                object_id: source,
+                card_id: CardId(0x98),
+            }),
+            modal: Some(ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 2,
+                ..Default::default()
+            }),
+            mode_abilities: vec![mode(), mode()],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        };
+        let context = PendingTriggerContext {
+            pending,
+            trigger_events: Vec::new(),
+            dispatch_origin: PendingTriggerDispatchOrigin::Normal,
+        };
+        let mut events_out = Vec::new();
+        dispatch_pending_trigger_context(state, context, &mut events_out)
+    }
+
+    /// CR 603.3c: a required modal trigger whose every mode needs a target and
+    /// none is available on an empty board is dropped at dispatch
+    /// (`DroppedNoLegalMode`) — the live contract the AI payoff preflight
+    /// (`execute_targets_satisfiable`) mirrors.
+    #[test]
+    fn modal_trigger_all_target_required_modes_no_targets_is_dropped() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_3C01),
+            controller,
+            "Modal Engine".to_string(),
+            Zone::Battlefield,
+        );
+        let disposition = dispatch_two_mode_creature_target_modal(&mut state, source, controller);
+        assert!(
+            matches!(disposition, TriggerDispatchDisposition::DroppedNoLegalMode),
+            "all-target-required modal with no legal target must drop, got {disposition:?}"
+        );
+    }
+
+    /// Control: with a legal creature target present, at least one mode is
+    /// choosable, so the same modal trigger is NOT dropped for lack of a legal
+    /// mode.
+    #[test]
+    fn modal_trigger_with_a_legal_target_is_not_dropped() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_3C02),
+            controller,
+            "Modal Engine".to_string(),
+            Zone::Battlefield,
+        );
+        let _creature = make_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let disposition = dispatch_two_mode_creature_target_modal(&mut state, source, controller);
+        assert!(
+            !matches!(disposition, TriggerDispatchDisposition::DroppedNoLegalMode),
+            "a legal target makes a mode choosable — must not drop, got {disposition:?}"
+        );
+    }
+
     #[test]
     fn keeper_of_the_accord_creature_intervening_if_false_when_tied() {
         let def = crate::parser::oracle_trigger::parse_trigger_line(
@@ -21370,6 +21585,7 @@ pub mod tests {
             )],
             duration: Some(Duration::UntilEndOfTurn),
             target: Some(TargetFilter::Any),
+            end_cost: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -21430,6 +21646,7 @@ pub mod tests {
             )],
             duration: Some(Duration::UntilEndOfTurn),
             target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            end_cost: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
@@ -27113,6 +27330,7 @@ pub mod tests {
                     .modifications(vec![ContinuousModification::AddKeyword {
                         keyword: Keyword::Trample,
                     }])],
+                end_cost: None,
             },
             Vec::new(),
             source,
@@ -28097,6 +28315,7 @@ pub mod tests {
             }],
             condition: None,
             duration_subject: None,
+            end_permission: None,
             source_name: "Jhoira".to_string(),
         };
         state.transient_continuous_effects.push_back(grant.clone());
@@ -28190,6 +28409,7 @@ pub mod tests {
                 }],
                 condition: None,
                 duration_subject: None,
+                end_permission: None,
                 source_name: "Grant source".to_string(),
             });
 
@@ -28334,6 +28554,7 @@ pub mod tests {
                     }],
                     condition: None,
                     duration_subject: None,
+                    end_permission: None,
                     source_name: "Jhoira of the Ghitu".to_string(),
                 },
             );

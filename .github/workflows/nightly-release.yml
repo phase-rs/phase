@@ -228,7 +228,7 @@ jobs:
           # path-dependencies it just revved. Resync them so the committed locks
           # match the new version, then fold them into the release commit + tag.
           cargo update --manifest-path client/src-tauri/Cargo.toml --package phase-tauri
-          cargo update --manifest-path lobby-worker/broker-wasm/Cargo.toml --package engine --package lobby-broker
+          cargo update --manifest-path lobby-worker/broker-wasm/Cargo.toml --package phase-engine --package lobby-broker
           if ! git diff --quiet -- client/src-tauri/Cargo.lock lobby-worker/broker-wasm/Cargo.lock; then
             git add client/src-tauri/Cargo.lock lobby-worker/broker-wasm/Cargo.lock
             git commit --amend --no-edit

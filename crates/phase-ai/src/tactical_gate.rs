@@ -177,6 +177,28 @@ fn assess_candidate(ctx: &PolicyContext<'_>) -> GateDecision {
         // `search::fallback_action`, which emits CancelCast when the scored
         // pool is empty.
         GameAction::CancelCast => GateDecision::Reject,
+        // CR 106.3 + CR 608.2d: A flexible source's color is mechanical during a
+        // pending cast, not a policy judgment. Enumerating one candidate per
+        // (source, color) row lets the scorer pick an arbitrary color and tap a
+        // U/R dual for {R} against a {2}{U} spell, stranding the blue pip in a
+        // ManaPayment dead-end with no untapped source left to repair it.
+        // Rejecting only the stranding rows leaves at least the demanded-color
+        // row of that same source in the pool, so the choice of WHICH source to
+        // tap stays strategic. Mirrors the `ChooseManaColor` pre-emption in
+        // `search::choose_action_with_session`, which fixes the prompt-shaped
+        // expression of this same choice.
+        GameAction::TapLandForMana { selection } => {
+            if crate::mana_colors::tap_strands_demanded_color(
+                ctx.state,
+                ctx.ai_player,
+                selection.source.object_id,
+                selection.mana_type,
+            ) {
+                GateDecision::Reject
+            } else {
+                GateDecision::Allow
+            }
+        }
         _ => GateDecision::Allow,
     }
 }
@@ -683,10 +705,10 @@ mod tests {
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::combat::{AttackerInfo, CombatState};
     use engine::game::scenario::{GameScenario, P0, P1};
-    use engine::types::ability::{BounceSelection, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{BounceSelection, EffectKind, ResolvedAbility, TargetFilter};
     use engine::types::game_state::{
-        PendingCast, StackEntry, StackEntryKind, TargetSelectionProgress, TargetSelectionSlot,
-        WaitingFor,
+        PendingCast, StackEntry, StackEntryKind, TargetEffectDetail, TargetSelectionProgress,
+        TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::CardId;
     use engine::types::keywords::WardCost;
@@ -843,6 +865,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
@@ -914,6 +938,8 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(creature)],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: TargetSelectionProgress::default(),
@@ -967,6 +993,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
