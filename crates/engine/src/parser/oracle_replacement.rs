@@ -4888,12 +4888,20 @@ fn parse_whenever_you_cast_enters_with(
 /// target: TargetFilter::None, .. }` — pushed to `GameState::pending_damage_replacements`
 /// under the `ObjectId(0)` sentinel (see `add_target_replacement.rs`), which the
 /// replacement scan (`find_applicable_replacements`) admits independent of any
-/// object's zone. `consume_on_apply` makes it one-shot: it fires on the first
-/// qualifying `ChangeZone`-to-battlefield event (the same spell this trigger's
-/// resolution was itself created for — nothing else can interleave between a
-/// trigger resolving and the spell directly below it on the stack resolving
-/// without an intervening priority pass) and then self-destructs, so it never
-/// lingers to affect a later, unrelated qualifying spell.
+/// object's zone. `consume_on_apply` makes it one-shot.
+///
+/// CR 117.3b: after Runadi's trigger resolves, the active player receives
+/// priority BEFORE the originally-cast spell resolves, and could cast a
+/// second qualifying flash creature in response — a bare filter-scoped
+/// one-shot install would let that INTERLOPING spell's battlefield entry
+/// consume the replacement first, leaving the original entrant uncountered.
+/// This is closed by AND-ing the spell filter with
+/// `TargetFilter::SpecificObject { id: TRIGGERING_SPELL_PLACEHOLDER }` — a
+/// parse-time placeholder id that `Effect::AddTargetReplacement`'s resolve
+/// function (`add_target_replacement.rs`) concretizes to the SPECIFIC spell
+/// object named by `state.current_trigger_event` (this trigger's own
+/// originating `SpellCast` event — CR 603.2) at install time, so only that
+/// exact spell's entry can ever satisfy it.
 pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
     text: &str,
     card_name: &str,
@@ -4907,6 +4915,20 @@ pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
     // CR 614.1c: one qualifying entry, then gone — this floating install must
     // never persist to affect a second, later cast of the same shape.
     replacement.consume_on_apply = true;
+    // CR 603.2 + CR 117.3b: bind to the SPECIFIC spell that caused this trigger,
+    // not just any spell matching the type/mana-value filter — see the
+    // interleaving-flash-creature note in the doc comment above.
+    // `TRIGGERING_SPELL_PLACEHOLDER` is concretized to the real triggering
+    // spell's id (or `ObjectId(0)`, matching nothing) by
+    // `Effect::AddTargetReplacement`'s resolve function at install time.
+    replacement.valid_card = Some(TargetFilter::And {
+        filters: vec![
+            spell_filter.clone(),
+            TargetFilter::SpecificObject {
+                id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
+            },
+        ],
+    });
 
     let install = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -19806,6 +19828,28 @@ mod tests {
             replacement.consume_on_apply,
             "floating install must be one-shot, or it would apply to a later, \
              unrelated qualifying spell too"
+        );
+        // valid_card must AND the spell filter with a `SpecificObject` leaf
+        // carrying the trigger-source placeholder — `Effect::AddTargetReplacement`
+        // concretizes this to the SPECIFIC triggering spell's id at install
+        // time, so a different qualifying creature entering during the
+        // post-trigger priority window can't steal the install.
+        let TargetFilter::And { filters } =
+            replacement.valid_card.as_ref().expect("valid_card set")
+        else {
+            panic!(
+                "expected valid_card to be an And{{spell filter, trigger-source \
+                 placeholder}}, got {:?}",
+                replacement.valid_card
+            );
+        };
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::SpecificObject { id }
+                    if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
+            )),
+            "valid_card must carry the trigger-source placeholder, got {filters:?}"
         );
         assert_eq!(replacement.event, ReplacementEvent::ChangeZone);
         assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
