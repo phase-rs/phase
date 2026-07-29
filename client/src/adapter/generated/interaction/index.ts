@@ -107,7 +107,7 @@ export type InteractionAttachmentFan = { hostId: number, children: Array<Interac
 
 export type InteractionAvailability = { "type": "progressAvailable", "data": { witness: InteractionSubmission, } } | { "type": "inputRequired" } | { "type": "escapeOnly", "data": { reason: InteractionReasonCode, } } | { "type": "waiting" } | { "type": "terminal", "data": { outcome: InteractionOutcomeCode, } } | { "type": "unsupported", "data": { reason: InteractionReasonCode, } } | { "type": "stuck", "data": { reason: InteractionReasonCode, } };
 
-export type ViewerInteraction = { waitingForKind: InteractionWaitingForKind, authorizedSubmitters: Array<number>, canSubmit: boolean, autoPassRecommended: boolean, opportunities: Array<InteractionOpportunity>, attachmentFans: { [key: number]: InteractionAttachmentFan }, availability: InteractionAvailability, };
+export type ViewerInteraction = { waitingForKind: InteractionWaitingForKind, authorizedSubmitters: Array<number>, canSubmit: boolean, autoPassRecommended: boolean, opportunities: Array<InteractionOpportunity>, attachmentFans: Record<number, InteractionAttachmentFan>, availability: InteractionAvailability, };
 
 export type AmountAssignment = { choiceId: InteractionChoiceId, amount: number, };
 

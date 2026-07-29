@@ -1094,6 +1094,7 @@ pub struct InteractionOpportunity {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
 pub struct InteractionAttachmentFanChild {
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
     pub object_id: u64,
     pub submission: InteractionSubmission,
 }
@@ -1106,6 +1107,7 @@ pub struct InteractionAttachmentFanChild {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
 pub struct InteractionAttachmentFan {
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
     pub host_id: u64,
     pub children: Vec<InteractionAttachmentFanChild>,
 }
@@ -1143,6 +1145,10 @@ pub struct ViewerInteraction {
     pub auto_pass_recommended: bool,
     pub opportunities: Vec<InteractionOpportunity>,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "interaction-bindings",
+        ts(type = "Record<number, InteractionAttachmentFan>")
+    )]
     pub attachment_fans: BTreeMap<u64, InteractionAttachmentFan>,
     pub availability: InteractionAvailability,
 }
