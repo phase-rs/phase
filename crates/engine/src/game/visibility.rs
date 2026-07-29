@@ -79,6 +79,9 @@ pub(crate) fn capture_library_search_card_view(
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
+    // Analysis provenance is meaningful only to the clone executing a preview;
+    // never carry it into a viewer projection.
+    filtered.life_safety_probe = Box::default();
     // Pending activation trigger collection retains source contexts and the
     // uncommitted event journal solely for rules execution. The pending ability
     // itself remains public, but this implementation carrier is never part of a

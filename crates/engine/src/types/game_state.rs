@@ -11433,6 +11433,9 @@ pub struct GameState {
     #[serde(deserialize_with = "deserialize_objects_with_trigger_provenance")]
     pub objects: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
     pub next_object_id: u64,
+    /// CR 603.7: persisted monotonic delayed-trigger installation allocator.
+    #[serde(default)]
+    pub next_delayed_trigger_token: u64,
     /// Monotonic allocator for [`LogicalZoneChangeGroupId`]. It is pure
     /// identity, so equality intentionally compares the active owner rather
     /// than this historical counter.
@@ -11684,6 +11687,11 @@ pub struct GameState {
     /// envelope in `game::precast_copy_shortcut`.
     #[serde(skip, default)]
     pub(crate) precast_shortcut_runtime: PrecastShortcutRuntime,
+    /// Clone-local AI analysis probe. It is never rules state, persistence, or
+    /// loop identity; ordinary reducer clones preserve it while viewer
+    /// projections explicitly clear it.
+    #[serde(skip, default)]
+    pub(crate) life_safety_probe: Box<crate::game::life_safety::LifeSafetyProbe>,
     pub next_timestamp: u64,
     #[serde(skip, default = "PublicStateDirty::all_dirty")]
     pub public_state_dirty: PublicStateDirty,
@@ -16640,6 +16648,7 @@ impl GameState {
             active_search_decision_controls: ActiveSearchDecisionControls::default(),
             objects: im::HashMap::default(),
             next_object_id: 1,
+            next_delayed_trigger_token: 1,
             next_logical_zone_change_group_id: initial_logical_zone_change_group_id(),
             // CR 118.3a: start at 1 so minted pip ids never collide with the
             // `ManaPipId(0)` unstamped sentinel.
@@ -16684,6 +16693,7 @@ impl GameState {
             static_mode_presence: crate::types::statics::StaticModePresence::all_present(),
             loop_detect_ring: std::collections::VecDeque::new(),
             precast_shortcut_runtime: PrecastShortcutRuntime::default(),
+            life_safety_probe: Box::default(),
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
             state_revision: 0,
@@ -18095,6 +18105,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_search_decision_controls: _,
         objects: _,
         next_object_id: _,
+        next_delayed_trigger_token: _,
         next_logical_zone_change_group_id: _,
         next_pip_id: _,
         resolved_rules_journal: _,
@@ -18132,6 +18143,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         static_mode_presence: _,
         loop_detect_ring: _,
         precast_shortcut_runtime: _,
+        life_safety_probe: _,
         next_timestamp: _,
         public_state_dirty: _,
         state_revision: _,
@@ -18414,6 +18426,7 @@ impl PartialEq for GameState {
             && self.active_search_decision_controls == other.active_search_decision_controls
             && self.objects.len() == other.objects.len()
             && self.next_object_id == other.next_object_id
+            && self.next_delayed_trigger_token == other.next_delayed_trigger_token
             && self.next_pip_id == other.next_pip_id
             && self.resolved_rules_journal == other.resolved_rules_journal
             && self.battlefield == other.battlefield

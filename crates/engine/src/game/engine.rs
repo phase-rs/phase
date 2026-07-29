@@ -266,6 +266,19 @@ pub(crate) fn apply_interaction_for_simulation(
     )
 }
 
+/// Apply exactly the reducer portion of an interaction action for the
+/// clone-local life-safety preview. The normal public/simulation entry points
+/// continue through the complete reconciliation and presentation boundary.
+pub(crate) fn apply_interaction_pre_reconciliation_for_life_safety(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    let raw = apply_action_boundary_core(state, authenticated_actor, semantic_owner, action, None)?;
+    Ok(raw.result)
+}
+
 pub(super) fn apply_action_boundary(
     state: &mut GameState,
     actor: PlayerId,
@@ -300,6 +313,34 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     mode: PublicFinalizeMode,
     stack_resolution_limit: Option<u32>,
 ) -> Result<ActionResult, EngineError> {
+    let raw = apply_action_boundary_core(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        stack_resolution_limit,
+    )?;
+    finish_action_boundary(state, raw, mode)
+}
+
+struct RawActionApplication {
+    result: ActionResult,
+    journal_start: usize,
+    is_actor_scoped_preference: bool,
+    boundary_snapshot: GameState,
+    previous_interaction_waiting: WaitingFor,
+    previous_interaction_slots: Vec<crate::types::interaction::ActiveInteractionSlot>,
+    submitted_interaction_owner: Option<PlayerId>,
+    preserve_interaction: bool,
+}
+
+fn apply_action_boundary_core(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+    stack_resolution_limit: Option<u32>,
+) -> Result<RawActionApplication, EngineError> {
     mana_sources::preflight_tap_land_action(state, semantic_owner, &action)?;
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
@@ -325,14 +366,41 @@ pub(super) fn apply_action_boundary_with_stack_limit(
         *state = boundary_snapshot;
         return Err(err);
     }
-    let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
+    let result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
         Ok(result) => result,
         Err(err) => {
             *state = boundary_snapshot;
             return Err(err);
         }
     };
+    Ok(RawActionApplication {
+        result,
+        journal_start,
+        is_actor_scoped_preference,
+        boundary_snapshot,
+        previous_interaction_waiting,
+        previous_interaction_slots,
+        submitted_interaction_owner,
+        preserve_interaction,
+    })
+}
+
+fn finish_action_boundary(
+    state: &mut GameState,
+    raw: RawActionApplication,
+    mode: PublicFinalizeMode,
+) -> Result<ActionResult, EngineError> {
     state.consumed_before_priority_trigger_events.clear();
+    let RawActionApplication {
+        mut result,
+        journal_start,
+        is_actor_scoped_preference,
+        boundary_snapshot,
+        previous_interaction_waiting,
+        previous_interaction_slots,
+        submitted_interaction_owner,
+        preserve_interaction,
+    } = raw;
     reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
@@ -3285,11 +3353,13 @@ pub(super) fn resume_pending_continuation_if_priority(
             .as_ref()
             .map(crate::types::game_state::DeferredLifeCostResume::resume_at_resolution_depth);
         if deferred_life_boundary.is_none_or(|boundary| state.resolution_stack.len() > boundary) {
+            super::life_safety::observe_boundary_carrier(state);
             effects::drain_pending_continuation(state, events);
         }
         if matches!(state.waiting_for, WaitingFor::Priority { .. })
             && deferred_life_boundary.is_none_or(|boundary| state.resolution_stack.len() > boundary)
         {
+            super::life_safety::observe_boundary_carrier(state);
             effects::resume_resolution_frames(state, events);
         }
         let mut drained_deferred_life = false;
@@ -3301,6 +3371,7 @@ pub(super) fn resume_pending_continuation_if_priority(
                     state.resolution_stack.len() <= resume.resume_at_resolution_depth()
                 })
         {
+            super::life_safety::observe_boundary_carrier(state);
             let waiting_for = drain_pending_deferred_life_cost_resume(state, events)?;
             state.waiting_for = waiting_for;
             drained_deferred_life = true;
@@ -3309,8 +3380,10 @@ pub(super) fn resume_pending_continuation_if_priority(
             && drained_deferred_life
             && state.pending_deferred_life_cost_resume.is_none()
         {
+            super::life_safety::observe_boundary_carrier(state);
             effects::drain_pending_continuation(state, events);
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                super::life_safety::observe_boundary_carrier(state);
                 effects::resume_resolution_frames(state, events);
             }
         }
@@ -3320,12 +3393,14 @@ pub(super) fn resume_pending_continuation_if_priority(
         // terminally drained; ordinary phase-boundary prompts use other states
         // and are intentionally unaffected.
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            super::life_safety::observe_boundary_carrier(state);
             turns::resume_phase_transition_after_post_replacement(state, events);
         }
         // CR 605.3b + CR 616.1: A post-replacement prompt reaches this common
         // boundary only after ordinary continuations drain. The shared typed
         // dispatcher owns the remaining eligible payment roots.
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            super::life_safety::observe_boundary_carrier(state);
             let _ = drain_pending_cost_move_resume(
                 state,
                 events,
