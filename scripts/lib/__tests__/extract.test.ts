@@ -6,7 +6,7 @@ import {
   normalizeCardName,
   resolveCardReference,
 } from "../cardNames.ts";
-import { extractSummary } from "../extract.ts";
+import { extractSummary, splitIntoItems } from "../extract.ts";
 
 // A small synthetic card-data key set covering every tricky case. These are the
 // lowercased canonical keys the way card-data.json stores them.
@@ -138,5 +138,57 @@ describe("extractSummary", () => {
     expect(extractSummary("Repro at https://phase.gg/g/a.b.c then it crashes")).toBe(
       "Repro at https://phase.gg/g/a.b.c then it crashes",
     );
+  });
+});
+
+describe("splitIntoItems", () => {
+  // A bulleted bug-report template is ONE report. Filtering to the marker lines
+  // reduced these to their headings and dropped every line of substance.
+  test("keeps a bulleted report template whole", () => {
+    const report = [
+      "[[Junji, the Midnight Sky]]",
+      "",
+      "• Steps to Reproduce:",
+      "Have your opponent gain control of it.",
+      "",
+      "• Expected Result:",
+      "Its controller chooses.",
+      "",
+      "• Actual Result:",
+      "Its owner chooses.",
+    ].join("\n");
+    expect(splitIntoItems(report)).toEqual([report]);
+  });
+
+  test("keeps bold/markdown section headings whole", () => {
+    const report = "- Expected Result:\nA draw.\n- Actual Result:\nNo draw.";
+    expect(splitIntoItems(report)).toEqual([report]);
+  });
+
+  test("splits genuinely distinct numbered reports", () => {
+    expect(splitIntoItems("1. Hydro Man doesn't work\n2. No More Lies won't accept the 3")).toEqual([
+      "1. Hydro Man doesn't work",
+      "2. No More Lies won't accept the 3",
+    ]);
+  });
+
+  test("a split item keeps the lines beneath its marker", () => {
+    expect(splitIntoItems("1. First bug\nmore about it\n2. Second bug\nmore about that")).toEqual([
+      "1. First bug\nmore about it",
+      "2. Second bug\nmore about that",
+    ]);
+  });
+
+  test("text before the first marker stays with the first item", () => {
+    expect(splitIntoItems("[[Card]] context\n- bug one\n- bug two")).toEqual([
+      "[[Card]] context\n- bug one",
+      "- bug two",
+    ]);
+  });
+
+  test("a single marker is not a split", () => {
+    expect(splitIntoItems("- just one bullet\nwith detail")).toEqual([
+      "- just one bullet\nwith detail",
+    ]);
   });
 });
