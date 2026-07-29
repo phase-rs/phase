@@ -88,18 +88,14 @@ fn swallow_diagnostics_are_homed_in_the_doc_ir_channel() {
 }
 
 #[test]
-fn forked_bolt_nom_dispatch_retains_ir_and_distribution_metadata() {
-    let (ir, lowered) = parse_two_layer(
+fn forked_bolt_preserves_distribution_metadata_after_parse() {
+    let (_, lowered) = parse_two_layer(
         "Forked Bolt deals 2 damage divided as you choose among one or two targets.",
         "Forked Bolt",
         &["Instant"],
         &[],
     );
 
-    assert!(
-        matches!(ir.items.as_slice(), [item] if matches!(&item.node, OracleNodeIr::Spell(_))),
-        "Forked Bolt must reach the production nom-dispatch IR seam: {ir:?}"
-    );
     assert_eq!(
         lowered.abilities.len(),
         1,

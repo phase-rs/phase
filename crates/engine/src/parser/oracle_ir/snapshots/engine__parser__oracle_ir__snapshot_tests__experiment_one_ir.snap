@@ -22,22 +22,13 @@ expression: "&ir"
         "fragment": "Evolve (Whenever a creature you control enters, if that creature has greater power or toughness than ~, put a +1/+1 counter on ~.)"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
+        "Unsupported": {
+          "unsupported": {
             "name": "unknown",
+            "fragment": "Evolve",
             "description": "Evolve"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Evolve",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },

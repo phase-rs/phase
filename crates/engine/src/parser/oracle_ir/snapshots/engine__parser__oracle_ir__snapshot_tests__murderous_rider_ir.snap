@@ -22,22 +22,13 @@ expression: "&ir"
         "fragment": "Lifelink"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
+        "Unsupported": {
+          "unsupported": {
             "name": "unknown",
+            "fragment": "Lifelink",
             "description": "Lifelink"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Lifelink",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },

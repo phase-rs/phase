@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1757
 expression: "&ir"
 ---
 {
@@ -24,7 +23,11 @@ expression: "&ir"
       },
       "node": {
         "Unsupported": {
-          "text": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
+          "unsupported": {
+            "name": "unknown",
+            "fragment": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
+            "description": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll."
+          },
           "min_x_value": 0
         }
       }
