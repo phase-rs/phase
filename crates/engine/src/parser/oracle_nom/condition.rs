@@ -15,6 +15,7 @@ use nom::Parser;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
+    parse_property_keyword, parse_superlative_adjective,
 };
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::{
@@ -2918,27 +2919,6 @@ fn parse_subject_has_superlative_form(input: &str) -> OracleResult<'_, StaticCon
         rest,
         build_superlative_comparison(filter, property, comparator, aggregate),
     ))
-}
-
-/// Parse a superlative adjective into its corresponding `AggregateFunction`.
-pub(crate) fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
-    alt((
-        value(AggregateFunction::Max, tag("greatest")),
-        value(AggregateFunction::Max, tag("highest")),
-        value(AggregateFunction::Min, tag("lowest")),
-        value(AggregateFunction::Min, tag("least")),
-    ))
-    .parse(input)
-}
-
-/// Property keyword parser — used by both LHS and RHS of the comparison.
-pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
-    alt((
-        value(ObjectProperty::Power, tag("power")),
-        value(ObjectProperty::Toughness, tag("toughness")),
-        value(ObjectProperty::ManaValue, tag("mana value")),
-    ))
-    .parse(input)
 }
 
 /// Parse the comparator phrase between "is " and "each other ...".

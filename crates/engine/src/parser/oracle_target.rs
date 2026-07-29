@@ -2844,6 +2844,12 @@ pub fn parse_type_phrase_with_ctx<'a>(
 
     // CR 108.3 + CR 110.2: Ownership and control are distinct; "you own and control" satisfies both.
     let mut controller = None;
+
+    // CR 109.2: a BARE postnominal superlative's ranked population is the
+    // enclosing noun phrase, which is not fully parsed yet at the point the
+    // suffix appears. Record the head here and materialize the `FilterProp`
+    // after the phrase closes (see the block below `base_type_filters`).
+    let mut pending_bare_superlative: Option<(AggregateFunction, ObjectProperty)> = None;
     pos +=
         parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller, ctx);
 
@@ -2884,6 +2890,34 @@ pub fn parse_type_phrase_with_ctx<'a>(
     if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx) {
         properties.push(prop);
         pos += consumed;
+    }
+
+    // CR 109.2 + CR 601.2c: BARE postnominal superlative ("with the lowest mana
+    // value" — Culling Scales; "with the greatest power" — Triumph of Gerrard,
+    // Szat's Will; "with the greatest mana value" — Favor of the Mighty). The
+    // `among`-bearing form was already consumed by the passes above, which are the
+    // single authority for an EXPLICIT eligible set; this pass handles the form
+    // whose population is the enclosing noun phrase itself.
+    //
+    // CR 109.2a PRE-CHECK (fail-fast, NOT the authority): the accumulators bound
+    // so far already settle the "card" question, so a `card` phrase is never
+    // consumed and its text stays honest in the remainder. The zone passes have
+    // not run yet — which is exactly why the AUTHORITY is the identical call in
+    // the materialization block below, over the FINAL accumulators.
+    if phrase_denotes_battlefield_permanents(
+        left_card_suffix,
+        &[
+            &adjective_type_filters,
+            card_type.as_slice(),
+            &extra_core_type_filters,
+            &neg_type_filters,
+        ],
+        &properties,
+    ) {
+        if let Some((head, consumed)) = parse_bare_superlative_property_suffix(&lower[pos..]) {
+            pending_bare_superlative = Some(head);
+            pos += consumed;
+        }
     }
 
     // Check "with [counter] counter(s) on it/them" suffix
@@ -3516,6 +3550,49 @@ pub fn parse_type_phrase_with_ctx<'a>(
         neg_type_filters,
     ]
     .concat();
+
+    // CR 109.2 + CR 601.2c + CR 608.2b: materialize the deferred bare superlative
+    // now that the enclosing noun phrase is complete — full type conjunction,
+    // controller (including a trailing "you control" / "they control"), and every
+    // other accumulated property.
+    //
+    // CR 109.2a AUTHORITY. This re-check is NOT redundant with the pre-check at the
+    // detection pass: `parse_zone_suffix` runs unconditionally after that pass and
+    // pushes into the same `properties` this block snapshots. "creature with the
+    // greatest power in your graveyard" therefore reaches here with
+    // `InZone { Graveyard }` accumulated and must NOT be emitted — a
+    // battlefield-defaulted population would rank the wrong set, and a
+    // graveyard-defaulted one would lean on off-battlefield P/T reads this change
+    // does not attempt.
+    //
+    // Ordering is load-bearing: build the population snapshot BEFORE appending the
+    // prop. Reversed, the prop nests inside its own population and
+    // `resolve_filter_threshold` recurses without bound.
+    if let Some((function, property)) = pending_bare_superlative.take() {
+        if phrase_denotes_battlefield_permanents(
+            left_card_suffix,
+            &[&base_type_filters, &relative_core_type_filters],
+            &properties,
+        ) {
+            let population = TargetFilter::Typed(TypedFilter {
+                type_filters: base_type_filters.clone(),
+                controller: controller.clone(),
+                properties: properties.clone(),
+            });
+            let prop = superlative_property_filter_prop(function, property, population);
+            properties.push(prop);
+        } else {
+            // CR 109.2a: the phrase names cards in a non-battlefield zone, whose
+            // ranked population this change does not model. Leave the text
+            // unclaimed and record it, rather than emitting a population that
+            // would silently be the wrong set.
+            ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                text: lower.trim().into(),
+                parser: "bare_superlative_property_suffix_non_battlefield_population".into(),
+                line_index: 0,
+            });
+        }
+    }
 
     let type_filter_branches = if relative_core_type_filters.is_empty() {
         vec![base_type_filters]
@@ -4870,48 +4947,119 @@ fn superlative_property_filter_prop(
 /// `oracle_effect/search.rs::parse_highest_mana_value_library_suffix`.
 /// The eligible set after "among " is parsed by the authoritative
 /// `parse_type_phrase_with_ctx` combinator (type list + controller suffix).
-/// Returns (FilterProp, bytes consumed from the original text).
+/// CR 109.2: the postnominal superlative qualifier with an EXPLICIT eligible set —
+/// "with the <superlative> <property> among <set>". This function owns ONLY the
+/// explicit-set clause; an explicit set overrides the enclosing noun phrase as
+/// the ranked population.
+///
+/// The head grammar is delegated in full to the single authority
+/// `oracle_nom::filter::parse_superlative_property_head`. The BARE form (no
+/// "among" clause), whose population is the enclosing noun phrase, is handled by
+/// `parse_bare_superlative_property_suffix` + the deferred materialization in
+/// `parse_type_phrase_with_ctx`.
 fn parse_superlative_property_suffix(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
-    // "with the <superlative> <property> among " — the superlative head selects
-    // the aggregate direction and the property is the second axis. Factor the
-    // 2×3 cross product into two alts (PATTERNS.md §8b).
-    // CR 208.1 (power and toughness) + CR 202.3 (mana value): greatest/highest =
-    // Max, least/lowest/smallest = Min. Both directions feed the same generic
-    // superlative_property_filter_prop, so the runtime (values.min()/max() in
-    // game/quantity.rs) and the Sacrifice/Destroy/return resolvers select the
-    // constrained object unchanged.
-    let (rest, (function, property)) = (
-        tag::<_, _, OracleError<'_>>("with the "),
-        alt((
-            value(
-                AggregateFunction::Max,
-                alt((tag("greatest "), tag("highest "))),
-            ),
-            value(
-                AggregateFunction::Min,
-                alt((tag("least "), tag("lowest "), tag("smallest "))),
-            ),
-        )),
-        alt((
-            value(ObjectProperty::Power, tag("power")),
-            value(ObjectProperty::Toughness, tag("toughness")),
-            value(ObjectProperty::ManaValue, tag("mana value")),
-        )),
-        tag(" among "),
-    )
-        .parse(trimmed)
-        .map(|(rest, (_, function, property, _))| (rest, (function, property)))
-        .ok()?;
+    let (rest, (function, property)) = nom_filter::parse_superlative_property_head(trimmed).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" among ").parse(rest).ok()?;
     // Delegate the "<type-set> <controller> control(s)" clause to the
     // authoritative type-phrase combinator — it parses the multi-type
     // or/and list, any leading article, and the trailing controller suffix.
     let (eligible, after) = parse_type_phrase_with_ctx(rest, ctx);
     let prop = superlative_property_filter_prop(function, property, eligible);
     Some((prop, text.len() - after.len()))
+}
+
+/// CR 109.2 + CR 601.2c: the BARE postnominal superlative — "with the
+/// <superlative> <property>" with NO "among <set>" clause. Detects and measures
+/// the head only; the eligible population is the ENCLOSING noun phrase, so the
+/// `FilterProp` is materialized by the caller once that phrase is fully parsed.
+///
+/// The `not(peek((space1, tag("among"))))` guard keeps the `among` form on its own
+/// authority even if that parse failed downstream for an unrelated reason — a
+/// bare-form fallback there would silently RE-SCOPE the ranked population, which
+/// is worse than leaving the phrase unparsed.
+fn parse_bare_superlative_property_suffix(
+    text: &str,
+) -> Option<((AggregateFunction, ObjectProperty), usize)> {
+    let trimmed = text.trim_start();
+    let (rest, head) = nom_filter::parse_superlative_property_head(trimmed).ok()?;
+    let (rest, _) = not(peek((space1, tag::<_, _, OracleError<'_>>("among"))))
+        .parse(rest)
+        .ok()?;
+    Some((head, text.len() - rest.len()))
+}
+
+/// CR 109.2 vs CR 109.2a — STRUCTURAL carve-out, never positional.
+///
+/// CR 109.2 makes a type description with no zone clause and no "card" mean
+/// permanents on the battlefield; that is the ONLY reading under which a bare
+/// superlative's ranked population may default to the battlefield
+/// (`game/quantity.rs` zone default). CR 109.2a makes a description containing
+/// "card" plus a zone name mean cards in that zone instead — a different
+/// population this pass must NOT silently claim.
+///
+/// Signals, all read from the parser's own typed accumulators:
+///   * `left_card_suffix` — the noun phrase ended in the "card"/"cards" noun;
+///   * a `TypeFilter::Card` anywhere in the accumulated type filters (the
+///     bare-noun form, where `left_card_suffix` is not set);
+///   * an accumulated non-battlefield zone prop.
+///
+/// Called TWICE: as a fail-fast pre-check at detection (so a `card` phrase is
+/// never consumed) and again at materialization over the FINAL accumulators,
+/// where it is the AUTHORITY that governs emission — the zone passes run after
+/// detection, so only the second call can see a zone prop.
+fn phrase_denotes_battlefield_permanents(
+    left_card_suffix: bool,
+    type_filter_groups: &[&[TypeFilter]],
+    properties: &[FilterProp],
+) -> bool {
+    !left_card_suffix
+        && !type_filter_groups
+            .iter()
+            .any(|group| group.iter().any(type_filter_includes_card))
+        && !properties
+            .iter()
+            .any(filter_prop_names_non_battlefield_zone)
+}
+
+/// CR 205: exhaustive over every `TypeFilter` variant so a negated or disjunctive
+/// `Card` leg cannot slip past the CR 109.2a carve-out, and so a future variant
+/// forces a CR 109.2a decision rather than defaulting to "battlefield".
+fn type_filter_includes_card(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Card => true,
+        TypeFilter::Non(inner) => type_filter_includes_card(inner),
+        TypeFilter::AnyOf(inner) => inner.iter().any(type_filter_includes_card),
+        TypeFilter::Creature
+        | TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred
+        | TypeFilter::Permanent
+        | TypeFilter::Any
+        | TypeFilter::Subtype(_) => false,
+    }
+}
+
+/// CR 109.2 + CR 400.1: any accumulated zone prop naming a zone other than the
+/// battlefield disqualifies the CR 109.2 battlefield default. The `_ => false`
+/// wildcard is deliberate — `FilterProp` has ~180 variants and enumerating them
+/// all in a zone predicate would be pure noise.
+fn filter_prop_names_non_battlefield_zone(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::InZone { zone } => *zone != Zone::Battlefield,
+        FilterProp::InAnyZone { zones } => zones.iter().any(|z| *z != Zone::Battlefield),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_names_non_battlefield_zone),
+        FilterProp::Not { prop } => filter_prop_names_non_battlefield_zone(prop),
+        _ => false,
+    }
 }
 
 /// Parse "with/that have/that each have mana value N or less" / "… or greater"
