@@ -1180,6 +1180,7 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::CardId;
+    use engine::types::phase::Phase;
     use engine::types::zones::Zone;
 
     fn make_state() -> GameState {
@@ -1721,6 +1722,13 @@ mod tests {
     #[test]
     fn land_drop_at_the_former_cap_raises_the_score() {
         let mut state = make_state();
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
         for _ in 0..12 {
             add_land(&mut state, PlayerId(0), false);
             add_land(&mut state, PlayerId(1), false);

@@ -486,6 +486,11 @@ def load_selfplay_corpus(
     for path in files:
         shard_schema = None
         excluded_reason = None
+        shard_meta: dict = {}
+        shard_feat: dict[str, list[list[float]]] = {"early": [], "mid": [], "late": []}
+        shard_lab: dict[str, list[int]] = {"early": [], "mid": [], "late": []}
+        shard_seeds: set = set()
+        shard_total = 0
         with open(path) as handle:
             for line in handle:
                 line = line.strip()
@@ -497,9 +502,9 @@ def load_selfplay_corpus(
                     if shard_schema < MIN_HARVEST_SCHEMA:
                         excluded_reason = f"schema {shard_schema} < {MIN_HARVEST_SCHEMA}"
                         break
-                    # First meta line wins for provenance; shards share a run.
-                    if not meta:
-                        meta = obj["meta"]
+                    # Preserve the first accepted metadata line for provenance.
+                    if not shard_meta:
+                        shard_meta = obj["meta"]
                     continue
                 if shard_schema is None:
                     excluded_reason = "missing harvest metadata"
@@ -508,16 +513,25 @@ def load_selfplay_corpus(
                 phase = turn_phase(int(obj["turn"]))
                 row = [float(feats[name]) for name in SELFPLAY_FEATURE_NAMES]
                 row += [float(feats[name]) for name in SELFPLAY_CONTROLS]
-                phase_feat[phase].append(row)
-                phase_lab[phase].append(1 if obj["won"] else 0)
-                seeds.add(int(obj["seed"]))
-                total += 1
+                shard_feat[phase].append(row)
+                shard_lab[phase].append(1 if obj["won"] else 0)
+                shard_seeds.add(int(obj["seed"]))
+                shard_total += 1
         if excluded_reason:
             print(f"Skipping {path}: {excluded_reason}", file=sys.stderr)
             continue
         if shard_schema is None:
             print(f"Skipping {path}: missing harvest metadata", file=sys.stderr)
             continue
+        # A shard is admitted atomically: a late invalid metadata marker must not
+        # leak rows collected before it into the training corpus.
+        for phase in ["early", "mid", "late"]:
+            phase_feat[phase].extend(shard_feat[phase])
+            phase_lab[phase].extend(shard_lab[phase])
+        if not meta:
+            meta = shard_meta
+        seeds.update(shard_seeds)
+        total += shard_total
         accepted_files.append(path)
 
     phase_features = {}
