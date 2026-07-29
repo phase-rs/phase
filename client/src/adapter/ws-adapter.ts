@@ -100,6 +100,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 23 — PayableResource::ManaGeneric changed from { per_x } to
+ *      { base_cost: ManaCost } (#6410) — a GameState payload field type
+ *      change, and base_cost intentionally carries no serde default (a
+ *      missing base_cost must fail deserialization, not silently resolve
+ *      to a zero-cost payment), so old and new peers can't parse each
+ *      other's serialized state.
  * 22 — Viewer interaction projections and semantic object-action identities.
  * 21 — Native P2P host bridge identity and server-authored state revisions.
  * 20 — Actor-scoped priority-passing settings and filtered per-player state.
@@ -114,7 +120,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 22;
+export const PROTOCOL_VERSION = 23;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
