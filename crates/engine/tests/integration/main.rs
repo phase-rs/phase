@@ -761,6 +761,7 @@ mod ninjutsu_cluster;
 mod nissa_ascended_animist_loyalty_token_6012;
 mod nix_counter_no_mana_spent;
 mod no_witnesses_most_creatures_investigate;
+mod notion_thief_opponent_draw_redirect;
 mod nth_spell_ordinal_cost_reduction;
 mod ob_nixilis_captive_kingpin_life_loss;
 mod obeka_splitter_additional_phases;

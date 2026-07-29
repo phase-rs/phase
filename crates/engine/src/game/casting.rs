@@ -354,7 +354,15 @@ pub(crate) fn begin_variable_speed_payment(
 
 /// CR 107.3a + CR 118.3: X in an activation/additional cost is chosen as part
 /// of activating or casting, bounded by the resources available to pay fully.
-pub(crate) fn sacrifice_cost_bounds(count: u32, eligible_len: usize) -> (usize, usize) {
+///
+/// `pub` as the single authority for the `u32::MAX` X-sentinel encoding, so a
+/// cast-time cost gate in `phase-ai` reads the engine's own minimum rather than
+/// re-spelling the sentinel. That is a *prospective* single-authority argument,
+/// not a measured divergence: for every `count < u32::MAX` this returns
+/// `(n, n)`, which a hand-rolled `count as usize` matches exactly. It becomes
+/// load-bearing the day a third bounds shape ("up to N") is added, at which
+/// point a copy would desynchronize with no compile error.
+pub fn sacrifice_cost_bounds(count: u32, eligible_len: usize) -> (usize, usize) {
     if count == u32::MAX {
         (0, eligible_len)
     } else {
@@ -16385,7 +16393,16 @@ fn find_pay_life_cost(
 /// CR 118.3: Find permanents controlled by `player` matching `filter` on the battlefield.
 /// The source is eligible when it matches the printed filter; "another" is
 /// represented by `FilterProp::Another` and enforced by `matches_target_filter`.
-pub(super) fn find_eligible_sacrifice_targets(
+///
+/// The single authority for sacrifice-cost eligibility. Three conditions, and all
+/// three matter: controller (CR 701.21a — "a player can't sacrifice … something
+/// that's a permanent they don't control"), the `player_cant_sacrifice_as_cost`
+/// static (Yasharn, Angel of Jubilation), and the filter itself. Callers must not
+/// re-derive this — an AI-side copy that omits the static check over-counts
+/// eligible fodder under a "players can't sacrifice" effect. `pub` so `phase-ai`'s
+/// cast-time cost gates share it with the payment path in `cost_payability.rs` and
+/// `casting_costs.rs`.
+pub fn find_eligible_sacrifice_targets(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,

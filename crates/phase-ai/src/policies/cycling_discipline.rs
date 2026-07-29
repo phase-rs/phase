@@ -139,18 +139,38 @@ mod tests {
 
     const AI: PlayerId = PlayerId(0);
 
+    /// Derived, not hand-built: every `AiSession::plan` entry is produced by
+    /// `derive_snapshot`, so a hand-written schedule can pin behaviour at a
+    /// shape production never presents. These two are the only reachable ones.
     fn baseline_plan() -> PlanSnapshot {
-        PlanSnapshot {
-            expected_lands: [1, 2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
-            ..PlanSnapshot::default()
-        }
+        crate::plan::derive_snapshot(&crate::features::DeckFeatures::default())
     }
 
     fn ramp_plan() -> PlanSnapshot {
-        PlanSnapshot {
-            expected_lands: [1, 2, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7],
-            ..PlanSnapshot::default()
-        }
+        crate::plan::derive_snapshot(&crate::features::DeckFeatures {
+            mana_ramp: crate::features::ManaRampFeature {
+                dork_count: 8,
+                commitment: 0.96,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+
+    /// The two helpers above replaced hand-written schedules
+    /// (`[1,2,3,4,5,6,6,…]` and `[1,2,4,5,6,7,7,…]`). They were correct — this
+    /// pins that, so the conversion is provably behaviour-preserving rather
+    /// than merely plausible.
+    #[test]
+    fn derived_plans_match_the_schedules_they_replaced() {
+        assert_eq!(
+            baseline_plan().expected_lands,
+            [1, 2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+        );
+        assert_eq!(
+            ramp_plan().expected_lands,
+            [1, 2, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7]
+        );
     }
 
     fn add_cycler(

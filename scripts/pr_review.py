@@ -2805,7 +2805,10 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif requested_changes_expiry["author_followup_after_warning"] and conflicts_with_base:
         action = "update_branch_for_handler"
         reason = "conflicting_after_author_followup"
-    elif requested_changes_expiry["author_followup_after_warning"]:
+    elif (
+        requested_changes_expiry["author_followup_after_warning"]
+        and author_followup_after_maintainer_activity
+    ):
         action = "review"
         reason = "author_followup_after_requested_changes_warning"
     elif requested_changes_expiry["close_due"]:
@@ -2830,6 +2833,16 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif local_block:
         action = "blocked"
         reason = "local_block_current_head"
+    elif (
+        local_event_type == "approved_enqueued"
+        and queue
+        and review_decision == "APPROVED"
+    ):
+        # The handler has already manually classified this exact head and live-
+        # verified its queue entry. A GraphQL file-list truncation must not turn
+        # that terminal disposition back into a redundant review candidate.
+        action = "queued"
+        reason = "local_approved_enqueued_in_merge_queue"
     elif classification.get("files_truncated"):
         # A truncated file list may hide a hard-stop path, so it must never silently
         # defer or pass to a handler. Current-head local terminal events are honored
