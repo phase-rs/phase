@@ -17143,7 +17143,24 @@ pub fn handle_activate_ability(
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking
     // before any branch path that pushes this ability onto the stack.
     resolved.ability_index = Some(ability_index);
-    let has_effect_targets = !build_target_slots(state, &resolved)?.is_empty();
+    // CR 602.2b + CR 601.2b/c: an X announcement can determine how many
+    // targets an ability has. Before X is chosen, target-slot construction may
+    // reject that specific class of otherwise legal activation; defer only that
+    // X-dependent case through the X round-trip. Every other target-build
+    // failure remains an immediate activation error.
+    let has_effect_targets = match build_target_slots(state, &resolved) {
+        Ok(target_slots) => !target_slots.is_empty(),
+        Err(_)
+            if activation_cost.as_ref().is_some_and(|cost| {
+                ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
+                    && (casting_costs::extract_x_mana_cost(cost).is_some()
+                        || casting_costs::activation_cost_needs_x_choice(&resolved, cost))
+            }) =>
+        {
+            true
+        }
+        Err(error) => return Err(error),
+    };
 
     // CR 602.2b + CR 601.2b-i: announcement-only choices are resolved before
     // entering the shared target-before-cost boundary below.
@@ -17271,6 +17288,35 @@ pub fn handle_activate_ability(
         }
 
         if !has_effect_targets {
+            // CR 602.2b + CR 601.2c/h: The no-target route shares the same
+            // serialized interactive-cost dispatcher as a target-first
+            // activation after target declaration. In particular, its handlers
+            // remove the paid cost leg before resuming, so a completed exile,
+            // craft, or collect-evidence cost cannot be prompted a second time.
+            let mut pending_interactive =
+                PendingCast::new(source_id, CardId(0), resolved.clone(), ManaCost::NoCost);
+            pending_interactive.activation_cost = Some(cost.clone());
+            pending_interactive.activation_ability_index = Some(ability_index);
+            let initial_activation_cost = pending_interactive.activation_cost.clone();
+            if let Some(waiting_for) =
+                casting_costs::surface_next_unpaid_interactive_activation_cost(
+                    state,
+                    player,
+                    &mut pending_interactive,
+                    events,
+                )?
+            {
+                return Ok(waiting_for);
+            }
+            if pending_interactive.activation_cost != initial_activation_cost {
+                return casting_costs::finish_activated_ability_at_payment_boundary(
+                    state,
+                    player,
+                    pending_interactive,
+                    events,
+                );
+            }
+
             // CR 601.2h + CR 701.9a: A resolved zero-card FromHand discard leg (e.g. Bomat
             // Courier's "Discard your hand" on an empty hand) is paid by doing nothing — the
             // helper returns `Ok(None)` so we FALL THROUGH to the following cost detection

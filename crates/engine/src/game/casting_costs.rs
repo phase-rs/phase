@@ -11693,6 +11693,18 @@ pub fn enter_payment_step(
             });
         }
 
+        if state
+            .pending_cast
+            .as_ref()
+            .is_some_and(|pending| pending.deferred_target_selection)
+        {
+            let pending = *state
+                .pending_cast
+                .take()
+                .expect("checked pending cast presence");
+            return begin_deferred_target_selection(state, player, pending, events);
+        }
+
         let targeted_counter_resume = pending.ability.chosen_x.and_then(|chosen_x| {
             pending
                 .activation_cost
@@ -11716,18 +11728,6 @@ pub fn enter_payment_step(
                 events,
             );
         }
-    }
-
-    if state
-        .pending_cast
-        .as_ref()
-        .is_some_and(|pending| pending.deferred_target_selection)
-    {
-        let pending = *state
-            .pending_cast
-            .take()
-            .expect("checked pending cast presence");
-        return begin_deferred_target_selection(state, player, pending, events);
     }
 
     if state.pending_cast.as_ref().is_some_and(|pending| {

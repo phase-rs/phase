@@ -90,20 +90,17 @@ pub enum PublicFinalizeMode {
 /// selected contribution. Once helper payment has started or completed, its
 /// resources may have changed and cancellation cannot roll that prefix back.
 fn ensure_assist_cancellation_is_allowed(state: &GameState) -> Result<(), EngineError> {
-    if state
+    let pending = state
         .pending_cast
         .as_deref()
-        .is_some_and(|pending| pending.activation_cost_committed)
-    {
+        .or_else(|| state.waiting_for.pending_cast_ref());
+    if pending.is_some_and(|pending| pending.activation_cost_committed) {
         return Err(EngineError::ActionNotAllowed(
             "Cannot cancel an activation after a cost is paid".to_string(),
         ));
     }
     if matches!(
-        state
-            .pending_cast
-            .as_deref()
-            .map(|pending| pending.assist_state),
+        pending.map(|pending| pending.assist_state),
         Some(AssistState::PaymentStarted { .. } | AssistState::Paid { .. })
     ) {
         return Err(EngineError::ActionNotAllowed(

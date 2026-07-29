@@ -5155,7 +5155,7 @@ fn composite_tap_self_exile_activation_moves_battlefield_source_to_exile() {
 }
 
 #[test]
-fn activated_sacrifice_cost_resumes_to_effect_target_selection() {
+fn activated_sacrifice_cost_selects_effect_target_before_payment() {
     let mut state = setup_game_at_main_phase();
     let source = create_object(
         &mut state,
@@ -5238,22 +5238,8 @@ fn activated_sacrifice_cost_resumes_to_effect_target_selection() {
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
 
     let waiting = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
-        .expect("activation should ask for the token sacrifice cost first");
+        .expect("activation should ask for its effect target before payment");
     state.waiting_for = waiting;
-    let WaitingFor::PayCost {
-        kind: PayCostKind::Sacrifice,
-        choices: permanents,
-        count,
-        ..
-    } = &state.waiting_for
-    else {
-        panic!("expected PayCost Sacrifice, got {:?}", state.waiting_for);
-    };
-    assert_eq!(*count, 1);
-    assert_eq!(permanents, &vec![token]);
-
-    apply_as_current(&mut state, GameAction::SelectCards { cards: vec![token] })
-        .expect("sacrificing the token should resume activation");
     let WaitingFor::TargetSelection {
         target_slots,
         selection,
@@ -5267,13 +5253,13 @@ fn activated_sacrifice_cost_resumes_to_effect_target_selection() {
         selection
             .current_legal_targets
             .contains(&TargetRef::Object(creature)),
-        "the post-cost target prompt must include the target creature"
+        "the target prompt must include the target creature before payment"
     );
     assert!(
         selection
             .current_legal_targets
             .contains(&TargetRef::Object(other_creature)),
-        "the post-cost target prompt must include each legal target creature"
+        "the target prompt must include each legal target creature before payment"
     );
 
     apply_as_current(
@@ -5283,6 +5269,23 @@ fn activated_sacrifice_cost_resumes_to_effect_target_selection() {
         },
     )
     .expect("target creature should be selectable");
+
+    let WaitingFor::PayCost {
+        kind: PayCostKind::Sacrifice,
+        choices: permanents,
+        count,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "expected PayCost Sacrifice after target declaration, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(*count, 1);
+    assert_eq!(permanents, &vec![token]);
+    apply_as_current(&mut state, GameAction::SelectCards { cards: vec![token] })
+        .expect("sacrificing the token should resume activation");
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
@@ -7334,6 +7337,74 @@ fn x_cost_activated_composite_tap_no_double_payment_on_interactive_targets() {
         "the tap cost is paid exactly once"
     );
     assert_eq!(state.stack.len(), 1, "the activation reaches the stack");
+}
+
+/// CR 602.2b + CR 601.2b/c/f: An X-cost activation whose exact target count
+/// is X cannot build target slots until X is announced. The pre-announcement
+/// target-slot error must defer only this X-dependent declaration, not suppress
+/// ordinary target-legality errors or start paying costs first.
+#[test]
+fn x_cost_activation_defers_exact_target_count_until_x_is_announced() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(954),
+        PlayerId(0),
+        "X Target Relic".to_string(),
+        Zone::Battlefield,
+    );
+    let target = create_object(
+        &mut state,
+        CardId(955),
+        PlayerId(1),
+        "Target Creature".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&target)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        },
+    )
+    .cost(AbilityCost::Mana {
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        },
+    });
+    ability.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    }));
+    Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability);
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+    state.waiting_for =
+        handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
+            .expect("the X activation must defer its target count");
+    assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
+
+    apply_as_current(&mut state, GameAction::ChooseX { value: 1 })
+        .expect("announcing X must allow target-slot construction");
+    let WaitingFor::TargetSelection { target_slots, .. } = &state.waiting_for else {
+        panic!(
+            "expected target selection after X announcement, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(target_slots.len(), 1);
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(target)));
 }
 
 #[test]
