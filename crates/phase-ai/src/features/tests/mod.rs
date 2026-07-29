@@ -3,6 +3,7 @@
 
 pub mod artifacts;
 pub mod blink;
+pub mod cost_reduction;
 pub mod devotion;
 pub mod draw_matters;
 pub mod enchantments;

@@ -14,6 +14,7 @@ mod condition_gated_activation;
 pub(crate) mod context;
 mod control_change_awareness;
 pub(crate) mod copy_value;
+mod cost_reduction;
 mod crew_timing;
 mod cycling_discipline;
 mod devotion;

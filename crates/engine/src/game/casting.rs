@@ -1,8 +1,8 @@
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityBlockKind, AbilityBlockReason, AbilityCondition,
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
-    AdditionalCost, CardPlayMode, CardSelectionMode, CastTimingPermission, CastingPermission,
-    ChoiceType, ContinuousModification, CostObjectCount, CostPaidObjectSnapshot,
+    AdditionalCost, BoardWideCostModifier, CardPlayMode, CardSelectionMode, CastTimingPermission,
+    CastingPermission, ChoiceType, ContinuousModification, CostObjectCount, CostPaidObjectSnapshot,
     CounterCostSelection, Duration, Effect, EffectKind, FilterProp, GameRestriction,
     ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity,
     QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
@@ -7192,8 +7192,6 @@ fn collect_battlefield_cost_modifiers(
     target_sensitive_only: bool,
     casting_variant: Option<CastingVariant>,
 ) -> Vec<CostModification> {
-    use crate::types::ability::ControllerRef;
-
     // CR 202.3d + CR 702.102b: a pre-payment `CastingVariant::Fuse` cast presents
     // the COMBINED characteristics of both halves to a `ModifyCost` static's
     // `spell_filter`. The `fused_split_spell` marker is not yet set at this seam.
@@ -7227,37 +7225,31 @@ fn collect_battlefield_cost_modifiers(
         let source_controller = src_obj.controller;
 
         {
-            let (amount, spell_filter, dynamic_count, is_raise) = match &def.mode {
-                StaticMode::ModifyCost {
-                    mode: CostModifyMode::Reduce,
-                    amount,
-                    spell_filter,
-                    dynamic_count,
-                } => (amount, spell_filter, dynamic_count, false),
-                StaticMode::ModifyCost {
-                    mode: CostModifyMode::Raise,
-                    amount,
-                    spell_filter,
-                    dynamic_count,
-                } => (amount, spell_filter, dynamic_count, true),
-                _ => continue,
+            // CR 601.2f + CR 113.6: single structural authority for "is this a
+            // board-wide cost modifier, and what are its terms" — shared with
+            // deck-time analysis (`phase-ai`'s `features::cost_reduction`) so the
+            // two cannot drift. It rejects `Minimum` and `SelfRef` (the latter is
+            // self-cost-reduction, handled by `apply_self_spell_cost_modifiers`
+            // for the spell being cast and never applied from a battlefield
+            // permanent to other spells).
+            let Some(modifier) = def.board_wide_cost_modifier() else {
+                continue;
             };
+            let BoardWideCostModifier {
+                mode,
+                amount,
+                spell_filter,
+                dynamic_count,
+                caster_scope,
+                condition: _,
+            } = modifier;
+            let is_raise = matches!(mode, CostModifyMode::Raise);
 
-            let has_target_filter = spell_filter
-                .as_ref()
-                .is_some_and(cost_filter_has_target_ref);
+            let has_target_filter = spell_filter.is_some_and(cost_filter_has_target_ref);
             if target_sensitive_only && !has_target_filter {
                 continue;
             }
             if selected_ability.is_none() && has_target_filter {
-                continue;
-            }
-
-            // CR 113.6: SelfRef statics are self-cost-reduction ("this spell costs
-            // {N} less") — handled by apply_self_spell_cost_modifiers for the spell
-            // being cast. They must never apply from a battlefield permanent to
-            // other spells.
-            if matches!(def.affected, Some(TargetFilter::SelfRef)) {
                 continue;
             }
 
@@ -7275,12 +7267,8 @@ fn collect_battlefield_cost_modifiers(
 
             // CR 601.2f: Check player scope — does this modifier apply to spells the caster casts?
             // Must run before condition check so QuantityComparison resolves against the caster.
-            if let Some(TargetFilter::Typed(ref tf)) = def.affected {
-                match tf.controller {
-                    Some(ControllerRef::You) if caster != source_controller => continue,
-                    Some(ControllerRef::Opponent) if caster == source_controller => continue,
-                    _ => {} // No controller restriction or matches
-                }
+            if !caster_scope.admits(caster, source_controller) {
+                continue;
             }
 
             // CR 601.2f: Check static condition — "as long as" / "during your turn"
@@ -7299,7 +7287,7 @@ fn collect_battlefield_cost_modifiers(
             }
 
             // CR 601.2f: Check spell type filter — does the spell match?
-            if let Some(ref filter) = spell_filter {
+            if let Some(filter) = spell_filter {
                 let matches = if let Some(ability) = selected_ability {
                     spell_matches_cost_filter_with_selected_targets_for(
                         state, caster, spell_id, filter, bf_id, ability, fused,
@@ -7314,7 +7302,7 @@ fn collect_battlefield_cost_modifiers(
 
             // CR 601.2f: Calculate the modification amount.
             let base_amount = amount.clone();
-            let multiplier = if let Some(ref qty_ref) = dynamic_count {
+            let multiplier = if let Some(qty_ref) = dynamic_count {
                 let qty_expr = crate::types::ability::QuantityExpr::Ref {
                     qty: qty_ref.clone(),
                 };

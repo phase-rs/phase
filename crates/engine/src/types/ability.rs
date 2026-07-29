@@ -5294,9 +5294,12 @@ pub enum ObjectScope {
     Target,
     /// CR 613.4c + CR 115.10: The object currently receiving an effect.
     /// In layer evaluation this is the per-object recipient. Outside layers,
-    /// it resolves to the first object target when present, then to the source.
+    /// it resolves to the first object target when present, then to the
+    /// entering object of an ETB-scoped replacement, then to the source.
     /// Used for recipient-relative "its colors" boosts such as Blessing of
-    /// the Nephilim and Civic Saber.
+    /// the Nephilim and Civic Saber, and for "its mana value"/"its power"
+    /// quantities inside "that creature enters with ... counters" replacement
+    /// effects (Runadi, Behemoth Caller).
     Recipient,
     /// CR 603.2: The object referenced by the current trigger event.
     EventSource,
@@ -20880,6 +20883,112 @@ pub enum ProtectionDoesNotRemove {
     /// already attached to it" (Benevolent Blessing). New same-quality
     /// attachments remain illegal; only already-attached controlled ones stay.
     ControlledAttachmentsAlreadyAttached,
+}
+
+/// CR 601.2f: whose spells a cost modifier applies to, read off
+/// `StaticDefinition.affected`.
+///
+/// The stored form is a `TargetFilter` whose `TypedFilter.controller` carries
+/// the scope, so every consumer would otherwise re-destructure it. Naming the
+/// three outcomes keeps the decision in one place and lets a caller that has no
+/// `PlayerId` (deck-time analysis) ask the same question as one that does
+/// (the casting pipeline).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostModifierCasterScope {
+    /// "Spells you cast" — applies only when the caster controls the source.
+    You,
+    /// "Spells your opponents cast" — applies only when the caster does not.
+    Opponent,
+    /// Unscoped — applies to every caster.
+    Any,
+}
+
+/// CR 601.2f: read the caster scope off a cost modifier's `affected` filter.
+pub fn cost_modifier_caster_scope(affected: Option<&TargetFilter>) -> CostModifierCasterScope {
+    match affected {
+        Some(TargetFilter::Typed(typed)) => match typed.controller {
+            Some(ControllerRef::You) => CostModifierCasterScope::You,
+            Some(ControllerRef::Opponent) => CostModifierCasterScope::Opponent,
+            _ => CostModifierCasterScope::Any,
+        },
+        _ => CostModifierCasterScope::Any,
+    }
+}
+
+/// CR 601.2f: the structural facts of a BOARD-WIDE cost modifier — one that a
+/// permanent applies to other spells, as opposed to a `SelfRef` "this spell
+/// costs {N} less" self-reduction (CR 113.6), which the casting pipeline
+/// resolves through a different path entirely.
+///
+/// This is the single structural authority for "is this static a cost modifier,
+/// and what are its terms". It deliberately answers only the questions that need
+/// NO game state, so that deck-time analysis and the live casting pipeline share
+/// one definition of eligibility instead of maintaining parallel copies that
+/// drift. State-dependent gates — the functioning zone, the `condition`, the
+/// `dynamic_count` multiplier, and the spell filter itself — stay with the
+/// caller that has the state to evaluate them.
+#[derive(Debug, Clone, Copy)]
+pub struct BoardWideCostModifier<'a> {
+    pub mode: crate::types::statics::CostModifyMode,
+    pub amount: &'a crate::types::mana::ManaCost,
+    pub spell_filter: Option<&'a TargetFilter>,
+    pub dynamic_count: Option<&'a QuantityRef>,
+    pub caster_scope: CostModifierCasterScope,
+    /// The gate a live caller must still evaluate before applying this modifier
+    /// (CR 601.2f "as long as" / "during your turn" clauses). `None` is
+    /// unconditional.
+    pub condition: Option<&'a StaticCondition>,
+}
+
+impl StaticDefinition {
+    /// CR 601.2f: view this static as a board-wide cost modifier, or `None` when
+    /// it is not one.
+    ///
+    /// Rejects `Minimum` (a CR 601.2f last-step floor, not a per-spell
+    /// adjustment) and `SelfRef` self-cost reductions (CR 113.6).
+    pub fn board_wide_cost_modifier(&self) -> Option<BoardWideCostModifier<'_>> {
+        let StaticMode::ModifyCost {
+            mode,
+            amount,
+            spell_filter,
+            dynamic_count,
+        } = &self.mode
+        else {
+            return None;
+        };
+        if matches!(mode, crate::types::statics::CostModifyMode::Minimum) {
+            return None;
+        }
+        if matches!(self.affected, Some(TargetFilter::SelfRef)) {
+            return None;
+        }
+        Some(BoardWideCostModifier {
+            mode: *mode,
+            amount,
+            spell_filter: spell_filter.as_ref(),
+            dynamic_count: dynamic_count.as_ref(),
+            caster_scope: cost_modifier_caster_scope(self.affected.as_ref()),
+            condition: self.condition.as_ref(),
+        })
+    }
+}
+
+impl CostModifierCasterScope {
+    /// CR 601.2f: does this scope admit `caster`, given who controls the source?
+    pub fn admits(self, caster: PlayerId, source_controller: PlayerId) -> bool {
+        match self {
+            CostModifierCasterScope::You => caster == source_controller,
+            CostModifierCasterScope::Opponent => caster != source_controller,
+            CostModifierCasterScope::Any => true,
+        }
+    }
+
+    /// CR 601.2f: does this scope admit the source's own controller? The
+    /// `PlayerId`-free question deck analysis asks — "would this discount the
+    /// spells of the player who controls it?"
+    pub fn admits_own_controller(self) -> bool {
+        !matches!(self, CostModifierCasterScope::Opponent)
+    }
 }
 
 impl StaticDefinition {

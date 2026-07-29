@@ -12,6 +12,7 @@ pub mod artifacts;
 pub mod blink;
 pub mod commitment;
 pub mod control;
+pub mod cost_reduction;
 pub mod devotion;
 pub mod draw_matters;
 pub mod enchantments;
@@ -37,6 +38,7 @@ pub use aristocrats::AristocratsFeature;
 pub use artifacts::ArtifactsFeature;
 pub use blink::BlinkFeature;
 pub use control::ControlFeature;
+pub use cost_reduction::CostReductionFeature;
 pub use devotion::DevotionFeature;
 pub use draw_matters::DrawMattersFeature;
 pub use enchantments::EnchantmentsFeature;
@@ -74,6 +76,9 @@ pub struct DeckFeatures {
     pub mana_ramp: ManaRampFeature,
     pub tribal: TribalFeature,
     pub control: ControlFeature,
+    /// CR 601.2f: cost-reduction density ("spells you cast cost less") — the
+    /// acceleration axis `mana_ramp` explicitly defers.
+    pub cost_reduction: CostReductionFeature,
     pub enchantments: EnchantmentsFeature,
     pub equipment: EquipmentFeature,
     pub blink: BlinkFeature,
@@ -125,6 +130,7 @@ impl DeckFeatures {
             mana_ramp: mana_ramp::detect(deck),
             tribal: tribal::detect(deck),
             control: control::detect(deck),
+            cost_reduction: cost_reduction::detect(deck),
             enchantments: enchantments::detect(deck),
             equipment: equipment::detect(deck),
             blink: blink::detect(deck),

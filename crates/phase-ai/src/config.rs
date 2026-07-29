@@ -533,6 +533,14 @@ pub struct PolicyPenalties {
     /// draw" engine (preference band, per engine).
     #[serde(default = "default_draw_payoff_bonus")]
     pub draw_payoff_bonus: f64,
+    /// CR 601.2f: card-equivalent value of ONE generic mana saved by deploying a
+    /// cost reducer, multiplied by the capped saved-mana total.
+    #[serde(default = "default_cost_reduction_deploy_bonus")]
+    pub cost_reduction_deploy_bonus: f64,
+    /// CR 601.2f: nudge-band penalty for casting past an unplayed, cheaper cost
+    /// reducer — the discount should be deployed first.
+    #[serde(default = "default_cost_reduction_defer_penalty")]
+    pub cost_reduction_defer_penalty: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -608,6 +616,8 @@ impl Default for PolicyPenalties {
             devotion_pip_progress: default_devotion_pip_progress(),
             devotion_god_activation: default_devotion_god_activation(),
             draw_payoff_bonus: default_draw_payoff_bonus(),
+            cost_reduction_deploy_bonus: default_cost_reduction_deploy_bonus(),
+            cost_reduction_defer_penalty: default_cost_reduction_defer_penalty(),
         }
     }
 }
@@ -735,6 +745,12 @@ fn default_devotion_god_activation() -> f64 {
 }
 fn default_draw_payoff_bonus() -> f64 {
     0.6
+}
+fn default_cost_reduction_deploy_bonus() -> f64 {
+    0.2
+}
+fn default_cost_reduction_defer_penalty() -> f64 {
+    -0.25
 }
 fn default_sacrifice_token_cost() -> f64 {
     0.5
@@ -883,6 +899,15 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "draw_payoff_bonus",
         "CR 121.1 per-engine draw-payoff weight — awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "cost_reduction_deploy_bonus",
+        "CR 601.2f per-saved-mana deployment weight — awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "cost_reduction_defer_penalty",
+        "CR 601.2f sequencing nudge for casting past a cheaper unplayed reducer — \
+         awaiting a paired-seed ai-gate calibration.",
     ),
     (
         "poison_clock_pressure",

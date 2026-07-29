@@ -90,7 +90,7 @@ use super::oracle_modal::{
 use super::oracle_replacement::{
     find_copy_verb_present, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir, parse_replacement_line,
-    parse_replacement_line_ir,
+    parse_replacement_line_ir, parse_whenever_you_cast_enters_with_trigger,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -5044,9 +5044,6 @@ pub(crate) fn parse_oracle_ir(
         // are CR 614.1c replacement effects, not triggered abilities — despite
         // the "whenever"/"when" framing. Intercept before the generic trigger
         // dispatch routes them through the SpellCast / ChangesZone matcher.
-        // Applies to Wildgrowth Archaic and cousin cards (Runadi, Boreal
-        // Outrider, Torgal, Dragon Broodmother, …). `parse_replacement_line`
-        // handles all the compositional variants (fixed / X / "where X is …").
         //
         // CR 603.2 exclusion: an ETB-with-counter TRIGGER ("… enters with a
         // counter on it, <consequence>") watches for ANY (untyped) counter and
@@ -5064,6 +5061,23 @@ pub(crate) fn parse_oracle_ir(
             && scan_contains(&lower, "enters with")
             && !scan_contains(&lower, "enters this way,")
         {
+            // CR 603.1 + CR 603.3 + CR 614.1c/614.12: "Whenever you cast [spell],
+            // that [subject] enters with … counter(s) on it[, where X is …]"
+            // (Wildgrowth Archaic and cousin cards — Runadi, Boreal Outrider,
+            // Torgal, Dragon Broodmother, …) is a TRIGGERED ability (CR 603.1),
+            // not an object-hosted static replacement — the entering-with-counters
+            // effect must survive the source leaving the battlefield after the
+            // trigger resolves but before the cast spell does (issue #6492
+            // review). Try this shape's dedicated trigger recognizer FIRST so it
+            // never falls through to the generic object-hosted replacement path.
+            if let Some(trigger) = parse_whenever_you_cast_enters_with_trigger(&line, card_name) {
+                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
+                i += 1;
+                continue;
+            }
+            // Every other "… enters with …" shape here (kicker-conditional
+            // "if ~ was kicked, it enters with …", external "[type] enters
+            // with …", etc.) is a genuine CR 614.1c object-hosted replacement.
             if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
                 emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 i += 1;
