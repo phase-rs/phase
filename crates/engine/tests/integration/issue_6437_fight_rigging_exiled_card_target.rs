@@ -227,3 +227,61 @@ fn fight_rigging_below_power_threshold_only_places_the_counter() {
         Some(Zone::Exile)
     );
 }
+
+/// Issue #6437 (second root cause) — `capture_linked_exile_snapshot`
+/// (`game/zones.rs`) must be kind-agnostic on the REAL leaves-the-battlefield
+/// path, not only on the still-on-battlefield path the two tests above
+/// exercise. Watcher for Tomorrow: "Hideaway 4 (...) This creature enters
+/// tapped. When this creature leaves the battlefield, put the exiled card
+/// into its owner's hand." — a pure LTB + `ExiledBySource` shape
+/// (`Effect::ChangeZoneAll`, per the parser's
+/// `hideaway_ltb_put_exiled_card_binds_exiled_by_source` test), unrelated to
+/// the PutCounter target-propagation fix above and untouched by it. Casting a
+/// real removal spell destroys Watcher through the actual casting/zone
+/// pipeline (`zones::move_to_zone`), which is exactly the leaves-the-
+/// battlefield departure `capture_linked_exile_snapshot` snapshots for the
+/// trigger's later `ExiledBySource` lookup (`filter.rs`'s `trigger_source.
+/// is_some()` branch). Pre-fix, that snapshot kept only `TrackedBySource`
+/// links, silently dropping Hideaway's own `HideawayLookable` link and
+/// leaving the hidden card stranded in exile instead of reaching the hand.
+const WATCHER_FOR_TOMORROW: &str = "Hideaway 4 (When this creature enters, look at the top four cards of your library, exile one face down, then put the rest on the bottom in a random order.)\nThis creature enters tapped.\nWhen this creature leaves the battlefield, put the exiled card into its owner's hand.";
+
+#[test]
+fn watcher_for_tomorrow_leaving_the_battlefield_finds_the_hideaway_linked_card() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let watcher = scenario
+        .add_creature_from_oracle(P0, "Watcher for Tomorrow", 2, 1, WATCHER_FOR_TOMORROW)
+        .id();
+    // Models an earlier turn's already-resolved Hideaway ETB: a card durably
+    // linked to Watcher in exile (CR 406.6 + CR 607.2a) via the SAME
+    // `HideawayLookable` kind Fight Rigging uses.
+    let hidden = scenario.add_creature_to_exile(P0, "Hidden Card", 0, 0).id();
+    let removal = scenario
+        .add_spell_to_hand_from_oracle(P0, "Destroy Spell", true, "Destroy target creature.")
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().exile_links.push(ExileLink {
+        exiled_id: hidden,
+        source_id: watcher,
+        kind: ExileLinkKind::HideawayLookable,
+    });
+
+    // Destroy Watcher through the REAL casting/resolution/zone pipeline —
+    // the battlefield departure this drives is exactly the
+    // `zones::move_to_zone` leaves-the-battlefield path under test, and the
+    // resulting LTB trigger is Watcher's own PARSED printed ability, not a
+    // hand-built stand-in.
+    let outcome = runner.cast(removal).target_objects(&[watcher]).resolve();
+
+    outcome.assert_zone(&[watcher], Zone::Graveyard);
+    assert_eq!(
+        outcome.state().objects.get(&hidden).map(|o| o.zone),
+        Some(Zone::Hand),
+        "the Hideaway-linked hidden card must reach its owner's hand via the \
+         leaves-the-battlefield ExiledBySource lookup, got {:?}",
+        outcome.state().objects.get(&hidden).map(|o| o.zone)
+    );
+}
