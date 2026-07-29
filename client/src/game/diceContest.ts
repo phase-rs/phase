@@ -1,4 +1,4 @@
-import type { GameEvent, PlayerId } from "../adapter/types";
+import type { GameEvent, PlayerId, TurnOrderSlotView } from "../adapter/types";
 import { useUiStore } from "../stores/uiStore";
 
 type DieRolledEvent = Extract<GameEvent, { type: "DieRolled" }>;
@@ -18,7 +18,12 @@ type StartingPlayerContestEvent = Extract<GameEvent, { type: "StartingPlayerCont
  * equals the event's `winner` by construction. No-ops when no contest ran
  * (explicit play/draw choice).
  */
-export function flashStartingPlayerContest(events: GameEvent[], startingPlayer: PlayerId): void {
+export function flashStartingPlayerContest(
+  events: GameEvent[],
+  startingPlayer: PlayerId,
+  turnOrder: TurnOrderSlotView[] | undefined,
+  viewerTurnNumber?: number,
+): void {
   const contest = events.find(
     (e): e is StartingPlayerContestEvent => e.type === "StartingPlayerContest",
   );
@@ -35,18 +40,20 @@ export function flashStartingPlayerContest(events: GameEvent[], startingPlayer: 
     rounds,
     context: "startingPlayer",
     winner: startingPlayer,
+    turnOrder,
+    viewerTurnNumber,
   });
 }
 
 /**
  * Fire the in-game roll overlay for an action's event batch. Groups all
- * `DieRolled` into one die overlay (e.g. a Krark's Thumb double) and otherwise
- * shows the first `CoinFlipped`. Always `context: "ability"`. No-ops when the
+ * `DieRolled` into one die overlay (e.g. a Krark's Thumb double) and queues
+ * every `CoinFlipped` after it. Always `context: "ability"`. No-ops when the
  * batch contains neither.
  */
 export function flashInGameRolls(events: GameEvent[]): void {
   const dice = events.filter((e): e is DieRolledEvent => e.type === "DieRolled");
-  const coin = events.find((e): e is CoinFlippedEvent => e.type === "CoinFlipped");
+  const coins = events.filter((e): e is CoinFlippedEvent => e.type === "CoinFlipped");
   const flash = useUiStore.getState().flashDiceRoll;
   // All dice in the batch group into one overlay (e.g. a Krark's Thumb double);
   // a co-occurring coin queues behind them and plays after (the overlay FIFO
@@ -64,7 +71,7 @@ export function flashInGameRolls(events: GameEvent[]): void {
       context: "ability",
     });
   }
-  if (coin) {
+  for (const coin of coins) {
     flash({ kind: "coin", playerId: coin.data.player_id, won: coin.data.won, context: "ability" });
   }
 }

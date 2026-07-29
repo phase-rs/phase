@@ -9,7 +9,7 @@
     "id": "saheeli-legend-loop",
     "thread_id": "1511770871323295934",
     "archive": "saheeli-legend-loop.zip",
-    "expected_action_type": "PlayLand"
+    "expected_action_type": "CastSpell"
   },
   {
     "id": "helix-pinnacle-x-spam",

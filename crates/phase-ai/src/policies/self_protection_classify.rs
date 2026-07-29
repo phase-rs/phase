@@ -1213,6 +1213,7 @@ mod tests {
                 .modifications(vec![ContinuousModification::AddKeyword { keyword }])],
             target,
             duration: None,
+            end_cost: None,
         }
     }
 
@@ -1238,6 +1239,7 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::You),
             )),
             duration: None,
+            end_cost: None,
         };
         assert!(is_self_protection_effect(&effect));
     }
@@ -1255,6 +1257,7 @@ mod tests {
                 ])],
                 target: None,
                 duration: None,
+                end_cost: None,
             },
         );
         let effect = Effect::GenericEffect {
@@ -1267,6 +1270,7 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::You),
             )),
             duration: None,
+            end_cost: None,
         };
         assert!(is_self_protection_effect(&effect));
     }
@@ -1391,7 +1395,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -1452,7 +1456,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -1512,7 +1516,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -1599,7 +1603,7 @@ mod tests {
             controller: opponent,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -1759,7 +1763,7 @@ mod tests {
             controller: opponent,
             kind: StackEntryKind::Spell {
                 card_id: CardId(88),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },

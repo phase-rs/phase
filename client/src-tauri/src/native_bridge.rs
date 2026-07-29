@@ -17,6 +17,10 @@ use tokio_tungstenite::{
 
 use crate::native_engine;
 
+/// phase-server's WebSocket route. Kept as a named constant so the one place
+/// that dials it reads as a contract rather than an incidental URL suffix.
+const SERVER_WEBSOCKET_PATH: &str = "/ws";
+
 /// Events forwarded from the shell-owned loopback WebSocket to remote content.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -141,7 +145,10 @@ pub fn native_engine_bridge_close(id: u64) -> Result<(), NativeEngineBridgeError
 }
 
 fn bridge_request(port: u16, origin: &str) -> Result<Request<()>, NativeEngineBridgeError> {
-    let url = format!("ws://127.0.0.1:{port}");
+    // phase-server serves its socket at `/ws` (`crates/phase-server/src/main.rs`
+    // route table), the same path web clients dial. The root path answers 404,
+    // which fails the upgrade and sends every native session to WASM.
+    let url = format!("ws://127.0.0.1:{port}{SERVER_WEBSOCKET_PATH}");
     let mut request =
         url.into_client_request()
             .map_err(|error| NativeEngineBridgeError::Connect {
@@ -267,7 +274,9 @@ mod tests {
     fn bridge_request_is_loopback_and_uses_the_channel_origin() {
         let request = bridge_request(43123, "https://phase-rs.dev").unwrap();
 
-        assert_eq!(request.uri().to_string(), "ws://127.0.0.1:43123/");
+        // The path is load-bearing: phase-server answers 404 on the root, and a
+        // failed upgrade silently downgrades every native session to WASM.
+        assert_eq!(request.uri().to_string(), "ws://127.0.0.1:43123/ws");
         assert_eq!(
             request.headers()[ORIGIN].to_str().unwrap(),
             "https://phase-rs.dev"

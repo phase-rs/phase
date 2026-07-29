@@ -70,6 +70,8 @@
     "moveToSideboard": "Ein {{name}} ins Sideboard verschieben",
     "moveToMain": "Ein {{name}} ins Hauptdeck verschieben",
     "removeOne": "Ein {{name}} entfernen",
+    "addOne": "Ein {{name}} hinzufügen",
+    "copyLimit": "{{name}} hat das Kopienlimit erreicht",
     "makeCommander": "{{name}} zum Kommandeur machen",
     "makeCommanderTitle": "Zu meinem Kommandeur machen",
     "chooseArtFor": "Artwork für {{name}} wählen",

@@ -8,6 +8,9 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::resolved_commands::{
+    ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+};
 
 /// CR 701.20a / CR 701.20e: RevealHand — reveal or privately look at a target
 /// player's hand, then optionally let the caster choose a card.
@@ -121,9 +124,22 @@ pub fn resolve(
 
     // CR 701.20b: Revealing a card doesn't cause it to leave the zone it's in.
     if is_reveal {
-        for &card_id in &hand {
-            state.revealed_cards.insert(card_id);
-        }
+        state
+            .resolve_and_apply_information(
+                &hand,
+                ResolvedInformationAudience::Controller(ability.controller),
+                ResolvedInformationLifetime::UntilActionBoundary,
+                ResolvedInformationEdit::Reveal,
+            )
+            .expect("resolved hand-reveal occurrences must be live and distinct");
+        state
+            .resolve_and_apply_information(
+                &hand,
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange,
+                ResolvedInformationEdit::Reveal,
+            )
+            .expect("published hand-reveal occurrences must be live and distinct");
 
         // Emit event with card names
         let card_names: Vec<String> = hand

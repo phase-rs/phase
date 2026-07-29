@@ -2503,7 +2503,7 @@ mod tests {
             controller: ctrl,
             kind: StackEntryKind::ActivatedAbility {
                 source_id: src,
-                ability: ResolvedAbility::new(Effect::NoOp, vec![], src, ctrl),
+                ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], src, ctrl)),
             },
         });
         let mut b = a.clone();

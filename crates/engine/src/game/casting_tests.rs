@@ -1059,11 +1059,16 @@ fn activation_mana_payment_auto_taps_activation_only_source() {
         Zone::Battlefield,
     );
     let cost = ManaCost::generic(1);
+    Arc::make_mut(&mut state.objects.get_mut(&ability_source).unwrap().abilities).push(
+        AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+            .cost(AbilityCost::Mana { cost: cost.clone() }),
+    );
 
     assert!(can_pay_ability_mana_cost_after_auto_tap(
         &state,
         PlayerId(0),
         ability_source,
+        Some(0),
         &cost
     ));
 
@@ -1072,8 +1077,8 @@ fn activation_mana_payment_auto_taps_activation_only_source() {
         &mut state,
         PlayerId(0),
         ability_source,
+        Some(0),
         &cost,
-        None,
         &mut events,
     )
     .unwrap();
@@ -3467,6 +3472,7 @@ fn granted_freerunning_static_surfaces_freerunning_variant() {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -7550,7 +7556,7 @@ fn x_cost_activated_minimum_rejects_zero_and_accepts_one() {
         controller: PlayerId(0),
         kind: StackEntryKind::ActivatedAbility {
             source_id: ObjectId(901),
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -7558,7 +7564,7 @@ fn x_cost_activated_minimum_rejects_zero_and_accepts_one() {
                 Vec::new(),
                 ObjectId(901),
                 PlayerId(0),
-            ),
+            )),
         },
     });
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
@@ -9688,6 +9694,7 @@ fn hearth_elemental_self_cost_reduction_counts_adventures() {
                 power: None,
                 toughness: None,
                 loyalty: None,
+                printed_loyalty: None,
                 defense: None,
                 card_types: Default::default(),
                 mana_cost: ManaCost::generic(1),
@@ -11105,6 +11112,7 @@ fn transient_activation_cost_reduction_hits_only_controlled_artifact_tokens() {
             }])],
         duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
         target: None,
+        end_cost: None,
     };
     let ability =
         crate::types::ability::ResolvedAbility::new(effect, vec![], dining_car, PlayerId(0));
@@ -11725,7 +11733,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
         controller: PlayerId(1),
         kind: StackEntryKind::Spell {
             card_id: CardId(997),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::Destroy {
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     cant_regenerate: false,
@@ -11733,7 +11741,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
                 vec![TargetRef::Object(large_creature)],
                 opposing_bolt,
                 PlayerId(1),
-            )),
+            ))),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 1,
         },
@@ -11783,7 +11791,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
         controller: PlayerId(1),
         kind: StackEntryKind::ActivatedAbility {
             source_id: ability_source,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Destroy {
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     cant_regenerate: false,
@@ -11791,7 +11799,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
                 vec![TargetRef::Object(large_creature)],
                 ability_source,
                 PlayerId(1),
-            ),
+            )),
         },
     });
     let not_of_this_world_targeting_ability = ResolvedAbility::new(
@@ -11960,6 +11968,7 @@ fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             }]
             .into();
         }
@@ -14737,6 +14746,7 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -14854,6 +14864,7 @@ fn add_witherbloom_affinity_source(state: &mut GameState, player: PlayerId) -> O
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         }]
         .into();
     }
@@ -25210,6 +25221,7 @@ fn create_adventure_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut ct = crate::types::card_type::CardType::default();
@@ -25300,6 +25312,7 @@ fn create_enchantment_adventure_in_hand(state: &mut GameState, player: PlayerId)
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut ct = crate::types::card_type::CardType::default();
@@ -25386,6 +25399,7 @@ fn create_omen_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut ct = crate::types::card_type::CardType::default();
@@ -25674,7 +25688,7 @@ fn adventure_exile_on_resolve() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(70),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::DealDamage {
                     amount: QuantityExpr::Fixed { value: 2 },
                     target: crate::types::ability::TargetFilter::Any,
@@ -25684,7 +25698,7 @@ fn adventure_exile_on_resolve() {
                 vec![TargetRef::Player(PlayerId(1))],
                 obj_id,
                 PlayerId(0),
-            )),
+            ))),
             casting_variant: CastingVariant::Adventure,
             actual_mana_spent: 0,
         },
@@ -25725,7 +25739,7 @@ fn adventure_countered_to_graveyard() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(70),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::DealDamage {
                     amount: QuantityExpr::Fixed { value: 2 },
                     target: crate::types::ability::TargetFilter::Any,
@@ -25735,7 +25749,7 @@ fn adventure_countered_to_graveyard() {
                 vec![TargetRef::Player(PlayerId(1))],
                 obj_id,
                 PlayerId(0),
-            )),
+            ))),
             casting_variant: CastingVariant::Adventure,
             actual_mana_spent: 0,
         },
@@ -25835,7 +25849,7 @@ fn can_pay_sacrifice_cost_with_eligible() {
         PlayerId(0),
         source,
         &cost,
-        None
+        Some(0)
     ));
 }
 
@@ -25861,7 +25875,7 @@ fn cannot_pay_sacrifice_cost_no_eligible() {
         PlayerId(0),
         source,
         &cost,
-        None
+        Some(0)
     ));
 }
 
@@ -29007,6 +29021,7 @@ fn add_disturb_creature_to_graveyard(
         power: Some(1),
         toughness: Some(1),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut card_types = crate::types::card_type::CardType::default();
@@ -31071,7 +31086,7 @@ fn composite_activated_pay_life_cost_deducts_life() {
     let life_before = state.players[0].life;
     let mut events = Vec::new();
 
-    pay_ability_cost_for_activation(&mut state, PlayerId(0), fetch, &cost, None, &mut events)
+    pay_ability_cost_for_activation(&mut state, PlayerId(0), fetch, &cost, Some(0), &mut events)
         .expect("fetchland-style composite cost should be payable");
 
     assert_eq!(state.players[0].life, life_before - 1);
@@ -33075,8 +33090,15 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         let mut events = Vec::new();
-        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, None, &mut events)
-            .expect("cost should pay with 2 +1/+1 counters available");
+        pay_ability_cost_for_activation(
+            &mut state,
+            PlayerId(0),
+            source,
+            &cost,
+            Some(0),
+            &mut events,
+        )
+        .expect("cost should pay with 2 +1/+1 counters available");
         let remaining = state
             .objects
             .get(&source)
@@ -33117,7 +33139,7 @@ mod remove_counter_cost {
             "cost must be unpayable when the source has no +1/+1 counters"
         );
         assert!(
-            !can_pay_ability_cost_now(&state, PlayerId(0), source, &cost, None),
+            !can_pay_ability_cost_now(&state, PlayerId(0), source, &cost, Some(0)),
             "can_pay_ability_cost_now must reject an unpayable remove-counter cost"
         );
     }
@@ -33154,8 +33176,15 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         let mut events = Vec::new();
-        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, None, &mut events)
-            .unwrap();
+        pay_ability_cost_for_activation(
+            &mut state,
+            PlayerId(0),
+            source,
+            &cost,
+            Some(0),
+            &mut events,
+        )
+        .unwrap();
         let removed_count = events
             .iter()
             .filter_map(|e| match e {
@@ -34603,7 +34632,7 @@ mod unattach_cost {
             PlayerId(0),
             equipment,
             &cost,
-            None,
+            Some(0),
             &mut Vec::new(),
         )
         .expect("attached Equipment should be able to unattach as a cost");
@@ -34905,6 +34934,7 @@ mod mtmte_cast_flow {
             power: Some(7),
             toughness: Some(7),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types,
             mana_cost: ManaCost::default(),
@@ -36283,6 +36313,227 @@ mod namor_colored_pip_cast_trigger {
     }
 }
 
+/// CR 107.4 + CR 202.3 + CR 603.2 (issue #1718): Ovika, Enigma Goliath —
+/// runtime cast-pipeline coverage. "Whenever you cast a noncreature spell,
+/// create X 1/1 red Phyrexian Goblin creature tokens, where X is the mana value
+/// of that spell. They gain haste until end of turn." The count binds the
+/// triggering spell's mana value via the prepositional of-form anaphor
+/// (`ObjectManaValue { EventSource }`). Before the parser fix the token clause
+/// "create X … tokens, where X is the mana value of that spell" dropped to
+/// `Unimplemented`, so the trigger fired but created ZERO tokens — the exact
+/// reported symptom.
+mod ovika_noncreature_spell_token_trigger {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::mana::{ManaCost, ManaUnit};
+
+    const OVIKA_ORACLE: &str = "Flying\nWard—{3}, Pay 3 life.\nWhenever you cast a noncreature spell, create X 1/1 red Phyrexian Goblin creature tokens, where X is the mana value of that spell. They gain haste until end of turn.";
+
+    /// Count token permanents a player controls on the battlefield.
+    fn token_count(runner: &crate::game::scenario::GameRunner, player: PlayerId) -> usize {
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Battlefield && o.controller == player && o.is_token)
+            .count()
+    }
+
+    /// Cast a benign noncreature spell of the given mana value with Ovika on the
+    /// battlefield, resolve the whole stack, and report how many tokens P0 ends
+    /// up controlling.
+    fn cast_noncreature_spell_of_mana_value(mv: u32) -> crate::game::scenario::GameRunner {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature_from_oracle(P0, "Ovika, Enigma Goliath", 7, 7, OVIKA_ORACLE);
+        // A noncreature spell whose only mana is generic, so its mana value is
+        // exactly `mv`. Benign resolution (gain 1 life) keeps the state simple.
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Test Filler", true, "You gain 1 life.")
+            .with_mana_cost(ManaCost::generic(mv))
+            .id();
+        // CR 601.2g-h: fund the generic cost from the pool so the driver
+        // auto-pays (601.2g covers mana abilities/funding, 601.2h the payment;
+        // 601.2f is total-cost determination).
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); mv as usize],
+        );
+        let mut runner = scenario.build();
+        runner.cast(spell).resolve();
+        runner
+    }
+
+    #[test]
+    fn casting_mana_value_three_spell_creates_three_goblins() {
+        let runner = cast_noncreature_spell_of_mana_value(3);
+        assert_eq!(
+            token_count(&runner, P0),
+            3,
+            "X must bind the triggering spell's mana value (3), got {}",
+            token_count(&runner, P0)
+        );
+        // Every created token is a red Phyrexian Goblin, not a generic token.
+        for obj in runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Battlefield && o.is_token && o.controller == P0)
+        {
+            assert_eq!(
+                (obj.power, obj.toughness),
+                (Some(1), Some(1)),
+                "each token must be exactly 1/1 — the mana value drives the token \
+                 COUNT, never the P/T, got {:?}/{:?}",
+                obj.power,
+                obj.toughness
+            );
+            assert!(
+                obj.color.contains(&ManaColor::Red),
+                "token must be red, got colors {:?}",
+                obj.color
+            );
+            assert!(
+                obj.card_types.subtypes.iter().any(|s| s == "Phyrexian"),
+                "token must be a Phyrexian, got subtypes {:?}",
+                obj.card_types.subtypes
+            );
+            assert!(
+                obj.card_types.subtypes.iter().any(|s| s == "Goblin"),
+                "token must be a Goblin, got subtypes {:?}",
+                obj.card_types.subtypes
+            );
+            assert!(
+                obj.keywords.contains(&Keyword::Haste), // allow-raw-authority: asserts the literal keyword set stamped on the freshly created token, not an effective-keyword query
+                "each token must gain haste (\"They gain haste until end of turn\"), \
+                 got keywords {:?}",
+                obj.keywords
+            );
+        }
+    }
+
+    #[test]
+    fn token_count_tracks_spell_mana_value() {
+        // Control: a mana-value-2 spell makes exactly two tokens, proving the
+        // count reads the triggering spell's mana value rather than a fixed
+        // number or the generic (amount-less) SpellCast event context.
+        let runner = cast_noncreature_spell_of_mana_value(2);
+        assert_eq!(
+            token_count(&runner, P0),
+            2,
+            "X must track the spell's mana value (2), got {}",
+            token_count(&runner, P0)
+        );
+    }
+}
+
+/// CR 107.4 + CR 202.3 + CR 603.2 (issue #1718): Pure Reflection — runtime
+/// cast-pipeline coverage for the P/T axis of the mana-value of-form anaphor.
+/// "Whenever a player casts a creature spell, destroy all Reflections. Then
+/// that player creates an X/X white Reflection creature token, where X is the
+/// mana value of that spell." Ovika binds `ObjectManaValue { EventSource }` to
+/// the token COUNT; Pure Reflection binds it to the token's POWER/TOUGHNESS.
+/// Pinning P/T here (with count pinned at one) discriminates a count/P-T axis
+/// confusion that count-only assertions cannot catch.
+mod pure_reflection_mana_value_token_pt {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::mana::{ManaCost, ManaUnit};
+
+    const PURE_REFLECTION_ORACLE: &str = "Whenever a player casts a creature spell, destroy all Reflections. Then that player creates an X/X white Reflection creature token, where X is the mana value of that spell.";
+
+    /// Put Pure Reflection on P0's battlefield, cast a creature spell with the
+    /// given mana cost (funded exactly by `pool`), resolve the whole stack, and
+    /// return the runner for token assertions.
+    fn cast_creature_spell_with_cost(
+        cost: ManaCost,
+        pool: Vec<ManaUnit>,
+    ) -> crate::game::scenario::GameRunner {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Pure Reflection", 0, 0)
+            .as_enchantment()
+            .from_oracle_text(PURE_REFLECTION_ORACLE);
+        let spell = scenario
+            .add_creature_to_hand(P0, "Test Bear", 2, 2)
+            .with_mana_cost(cost)
+            .id();
+        // CR 601.2g-h: fund the cost from the pool so the driver auto-pays.
+        scenario.with_mana_pool(P0, pool);
+        let mut runner = scenario.build();
+        runner.cast(spell).resolve();
+        runner
+    }
+
+    /// Exactly one white Reflection token whose P/T both equal the triggering
+    /// spell's mana value.
+    fn assert_single_reflection_token(
+        runner: &crate::game::scenario::GameRunner,
+        expected_pt: i32,
+    ) {
+        let tokens: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Battlefield && o.controller == P0 && o.is_token)
+            .collect();
+        assert_eq!(
+            tokens.len(),
+            1,
+            "exactly one Reflection token must be created (the mana value drives \
+             P/T, never the count), got {}",
+            tokens.len()
+        );
+        let token = tokens[0];
+        assert_eq!(
+            (token.power, token.toughness),
+            (Some(expected_pt), Some(expected_pt)),
+            "Reflection must be {expected_pt}/{expected_pt} — X binds the \
+             triggering spell's mana value — got {:?}/{:?}",
+            token.power,
+            token.toughness
+        );
+        assert!(
+            token.color.contains(&ManaColor::White),
+            "token must be white, got colors {:?}",
+            token.color
+        );
+        assert!(
+            token.card_types.subtypes.iter().any(|s| s == "Reflection"),
+            "token must be a Reflection, got subtypes {:?}",
+            token.card_types.subtypes
+        );
+    }
+
+    #[test]
+    fn reflection_token_pt_binds_spell_mana_value() {
+        let runner = cast_creature_spell_with_cost(
+            ManaCost::generic(3),
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 3],
+        );
+        assert_single_reflection_token(&runner, 3);
+    }
+
+    #[test]
+    fn reflection_token_pt_sums_generic_and_colored_pips() {
+        // CR 202.3: {1}{R} has mana value 2 — one generic plus one colored pip.
+        // A mana-value computation that ignored colored pips would yield a 1/1
+        // here; the control above cannot catch that (generic-only cost).
+        let runner = cast_creature_spell_with_cost(
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            },
+            vec![
+                ManaUnit::new(ManaType::Red, ObjectId(9_999), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(9_998), false, vec![]),
+            ],
+        );
+        assert_single_reflection_token(&runner, 2);
+    }
+}
+
 /// CR 701.43a / CR 701.43b / CR 502.3: Exert cost — Arena of Glory class.
 mod exert_cost {
     use super::*;
@@ -36318,7 +36569,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            Some(0),
             &mut events,
         )
         .expect("exert cost pays");
@@ -36378,7 +36629,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            Some(0),
             &mut events,
         )
         .expect("first exert");
@@ -36387,7 +36638,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            Some(0),
             &mut events,
         )
         .expect("second exert");
@@ -36435,7 +36686,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            Some(0),
             &mut events,
         );
         assert!(matches!(result, Err(EngineError::ActionNotAllowed(_))));
@@ -36455,7 +36706,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            Some(0),
             &mut events,
         )
         .expect("exert cost pays");
@@ -38694,7 +38945,7 @@ fn bestow_illegal_target_at_resolution_reverts_to_creature() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(707),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "Aura".to_string(),
                     description: None,
@@ -38702,7 +38953,7 @@ fn bestow_illegal_target_at_resolution_reverts_to_creature() {
                 vec![TargetRef::Object(target_creature)],
                 bestow_id,
                 PlayerId(0),
-            )),
+            ))),
             casting_variant: CastingVariant::Bestow,
             actual_mana_spent: 0,
         },
@@ -38781,7 +39032,7 @@ fn bestow_legal_target_resolves_attached_as_aura() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(709),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "Aura".to_string(),
                     description: None,
@@ -38789,7 +39040,7 @@ fn bestow_legal_target_resolves_attached_as_aura() {
                 vec![TargetRef::Object(target_creature)],
                 bestow_id,
                 PlayerId(0),
-            )),
+            ))),
             casting_variant: CastingVariant::Bestow,
             actual_mana_spent: 0,
         },
@@ -43521,6 +43772,7 @@ fn conditional_cost_reduction_applies_only_when_condition_met() {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
+    use crate::types::statics::CostModifyMode;
 
     let condition = parse_restriction_condition("you control a legendary creature")
         .expect("test condition must parse");
@@ -43540,6 +43792,7 @@ fn conditional_cost_reduction_applies_only_when_condition_met() {
             },
         });
         def.cost_reduction = Some(CostReduction {
+            mode: CostModifyMode::Reduce,
             amount_per: 3,
             count: QuantityExpr::Fixed { value: 1 },
             condition: Some(condition.clone()),
@@ -43671,6 +43924,110 @@ fn hyldas_crown_cost_reduction_applies_only_during_your_turn() {
         generic_of(&def_off),
         1,
         "on an opponent's turn the reduction does not apply"
+    );
+}
+
+/// CR 602.2b + CR 601.2f: Loreseeker's Stone —
+/// "{3}, {T}: Draw three cards. This ability costs {1} more to activate
+/// for each card in your hand." The {3} generic component is {3} with an
+/// empty hand and {8} with five cards in hand. Parsed from the real Oracle
+/// clause and applied through production `apply_cost_reduction` (the same
+/// seam `can_activate_ability_now` / activation cost determination use).
+///
+/// Discriminating assertion: `generic_of(&def)` scales 3 → 8 with hand size.
+/// Reverting the Raise apply arm leaves generic at {3} for every hand size
+/// (the Discord report: activating for {3} with five cards in hand).
+#[test]
+fn loreseekers_stone_raise_cost_scales_with_hand_size() {
+    use crate::parser::oracle_cost::try_parse_cost_reduction;
+    use crate::types::ability::{Effect, QuantityExpr, QuantityRef, ZoneRef};
+
+    let reduction = try_parse_cost_reduction(
+        "this ability costs {1} more to activate for each card in your hand",
+    )
+    .expect("Loreseeker's Stone cost-increase clause must parse");
+    assert_eq!(reduction.mode, CostModifyMode::Raise);
+    assert_eq!(reduction.amount_per, 1);
+    match &reduction.count {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    ..
+                },
+        }
+        | QuantityExpr::Ref {
+            qty: QuantityRef::HandSize { .. },
+        } => {}
+        other => panic!("expected hand-size count, got {other:?}"),
+    }
+
+    let make_def = || {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Unimplemented {
+                name: "draw".to_string(),
+                description: None,
+            },
+        );
+        def.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 3,
+            },
+        });
+        def.cost_reduction = Some(reduction.clone());
+        def
+    };
+    let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+        AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, .. },
+        } => *generic,
+        other => panic!("expected Mana cost, got {other:?}"),
+    };
+
+    let build_state = |hand_cards: usize| -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(6500);
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Loreseeker's Stone".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&src).unwrap();
+            o.card_types.core_types.push(CoreType::Artifact);
+        }
+        for i in 0..hand_cards {
+            create_object(
+                &mut state,
+                CardId(100 + i as u64),
+                PlayerId(0),
+                format!("Hand Card {i}"),
+                Zone::Hand,
+            );
+        }
+        (state, src)
+    };
+
+    let (state0, src0) = build_state(0);
+    let mut def0 = make_def();
+    apply_cost_reduction(&state0, &mut def0, PlayerId(0), src0);
+    assert_eq!(generic_of(&def0), 3, "empty hand: {{3}} + {{0}} = {{3}}");
+
+    let (state5, src5) = build_state(5);
+    let mut def5 = make_def();
+    apply_cost_reduction(&state5, &mut def5, PlayerId(0), src5);
+    assert_eq!(
+        generic_of(&def5),
+        8,
+        "five cards in hand: {{3}} + {{5}} = {{8}} (Discord report)"
+    );
+    assert_ne!(
+        generic_of(&def0),
+        generic_of(&def5),
+        "paid generic must differ across hand sizes (revert leaves both at {{3}})"
     );
 }
 
@@ -46000,8 +46357,8 @@ fn cancel_clears_pins() {
     );
 }
 
-/// TEST 7: MP-accepts — SpendPoolMana is classified as a mana ability so it
-/// rides session skip_legality.
+/// TEST 7: SpendPoolMana is classified as a mana ability so AI candidate
+/// enumeration omits mana-payment-window bookkeeping actions.
 #[test]
 fn spend_pool_mana_is_mana_ability() {
     assert!(
@@ -46009,14 +46366,14 @@ fn spend_pool_mana_is_mana_ability() {
             pip_id: ManaPipId(1)
         }
         .is_mana_ability(),
-        "SpendPoolMana must be a mana ability (MP skip_legality)"
+        "SpendPoolMana must be a mana ability"
     );
     assert!(
         GameAction::UnspendPoolMana {
             pip_id: ManaPipId(1)
         }
         .is_mana_ability(),
-        "UnspendPoolMana must be a mana ability (MP skip_legality)"
+        "UnspendPoolMana must be a mana ability"
     );
 }
 
@@ -47878,6 +48235,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
             power: Some(3),
             toughness: Some(3),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: {
                 let mut types = crate::types::card_type::CardType::default();
@@ -49065,4 +49423,261 @@ fn path_of_ancestry_fires_for_a_commander_an_opponent_controls() {
         base + 1,
         "a stolen commander is still YOUR commander (CR 903.3) — the scry must still fire"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #6494 — resolve_non_self_discard_requirement class boundary
+//
+// The shared helper backing every non-self FromHand discard cost site
+// (activation begin_cost_payment, surface_next_unpaid_interactive_activation_cost,
+// and the spell additional-cost arm). A resolved-count-0 FromHand discard is
+// paid by doing nothing (CR 601.2h + CR 701.9a) → Ok(None); a nonzero count with
+// too few eligible cards is unpayable → Err; SourceCard "discard this card" is
+// FromHand-only-excluded → Ok(None) (its own count-1 path is untouched).
+// ---------------------------------------------------------------------------
+
+fn from_hand_discard_cost(count: QuantityExpr) -> AbilityCost {
+    AbilityCost::Discard {
+        count,
+        filter: None,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+    }
+}
+
+/// Issue #6494 (negative, class boundary): a fixed `Discard { count: 1 }` on an
+/// EMPTY hand is UNPAYABLE (CR 601.2h) — the helper returns `Err`, NOT `Ok(None)`.
+/// The zero-count auto-pay class is `resolved == 0` ONLY; `count >= 1` never
+/// auto-pays. Reach-guarded: the same cost with a card in hand returns
+/// `Ok(Some((1, [card])))`, proving the helper reaches its count/eligibility
+/// check rather than short-circuiting. `AbilityCost::is_payable` agrees (false
+/// on empty hand, true with the card).
+#[test]
+fn resolve_discard_requirement_fixed_one_empty_hand_is_unpayable_err() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Source".to_string(),
+        Zone::Battlefield,
+    );
+    let cost = from_hand_discard_cost(QuantityExpr::Fixed { value: 1 });
+
+    // Empty hand: unpayable, so the helper errors rather than auto-paying.
+    assert!(state.players[0].hand.is_empty());
+    assert!(matches!(
+        resolve_non_self_discard_requirement(&state, PlayerId(0), source, &cost),
+        Err(EngineError::ActionNotAllowed(_))
+    ));
+    // CR 601.2h: the payability gate excludes it too.
+    assert!(!cost.is_payable(&state, PlayerId(0), source));
+
+    // Positive reach-guard: with one eligible card the helper resolves the real
+    // interactive requirement (not a vacuous early return).
+    let card = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(0),
+        "Card".to_string(),
+        Zone::Hand,
+    );
+    match resolve_non_self_discard_requirement(&state, PlayerId(0), source, &cost) {
+        Ok(Some((count, eligible))) => {
+            assert_eq!(count, 1);
+            assert_eq!(eligible, vec![card]);
+        }
+        other => panic!("expected Ok(Some((1, [card]))), got {other:?}"),
+    }
+    assert!(cost.is_payable(&state, PlayerId(0), source));
+}
+
+/// Issue #6494 (no over-fire, casting path): a `Discard { Fixed(2) }` with THREE
+/// eligible cards resolves to `Ok(Some((2, <all 3 choices>)))` — the count stays
+/// 2 (never widened or auto-paid) and every eligible card is offered as a choice.
+#[test]
+fn resolve_discard_requirement_fixed_two_with_three_eligible_offers_all() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Source".to_string(),
+        Zone::Battlefield,
+    );
+    let c1 = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(0),
+        "A".to_string(),
+        Zone::Hand,
+    );
+    let c2 = create_object(
+        &mut state,
+        CardId(3),
+        PlayerId(0),
+        "B".to_string(),
+        Zone::Hand,
+    );
+    let c3 = create_object(
+        &mut state,
+        CardId(4),
+        PlayerId(0),
+        "C".to_string(),
+        Zone::Hand,
+    );
+
+    let cost = from_hand_discard_cost(QuantityExpr::Fixed { value: 2 });
+    match resolve_non_self_discard_requirement(&state, PlayerId(0), source, &cost) {
+        Ok(Some((count, eligible))) => {
+            assert_eq!(count, 2);
+            assert_eq!(eligible.len(), 3);
+            for card in [c1, c2, c3] {
+                assert!(eligible.contains(&card));
+            }
+        }
+        other => panic!("expected Ok(Some((2, 3 choices))), got {other:?}"),
+    }
+}
+
+/// Issue #6494 (SourceCard/self-discard untouched): a `Discard { self_scope:
+/// SourceCard }` ("discard this card") is FromHand-only-excluded — both the
+/// detector `find_non_self_discard` and the helper return `None`, so the
+/// SourceCard discard path never routes through the zero-count auto-pay. Reach-
+/// guarded: an otherwise-identical FromHand discard IS detected, proving the
+/// `None` is scope-driven, not a failure to match the `Discard` shape at all.
+#[test]
+fn resolve_discard_requirement_source_card_scope_is_not_auto_paid() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Channel".to_string(),
+        Zone::Hand,
+    );
+
+    let source_card_cost = AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value: 1 },
+        filter: None,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+    };
+    // FromHand-only detection: SourceCard is invisible to both the detector and
+    // the helper, so it can never reach the zero-count auto-pay branch.
+    assert!(find_non_self_discard(&source_card_cost).is_none());
+    assert!(matches!(
+        resolve_non_self_discard_requirement(&state, PlayerId(0), source, &source_card_cost),
+        Ok(None)
+    ));
+
+    // Positive reach-guard: the same shape as FromHand IS detected (so the None
+    // above is the SourceCard scope, not a shape mismatch).
+    let from_hand_cost = from_hand_discard_cost(QuantityExpr::Fixed { value: 1 });
+    assert!(find_non_self_discard(&from_hand_cost).is_some());
+}
+
+/// Issue #6494 (site 3 — activation `begin_cost_payment` discard emitter, casting
+/// path class): Bomat Courier's activated ability
+/// "{R}, Discard your hand, Sacrifice this creature: Put all cards exiled with
+/// this creature into their owners' hands." must be activatable with an EMPTY
+/// hand — the "Discard your hand" leg is a zero-card discard paid by doing
+/// nothing (CR 601.2h + CR 701.9a).
+///
+/// Built from Bomat Courier's VERBATIM parsed cost
+/// (`Composite[Mana {R}, Discard { HandSize, FromHand }, Sacrifice(SelfRef, 1)]`),
+/// driven through the production `handle_activate_ability` entry. A stand-in
+/// `Draw 1` effect isolates the cost-payment path (the exiled-card return is the
+/// card's effect, not the cost under repair). Revert-sensitive: at base the
+/// discard leg surfaces `PayCost { Discard, count: 0 }`, so the activation never
+/// reaches the stack, the self-sacrifice never fires, and nothing is drawn.
+#[test]
+fn bomat_courier_activates_empty_handed_casting_path() {
+    let mut state = setup_game_at_main_phase();
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let bomat = create_object(
+        &mut state,
+        CardId(6494),
+        PlayerId(0),
+        "Bomat Courier".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&bomat).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.core_types.push(CoreType::Creature);
+    }
+    // A card in library so the stand-in Draw is observable.
+    let lib_card = create_object(
+        &mut state,
+        CardId(6495),
+        PlayerId(0),
+        "Library Card".to_string(),
+        Zone::Library,
+    );
+
+    // Bomat Courier's EXACT parsed activated-ability cost.
+    let bomat_cost = AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                },
+            },
+            AbilityCost::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+                filter: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+        ],
+    };
+    Arc::make_mut(&mut state.objects.get_mut(&bomat).unwrap().abilities).push(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(bomat_cost),
+    );
+
+    assert!(state.players[0].hand.is_empty());
+
+    let mut events = Vec::new();
+    let waiting = handle_activate_ability(&mut state, PlayerId(0), bomat, 0, &mut events)
+        .expect("empty-hand Bomat Courier activation must not error");
+    state.waiting_for = waiting;
+
+    // Drive cost payment + resolution. The driver must NEVER see a discard prompt.
+    for _ in 0..10 {
+        if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        assert!(
+            !matches!(
+                state.waiting_for,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::Discard,
+                    ..
+                }
+            ),
+            "a dead PayCost {{ Discard }} was surfaced on the casting path"
+        );
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    }
+
+    // The self-sacrifice cost leg fired (Bomat left the battlefield to graveyard).
+    assert_eq!(state.objects[&bomat].zone, Zone::Graveyard);
+    // Positive reach-guard: the ability resolved (the stand-in Draw drew the card).
+    assert!(state.stack.is_empty(), "the ability must fully resolve");
+    assert_eq!(state.objects[&lib_card].zone, Zone::Hand);
 }

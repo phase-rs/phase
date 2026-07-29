@@ -8,14 +8,18 @@ use super::board_development::BoardDevelopmentPolicy;
 use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
 use super::chalice_avoidance::ChaliceAvoidancePolicy;
+use super::combat_withdrawal::CombatWithdrawalPolicy;
 use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
+use super::crew_timing::CrewTimingPolicy;
 use super::cycling_discipline::CyclingDisciplinePolicy;
+use super::devotion::DevotionPolicy;
 use super::effect_timing::EffectTimingPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
 use super::fetch_land_patience::FetchLandPatiencePolicy;
 use super::free_outlet_activation::FreeOutletActivationPolicy;
+use super::graveyard_types::GraveyardTypesPolicy;
 use super::hand_disruption::HandDisruptionPolicy;
 use super::hold_mana_up::HoldManaUpForInteractionPolicy;
 use super::interaction_reservation::InteractionReservationPolicy;
@@ -29,6 +33,7 @@ use super::payoff::{
     EQUIPMENT_PAYOFF, LIFEGAIN_PAYOFF, MILL_PAYOFF, REANIMATOR_PAYOFF,
 };
 use super::plus_one_counters::PlusOneCountersPolicy;
+use super::poison::PoisonClockPolicy;
 use super::ramp_timing::RampTimingPolicy;
 use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
@@ -129,6 +134,18 @@ pub enum PolicyId {
     SeparatePilesTiming,
     XCastGate,
     LoopShortcut,
+    /// CR 700.5: mono-color devotion pip density.
+    Devotion,
+    /// CR 104.3d: the alternate poison win clock.
+    PoisonClock,
+    /// CR 207.2c + CR 205.2a: delirium / descend graveyard type-diversity.
+    GraveyardTypes,
+    CrewTiming,
+    CombatWithdrawal,
+    /// CR 608.2c: "return a land you control" self-bounce target choice.
+    SelfBounceTarget,
+    /// CR 121.1: reward drawing into an on-battlefield "whenever you draw" engine.
+    DrawPayoff,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -320,6 +337,9 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&ARTIFACT_SYNERGY)),
             Box::new(BoardDevelopmentPolicy),
             Box::new(EtbValuePolicy),
+            Box::new(DevotionPolicy),
+            Box::new(PoisonClockPolicy),
+            Box::new(GraveyardTypesPolicy),
             Box::new(PayoffPolicy::new(&ENCHANTMENTS_PAYOFF)),
             Box::new(PayoffPolicy::new(&EQUIPMENT_PAYOFF)),
             Box::new(CopyValuePolicy),
@@ -374,10 +394,14 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&ENERGY_PAYOFF)),
             Box::new(ChaliceAvoidancePolicy),
             Box::new(PaymentSelectionPolicy),
+            Box::new(CrewTimingPolicy),
+            Box::new(CombatWithdrawalPolicy),
             Box::new(SeparatePilesTimingPolicy),
             Box::new(PayoffPolicy::new(&REANIMATOR_PAYOFF)),
             Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),
             Box::new(LoopShortcutPolicy),
+            Box::new(super::self_bounce_target::SelfBounceTargetPolicy),
+            Box::new(super::draw_payoff::DrawPayoffPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {

@@ -9,13 +9,12 @@ import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { DRAFT_BOT_AI_SEAT, useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
+import { blockerAssignmentPairs, useUiStore } from "../../stores/uiStore.ts";
 import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets, getValidAttackTargetsByAttacker } from "../../utils/combat.ts";
-import { useBlockRequirements } from "../combat/useBlockRequirements.ts";
-import { useBlockerConstraints } from "../combat/useBlockerConstraints.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { AttackTargetPicker } from "../controls/AttackTargetPicker.tsx";
+import { ManaCostSymbols } from "../mana/ManaCostSymbols.tsx";
 
 type ActionButtonMode =
   | "combat-attackers"
@@ -72,23 +71,20 @@ export function ActionButton() {
   const setCombatMode = useUiStore((s) => s.setCombatMode);
   const setCombatClickHandler = useUiStore((s) => s.setCombatClickHandler);
 
-  // Engine-declared per-attacker minimum-blocker requirements (menace /
-  // "blocked by N or more"). Used to block confirmation while any attacker is
-  // under-assigned, so the player gets a clear message instead of an engine
-  // rejection (CR 702.111b / CR 509.1b).
-  const { byAttacker: blockRequirements } = useBlockRequirements();
-  const incompleteBlockCount = useMemo(
-    () => Array.from(blockRequirements.values()).filter((r) => r.status === "incomplete").length,
-    [blockRequirements],
+  const blockerPairs = useMemo(
+    () => blockerAssignmentPairs(blockerAssignments),
+    [blockerAssignments],
   );
-  // CR 509.1c: engine-provided must-block gating. Attacker must-attack
-  // requirements are NOT gated client-side — the engine strictly validates the
-  // declaration (CR 508.1d) and rejects an illegal submission; the must-attack
-  // badges (see AttackRequirementBadges / useAttackRequirements) are display only.
-  const { unsatisfiedMustBlockCount } = useBlockerConstraints();
 
   const canCompanionToHand = useGameStore((s) =>
     s.legalActions.some((a) => a.type === "CompanionToHand"),
+  );
+
+  // CR 116.2c: this ordered offer list is projected by the engine. Each action
+  // already carries its engine-authored display name and cost, so the frontend
+  // renders and dispatches it unchanged.
+  const endContinuousEffectOffers = useGameStore(
+    (s) => s.endContinuousEffectOffers,
   );
 
   const { advanceLabel } = usePhaseInfo();
@@ -149,26 +145,32 @@ export function ActionButton() {
     [waitingFor],
   );
 
+  // A new declaration prompt invalidates a partially selected blocker from the
+  // prior prompt, even though both prompts share the same combat mode.
+  const blockerPrompt = waitingFor?.type === "DeclareBlockers" ? waitingFor : null;
+  useEffect(() => {
+    setPendingBlocker(null);
+  }, [blockerPrompt]);
+
   // Blocker click handler
   const handleBlockerClick = useCallback(
     (objectId: ObjectId) => {
-      // Click an already-assigned blocker to unassign
-      if (blockerAssignments.has(objectId)) {
-        removeBlockerAssignment(objectId);
+      // Selecting a blocker never clears its other assignments: one blocker can
+      // be assigned to multiple attackers. A second click on an attacker toggles
+      // only that pair, using the engine-provided candidate list.
+      if (validBlockerIds.includes(objectId) && validBlockTargets[objectId]?.length > 0) {
+        setPendingBlocker((current) => current === objectId ? null : objectId);
         return;
       }
 
-      if (pendingBlocker === null) {
-        // First click: select a valid blocker (must have at least one valid target)
-        if (validBlockerIds.includes(objectId) && validBlockTargets[objectId]?.length > 0) {
-          setPendingBlocker(objectId);
-        }
-      } else {
-        // Second click: assign to an attacker (only if engine says this pair is valid)
+      if (pendingBlocker !== null) {
         const validTargetsForBlocker = validBlockTargets[pendingBlocker] ?? [];
         if (combatAttackerIds.includes(objectId) && validTargetsForBlocker.includes(objectId)) {
-          assignBlocker(pendingBlocker, objectId);
-          setPendingBlocker(null);
+          if (blockerAssignments.get(pendingBlocker)?.has(objectId)) {
+            removeBlockerAssignment(pendingBlocker, objectId);
+          } else {
+            assignBlocker(pendingBlocker, objectId);
+          }
         }
       }
     },
@@ -241,7 +243,7 @@ export function ActionButton() {
   function handleConfirmBlockers() {
     dispatchAction({
       type: "DeclareBlockers",
-      data: { assignments: Array.from(blockerAssignments.entries()) },
+      data: { assignments: blockerPairs },
     });
   }
 
@@ -317,14 +319,14 @@ export function ActionButton() {
 
         {mode === "combat-blockers" && (
           <>
-            {blockerAssignments.size > 0 ? (
+            {blockerPairs.length > 0 ? (
               <>
                 <button
-                  disabled={actionBlocked || incompleteBlockCount > 0 || unsatisfiedMustBlockCount > 0}
+                  disabled={actionBlocked}
                   onClick={handleConfirmBlockers}
-                  className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionBlocked || incompleteBlockCount > 0 || unsatisfiedMustBlockCount > 0, className: primaryButtonClass })}
+                  className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionBlocked, className: primaryButtonClass })}
                 >
-                  {t("actionButton.confirmBlockers", { count: blockerAssignments.size })}
+                  {t("actionButton.confirmBlockers", { count: blockerPairs.length })}
                 </button>
                 <button
                   disabled={actionBlocked}
@@ -336,9 +338,9 @@ export function ActionButton() {
               </>
             ) : (
               <button
-                disabled={actionBlocked || unsatisfiedMustBlockCount > 0}
+                disabled={actionBlocked}
                 onClick={() => handleSkipConfirm("blockers")}
-                className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked || unsatisfiedMustBlockCount > 0, className: primaryButtonClass })}
+                className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked, className: primaryButtonClass })}
               >
                 {skipArmed === "blockers"
                   ? t("actionButton.blockWithNoneConfirm")
@@ -348,16 +350,6 @@ export function ActionButton() {
             {pendingBlocker !== null && (
               <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-[8px] border border-cyan-300/25 bg-cyan-950/95 px-4 py-2 text-sm font-medium text-cyan-100 shadow-lg">
                 {t("actionButton.selectAttackerForBlocker")}
-              </div>
-            )}
-            {pendingBlocker === null && incompleteBlockCount > 0 && (
-              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-[8px] border border-amber-300/30 bg-amber-950/95 px-4 py-2 text-sm font-medium text-amber-100 shadow-lg">
-                {t("combat.blockIncomplete", { count: incompleteBlockCount })}
-              </div>
-            )}
-            {pendingBlocker === null && incompleteBlockCount === 0 && unsatisfiedMustBlockCount > 0 && (
-              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-[8px] border border-rose-300/30 bg-rose-950/95 px-4 py-2 text-sm font-medium text-rose-100 shadow-lg">
-                {t("combat.unsatisfiedMustBlock", { count: unsatisfiedMustBlockCount })}
               </div>
             )}
           </>
@@ -374,6 +366,27 @@ export function ActionButton() {
                 {t("actionButton.companionToHand")}
               </button>
             )}
+            {/* CR 116.2c: pay a continuous effect's printed termination cost.
+                No timing gate — the engine offers this at any priority window
+                for as long as the effect lives and the cost is payable. */}
+            {endContinuousEffectOffers.map((offer) => (
+              <button
+                key={offer.data.group}
+                disabled={actionBlocked}
+                onClick={() => dispatchAction(offer)}
+                className={gameButtonClass({
+                  tone: "amber",
+                  size: "md",
+                  disabled: actionBlocked,
+                  className: secondaryButtonClass,
+                })}
+              >
+                <span className="inline-flex items-center gap-1">
+                  {t("actionButton.endContinuousEffect", { source: offer.data.source_name })}
+                  <ManaCostSymbols cost={offer.data.cost} size="xs" />
+                </span>
+              </button>
+            ))}
             <button
               disabled={actionBlocked}
               onClick={() => dispatchAction({ type: "PassPriority" })}
@@ -437,6 +450,30 @@ export function ActionButton() {
                 {t("actionButton.companionToHand")}
               </button>
             )}
+            {/* CR 116.2c: pay a continuous effect's printed termination cost.
+                No timing gate — the engine offers this at any priority window
+                for as long as the effect lives and the cost is payable. */}
+            {!idle &&
+              endContinuousEffectOffers.map((offer) => (
+                <button
+                  key={offer.data.group}
+                  disabled={actionBlocked}
+                  onClick={() => dispatchAction(offer)}
+                  className={gameButtonClass({
+                    tone: "amber",
+                    size: "md",
+                    disabled: actionBlocked,
+                    className: secondaryButtonClass,
+                  })}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    {t("actionButton.endContinuousEffect", {
+                      source: offer.data.source_name,
+                    })}
+                    <ManaCostSymbols cost={offer.data.cost} size="xs" />
+                  </span>
+                </button>
+              ))}
             {/* In idle (no priority), the "who/why" narration lives in
                 TurnStatusLine — rendering a disabled "Waiting" button here too
                 would duplicate it (and an empty/relabeled disabled control is

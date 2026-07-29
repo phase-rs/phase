@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { gameObjectFactory } from "../gameObjectFactory.ts";
-import { gameStateFactory, waitingForFactory } from "../gameStateFactory.ts";
+import {
+  castOfferWaitingForFactory,
+  gameStateFactory,
+  targetSelectionWaitingForFactory,
+  waitingForFactory,
+} from "../gameStateFactory.ts";
 
 describe("gameObjectFactory convenience methods", () => {
   it("composes card type, supertype, zone, and state methods", () => {
@@ -69,6 +74,36 @@ describe("waitingForFactory", () => {
     expect(waitingFor).toMatchObject({
       type: "TargetSelection",
       data: expect.objectContaining({ player: 1 }),
+    });
+  });
+
+  it("merges data overrides without discarding variant defaults", () => {
+    const waitingFor = targetSelectionWaitingForFactory.forPlayer(1).build();
+
+    expect(waitingFor).toMatchObject({
+      type: "TargetSelection",
+      data: {
+        player: 1,
+        pending_cast: { object_id: 1, card_id: 1 },
+        target_slots: [{ legal_targets: [], optional: false }],
+      },
+    });
+  });
+
+  it("exposes CastOffer's domain fields through chainable factory methods", () => {
+    const waitingFor = castOfferWaitingForFactory.forPlayer(1).adventure(157).build();
+
+    expect(waitingFor).toEqual({
+      type: "CastOffer",
+      data: {
+        player: 1,
+        kind: {
+          type: "Adventure",
+          object_id: 157,
+          card_id: 157,
+          payment_mode: { type: "Auto" },
+        },
+      },
     });
   });
 });

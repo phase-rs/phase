@@ -1,0 +1,338 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 81,
+          "end_byte": 147,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "I, II — Create a 2/2 white Knight creature token with vigilance."
+      },
+      "node": {
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "CounterAdded",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "Token",
+                  "name": "Knight",
+                  "power": {
+                    "type": "Fixed",
+                    "value": 2
+                  },
+                  "toughness": {
+                    "type": "Fixed",
+                    "value": 2
+                  },
+                  "types": [
+                    "Creature",
+                    "Knight"
+                  ],
+                  "colors": [
+                    "White"
+                  ],
+                  "keywords": [
+                    "Vigilance"
+                  ],
+                  "tapped": false,
+                  "count": {
+                    "type": "Fixed",
+                    "value": 1
+                  },
+                  "owner": {
+                    "type": "Controller"
+                  },
+                  "enters_attacking": false
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "Chapter 1",
+              "constraint": null,
+              "condition": null,
+              "counter_filter": {
+                "counter_type": "lore",
+                "threshold": 1
+              },
+              "batched": false
+            },
+            "source_text": "I, II — Create a 2/2 white Knight creature token with vigilance."
+          }
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 81,
+          "end_byte": 147,
+          "precision": "Exact",
+          "ordinal_within_span": 1
+        },
+        "fragment": "I, II — Create a 2/2 white Knight creature token with vigilance."
+      },
+      "node": {
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "CounterAdded",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "Token",
+                  "name": "Knight",
+                  "power": {
+                    "type": "Fixed",
+                    "value": 2
+                  },
+                  "toughness": {
+                    "type": "Fixed",
+                    "value": 2
+                  },
+                  "types": [
+                    "Creature",
+                    "Knight"
+                  ],
+                  "colors": [
+                    "White"
+                  ],
+                  "keywords": [
+                    "Vigilance"
+                  ],
+                  "tapped": false,
+                  "count": {
+                    "type": "Fixed",
+                    "value": 1
+                  },
+                  "owner": {
+                    "type": "Controller"
+                  },
+                  "enters_attacking": false
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "Chapter 2",
+              "constraint": null,
+              "condition": null,
+              "counter_filter": {
+                "counter_type": "lore",
+                "threshold": 2
+              },
+              "batched": false
+            },
+            "source_text": "I, II — Create a 2/2 white Knight creature token with vigilance."
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "source": {
+        "id": {
+          "item": 3,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 81,
+          "end_byte": 147,
+          "precision": "Exact",
+          "ordinal_within_span": 2
+        },
+        "fragment": "I, II — Create a 2/2 white Knight creature token with vigilance."
+      },
+      "node": {
+        "Replacement": {
+          "definition": {
+            "event": "Moved",
+            "execute": {
+              "kind": "Spell",
+              "effect": {
+                "type": "PutCounter",
+                "counter_type": "lore",
+                "count": {
+                  "type": "Fixed",
+                  "value": 1
+                },
+                "target": {
+                  "type": "SelfRef"
+                }
+              },
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
+            },
+            "mode": {
+              "type": "Mandatory"
+            },
+            "valid_card": {
+              "type": "SelfRef"
+            },
+            "description": "Saga ETB lore counter",
+            "condition": null,
+            "destination_zone": "Battlefield"
+          },
+          "source_text": "Saga ETB lore counter",
+          "execute_ir": null
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 2,
+          "last_line": 2,
+          "start_byte": 148,
+          "end_byte": 204,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "III — Knights you control get +2/+1 until end of turn."
+      },
+      "node": {
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "CounterAdded",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "PumpAll",
+                  "power": {
+                    "type": "Fixed",
+                    "value": 2
+                  },
+                  "toughness": {
+                    "type": "Fixed",
+                    "value": 1
+                  },
+                  "target": {
+                    "type": "Typed",
+                    "type_filters": [
+                      {
+                        "Subtype": "Knight"
+                      }
+                    ],
+                    "controller": "You",
+                    "properties": []
+                  }
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": "UntilEndOfTurn",
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "Chapter 3",
+              "constraint": null,
+              "condition": null,
+              "counter_filter": {
+                "counter_type": "lore",
+                "threshold": 3
+              },
+              "batched": false
+            },
+            "source_text": "III — Knights you control get +2/+1 until end of turn."
+          }
+        }
+      }
+    }
+  ],
+  "source_text": "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI, II — Create a 2/2 white Knight creature token with vigilance.\nIII — Knights you control get +2/+1 until end of turn.",
+  "card_name": "History of Benalia"
+}

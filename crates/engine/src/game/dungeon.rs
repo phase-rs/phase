@@ -311,6 +311,7 @@ pub fn room_effects(
                     ])],
                     duration: None,
                     target: Some(TargetFilter::Typed(TypedFilter::creature())),
+                    end_cost: None,
                 },
                 source_id,
                 controller,
@@ -339,6 +340,7 @@ pub fn room_effects(
                 Effect::ExileTop {
                     player: TargetFilter::Controller,
                     count: fixed(2),
+                    position: crate::types::ability::LibraryPosition::Top,
                     face_down: false,
                 },
                 source_id,
@@ -864,6 +866,7 @@ pub fn room_effects(
                         source_controller: None,
                         source_object: None,
                         bypass_beneficiary: None,
+                        protection_does_not_remove: None,
                     }],
                     triggers: Vec::new(),
                 },

@@ -1271,9 +1271,9 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 /// Combinator-based (parser-combinator gate): runs on an already-lowercase slice
 /// and mirrors `try_parse_cost_reduction`'s `parse_mana_symbols` path.
 pub(crate) fn is_self_cost_reduction_prefix(lower: &str) -> bool {
-    // Scoped to the ACTIVATED-ability form only ("this ability costs {N} less to
-    // activate"). The spell form ("this spell costs {N} less to cast") is parsed
-    // through a different (spell) path that does NOT route through
+    // Scoped to the ACTIVATED-ability form only ("this ability costs {N} less/more
+    // to activate"). The spell form ("this spell costs {N} less/more to cast") is
+    // parsed through a different (spell) path that does NOT route through
     // `strip_cost_reduction_node`, so suppressing the suffix split there would
     // only strand its condition as a swallowed clause (e.g. Lashwhip Predator).
     let Ok((rest, _)) = tag::<_, _, nom::error::Error<&str>>("this ability costs ").parse(lower)
@@ -1287,12 +1287,18 @@ pub(crate) fn is_self_cost_reduction_prefix(lower: &str) -> bool {
     };
 
     let after_mana = after_mana.trim_start();
-    tag::<_, _, nom::error::Error<&str>>("less to activate")
-        .parse(after_mana)
-        .is_ok()
+    // CR 601.2f: both cost reductions ("less") and cost increases ("more") are
+    // self-referential total-cost modifiers — keep the whole sentence intact for
+    // `try_parse_cost_reduction` (Loreseeker's Stone class).
+    alt((
+        tag::<_, _, nom::error::Error<&str>>("less to activate"),
+        tag::<_, _, nom::error::Error<&str>>("more to activate"),
+    ))
+    .parse(after_mana)
+    .is_ok()
 }
 
-/// CR 601.2f: Parse "this ability/spell costs {N} less to activate/cast for each [condition]".
+/// CR 601.2f: Parse "this ability/spell costs {N} less/more to activate/cast for each [condition]".
 /// Returns `None` for unrecognized patterns.
 pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     let lower = text.to_lowercase();
@@ -1309,90 +1315,78 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     let (mana_cost, after_mana) = parse_mana_symbols(&rest_lower)?;
     let amount_per = match mana_cost {
         crate::types::mana::ManaCost::Cost { generic, shards } if shards.is_empty() => generic,
-        // CR 107.3c: When the cost reduction is "{X}" and X is *defined by the
-        // text* ("..., where X is <count>"), the reduction is a dynamic amount,
-        // not a player-chosen one. Route to the where-X branch; any other shard
-        // shape (colored/colorless reductions) stays an honest gap — CR 118.7a
-        // limits cost reduction to the generic component.
+        // CR 107.3c: When the cost modification is "{X}" and X is *defined by the
+        // text* ("..., where X is <count>"), the amount is dynamic, not a
+        // player-chosen one. Route to the where-X branch; any other shard
+        // shape (colored/colorless adjustments) stays an honest gap — CR 118.7a
+        // limits generic-component adjustments for the Reduce path; Raise grows
+        // only generic as well (CR 601.2f).
         crate::types::mana::ManaCost::Cost { generic: 0, shards }
             if shards.as_slice() == [crate::types::mana::ManaCostShard::X] =>
         {
             return try_parse_dynamic_x_cost_reduction(after_mana.trim_start());
         }
-        _ => return None, // Only generic mana reduction supported
+        _ => return None, // Only generic mana modification supported
     };
 
     let after_mana = after_mana.trim_start();
 
+    // CR 601.2f: Directional axis — "less" reduces, "more" raises. Shared with
+    // external `ReduceAbilityCost` statics via `CostModifyMode`.
+    let (mode, after_mode) = parse_self_cost_modify_direction(after_mana)?;
+
     // CR 602.2b: An activated ability's analog to a spell's mana cost is its activation cost.
-    // CR 601.2f: Cost reductions reduce that cost, with the mana component floored at {0}.
+    // CR 601.2f: Cost reductions reduce that cost, with the mana component floored at {0};
+    //           cost increases are added into the total cost.
     // CR 102.1: The active player is the player whose turn it is, so "during your
     //           turn" is the controller-is-active-player test.
-    // Timing-gated flat form ("... less to activate during your turn[s]" / "... less
+    // Timing-gated flat form ("... less/more to activate during your turn[s]" / "... less/more
     // to cast during your turn[s]") is therefore exactly the `IsYourTurn` flat
     // conditional (count = Fixed(1)). Checked before the generic "if [condition]"
     // form because "during your turn" is not introduced by "if". Hylda's Crown of
     // Winter: "This ability costs {1} less to activate during your turn."
-    if nom_on_lower(after_mana, after_mana, |i| {
-        value(
-            (),
-            (
-                alt((
-                    tag("less to activate during your "),
-                    tag("less to cast during your "),
-                )),
-                alt((tag("turns"), tag("turn"))),
-            ),
-        )
-        .parse(i)
+    if nom_on_lower(after_mode, after_mode, |i| {
+        value((), (tag(" during your "), alt((tag("turns"), tag("turn"))))).parse(i)
     })
     .is_some_and(|((), rest)| rest.trim().trim_end_matches('.').trim().is_empty())
     {
         return Some(CostReduction {
+            mode,
             amount_per,
             count: QuantityExpr::Fixed { value: 1 },
             condition: Some(crate::types::ability::ParsedCondition::IsYourTurn),
         });
     }
 
-    // CR 602.2b + CR 601.2f conditional flat form: "... less to activate if [condition]" /
-    // "... less to cast if [condition]". The reduction is a flat {amount_per}
+    // CR 602.2b + CR 601.2f conditional flat form: "... less/more to activate if [condition]" /
+    // "... less/more to cast if [condition]". The adjustment is a flat {amount_per}
     // (count = Fixed(1)) gated by `condition`. Checked before the "for each"
     // form; if the "if " marker is present but the condition does not parse,
     // return None so the clause stays a loud gap (coverage honesty) rather than
     // silently mis-parsing.
-    if let Some(((), cond_text)) = nom_on_lower(after_mana, after_mana, |i| {
-        value(
-            (),
-            alt((tag("less to activate if "), tag("less to cast if "))),
-        )
-        .parse(i)
-    }) {
+    if let Some(((), cond_text)) =
+        nom_on_lower(after_mode, after_mode, |i| value((), tag(" if ")).parse(i))
+    {
         let cond_text = cond_text.trim().trim_end_matches('.').trim();
         let condition = super::oracle_condition::parse_restriction_condition(cond_text)?;
         return Some(CostReduction {
+            mode,
             amount_per,
             count: QuantityExpr::Fixed { value: 1 },
             condition: Some(condition),
         });
     }
 
-    // Strip " less to activate for each " or " less to cast for each "
-    let ((), after_less) = nom_on_lower(after_mana, after_mana, |i| {
-        value(
-            (),
-            alt((
-                tag("less to activate for each "),
-                tag("less to cast for each "),
-            )),
-        )
-        .parse(i)
+    // Strip " for each " after the already-consumed less/more verb.
+    let ((), after_less) = nom_on_lower(after_mode, after_mode, |i| {
+        value((), tag(" for each ")).parse(i)
     })?;
 
-    // Try parse_for_each_clause first (handles counters, player counts, etc.),
+    // Try parse_for_each_clause first (handles counters, player counts, hand size, etc.),
     // then fall back to parse_type_phrase for standard object count patterns.
     if let Ok((_, qty)) = nom_quantity::parse_for_each_clause_ref_complete(after_less) {
         return Some(CostReduction {
+            mode,
             amount_per,
             count: QuantityExpr::Ref { qty },
             condition: None,
@@ -1406,6 +1400,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     }
 
     Some(CostReduction {
+        mode,
         amount_per,
         count: QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
@@ -1414,32 +1409,49 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     })
 }
 
+/// CR 601.2f: After the `{N}` amount, consume "less|more to activate|cast" and
+/// return the direction plus the remainder (timing / if / for each / where-X).
+fn parse_self_cost_modify_direction(
+    after_mana: &str,
+) -> Option<(crate::types::statics::CostModifyMode, &str)> {
+    use crate::types::statics::CostModifyMode;
+    nom_on_lower(after_mana, after_mana, |i| {
+        alt((
+            map(alt((tag("less to activate"), tag("less to cast"))), |_| {
+                CostModifyMode::Reduce
+            }),
+            map(alt((tag("more to activate"), tag("more to cast"))), |_| {
+                CostModifyMode::Raise
+            }),
+        ))
+        .parse(i)
+    })
+}
+
 /// CR 601.2f + CR 602.2b + CR 107.3c: Parse the dynamic-{X} activated-ability
-/// cost-reduction tail "less to activate, where X is <count>" (verb axis also
-/// accepts "less to cast"). `input` is the already-lowercase slice immediately
+/// cost-modification tail "less|more to activate, where X is <count>" (verb axis also
+/// accepts "… to cast"). `input` is the already-lowercase slice immediately
 /// after the leading "{X}" amount.
 ///
 /// CR 107.3c: because X is defined by the ability's own text ("where X is ..."),
-/// the controller does not choose it — the reduction is a dynamic amount. This
+/// the controller does not choose it — the amount is dynamic. This
 /// maps to `CostReduction { amount_per: 1, count: Ref(<qty>), .. }` so the
-/// runtime `apply_cost_reduction` computes `reduce_by = 1 * count` and resolves
-/// `count` from game state. CR 118.7a/CR 601.2f then reduce only the generic
-/// component, flooring at {0}.
+/// runtime `apply_cost_reduction` computes `delta = 1 * count` and resolves
+/// `count` from game state. CR 118.7a/CR 601.2f then adjust only the generic
+/// component (`Reduce` floors at {0}; `Raise` adds).
 ///
-/// Covers the entire "{X} less to activate, where X is <any QuantityRef>" class
+/// Covers the entire "{X} less/more to activate, where X is <any QuantityRef>" class
 /// (Survey Mechan, The Dominion Bracelet, and any future card of this shape) by
 /// delegating the count phrase to `parse_dynamic_x_clause`. Returns `None` when
 /// the where-X clause does not parse so the clause stays an honest gap rather
 /// than a misparse.
 fn try_parse_dynamic_x_cost_reduction(input: &str) -> Option<CostReduction> {
-    // Strip the verb. No trailing space: the where-X clause begins with ", ".
-    let ((), after_verb) = nom_on_lower(input, input, |i| {
-        value((), alt((tag("less to activate"), tag("less to cast")))).parse(i)
-    })?;
+    let (mode, after_verb) = parse_self_cost_modify_direction(input)?;
 
     // Delegate ", where x is <phrase>" to the shared dynamic-X combinator.
     let (_, qty) = parse_dynamic_x_clause(after_verb).ok()?;
     Some(CostReduction {
+        mode,
         amount_per: 1,
         count: QuantityExpr::Ref { qty },
         condition: None,
@@ -3493,6 +3505,71 @@ mod tests {
             "creatures you control get +1/+1"
         ));
         assert!(!is_self_cost_reduction_prefix("draw a card"));
+
+        // CR 601.2f Raise: "more to activate" is the same self-referential class
+        // (Loreseeker's Stone) — keep the sentence intact for the directional parser.
+        assert!(is_self_cost_reduction_prefix(
+            "this ability costs {1} more to activate for each card in your hand"
+        ));
+    }
+
+    /// CR 601.2f + CR 602.2b: Loreseeker's Stone class — "costs {1} more to
+    /// activate for each card in your hand" parses as Raise × HandSize/zone
+    /// card count, not an Unimplemented gap.
+    #[test]
+    fn cost_increase_for_each_card_in_hand() {
+        use crate::types::ability::{QuantityRef, ZoneRef};
+        use crate::types::statics::CostModifyMode;
+
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {1} more to activate for each card in your hand",
+        )
+        .expect("hand-size cost increase should parse");
+        assert_eq!(reduction.mode, CostModifyMode::Raise);
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        match &reduction.count {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        ..
+                    },
+            }
+            | QuantityExpr::Ref {
+                qty: QuantityRef::HandSize { .. },
+            } => {}
+            other => panic!("expected hand-size count, got {other:?}"),
+        }
+    }
+
+    /// CR 601.2f Raise: the spell-form verb follows the same directional
+    /// cost-modification grammar as the activated-ability form.
+    #[test]
+    fn cost_increase_spell_variant_for_each_card_in_hand() {
+        use crate::types::ability::{QuantityRef, ZoneRef};
+        use crate::types::statics::CostModifyMode;
+
+        let reduction = try_parse_cost_reduction(
+            "this spell costs {1} more to cast for each card in your hand",
+        )
+        .expect("spell-form hand-size cost increase should parse");
+        assert_eq!(reduction.mode, CostModifyMode::Raise);
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        match &reduction.count {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        ..
+                    },
+            }
+            | QuantityExpr::Ref {
+                qty: QuantityRef::HandSize { .. },
+            } => {}
+            other => panic!("expected hand-size count, got {other:?}"),
+        }
     }
 
     /// CR 107.3c: The dynamic-{X} head still routes through the self

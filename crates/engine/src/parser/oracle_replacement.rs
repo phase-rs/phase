@@ -12,10 +12,12 @@ use nom::Parser;
 use super::oracle_effect::become_copy_except::parse_except_clause;
 use super::oracle_effect::{
     parse_effect_chain, parse_effect_chain_with_context, parse_effect_clause,
-    try_parse_named_choice, try_parse_named_choice_conjunction,
+    parse_named_choice_object, try_parse_named_choice, try_parse_named_choice_conjunction,
 };
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::doc::OracleNodeIr;
 use super::oracle_ir::replacement::ReplacementIr;
+use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::oracle_nom::condition::{
     parse_attached_subject_target_filter, parse_inner_condition,
@@ -26,7 +28,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_type_filter_word;
 use super::oracle_quantity::capitalize_first;
-use super::oracle_target::parse_type_phrase;
+use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::{
     normalize_card_name_refs, parse_count_expr, parse_number, parse_ordinal, strip_after,
     strip_reminder_text, TextPair,
@@ -1603,22 +1605,27 @@ fn parse_assemble_contraption_subject(subject: &str) -> Option<TargetFilter> {
 /// Handles Bloodletter-style doublers and preserves generic "If you would lose
 /// life, instead ..." replacement recognition without substring dispatch.
 fn parse_lose_life_replacement(text: &str, lower: &str) -> Option<ReplacementDefinition> {
-    let ((scope, quantity_modification), rest) = nom_on_lower(text, lower, |i| {
-        let (i, _) = tag("if ").parse(i)?;
-        let (i, scope) = parse_lose_life_subject(i)?;
-        let (i, _) = tag(" would lose life").parse(i)?;
-        let (i, _) = opt(preceded(tag(" "), tag("during your turn"))).parse(i)?;
-        let (i, _) = tag(", ").parse(i)?;
-        let (i, quantity_modification) = alt((
-            value(
-                Some(QuantityModification::DOUBLE),
-                terminated(parse_double_lose_life_consequence, opt(char('.'))),
-            ),
-            value(None, parse_lose_life_instead_consequence),
-        ))
-        .parse(i)?;
-        Ok((i, (scope, quantity_modification)))
-    })?;
+    let ((scope, during_your_turn, quantity_modification), rest) =
+        nom_on_lower(text, lower, |i| {
+            let (i, _) = tag("if ").parse(i)?;
+            let (i, scope) = parse_lose_life_subject(i)?;
+            let (i, _) = tag(" would lose life").parse(i)?;
+            let (i, during_your_turn) =
+                opt(preceded(tag(" "), tag("during your turn"))).parse(i)?;
+            let (i, _) = tag(", ").parse(i)?;
+            let (i, quantity_modification) = alt((
+                value(
+                    Some(QuantityModification::DOUBLE),
+                    terminated(parse_double_lose_life_consequence, opt(char('.'))),
+                ),
+                value(None, parse_lose_life_instead_consequence),
+            ))
+            .parse(i)?;
+            Ok((
+                i,
+                (scope, during_your_turn.is_some(), quantity_modification),
+            ))
+        })?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -1630,6 +1637,18 @@ fn parse_lose_life_replacement(text: &str, lower: &str) -> Option<ReplacementDef
     }
     if let Some(quantity_modification) = quantity_modification {
         def = def.quantity_modification(quantity_modification);
+    }
+    if during_your_turn {
+        // CR 109.5 + CR 102.1: "during your turn" means while the source's
+        // controller is the active player.
+        // Reuse the existing parameterized active-player gate rather than
+        // hiding Bloodletter's restriction in the LoseLife event matcher.
+        def = def.condition(ReplacementCondition::OnlyIfQuantity {
+            lhs: QuantityExpr::Fixed { value: 0 },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+            active_player_req: Some(ControllerRef::You),
+        });
     }
     Some(def)
 }
@@ -2120,11 +2139,22 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
         return None;
     }
 
-    // Extract the "choose a ..." clause — scan_split_at_phrase returns (prefix, rest_starting_at_match)
-    let (prefix_lower, choose_text) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
+    // Extract the "choose a ..." clause — `scan_preceded` yields the suffix
+    // AFTER `choose ` so named-choice parsing receives the object table with
+    // "choose " already stripped.
+    let (prefix_lower, _, choose_suffix) = nom_primitives::scan_preceded(norm_lower, |i| {
         tag::<_, _, OracleError<'_>>("choose ").parse(i)
     })?;
-    let choice_type = try_parse_named_choice(choose_text)?;
+    // Structural trailing-period cleanup before the named-choice object table
+    // (not parsing dispatch). `parse_named_choice_object` expects the phrase
+    // with "choose " already stripped.
+    let choose_object = choose_suffix.trim_end().trim_end_matches('.').trim();
+    // Named-attribute choices only. Object choices ("choose a creature") are
+    // deliberately NOT claimed here — see `LinkedChoiceKind::CopyChosenHost`.
+    // Claiming them as Moved+unsupported would reshape every as-enters
+    // permanent-choose card (Dauntless Bodyguard, Scheming Fence, …) even when
+    // no CopyChosen consumer exists.
+    let choice_type = parse_named_choice_object(choose_object)?;
 
     let choose = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -2271,6 +2301,39 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
+}
+
+/// Parse the object-filter of an as-enters permanent choice. Accepts either the
+/// suffix after `choose ` (`"a creature."`) or a full `"choose a creature."`
+/// clause. Requires full consumption and a concrete `Typed` filter.
+///
+/// Used by `LinkedChoiceKind::CopyChosenHost` to identify Unimplemented ability
+/// gaps that pair with a CopyChosen static and to derive the injected
+/// `ChoosePermanent` filter — never by line-local
+/// replacement classification (that would claim Moved for every
+/// permanent-choose card).
+pub(crate) fn as_enters_choose_permanent_filter(choose_text: &str) -> Option<TargetFilter> {
+    // Structural optional-prefix + trailing-period cleanup (not dispatch):
+    // callers may pass the match-at-start slice or the post-`choose ` suffix.
+    let object_phrase = choose_text.trim_start();
+    let object_phrase = object_phrase
+        .strip_prefix("choose ") // allow-noncombinator: optional prefix tolerance
+        .unwrap_or(object_phrase);
+    let trimmed_end = object_phrase.trim_end();
+    let object_phrase = trimmed_end
+        .strip_suffix('.') // allow-noncombinator: structural trailing-period cleanup
+        .unwrap_or(trimmed_end)
+        .trim();
+    if object_phrase.is_empty() {
+        return None;
+    }
+    let (filter, remainder) = parse_target(object_phrase);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    // CR 707.2c: the copy source is a permanent — only a concrete object filter
+    // (never a player/zone/`Any` descriptor) is a valid copy-source pool.
+    matches!(filter, TargetFilter::Typed(_)).then_some(filter)
 }
 
 /// Parse "As ~ becomes attached [to a creature/permanent], choose …" into an
@@ -2434,6 +2497,7 @@ fn parse_as_enters_becomes(text: &str) -> Option<ReplacementDefinition> {
                 .modifications(modifications)],
             duration: Some(Duration::Permanent),
             target: None,
+            end_cost: None,
         },
     )
     .duration(Duration::Permanent);
@@ -2532,6 +2596,33 @@ fn color_label_word(color: crate::types::mana::ManaColor) -> &'static str {
     }
 }
 
+/// The IR emission for one "As ~ enters, it becomes your choice of …" line
+/// (Plan 05b U0-40).
+///
+/// # Emission order is load-bearing
+///
+/// This recognizer used to push into a scratch `ParsedAbilities` that
+/// `drain_result_vectors` then emitted in ITS fixed order — abilities, then
+/// triggers, then statics, then replacements — regardless of the order the
+/// pushes happened in. `emit_at` stamps `ordinal_within_span` in emission
+/// order, so emitting in any other order renumbers them. The caller therefore
+/// emits `face_up_residual` FIRST and `nodes` after, and `nodes` itself is
+/// ordered statics-then-replacement — none of which is the order this
+/// recognizer constructs them in.
+pub(crate) struct AsEntersChoiceModalIr {
+    /// CR 614.1e residual, `None` when the line has no "or is turned face up"
+    /// half. A bare `AbilityDefinition` rather than a node, so the caller emits
+    /// it through `ability_at`: it is a fixed strict-failure marker with no
+    /// parsed body to carry, and Plan 05b's burn-down ratchet keeps every
+    /// pre-lowered construction inside `oracle.rs` — constructing one here would
+    /// move a producer into a file the ledger does not track. Giving it a real
+    /// IR node is U0-62's residual-node question, which this row does not answer.
+    pub(crate) face_up_residual: Option<AbilityDefinition>,
+    /// The heterogeneous node sequence: one `Static` per mode, then the single
+    /// `Replacement`.
+    pub(crate) nodes: Vec<OracleNodeIr>,
+}
+
 /// CR 208.2b (governing) + CR 614.1c + CR 614.12a + CR 205.1b: lower the modal
 /// "As ~ enters, it becomes your choice of <profile_1>, <profile_2>, [or]
 /// <profile_N>" as-enters replacement (Primal Plasma, Primal Clay, Corrupted
@@ -2564,26 +2655,23 @@ fn color_label_word(color: crate::types::mana::ManaColor) -> &'static str {
 /// (a modal P/T as-enters replacement, not a CR 607.2d anchor-word linked
 /// ability). No `614.12c` annotation appears in this lowering.
 ///
-/// Returns `true` when a modal replacement + statics were emitted; `false` when
-/// the line was an honest gap (fewer than two parseable P/T profiles, a mode
-/// missing P/T, or a duplicate-label collision) so the caller can fall through.
-pub(crate) fn lower_as_enters_becomes_choice_modal(
-    text: &str,
-    result: &mut super::oracle::ParsedAbilities,
-) -> bool {
+/// Returns the IR emission for the line; `None` when the line was an honest gap
+/// (fewer than two parseable P/T profiles, a mode missing P/T, or a
+/// duplicate-label collision) so the caller can fall through.
+pub(crate) fn lower_as_enters_becomes_choice_modal(text: &str) -> Option<AsEntersChoiceModalIr> {
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
     // nom-frame: "as " + `~` self-anchor + the "becomes your choice of" pivot.
     let Ok((after_as, _)) = tag::<_, _, VE>("as ").parse(lower.as_str()) else {
-        return false;
+        return None;
     };
     let Ok((after_subject, subject_lower)) = take_until::<_, _, VE>(" enters").parse(after_as)
     else {
-        return false;
+        return None;
     };
     if subject_lower.trim() != "~" {
-        return false;
+        return None;
     }
     let Ok((tail_lower, _)) = alt((
         tag::<_, _, VE>(" enters, it becomes your choice of "),
@@ -2591,7 +2679,7 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
         tag(" enters or is turned face up, it becomes your choice of "),
     ))
     .parse(after_subject) else {
-        return false;
+        return None;
     };
 
     // CR 614.1e: "or is turned face up" is a separate replacement class not yet
@@ -2601,9 +2689,7 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
 
     // Recover the ORIGINAL-case descriptor tail — subtype proper-noun casing
     // (e.g. "Wall") is load-bearing for `parse_animation_spec`.
-    let Some(desc_start) = text.len().checked_sub(tail_lower.len()) else {
-        return false;
-    };
+    let desc_start = text.len().checked_sub(tail_lower.len())?;
     let descriptor_original = text[desc_start..].trim().trim_end_matches('.').trim();
 
     // CR 205.1b: strip the "in addition to its other types" marker once, and
@@ -2645,7 +2731,7 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
     )
     .parse(modes_text);
     let Ok((_, profiles)) = profile_split else {
-        return false;
+        return None;
     };
 
     // Per profile: parse the animation spec, require fixed P/T, synthesize the
@@ -2658,14 +2744,12 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
         let (profile_body, _) = opt(alt((tag::<_, _, VE>("a "), tag("an "))))
             .parse(profile.trim())
             .unwrap_or((profile.trim(), None));
-        let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
+        let spec = super::oracle_effect::animation::parse_animation_spec(
             profile_body.trim(),
             &mut ParseContext::default(),
-        ) else {
-            return false;
-        };
+        )?;
         if spec.power.is_none() || spec.toughness.is_none() {
-            return false;
+            return None;
         }
         labels.push(synthesize_mode_label(&spec));
         mode_mods.push(
@@ -2678,7 +2762,7 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
 
     // Require >= 2 modes (CR 208.2b lists "two or more").
     if labels.len() < 2 {
-        return false;
+        return None;
     }
     // Collision guard: duplicate synthesized labels would make the gate
     // ambiguous. Abort rather than emit an unusable modal (honest gap).
@@ -2686,7 +2770,7 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
         // allow-noncombinator: `Vec<String>` slice containment (label collision
         // check), not string parsing dispatch.
         if labels[..idx].contains(label) {
-            return false;
+            return None;
         }
     }
 
@@ -2707,7 +2791,6 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
         // CR 614.1c: battlefield-entry-scoped as-enters replacement.
         .destination_zone(Zone::Battlefield)
         .description(text.to_string());
-    result.replacements.push(choice_replacement);
 
     // Per mode: a continuous static gated on `ChosenLabelIs { label }`. Inline the
     // `ChosenLabelIs` composition (these fresh statics carry no pre-existing
@@ -2721,31 +2804,46 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
     // choice is persisted, and that `Labeled` re-layer flushes the gated
     // `ChosenLabelIs` statics below before state-based actions run — without it the
     // creature would keep its printed P/T (e.g. 0/0) and die to SBAs.
-    for (label, mods) in labels.iter().zip(mode_mods) {
-        // CR 208.2b: chosen-mode P/T (+ additional characteristics) applied as a
-        // Layer-7b continuous effect while this label was chosen at entry.
-        result.statics.push(
+    let mode_statics: Vec<StaticDefinition> = labels
+        .iter()
+        .zip(mode_mods)
+        .map(|(label, mods)| {
+            // CR 208.2b: chosen-mode P/T (+ additional characteristics) applied as a
+            // Layer-7b continuous effect while this label was chosen at entry.
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
                 .modifications(mods)
                 .condition(StaticCondition::ChosenLabelIs {
                     label: label.clone(),
-                }),
-        );
-    }
+                })
+        })
+        .collect();
 
-    // CR 614.1e: "or is turned face up" is a separate replacement class not yet
-    // supported for modal choice. Surface it as an honest `Effect::unimplemented`
-    // (coverage-red) instead of silently dropping the face-up entry path — do NOT
-    // emit any `TurnFaceUp` replacement.
-    if has_face_up {
-        result.abilities.push(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::unimplemented("modal-enters-face-up", "or is turned face up"),
-        ));
-    }
+    // Assembled in `drain_result_vectors`' order — see this function's doc block.
+    let mut nodes: Vec<OracleNodeIr> = Vec::with_capacity(mode_statics.len() + 1);
+    nodes.extend(
+        mode_statics
+            .into_iter()
+            .map(|def| OracleNodeIr::Static(StaticIr::from_definition(text, def))),
+    );
+    nodes.push(OracleNodeIr::Replacement(ReplacementIr::from_definition(
+        text,
+        choice_replacement,
+    )));
 
-    true
+    Some(AsEntersChoiceModalIr {
+        // CR 614.1e: "or is turned face up" is a separate replacement class not
+        // yet supported for modal choice. Surface it as an honest
+        // `Effect::unimplemented` (coverage-red) instead of silently dropping the
+        // face-up entry path — do NOT emit any `TurnFaceUp` replacement.
+        face_up_residual: has_face_up.then(|| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("modal-enters-face-up", "or is turned face up"),
+            )
+        }),
+        nodes,
+    })
 }
 
 /// nom combinator: the mode separator between profiles (", or " / ", " / " or ").
@@ -2810,16 +2908,13 @@ fn subject_lower_has_face_up(after_subject: &str) -> bool {
 /// CR 708.11: an "As … is turned face up" ability applies while the permanent is
 /// being turned face up (the face-up arm).
 /// CR 122.1a: the placed +1/+1 counters add to the creature's power and toughness.
-pub(crate) fn lower_as_enters_or_face_up_counters(
-    text: &str,
-    result: &mut super::oracle::ParsedAbilities,
-) -> bool {
+pub(crate) fn lower_as_enters_or_face_up_counters(text: &str) -> Option<Vec<ReplacementIr>> {
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
     // nom-frame: "as ~ enters[ the battlefield][ or is turned face up], ".
     let Ok((rest, _)) = tag::<_, _, VE>("as ~ enters").parse(lower.as_str()) else {
-        return false;
+        return None;
     };
     let (rest, _the_battlefield) = opt(tag::<_, _, VE>(" the battlefield"))
         .parse(rest)
@@ -2829,17 +2924,15 @@ pub(crate) fn lower_as_enters_or_face_up_counters(
         .unwrap_or((rest, None));
     let has_face_up = face_up.is_some();
     let Ok((tail_lower, _)) = tag::<_, _, VE>(", ").parse(rest) else {
-        return false;
+        return None;
     };
 
     // Recover the ORIGINAL-case effect slice via byte offset (mirrors
     // `split_once_on_lower`) so `parse_effect_chain` sees the printed casing.
-    let Some(effect_start) = text.len().checked_sub(tail_lower.len()) else {
-        return false;
-    };
+    let effect_start = text.len().checked_sub(tail_lower.len())?;
     let effect_text = text[effect_start..].trim().trim_end_matches('.').trim();
     if effect_text.is_empty() {
-        return false;
+        return None;
     }
 
     // Reuse the counter + quantity effect stack (where-X → ObjectCount / Another).
@@ -2850,32 +2943,39 @@ pub(crate) fn lower_as_enters_or_face_up_counters(
     // Unimplemented or externally targeted). Rewrites the "it" placeholder to
     // `SelfRef` so the runtime event-modifier fold recognizes it.
     if !normalize_self_put_counter_chain(&mut execute) {
-        return false;
+        return None;
     }
+
+    // Both arms derive from the same printed sentence, so both carry `text` as
+    // their provenance — the sentence never splits, which is why this recognizer
+    // exists at all.
+    let mut irs = Vec::new();
 
     // CR 614.1c: ETB arm — a battlefield-entry-scoped `Moved` replacement whose
     // `PutCounter { SelfRef }` execute is folded into the entering object's
     // enter-with-counters by the runtime event-modifier path.
-    result.replacements.push(
+    irs.push(ReplacementIr::from_definition(
+        text,
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(execute.clone())
             .valid_card(TargetFilter::SelfRef)
             .destination_zone(Zone::Battlefield)
             .description(text.to_string()),
-    );
+    ));
 
     // CR 708.11: face-up arm — the same effect applies as the permanent is turned
     // face up (Disguise/megamorph turn-up), bound to that permanent via SelfRef.
     if has_face_up {
-        result.replacements.push(
+        irs.push(ReplacementIr::from_definition(
+            text,
             ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
                 .valid_card(TargetFilter::SelfRef)
                 .execute(execute)
                 .description(text.to_string()),
-        );
+        ));
     }
 
-    true
+    Some(irs)
 }
 
 /// Validate + normalize the execute chain of an as-enters / turned-face-up
@@ -9784,23 +9884,63 @@ fn parse_damage_prevention_replacement(
     // the amount. The bare "all" arm below must stay ordered after this one
     // because it shares the "all" prefix.
     let after_prevent = strip_after(working_lower, "prevent ");
-    let amount = if let Some((after_all_but, _)) =
+    // CR 615.1a: A prevention clause resolves to one of two representations on the
+    // resulting `DamageDone` replacement:
+    //   * a `ShieldKind::Prevention` shield — "prevent all", "prevent all but N",
+    //     the depleting "prevent the next N", or the redirection-context
+    //     "prevent that damage"; or
+    //   * for the continuous, non-depleting bare "prevent N of that damage" class
+    //     (Heart-Shaped Herb — issue #5902, Sphere of Purity, Orbs of Warding,
+    //     Urza's Armor, Guardian Seraph, Daunting Defender, ...), a
+    //     `DamageModification::PreventionMinus { value: N }` that
+    //     saturating-subtracts N from every qualifying damage event.
+    //
+    // CR 702.64: `PreventionMinus` deliberately reuses the same shared per-event
+    // damage-subtraction authority that Absorb already synthesizes
+    // (`database::synthesis::build_absorb_replacement`) rather than a new
+    // prevention-amount variant — it is the typed PREVENTION provenance of the
+    // shared `Minus` subtraction arm, so parser and resolver keep a single
+    // semantic representation for continuous per-event prevention (it is
+    // non-consumed and re-fires for every event — exactly Absorb's CR 702.64b
+    // semantics) while plain arithmetic `Minus` (Benevolent Unicorn) stays
+    // outside the prevention bookkeeping.
+    enum PreventionRepr {
+        Shield(PreventionAmount),
+        Reduce(u32),
+    }
+    let repr = if let Some((after_all_but, _)) =
         after_prevent.and_then(|s| tag::<_, _, OracleError<'_>>("all but ").parse(s).ok())
     {
         let (n, _) = parse_number(after_all_but)?;
-        PreventionAmount::AllBut(n)
+        PreventionRepr::Shield(PreventionAmount::AllBut(n))
     } else if nom_primitives::scan_contains(working_lower, "prevent all") {
-        PreventionAmount::All
+        PreventionRepr::Shield(PreventionAmount::All)
     } else if let Some(rest) = strip_after(working_lower, "prevent the next ") {
         // Uses oracle_util::parse_number (not nom directly) because it handles "X" → 0
         // for cards like Temper, Acolyte's Reward, etc.
         let (n, _) = parse_number(rest)?;
-        PreventionAmount::Next(n)
+        PreventionRepr::Shield(PreventionAmount::Next(n))
     } else if nom_primitives::scan_contains(working_lower, "prevent that damage") {
         // "prevent that damage" in redirection context — redirect handled separately
-        PreventionAmount::All
+        PreventionRepr::Shield(PreventionAmount::All)
     } else {
-        return None;
+        // CR 615.1a: bare "prevent N of that damage" — a numeric amount
+        // immediately following the "prevent " verb, anchored by the literal
+        // " of that damage" suffix DIRECTLY after the number (a composed nom
+        // sequence, not a scan), so a non-adjacent "of that damage" phrase
+        // elsewhere in the clause cannot be misbound as the anchor.
+        // `nom_primitives::parse_number` (unlike `parse_number_or_x`) never
+        // matches the bare pronoun "x", so the dynamic "prevent X ..." idiom is
+        // not swallowed into a static `PreventionMinus { value: 0 }` no-op and
+        // stays with the chunk-level where-X machinery. Any miss (no number, or
+        // no adjacent " of that damage" anchor) means this is not a recognized
+        // prevention pattern, so `?` bails the whole parse.
+        let n = after_prevent.and_then(|s| {
+            nom_parse_lower(s, |i| {
+                terminated(nom_primitives::parse_number, tag(" of that damage")).parse(i)
+            })
+        })?;
+        PreventionRepr::Reduce(n)
     };
 
     // --- 2. Extract combat scope ---
@@ -9916,8 +10056,22 @@ fn parse_damage_prevention_replacement(
 
     // --- 5. Build the replacement definition ---
     let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
-        .prevention_shield(amount)
         .description(original_text.to_string());
+    def = match repr {
+        // CR 615.1a: shield-style prevention (all / all-but / depleting next /
+        // redirection-context "prevent that damage").
+        PreventionRepr::Shield(amount) => def.prevention_shield(amount),
+        // CR 615.1a + CR 702.64: continuous "prevent N of that damage" reuses the
+        // shared `Minus` per-event subtraction authority (Branch 1 of
+        // `damage_done_applier`) under its typed PREVENTION provenance,
+        // `DamageModification::PreventionMinus` — never consumed, re-firing for
+        // every qualifying event, and emitting `DamagePrevented` bookkeeping
+        // (which plain-arithmetic `Minus`, e.g. Benevolent Unicorn's "minus 1",
+        // must not).
+        PreventionRepr::Reduce(n) => {
+            def.damage_modification(DamageModification::PreventionMinus { value: n })
+        }
+    };
 
     if let Some(cs) = combat_scope {
         def = def.combat_scope(cs);
@@ -12759,6 +12913,7 @@ mod tests {
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::EventContextAmount
                     },
+                    position: crate::types::ability::LibraryPosition::Top,
                     face_down: false,
                 }
             ),
@@ -12872,6 +13027,103 @@ mod tests {
             }
             other => panic!("expected Typed recipient filter, got {other:?}"),
         }
+    }
+
+    /// CR 615.1a + CR 702.64: Heart-Shaped Herb (issue #5902) — "If a source an
+    /// opponent controls would deal damage to you, prevent 1 of that damage."
+    /// Before this fix the bare "prevent N of that damage" amount phrasing (no
+    /// "all" / "all but" / "the next") matched none of the amount branches, so
+    /// `parse_damage_prevention_replacement` returned `None` and the whole
+    /// static ability silently failed to install — matching the reported symptom
+    /// ("isn't affecting it at all"). Per the maintainer's CR review the class is
+    /// re-emitted onto the shared `Minus` per-event subtraction authority under
+    /// its typed prevention provenance, `DamageModification::PreventionMinus`
+    /// (the CR 702.64 Absorb representation), NOT a new prevention-amount
+    /// variant. This idiom is shared by many real cards
+    /// (Sphere of Purity, Orbs of Warding, Urza's Armor, Guardian Seraph,
+    /// Daunting Defender, ...), so the fix is generic.
+    #[test]
+    fn heart_shaped_herb_prevent_n_of_that_damage_is_minus_modification() {
+        let def = parse_replacement_line(
+            "If a source an opponent controls would deal damage to you, prevent 1 of that damage.",
+            "Heart-Shaped Herb",
+        )
+        .expect("Heart-Shaped Herb should parse as damage prevention");
+
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::PreventionMinus { value: 1 }),
+            "bare 'prevent 1 of that damage' must install a continuous \
+             PreventionMinus(1) modification (prevention provenance of the \
+             shared Minus subtraction), not fall through unparsed"
+        );
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::None,
+            "the Minus representation must not also carry a prevention shield_kind"
+        );
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            def.damage_target_filter,
+            Some(damage_target_controller()),
+            "recipient must be the shield controller ('deal damage to you')"
+        );
+
+        let source_filter = def
+            .damage_source_filter
+            .as_ref()
+            .expect("'a source an opponent controls' must produce a source filter");
+        match source_filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::Opponent),
+                    "source must be scoped to opponent-controlled, not any source"
+                );
+            }
+            other => panic!("expected Typed opponent-controlled source filter, got {other:?}"),
+        }
+    }
+
+    /// Sibling coverage for the same bare "prevent N of that damage" idiom with
+    /// N > 1 and no source-controller qualifier (Sphere of Purity-style). Pins
+    /// that the fix generalizes to other N and doesn't require an "an opponent
+    /// controls" clause to be present.
+    #[test]
+    fn bare_prevent_n_of_that_damage_generalizes_without_source_controller_clause() {
+        let def = parse_replacement_line(
+            "If a source would deal damage to equipped creature, prevent 2 of that damage.",
+            "Shield of the Realm",
+        )
+        .expect("bare 'prevent N of that damage' with no controller qualifier should parse");
+
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::PreventionMinus { value: 2 })
+        );
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(
+            def.damage_source_filter.is_none(),
+            "unqualified 'a source' must not synthesize a source filter"
+        );
+    }
+
+    /// CR 615.1a: the "prevent N of that damage" grammar is an ANCHORED nom
+    /// sequence — the number must be immediately followed by " of that damage".
+    /// A non-adjacent "of that damage" later in the clause must NOT satisfy the
+    /// anchor (the pre-fix scan-based check accepted it), and the clause must
+    /// fall through unrecognized rather than misbind the amount.
+    #[test]
+    fn prevent_n_requires_adjacent_of_that_damage_anchor() {
+        let def = parse_replacement_line(
+            "If a source would deal damage to you, prevent 2 damage this turn of that damage.",
+            "Anchor Probe",
+        );
+        assert!(
+            def.is_none(),
+            "a non-adjacent 'of that damage' phrase must not satisfy the anchored \
+             'prevent N of that damage' grammar, got {def:?}"
+        );
     }
 
     /// CR 614.1a + CR 615.5 + CR 608.2c: Vigor — "If damage would be dealt to
@@ -13827,6 +14079,47 @@ mod tests {
             Some(QuantityModification::DOUBLE)
         );
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Fixed { value: 0 },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                active_player_req: Some(ControllerRef::You),
+            })
+        );
+    }
+
+    #[test]
+    fn bloodletter_full_oracle_parses_without_coverage_gaps() {
+        let parsed = parse_oracle_text(
+            "Flying\nIf an opponent would lose life during your turn, they lose twice that much \
+             life instead. (Damage causes loss of life.)",
+            "Bloodletter of Aclazotz",
+            &["Flying".to_string()],
+            &["Creature".to_string()],
+            &["Vampire".to_string(), "Demon".to_string()],
+        );
+
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "Bloodletter must not hide a swallowed turn condition: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            parsed.abilities.is_empty(),
+            "Bloodletter's static replacement must not lower as a spell ability"
+        );
+        assert_eq!(parsed.replacements.len(), 1);
+        assert_eq!(
+            parsed.replacements[0].condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Fixed { value: 0 },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                active_player_req: Some(ControllerRef::You),
+            })
+        );
     }
 
     #[test]
@@ -14629,6 +14922,22 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 614.12a + CR 707.2c: object as-enters choice alone is NOT a
+    /// replacement line — line-local parse must leave it alone so non-CopyChosen
+    /// cards keep their unsupported ability shape. `CopyChosenHost` injects
+    /// ChoosePermanent only when the companion static is present.
+    #[test]
+    fn as_enters_choose_a_creature_is_not_a_line_local_replacement() {
+        assert!(
+            parse_replacement_line(
+                "As this Aura enters, choose a creature.",
+                "Metamorphic Alteration",
+            )
+            .is_none(),
+            "bare object as-enters choose must not claim Moved without CopyChosen"
+        );
     }
 
     #[test]
@@ -20104,6 +20413,7 @@ mod tests {
                 static_abilities,
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: _,
             } => {
                 assert!(static_abilities.iter().any(|static_ability| {
                     static_ability.affected == Some(TargetFilter::ParentTarget)

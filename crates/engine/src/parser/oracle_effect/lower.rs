@@ -1611,7 +1611,10 @@ fn filter_mentions_exiled_by_source(filter: &TargetFilter) -> bool {
 
 /// CR 115.1: True when a `ChangeZone` clause selects from the battlefield
 /// (explicitly or by permanent-type default) rather than a private/off-BF zone.
-fn change_zone_selects_battlefield_permanent(origin: Option<Zone>, target: &TargetFilter) -> bool {
+pub(super) fn change_zone_selects_battlefield_permanent(
+    origin: Option<Zone>,
+    target: &TargetFilter,
+) -> bool {
     if target.is_context_ref() {
         return false;
     }
@@ -1628,16 +1631,86 @@ fn change_zone_selects_battlefield_permanent(origin: Option<Zone>, target: &Targ
     matches!(target, TargetFilter::Typed(_))
 }
 
+/// CR 115.10a + CR 608.2d: shared ChangeZone stack-vs-resolution classifier.
+/// `fragment_lower` must be the moved-object clause / predicate only — never a
+/// subject prefix like "Target player …", which would false-positive the
+/// `"target "` scan and force Stack.
+///
+/// Used by `target_choice_timing_for_clause` (`ChangeZone` only — mass
+/// `ChangeZoneAll` keeps the historical Stack default there) and by the
+/// `"target player" + ChangeZone/ChangeZoneAll` TargetOnly wrap (Strategic
+/// Betrayal #6505, Relic of Progenitus #6446).
+pub(super) fn change_zone_target_choice_timing(
+    origin: Option<Zone>,
+    target: &TargetFilter,
+    has_multi_target: bool,
+    fragment_lower: &str,
+) -> TargetChoiceTiming {
+    let off_battlefield_origin = origin.is_some_and(|zone| zone != Zone::Battlefield)
+        || has_multi_target
+            && target
+                .extract_zones()
+                .iter()
+                .any(|zone| *zone != Zone::Battlefield);
+    if off_battlefield_origin {
+        // Off-BF non-"target " legs (Relic: "exiles a card from their graveyard")
+        // are resolution picks; explicit "target cards …" (Memory's Journey) stay Stack.
+        if nom_primitives::scan_contains(fragment_lower, "target ") {
+            TargetChoiceTiming::Stack
+        } else {
+            TargetChoiceTiming::Resolution
+        }
+    } else if nom_primitives::scan_contains(fragment_lower, "target ") {
+        TargetChoiceTiming::Stack
+    } else if change_zone_selects_battlefield_permanent(origin, target) {
+        // CR 115.1: battlefield non-targeted picks (Sothera / Strategic Betrayal
+        // edict class) resolve via EffectZoneChoice after player_scope rebinding,
+        // not stack targeting.
+        // Graveyard/hand/library seeds without "target" (Deadly Cover-Up) keep
+        // stack-time selection — their filters carry explicit InZone constraints
+        // and origin is None (not off_battlefield_origin above).
+        TargetChoiceTiming::Resolution
+    } else {
+        TargetChoiceTiming::Stack
+    }
+}
+
 pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
+    if let Effect::ChooseCounterKind { target } = &clause_ir.parsed.effect {
+        let lower = clause_ir
+            .source
+            .fragment()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        // CR 115.1 + CR 608.2d: "choose a counter on a permanent you
+        // control" is an untargeted choice made while the ability resolves.
+        // Context references are already bound and need no selection slot.
+        if !nom_primitives::scan_contains(&lower, "target ") && !target.is_context_ref() {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
     if let Effect::PutCounter { target, .. } = &clause_ir.parsed.effect {
         let lower = clause_ir
             .source
             .fragment()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if !nom_primitives::scan_contains(&lower, "target ")
-            && target.contains_source_attachment_host()
-        {
+        // CR 115.10a: an object is a target only if the text uses the literal
+        // word "target"; CR 608.2d: an untargeted choice is made "while
+        // applying the effect" (at resolution), not at announcement. Was
+        // previously scoped to `contains_source_attachment_host()` alone
+        // (Equipped/Enchanted-host counters, e.g. "put a loyalty counter on
+        // the equipped creature" — deterministic, no player choice). Widened
+        // to every untargeted `PutCounter` recipient that isn't already a
+        // deterministic `is_context_ref()` shape (SelfRef/ParentTarget/None/…,
+        // which resolve automatically regardless of timing) — this is the
+        // same generalization `MultiplyCounter` below already applies. Covers
+        // "put a keyword counter on any creature you control" (Kathril,
+        // Aspect Warper, issue #6321/#6533): each independent instruction in a
+        // replicated keyword-counter chain must offer its own untargeted
+        // choice at ITS OWN resolution (CR 608.2d), not inherit one shared
+        // choice made once when the whole ability went on the stack.
+        if !nom_primitives::scan_contains(&lower, "target ") && !target.is_context_ref() {
             return TargetChoiceTiming::Resolution;
         }
     }
@@ -1671,37 +1744,21 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
         }
     }
 
+    // Mass `ChangeZoneAll` stays Stack here (pre-#6446). The TargetOnly wrap
+    // may still stamp Resolution on ChangeZoneAll resolution-picks via the
+    // shared helper; clause-IR timing must not silently reclassify every
+    // off-BF mass move (Bomat Courier / Jace −12 snapshot regressions).
     let Effect::ChangeZone { origin, target, .. } = &clause_ir.parsed.effect else {
         return TargetChoiceTiming::Stack;
     };
-    let off_battlefield_origin = origin.is_some_and(|zone| zone != Zone::Battlefield)
-        || (clause_ir.multi_target.is_some() || clause_ir.parsed.multi_target.is_some())
-            && target
-                .extract_zones()
-                .iter()
-                .any(|zone| *zone != Zone::Battlefield);
     let lower = clause_ir
         .source
         .fragment()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if off_battlefield_origin {
-        if nom_primitives::scan_contains(&lower, "target ") {
-            TargetChoiceTiming::Stack
-        } else {
-            TargetChoiceTiming::Resolution
-        }
-    } else if nom_primitives::scan_contains(&lower, "target ") {
-        TargetChoiceTiming::Stack
-    } else if change_zone_selects_battlefield_permanent(*origin, target) {
-        // CR 115.1: battlefield non-targeted picks (Sothera edict class) resolve
-        // via EffectZoneChoice after player_scope rebinding, not stack targeting.
-        // Graveyard/hand/library seeds without "target" (Deadly Cover-Up) keep
-        // stack-time selection — their filters carry explicit InZone constraints.
-        TargetChoiceTiming::Resolution
-    } else {
-        TargetChoiceTiming::Stack
-    }
+    let has_multi_target =
+        clause_ir.multi_target.is_some() || clause_ir.parsed.multi_target.is_some();
+    change_zone_target_choice_timing(*origin, target, has_multi_target, &lower)
 }
 
 /// CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
@@ -2501,6 +2558,332 @@ pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
     )
 }
 
+/// CR 603.12 + CR 609.3: Re-link a clause that READS the just-created-token
+/// referent published by a clause under an AFFIRMATIVE reflexive gate.
+///
+/// A reflexive gate ("When you do", "If you do") means the antecedent may not
+/// have happened, in which case its clause created no token. A following clause
+/// whose only subject is that token ("Put a +1/+1 counter on that token") is
+/// then not the next independent instruction (CR 608.2c) — it is an instruction
+/// that can do nothing at all (CR 609.3: an effect does only as much as
+/// possible). Tagging it `SequentialSibling` makes the resolver's
+/// condition-false descent resolve it anyway, and `TargetFilter::LastCreated`
+/// resolves against `state.last_created_token_ids`, a GAME-LIFETIME ledger that
+/// is never cleared at a resolution boundary — so it would bind a token from an
+/// EARLIER resolution.
+///
+/// Re-linking to `ContinuationStep` makes the clause a resolution step of the
+/// instruction it is already attached to — and `gated_instruction_reaches`
+/// restricts the pass to the case where that instruction is the gated
+/// publisher's own, which is what the printed text means: it resolves when the
+/// gate is true and is skipped when it is false. Because the whole clause moves,
+/// every referent-reading position inside it moves with it — there is no
+/// per-effect read-position list to keep in sync.
+///
+/// Deliberately narrow: only a clause that reads the referent the gated clause
+/// PUBLISHES, and that is not separated from it by an independent instruction,
+/// is re-linked. A genuinely independent tail after a reflexive gate still
+/// resolves (Springheart Nantuko's "If you didn't create a token this way"
+/// complement; Scion of the Ur-Dragon's "Then shuffle", CR 701.23 + CR 701.24;
+/// Localized Destruction's "Destroy all creatures").
+///
+/// This pass and the referent walk that seeds the binding
+/// (`parser::oracle_effect::chain_prior_referent_is_created_token`) are two
+/// halves of one rule and must not diverge: the walk predicts THIS pass's
+/// acceptance before assembly, from the same two authorities —
+/// `oracle_ir::ast::sub_link_after_boundary` and
+/// [`instruction_spine_is_continuation`] — so a seed cannot land on a shape this
+/// pass declines for a reason either authority can see. Widening either half
+/// without the other re-opens the stale-`LastCreated` bind. The prediction's
+/// blind spot (assembly-time `SequentialSibling` minters) is enumerated on
+/// [`instruction_spine_is_continuation`].
+pub(super) fn relink_gated_token_referent_consumers(defs: &mut [AbilityDefinition]) {
+    for i in 0..defs.len() {
+        let Some(publisher) = defs[..i]
+            .iter()
+            .rposition(|d| is_token_creating_effect(&d.effect))
+        else {
+            continue;
+        };
+        if !defs[publisher]
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_affirmative_reflexive_gate)
+        {
+            continue;
+        }
+        if !gated_instruction_reaches(&defs[publisher..i]) {
+            continue;
+        }
+        if defs[i].sub_link == SubAbilityLink::SequentialSibling
+            && ability_reads_last_created(&defs[i])
+        {
+            defs[i].sub_link = SubAbilityLink::ContinuationStep;
+        }
+    }
+}
+
+/// CR 608.2c: Is the clause following `slice` still inside the gated
+/// publisher's own instruction?
+///
+/// `slice[0]` is the gated publisher; the remaining entries are the clauses
+/// between it and the candidate consumer. `sub_link` describes the link to the
+/// IMMEDIATELY preceding node, not to the publisher, and the resolver's
+/// condition-false descent (`game::effects::resolve_ability_chain`) walks
+/// `sub_ability` from the gated node and resolves the FIRST node whose
+/// `sub_link` is `SequentialSibling` — together with that node's entire
+/// sub-chain. So re-tagging a consumer that sits behind an intervening
+/// `SequentialSibling` would only make it a continuation step of THAT sibling:
+/// the descent selects the sibling and resolves the consumer anyway, changing
+/// the link for nothing. Requiring an unbroken continuation path is what makes
+/// the re-tag mean what `SubAbilityLink::ContinuationStep` says it means.
+///
+/// Each node's own within-clause spine is checked too, via
+/// [`instruction_spine_is_continuation`], because the chain assembler appends the
+/// next clause to the DEEPEST `sub_ability`, so an internal `SequentialSibling`
+/// rider also sits on the descent path.
+fn gated_instruction_reaches(slice: &[AbilityDefinition]) -> bool {
+    slice.iter().enumerate().all(|(idx, def)| {
+        (idx == 0 || def.sub_link == SubAbilityLink::ContinuationStep)
+            && instruction_spine_is_continuation(def)
+    })
+}
+
+/// CR 608.2c: Is every node of this definition's own within-clause spine a
+/// `ContinuationStep`?
+///
+/// Shared by the two passes that must agree on "an unbroken continuation path
+/// runs from the gated publisher to the consumer": `gated_instruction_reaches`
+/// (above, over assembled `AbilityDefinition`s) and the referent walk
+/// `parser::oracle_effect::chain_prior_referent_is_created_token` (over
+/// `ClauseIr::parsed.sub_ability`, which is the same `AbilityDefinition` spine
+/// before assembly appends the following clause to its deepest node).
+///
+/// Not vacuous even though no shipped card exercises it today: PARSE-TIME
+/// builders mint an internal `SequentialSibling` rider directly and hand it back
+/// inside a `ParsedEffectClause` — [`try_parse_bidirectional_prevent`] here and
+/// `oracle_effect::mod::try_parse_exile_play_grant_with_play_prohibition` — so
+/// such a spine can reach both callers.
+///
+/// SCOPE, stated so the seeder's use of it is not read as a proof: this sees the
+/// parse-time spine only. Three ASSEMBLY-time sites mint a `SequentialSibling`
+/// that no `ClauseIr` carries and that the referent walk therefore cannot
+/// predict. Each would make `gated_instruction_reaches` stricter than the walk
+/// predicted, i.e. leave a `LastCreated` bind the re-link does not protect:
+///
+/// * [`attach_graveyard_redirect_rider_to_prior_cast_from_zone`] and
+///   `absorb_last_created_riders` — each needs an `Effect::CastFromZone` /
+///   `Effect::FlipCoins` antecedent, and the second MOVES its rider inside the
+///   coin effect, off the top level entirely.
+/// * `oracle_effect::mod::attach_repeat_process_keywords`, which pushes cloned
+///   TOP-LEVEL siblings rather than a within-clause rider, and clones the
+///   template's target VERBATIM. Closed at its binding site: `assembly.rs`
+///   declines the binding when [`clone_would_transplant_gated_referent`] holds,
+///   and that predicate decides by running THIS pass over the def vector the
+///   clone would land in. So every clone that exists is one this pass either
+///   re-tagged onto the gated instruction's continuation path or found honest
+///   on its own (self-gated, or reading no gated referent at all).
+///
+/// The backstop for all three is the invariant "no `SequentialSibling` node
+/// reads `TargetFilter::LastCreated`". Two tests carry it, and NEITHER is a
+/// corpus sweep — read them for what they cover before relying on them:
+/// `bbfu9_no_stale_last_created_bind` asserts it over a FROZEN list of the 20
+/// cards whose AST this change moved, embedded verbatim (it cannot see a card
+/// that acquires the shape later), and
+/// `repeat_process_directive_never_joins_a_continuation_path` asserts it over
+/// the repeat-process grammar's own fixtures.
+pub(super) fn instruction_spine_is_continuation(def: &AbilityDefinition) -> bool {
+    let mut cursor = def.sub_ability.as_deref();
+    while let Some(node) = cursor {
+        if node.sub_link != SubAbilityLink::ContinuationStep {
+            return false;
+        }
+        cursor = node.sub_ability.as_deref();
+    }
+    true
+}
+
+/// CR 111.1: Does this ability (or anything nested inside it) read the
+/// just-created-token referent `TargetFilter::LastCreated`? Walks the whole
+/// definition — target filter (including composite wrappers), `GenericEffect`
+/// grant recipients, a `CreateDelayedTrigger`'s inner definition, modal modes,
+/// and the within-clause sub/else chain — so the answer does not depend on an
+/// enumeration of which `Effect` variants can carry the referent.
+fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
+    fn filter_reads(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::LastCreated => true,
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(filter_reads)
+            }
+            TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+                filter_reads(filter)
+            }
+            TargetFilter::ChosenDamageSource { filter } => {
+                filter.as_deref().is_some_and(filter_reads)
+            }
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Typed(..)
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => false,
+        }
+    }
+    if def.effect.target_filter().is_some_and(filter_reads) {
+        return true;
+    }
+    match &*def.effect {
+        Effect::CreateDelayedTrigger { effect, .. } if ability_reads_last_created(effect) => {
+            return true;
+        }
+        Effect::GenericEffect {
+            static_abilities, ..
+        } if static_abilities
+            .iter()
+            .any(|s| s.affected.as_ref().is_some_and(filter_reads)) =>
+        {
+            return true;
+        }
+        _ => {}
+    }
+    def.sub_ability
+        .as_deref()
+        .is_some_and(ability_reads_last_created)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_reads_last_created)
+        || def.mode_abilities.iter().any(ability_reads_last_created)
+}
+
+/// CR 603.12: Would replicating `defs[template]` at the TAIL of `defs`
+/// transplant a gated publisher's just-created-token referent to a slot the
+/// resolver can reach without that token?
+///
+/// `oracle_effect::mod::attach_repeat_process_keywords` ("Repeat this process
+/// for …") clones its template VERBATIM — target included — and pushes the
+/// clones at the end of `defs`. That is position-independent unless the template
+/// reads `TargetFilter::LastCreated`, which is a CHAIN-CONTEXT referent:
+/// [`relink_gated_token_referent_consumers`] keeps such a read honest only while
+/// an unbroken continuation path runs from the gated clause that published it,
+/// and a clone landing off that path keeps `SubAbilityLink::SequentialSibling`.
+/// The resolver's condition-false descent then resolves the clone anyway, and
+/// `state.last_created_token_ids` is a game-lifetime ledger — so on a false gate
+/// it binds a token from an EARLIER resolution.
+///
+/// Two early returns bound the question, and neither is a guess about position:
+///
+/// * a template that reads no `LastCreated` carries no chain-context referent at
+///   all — nothing to transplant, wherever the clone lands;
+/// * an UNGATED nearest publisher creates its token unconditionally during this
+///   resolution, so the read is live at any position — that is BASE behaviour
+///   and not a hazard.
+///
+/// The remaining question — "is the clone honest where it lands?" — is not
+/// re-derived here. It is ASKED, by building the def
+/// [`super::attach_repeat_process_keywords`] will push
+/// ([`super::repeat_process_clone_shape`], the shared authority for that shape)
+/// and running [`relink_gated_token_referent_consumers`] over the result. The
+/// clone is honest if either answer comes back yes:
+///
+/// * the re-link re-tags it `ContinuationStep`, so it is a resolution step of
+///   the gated instruction and the condition-false descent never selects it; or
+/// * it is SELF-GATED — [`AbilityDefinition::is_self_gated_reflexive`] — so the
+///   descent's own false-condition skip drops it wherever it sits.
+///
+/// Running the pass rather than predicting it is what makes the answer exact.
+/// The prediction has to model the pass's ORDER (the template is re-tagged
+/// before the clone is examined, so a `Sentence`-joined template that is still
+/// `SequentialSibling` at this point must be treated as if it were not) and the
+/// pass's choice of publisher for the clone (a LATER token creator becomes the
+/// clone's own nearest publisher). Both were hand-modelled before and both are
+/// now simply what the pass does.
+///
+/// The probe is not byte-for-byte the finished chain, in two ways, and neither
+/// changes the answer — measured on purpose-built fixtures, not argued:
+///
+/// * the probe DEF: the clone the caller actually pushes differs only in its
+///   `counter_type` and in keyword payloads rewritten inside `QuantityCheck` /
+///   `TargetHasKeywordInstead` / `SourceLacksKeyword`
+///   (`super::rewrite_ability_condition_keyword`) — no field either answer reads.
+/// * the probe VECTOR: later passes APPEND defs after this binding runs, so the
+///   vector here is a PREFIX of the finished chain (a fixture ending "… Repeat
+///   this process for first strike. Then create a Soldier token." is examined at
+///   4 defs and finishes at 6), and the caller pushes one clone per listed
+///   keyword where this pushes one. Both are benign: the re-link's verdict for a
+///   node is a function of the defs BEFORE it, which appends leave index-stable,
+///   and every clone is a copy of the same template landing consecutively on the
+///   same path — two-keyword fixtures emit or decline both clones together,
+///   never split.
+pub(super) fn clone_would_transplant_gated_referent(
+    defs: &[AbilityDefinition],
+    template: usize,
+) -> bool {
+    if !ability_reads_last_created(&defs[template]) {
+        return false;
+    }
+    let Some(publisher) = defs[..template]
+        .iter()
+        .rposition(|d| is_token_creating_effect(&d.effect))
+    else {
+        return false;
+    };
+    if !defs[publisher]
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_affirmative_reflexive_gate)
+    {
+        return false;
+    }
+    let mut probe = defs.to_vec();
+    probe.push(super::repeat_process_clone_shape(&defs[template]));
+    relink_gated_token_referent_consumers(&mut probe);
+    let landed = probe.last().expect("pushed just above");
+    landed.sub_link == SubAbilityLink::SequentialSibling && !landed.is_self_gated_reflexive()
+}
+
 /// CR 301.5 + CR 303.4: True when the nearest preceding token creator makes
 /// an Equipment or Aura token. Used to prefer the `attachment` slot for the
 /// post-token anaphor rewrite (`rewrite_parent_target_to_last_created`): in
@@ -2637,10 +3020,16 @@ pub(super) fn fold_token_it_has_grants_into_token_statics(def: &mut AbilityDefin
         def.sub_ability = Some(Box::new(grant));
         return;
     }
+    // CR 116.2c: `end_cost: None` is a REQUIREMENT of the fold, not a wildcard.
+    // Folding a grant's statics into the token clause would discard the grant's
+    // own effect node — and with it any pay-to-end permission riding on it. A
+    // grant that carries one falls to the non-folding branch below, keeping the
+    // permission attached to the effect that installs it.
     let Effect::GenericEffect {
         static_abilities,
         duration,
         target,
+        end_cost: None,
     } = grant.effect.as_ref()
     else {
         def.sub_ability = Some(Box::new(grant));
@@ -2771,6 +3160,7 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(
         static_abilities: vec![static_def],
         duration: duration.or(clause_duration).or(Some(Duration::Permanent)),
         target: Some(TargetFilter::LastCreated),
+        end_cost: None,
     })
 }
 
@@ -3588,15 +3978,39 @@ pub(crate) fn target_filter_is_single_object_target(filter: &TargetFilter) -> bo
     }
 }
 
+/// #5994: whether the per-opponent fanout slot is optional (min 0) or
+/// mandatory (min 1), for verbs that fall through to this detector because
+/// they aren't in `MULTI_TARGET_VERBS` (e.g. "put", "gain control of") — a
+/// `MULTI_TARGET_VERBS` verb like "exile" takes its min from
+/// `stripped_multi_target` upstream and never reaches this function. Scans at
+/// word boundaries for an "up to N target …" quantifier anywhere in the
+/// clause, not just immediately after the verb, so one detector covers every
+/// non-`MULTI_TARGET_VERBS` verb instead of each needing its own hardcoded
+/// prefix (the prior version only recognized "gain control of "). This does
+/// NOT recognize "any number of target …" — that arm lives in
+/// `strip_leading_quantifier`, which this function doesn't call; no card in
+/// the per-opponent-fanout class currently uses that form. Reusing
+/// `strip_optional_target_prefix` (rather than the bare `strip_leading_quantifier`
+/// used by `MULTI_TARGET_VERBS`) is the safety property this relies on: it only
+/// accepts a quantifier immediately followed by "target "/"other target "/
+/// "another target ", so it can't misfire on a resource-count quantifier that
+/// happens to precede the object noun (e.g. "put up to three +1/+1 counters on
+/// target creature" — the quantity there modifies the counters, not the
+/// target, and the "target " guard declines it).
 fn per_opponent_target_fanout_min(text: &str) -> usize {
     let lower = text.to_ascii_lowercase();
-    let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
-        value((), tag("gain control of ")).parse(input)
-    }) else {
-        return 1;
-    };
-    let (_, spec) = strip_optional_target_prefix(rest);
-    if spec.is_some_and(|spec| spec.min_is_fixed_zero()) {
+    let found_optional_target_slot =
+        nom_primitives::scan_at_word_boundaries(lower.as_str(), |input| {
+            match strip_optional_target_prefix(input) {
+                (rest, Some(spec)) if spec.min_is_fixed_zero() => Ok((rest, ())),
+                _ => Err(nom::Err::Error(OracleError::new(
+                    input,
+                    nom::error::ErrorKind::Fail,
+                ))),
+            }
+        })
+        .is_some();
+    if found_optional_target_slot {
         0
     } else {
         1
@@ -8100,6 +8514,9 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     if let Some(expr) = parse_where_x_kicker_count(expression) {
         return Some(expr);
     }
+    if let Some(expr) = parse_where_x_scry_look_count(expression) {
+        return Some(expr);
+    }
     if let Some(expr) = parse_where_x_exiled_card_power(expression_lower.as_str()) {
         return Some(expr);
     }
@@ -8144,6 +8561,14 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     // "the number of age counters on this enchantment", etc.).
     if let Some(expr) = parse_cda_quantity(where_x_expression) {
         return Some(expr);
+    }
+    // CR 107.3i: Keep the compositional nom quantity grammar available to
+    // where-X bindings after the more-specific CDA interpreter has declined
+    // them. This supplies a single X value for past-tense event-subject forms
+    // such as "the number of counters it had" without a card-name-specific
+    // token parser.
+    if let Ok((_, qty)) = nom_quantity::parse_quantity_ref_complete(expression_lower.as_str()) {
+        return Some(QuantityExpr::Ref { qty });
     }
     // CR 107.3i + CR 115.1: Some where-X definitions spell the count as
     // "the number of <for-each clause>" where the clause itself may need a
@@ -8324,6 +8749,20 @@ fn parse_where_x_kicker_count(where_x_expression: &str) -> Option<QuantityExpr> 
     rest.is_empty().then_some(QuantityExpr::Ref {
         qty: QuantityRef::KickerCount,
     })
+}
+
+/// CR 701.22a: "where X is the number of cards looked at while scrying this
+/// way" (Elrond, Master of Healing) binds X to the effective (post-clamp)
+/// look count of the scry that fired the enclosing "whenever you scry"
+/// trigger — `QuantityRef::TriggeringScryLookCount`, resolved per-trigger
+/// from that trigger's own preserved scry event. Delegates to the composed
+/// grammar in `oracle_nom::quantity` (shared with the general quantity-ref
+/// channel); the where-X binder additionally requires the phrase to own the
+/// entire expression.
+fn parse_where_x_scry_look_count(where_x_expression: &str) -> Option<QuantityExpr> {
+    let lower = where_x_expression.to_ascii_lowercase();
+    let (rest, qty) = nom_quantity::parse_scry_look_count_ref(lower.as_str()).ok()?;
+    rest.is_empty().then_some(QuantityExpr::Ref { qty })
 }
 
 /// CR 107.3c: A "where X is …" clause DEFINES the value of X in the ability's
@@ -9025,6 +9464,8 @@ fn apply_where_x_continuous_modification(
         // Keep this wildcard-free so a future QuantityExpr-carrying variant
         // forces a deliberate where-X decision.
         ContinuousModification::CopyValues { .. }
+        // CR 707.2c (Metamorphic Alteration): inert copy marker — no where-X carrier.
+        | ContinuousModification::CopyChosen
         | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
@@ -9055,6 +9496,8 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddStaticMode { .. }
         | ContinuousModification::GrantStaticAbility { .. }
+        // Granted object-hosted replacement: no where-X / anaphoric magnitude.
+        | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::SwitchPowerToughness
         | ContinuousModification::AssignDamageFromToughness
         | ContinuousModification::AssignDamageAsThoughUnblocked
@@ -9123,6 +9566,8 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         ContinuousModification::AddCounterOnEnter { .. }
         | ContinuousModification::SetStartingLoyalty { .. } => {}
         ContinuousModification::CopyValues { .. }
+        // CR 707.2c (Metamorphic Alteration): inert copy marker — no where-X carrier.
+        | ContinuousModification::CopyChosen
         | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
@@ -9154,6 +9599,8 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddStaticMode { .. }
         | ContinuousModification::GrantStaticAbility { .. }
+        // Granted object-hosted replacement: no where-X / anaphoric magnitude.
+        | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::SwitchPowerToughness
         | ContinuousModification::AssignDamageFromToughness
         | ContinuousModification::AssignDamageAsThoughUnblocked
@@ -9905,15 +10352,17 @@ mod tests {
     use super::{
         match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
         parse_where_x_quantity_expression, patch_choose_from_zone_counter_continuation_target,
-        strip_redundant_flip_win_quantifier, strip_return_destination_ext_with_remainder,
-        strip_temporal_prefix, strip_temporal_suffix, strip_trailing_duration,
-        strip_trailing_where_x, value_quantity_clause_owns_this_turn_suffix,
+        relink_gated_token_referent_consumers, strip_redundant_flip_win_quantifier,
+        strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
+        strip_trailing_duration, strip_trailing_where_x,
+        value_quantity_clause_owns_this_turn_suffix,
     };
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, AggregateFunction, ContinuousModification,
-        DelayedTriggerCondition, Duration, Effect, ObjectProperty, ObjectScope, PtValue,
-        QuantityExpr, QuantityRef, TargetFilter, TriggerDefinition,
+        AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction,
+        ContinuousModification, DelayedTriggerCondition, Duration, Effect, ModalChoice,
+        ObjectProperty, ObjectScope, PtValue, QuantityExpr, QuantityRef, SubAbilityLink,
+        TargetFilter, TriggerDefinition,
     };
     use crate::types::counter::CounterType;
     use crate::types::phase::Phase;
@@ -9934,6 +10383,110 @@ mod tests {
                 "must strip {prefix:?}"
             );
         }
+    }
+
+    fn gated_token_creator_for_relink() -> AbilityDefinition {
+        let mut creator = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "Soldier".to_string(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string(), "Soldier".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+        );
+        creator.condition = Some(AbilityCondition::WhenYouDo);
+        creator
+    }
+
+    fn last_created_consumer_for_relink(target: TargetFilter) -> AbilityDefinition {
+        let mut consumer = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target,
+            },
+        );
+        consumer.sub_link = SubAbilityLink::SequentialSibling;
+        consumer
+    }
+
+    /// CR 603.12 + CR 608.2c: a token referent hidden by any `TargetFilter`
+    /// wrapper still makes the following clause dependent on the gated token
+    /// creator, so the false branch cannot bind an earlier resolution's token.
+    #[test]
+    fn relink_follows_last_created_through_target_filter_wrappers() {
+        let wrapped_filters = [
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::LastCreated),
+            },
+            TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(0),
+                filter: Box::new(TargetFilter::LastCreated),
+                caused_by: None,
+            },
+            TargetFilter::ChosenDamageSource {
+                filter: Some(Box::new(TargetFilter::LastCreated)),
+            },
+        ];
+
+        for filter in wrapped_filters {
+            let mut defs = vec![
+                gated_token_creator_for_relink(),
+                last_created_consumer_for_relink(filter),
+            ];
+            relink_gated_token_referent_consumers(&mut defs);
+            assert_eq!(
+                defs[1].sub_link,
+                SubAbilityLink::ContinuationStep,
+                "a wrapped LastCreated reader must stay on the gated creator's continuation path"
+            );
+        }
+    }
+
+    /// CR 700.2 + CR 603.12: modal mode bodies are part of the containing
+    /// definition for the re-link decision. A `LastCreated` reader in a chosen
+    /// mode must not remain a standalone sibling of its gated token creator.
+    #[test]
+    fn relink_follows_last_created_through_modal_modes() {
+        let modal = ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 1,
+            ..Default::default()
+        };
+        let consumer = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .with_modal(
+            modal,
+            vec![last_created_consumer_for_relink(TargetFilter::LastCreated)],
+        );
+        let mut defs = vec![gated_token_creator_for_relink(), consumer];
+        defs[1].sub_link = SubAbilityLink::SequentialSibling;
+
+        relink_gated_token_referent_consumers(&mut defs);
+
+        assert_eq!(
+            defs[1].sub_link,
+            SubAbilityLink::ContinuationStep,
+            "a modal LastCreated reader must keep its wrapper on the gated continuation path"
+        );
     }
 
     /// CR 608.2c: a `ChooseFromZone` head with a `RemoveCounter`/`PutCounter`
@@ -11510,6 +12063,7 @@ mod where_x_tests {
             ])],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
+            end_cost: None,
         };
 
         super::apply_where_x_effect_expression(&mut effect, Some("its power"));
@@ -11717,6 +12271,7 @@ mod token_anaphor_rewrite_tests {
                 }])],
             duration: None,
             target: Some(TargetFilter::ParentTarget),
+            end_cost: None,
         };
 
         rewrite_parent_target_to_last_created(&mut effect, false);
@@ -11726,6 +12281,7 @@ mod token_anaphor_rewrite_tests {
                 static_abilities,
                 duration,
                 target,
+                end_cost: _,
             } => {
                 assert_eq!(target, Some(TargetFilter::LastCreated));
                 assert_eq!(duration, Some(Duration::Permanent));

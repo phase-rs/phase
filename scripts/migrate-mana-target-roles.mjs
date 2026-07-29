@@ -124,6 +124,10 @@ const ROLE_BY_CARD = new Map([
   // supplies the AMOUNT; the controller receives the mana. THE canary entry —
   // if a careless bulk rewrite flips anything, it flips this one.
   ["carpet of flowers", "CountSource"],
+  // "{T}, Mill a card: Target player adds one mana of any color." — a targeted
+  // RECIPIENT (fixed one mana, no count source), same class as Jetfire. Entered
+  // the curated fixture with a later `main` regeneration.
+  ["the warring triad", "Recipient"],
   // --- Entries below appear only in persisted game-state dumps (`--state`),
   // --- not in the curated card fixture. Verified against Scryfall Oracle text.
   // "Whenever enchanted land is tapped for mana, its controller adds an

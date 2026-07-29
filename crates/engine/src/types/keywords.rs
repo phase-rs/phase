@@ -902,10 +902,22 @@ pub enum Keyword {
     /// RUNTIME: synthesized as-enters replacement by
     /// `database/synthesis.rs::synthesize_devour` — a `ReplacementEvent::Moved`
     /// replacement on `SelfRef` whose execute chain is a ranged `Effect::Sacrifice`
-    /// over the controller's creatures + a per-sacrifice `PutCounter(+1/+1)`
-    /// sub-ability. CR 702.82a: Devour N — as it enters, you may sacrifice any
-    /// number of creatures; it enters with N +1/+1 counters per sacrifice.
-    Devour(u32),
+    /// over the controller's permanents matching `quality` + a per-sacrifice
+    /// `PutCounter(+1/+1)` sub-ability.
+    ///
+    /// CR 702.82a: "Devour N" — as it enters, you may sacrifice any number of
+    /// creatures; it enters with N +1/+1 counters per sacrifice. This is the
+    /// default and corresponds to `quality: TypeFilter::Creature`.
+    ///
+    /// CR 702.82c: "Devour [quality] N" — the quality-qualified variant sacrifices
+    /// [quality] permanents instead (e.g. Land for Famished Worldsire, Artifact for
+    /// Caprichrome, Subtype("Food") for Feasting Hobbit). Per CR 702.82c the counter
+    /// math (N +1/+1 counters per permanent sacrificed, CR 122.1a) is identical to
+    /// the plain form and independent of `quality` — only the sacrifice pool changes.
+    Devour {
+        n: u32,
+        quality: TypeFilter,
+    },
 
     /// CR 702.164: Toxic N — when this creature deals combat damage to a player,
     /// that player gets N poison counters.
@@ -1332,7 +1344,7 @@ impl Keyword {
             | Keyword::Demonstrate
             | Keyword::Bloodthirst(_)
             | Keyword::Amplify(_)
-            | Keyword::Devour(_)
+            | Keyword::Devour { .. }
             | Keyword::Teamwork(_)
             | Keyword::Backup(_)
             | Keyword::Squad(_)
@@ -1504,7 +1516,7 @@ impl Keyword {
             Keyword::Craft { .. } => KeywordKind::Craft,
             Keyword::Harmonize(_) => KeywordKind::Harmonize,
             Keyword::Warp(_) => KeywordKind::Warp,
-            Keyword::Devour(_) => KeywordKind::Devour,
+            Keyword::Devour { .. } => KeywordKind::Devour,
             Keyword::Offspring(_) => KeywordKind::Offspring,
             Keyword::Splice { .. } => KeywordKind::Splice,
             Keyword::Bargain => KeywordKind::Bargain,
@@ -1710,22 +1722,47 @@ impl Keyword {
         )
     }
 
-    /// CR 702.164b: Keywords whose multiple instances SUM their parameter values
-    /// into a single aggregate (e.g. a creature's total toxic value), rather than
-    /// collapsing identical instances. When such a keyword is granted on top of an
-    /// identical printed instance, BOTH must remain on the keyword list so the
-    /// aggregate reader counts every copy. Distinct from `instances_function_separately`
-    /// (which gates per-instance trigger installation — a different semantic axis).
-    /// Conservative/CR-driven: only Toxic sums today (CR 702.164b). Protection
-    /// (CR 702.16g), Ward, Annihilator, Afflict, Frenzy do NOT sum — they keep
-    /// deduping identical instances. Add any future "sum of all N" keyword here.
+    /// CR 702.164b + CR 702.44d: Keywords whose multiple instances must COEXIST on
+    /// the keyword list rather than collapse to one when an identical instance is
+    /// granted on top of a printed one. When such a keyword is granted on top of an
+    /// identical printed instance, BOTH must remain on the keyword list so each
+    /// instance's effect is realized separately. Two disjoint reasons a keyword
+    /// belongs here, both served by the same "don't dedup identical instances"
+    /// mechanic in the keyword-grant paths:
+    ///
+    /// - **Parameter-value summation** (CR 702.164b): the aggregate reader sums
+    ///   each instance's parameter (a creature's total toxic value). Only Toxic
+    ///   sums today. Protection (CR 702.16g), Ward, Annihilator, Afflict, Frenzy do
+    ///   NOT sum — they keep deduping identical instances.
+    /// - **Instance-count multiplicity** (CR 702.44d + CR 702.54c): an as-enters
+    ///   static ability where "each instance works separately" — Sunburst places
+    ///   its as-enters counters once per instance (CR 702.44a), and Bloodthirst
+    ///   likewise places its counters once per instance (CR 702.54a). A GRANTED
+    ///   Sunburst ("that spell gains sunburst": Solar Array / Lux Artillery) or
+    ///   GRANTED Bloodthirst ("it gains bloodthirst 3": Bloodlord of Vaasgoth) on
+    ///   top of an identical printed one must coexist so both the printed
+    ///   object-carried replacement AND the granted virtual replacement (counting
+    ///   the base-subtracted surplus) fire. Without coexistence the layer-6 grant
+    ///   dedups against the identical printed instance and the granted instance is
+    ///   silently lost. (Bloodthirst carries a `BloodthirstValue`, so the
+    ///   granted-count is per DISTINCT value — a granted `bloodthirst 3` and a
+    ///   printed `bloodthirst 1` never dedup regardless.)
+    ///
+    /// Distinct from `instances_function_separately` (which gates per-instance
+    /// TRIGGER installation, and deliberately excludes Sunburst because its
+    /// multiplicity is realized by synthesis / the granted-replacement path, not by
+    /// the trigger installer — a different semantic axis). Add any future keyword
+    /// whose identical instances must coexist here.
     ///
     /// Out of scope (intentionally not gated by this predicate): cast-time spell
     /// keyword merge (`casting.rs` `upsert_keyword_by_kind`/`merge_spell_keyword` —
     /// Toxic is inert at cast time) and the layers `AddDynamicKeyword` arm
-    /// (`DynamicKeywordKind` is only Annihilator/Modular, never Toxic).
-    pub fn sums_across_instances(&self) -> bool {
-        matches!(self, Keyword::Toxic(_))
+    /// (`DynamicKeywordKind` is only Annihilator/Modular, never Toxic/Sunburst).
+    pub fn instances_must_coexist(&self) -> bool {
+        matches!(
+            self,
+            Keyword::Toxic(_) | Keyword::Sunburst | Keyword::Bloodthirst(_)
+        )
     }
 
     /// CR 613.7: When multiple effects grant the same single-authoritative-value
@@ -1737,7 +1774,7 @@ impl Keyword {
     /// (CR 702.122/702.171, vehicle/mount crew-power) and Enchant (CR 702.5a,
     /// an Aura's current legal-attachment filter, reachable via
     /// `AddKeyword{Enchant(_)}` from `install_aura_continuous_effect`) are the
-    /// currently known members. Contrast `sums_across_instances` (Toxic, which
+    /// currently known members. Contrast `instances_must_coexist` (Toxic, which
     /// accumulates) and the default (Protection/Ward/Annihilator, which coexist
     /// as separate instances per CR 702.16g).
     pub fn overrides_same_kind_on_grant(&self) -> bool {
@@ -2444,7 +2481,16 @@ impl FromStr for Keyword {
                 "bloodthirst" => return Ok(Keyword::Bloodthirst(parse_bloodthirst_value(p))),
                 "amplify" => return Ok(Keyword::Amplify(p.parse().unwrap_or(1))),
                 "graft" => return Ok(Keyword::Graft(p.parse().unwrap_or(1))),
-                "devour" => return Ok(Keyword::Devour(p.parse().unwrap_or(1))),
+                // CR 702.82a: the colon-form `FromStr` path carries only the count;
+                // the quality qualifier (CR 702.82c) is captured upstream by the
+                // dedicated `parse_devour_keyword_line` combinator, so this fallback
+                // builds the CR 702.82a creature default.
+                "devour" => {
+                    return Ok(Keyword::Devour {
+                        n: p.parse().unwrap_or(1),
+                        quality: TypeFilter::Creature,
+                    })
+                }
                 // CR 702.164
                 "toxic" => return Ok(Keyword::Toxic(p.parse().unwrap_or(1))),
                 // CR 702.171a
@@ -3377,7 +3423,28 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Bloodthirst" => Ok(Keyword::Bloodthirst(bloodthirst(data)?)),
         "Amplify" => Ok(Keyword::Amplify(uint(data))),
         "Graft" => Ok(Keyword::Graft(uint(data))),
-        "Devour" => Ok(Keyword::Devour(uint(data))),
+        "Devour" => {
+            // Struct variant: {"Devour": {"n": N, "quality": <TypeFilter>}}.
+            // A bare number {"Devour": N} is also accepted for back-compat with
+            // card-data serialized before the CR 702.82c quality axis existed; it
+            // deserializes to the CR 702.82a creature default. Mirrors the Crew arm.
+            if let Some(obj) = data.as_object() {
+                let n = obj.get("n").map(uint).unwrap_or(1);
+                let quality = obj
+                    .get("quality")
+                    .cloned()
+                    .map(serde_json::from_value::<TypeFilter>)
+                    .transpose()
+                    .map_err(|e| e.to_string())?
+                    .unwrap_or(TypeFilter::Creature);
+                Ok(Keyword::Devour { n, quality })
+            } else {
+                Ok(Keyword::Devour {
+                    n: uint(data),
+                    quality: TypeFilter::Creature,
+                })
+            }
+        }
         // CR 702.164 / CR 702.171a / CR 702.46 / CR 702.165
         "Toxic" => Ok(Keyword::Toxic(uint(data))),
         "Saddle" => Ok(Keyword::Saddle(uint(data))),
@@ -3539,6 +3606,46 @@ mod tests {
             CostBearingKeywordKind::Foretell.with_cost(cost.clone()),
             Keyword::Foretell(cost)
         );
+    }
+
+    /// Back-compat: card-data.json serialized before the CR 702.82c quality axis
+    /// encoded Devour as a bare number `{"Devour": 3}`. The custom Deserialize
+    /// bare-number fallback must still load such states, defaulting to the CR
+    /// 702.82a creature quality — otherwise every pre-existing saved game / cached
+    /// card-data blob would drop the keyword on reload.
+    #[test]
+    fn devour_old_form_bare_number_json_still_loads() {
+        let old: Keyword = serde_json::from_str(r#"{"Devour": 3}"#).unwrap();
+        assert_eq!(
+            old,
+            Keyword::Devour {
+                n: 3,
+                quality: TypeFilter::Creature,
+            }
+        );
+    }
+
+    /// The new struct form round-trips through serde, and a non-creature quality
+    /// (CR 702.82c) survives serialize→deserialize.
+    #[test]
+    fn devour_struct_form_round_trips_quality() {
+        for quality in [
+            TypeFilter::Creature,
+            TypeFilter::Land,
+            TypeFilter::Artifact,
+            TypeFilter::Subtype("Food".to_string()),
+        ] {
+            let kw = Keyword::Devour {
+                n: 3,
+                quality: quality.clone(),
+            };
+            let json = serde_json::to_string(&kw).unwrap();
+            let back: Keyword = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                back, kw,
+                "Devour quality must round-trip: {quality:?} via {json}"
+            );
+        }
     }
 
     #[test]

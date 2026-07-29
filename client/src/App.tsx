@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, useSearchParams } from "react-router";
 
 import { AppShell } from "./components/chrome/AppShell";
 import { AppToast } from "./components/chrome/AppToast";
+import { NativeEngineProgressOverlay } from "./components/chrome/NativeEngineProgressOverlay";
 import { RouteTelemetry } from "./components/chrome/RouteTelemetry";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { HostControlTile } from "./components/chrome/HostControlTile";
@@ -128,6 +129,7 @@ function AppContent() {
       </ErrorBoundary>
       <HostControlTile />
       <AppToast />
+      <NativeEngineProgressOverlay />
       <EngineLostModal />
       <NonFatalPanicToast />
       <StuckDecisionToast />

@@ -106,7 +106,7 @@ fn install_lose_control_draw(
             or_trigger: None,
             lifetime: DelayedTriggerLifetime::ThisTurn,
         },
-        ability,
+        ability: Box::new(ability),
         controller,
         source_id: source,
         one_shot: true,

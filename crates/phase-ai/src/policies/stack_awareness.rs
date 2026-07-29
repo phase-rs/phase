@@ -317,10 +317,11 @@ mod tests {
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{BounceSelection, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{BounceSelection, EffectKind, ResolvedAbility, TargetFilter};
     use engine::types::card_type::CoreType;
     use engine::types::game_state::{
-        GameState, PendingCast, StackEntry, StackEntryKind, TargetSelectionSlot, WaitingFor,
+        GameState, PendingCast, StackEntry, StackEntryKind, TargetEffectDetail,
+        TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::ManaCost;
@@ -360,7 +361,7 @@ mod tests {
             source_id: ObjectId(999),
             controller: PlayerId(1),
             kind: StackEntryKind::Spell {
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 card_id: CardId(999),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
@@ -384,6 +385,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(target_id)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),

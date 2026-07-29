@@ -14,12 +14,14 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 /// CR 101.4 + CR 701.23i: A scoped self-library search can use the simultaneous
-/// protocol only when its immediate continuation is the ordinary parent-target
-/// library-to-battlefield delivery. Other search shapes retain the established
-/// sequential player-scope resolver rather than being coerced into a subtly
-/// different timing model.
+/// protocol only when its immediate continuation is a plain parent-target
+/// library-to-battlefield delivery without a reveal, or a plain
+/// library-to-hand delivery with a reveal. Other search shapes retain the
+/// established sequential player-scope resolver rather than being coerced into
+/// a subtly different timing model.
 pub(crate) fn supports_simultaneous_delivery(ability: &ResolvedAbility) -> bool {
     let Effect::SearchLibrary {
+        reveal,
         target_player,
         source_zones,
         ..
@@ -42,8 +44,7 @@ pub(crate) fn supports_simultaneous_delivery(ability: &ResolvedAbility) -> bool 
     if !is_plain_parent_target_delivery(delivery) {
         return false;
     }
-    matches!(
-        &delivery.effect,
+    match &delivery.effect {
         Effect::ChangeZone {
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
@@ -58,8 +59,34 @@ pub(crate) fn supports_simultaneous_delivery(ability: &ResolvedAbility) -> bool 
             face_down_profile: None,
             enters_modified_if: None,
             ..
-        } if enter_with_counters.is_empty() && conditional_enter_with_counters.is_empty()
-    )
+        } if !*reveal
+            && enter_with_counters.is_empty()
+            && conditional_enter_with_counters.is_empty() =>
+        {
+            true
+        }
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Hand,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters,
+            conditional_enter_with_counters,
+            face_down_profile: None,
+            enters_modified_if: None,
+        } if *reveal
+            && enter_with_counters.is_empty()
+            && conditional_enter_with_counters.is_empty() =>
+        {
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The player-scope splitter normally peels the once-after-all-searches shuffle
@@ -88,9 +115,12 @@ pub(crate) fn has_only_detachable_shuffle_tail(ability: &ResolvedAbility) -> boo
 /// supported `Effect::ChangeZone` fields may enter it. Every checked field
 /// would otherwise require `resolve_ability_chain` to preserve behavior.
 fn is_plain_parent_target_delivery(delivery: &ResolvedAbility) -> bool {
-    delivery.trigger_source.is_none()
-        && delivery.trigger_definition_ref.is_none()
-        && delivery.targets.is_empty()
+    // Trigger instantiation stamps source/definition provenance recursively on
+    // every continuation. The scoped protocol consumes this child as a typed
+    // `ZoneMoveRequest`, where neither provenance field changes the delivery;
+    // rejecting them would make an otherwise identical triggered search fall
+    // back to sequential resolution while the spell form batches correctly.
+    delivery.targets.is_empty()
         && delivery.sub_ability.is_none()
         && delivery.else_ability.is_none()
         && delivery.duration.is_none()
@@ -511,6 +541,8 @@ fn prepare_scoped_group(
             events.push(GameEvent::PlayerPerformedAction {
                 player_id: player,
                 action: PlayerActionKind::SearchedLibrary,
+                look_count: None,
+                scry_bottom_count: None,
             });
             state.players_who_searched_library_this_turn.insert(player);
             state
@@ -918,6 +950,51 @@ mod tests {
         )
         .sub_ability(delivery);
         (state, search, cards)
+    }
+
+    /// The batch shortcut is deliberately limited to the two delivery shapes
+    /// whose visible information and movement timing it implements itself.
+    #[test]
+    fn simultaneous_delivery_accepts_only_unrevealed_battlefield_or_revealed_hand() {
+        let (_, revealed_hand, _) = three_player_scoped_search(true);
+        assert!(
+            supports_simultaneous_delivery(&revealed_hand),
+            "a revealed plain library-to-hand delivery is batch-safe"
+        );
+
+        let (_, unrevealed_hand, _) = three_player_scoped_search(false);
+        assert!(
+            !supports_simultaneous_delivery(&unrevealed_hand),
+            "an unrevealed library-to-hand delivery is outside the shortcut"
+        );
+
+        let (_, mut revealed_battlefield, _) = three_player_scoped_search(true);
+        let delivery = revealed_battlefield
+            .sub_ability
+            .as_deref_mut()
+            .expect("fixture supplies a delivery child");
+        let Effect::ChangeZone { destination, .. } = &mut delivery.effect else {
+            panic!("fixture delivery must be ChangeZone");
+        };
+        *destination = Zone::Battlefield;
+        assert!(
+            !supports_simultaneous_delivery(&revealed_battlefield),
+            "a revealed library-to-battlefield delivery is outside the shortcut"
+        );
+
+        let (_, mut unrevealed_battlefield, _) = three_player_scoped_search(false);
+        let delivery = unrevealed_battlefield
+            .sub_ability
+            .as_deref_mut()
+            .expect("fixture supplies a delivery child");
+        let Effect::ChangeZone { destination, .. } = &mut delivery.effect else {
+            panic!("fixture delivery must be ChangeZone");
+        };
+        *destination = Zone::Battlefield;
+        assert!(
+            supports_simultaneous_delivery(&unrevealed_battlefield),
+            "the established plain library-to-battlefield shortcut remains valid"
+        );
     }
 
     /// A child rider cannot be represented by the typed batch move request.

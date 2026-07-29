@@ -423,6 +423,12 @@
           "markdownDescription": "Allows first-party remote content to send JSON text through its native-engine bridge."
         },
         {
+          "description": "Allows first-party remote content to read the latest native-engine provisioning progress.",
+          "type": "string",
+          "const": "allow-native-engine-progress",
+          "markdownDescription": "Allows first-party remote content to read the latest native-engine provisioning progress."
+        },
+        {
           "description": "Allows first-party remote content to persist its selected channel.",
           "type": "string",
           "const": "allow-set-channel-preference",

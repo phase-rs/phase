@@ -602,6 +602,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
         TargetFilter::LastRevealed => "last revealed".into(),
+        TargetFilter::LastZoneChanged => "last zone changed".into(),
         TargetFilter::CostPaidObject => "cost-paid object".into(),
         TargetFilter::ChosenCard => "last chosen card".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
@@ -1299,6 +1300,12 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::LifeAboveStarting => "life above starting".into(),
         QuantityRef::StartingLifeTotal => "starting life total".into(),
         QuantityRef::TriggeringDiscoverValue => "the triggering discover's value".into(),
+        QuantityRef::TriggeringScryLookCount => {
+            "the number of cards looked at while scrying this way".into()
+        }
+        QuantityRef::TriggeringScryBottomCount => {
+            "the number of cards put on the bottom while scrying this way".into()
+        }
         QuantityRef::Speed { player } => {
             format!("speed ({})", fmt_player_scope(player))
         }
@@ -2292,13 +2299,26 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExileTop {
             player,
             count,
+            position,
             face_down,
         } => {
             d.push(("player".into(), fmt_target(player)));
             d.push(("count".into(), fmt_quantity(count)));
+            if !matches!(position, crate::types::ability::LibraryPosition::Top) {
+                d.push(("position".into(), format!("{position:?}")));
+            }
             if *face_down {
                 d.push(("face_down".into(), "true".into()));
             }
+        }
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => {
+            d.push(("object".into(), fmt_target(object)));
+            d.push(("player".into(), fmt_target(player)));
+            d.push(("count".into(), fmt_quantity(count)));
         }
         Effect::Pump {
             power,
@@ -2333,6 +2353,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         } => {
             d.push(("target".into(), fmt_target(target)));
         }
+        // CR 707.2c (Metamorphic Alteration): report the copy-source choice pool.
+        Effect::ChoosePermanent { filter } => {
+            d.push(("choose".into(), fmt_target(filter)));
+        }
         Effect::Destroy { target, .. }
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
@@ -2349,14 +2373,34 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
         | Effect::ForceAttack { target, .. }
-        | Effect::Transform { target }
+        // CR 701.27a: single-scope Transform reports its `target` like other
+        // single-target effects; mass Transform (scope:All) reports a `filter` below.
+        | Effect::Transform {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
+        // CR 710.4: the flipping permanent is the effect's single reported target.
+        | Effect::FlipPermanent { target }
         | Effect::Shuffle { target }
         | Effect::Reveal { target }
         | Effect::Regenerate { target }
         | Effect::RemoveAllDamage { target } => {
             d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::ForceBlock {
+            target,
+            attacker,
+            duration,
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+            if let Some(attacker) = attacker {
+                d.push(("attacker".into(), format!("{attacker:?}")));
+            }
+            if *duration != Duration::UntilEndOfTurn {
+                d.push(("duration".into(), format!("{duration:?}")));
+            }
         }
         // CR 702.50a: EpicCopy's parameters live in its snapshotted ability.
         Effect::EpicCopy { .. } => {}
@@ -2371,6 +2415,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         // CR 701.26a/b: mass tap/untap (legacy `TapAll`/`UntapAll`) reports a
         // population `filter`, like the other mass effects.
         | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
+        // CR 701.27a + CR 115.10a: mass Transform ("Transform all Humans") reports its
+        // non-targeting population `filter`, like the other mass effects.
+        | Effect::Transform {
             scope: EffectScope::All,
             target,
             ..
@@ -2998,6 +3049,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             static_abilities,
             duration,
             target,
+            // CR 116.2c: the pay-to-end permission is a runtime special action,
+            // not a characteristic-shaping detail of the continuous effect, so it
+            // is deliberately absent from this display-only detail map.
+            end_cost: _,
         } => {
             if let Some(dur) = duration {
                 d.push(("duration".into(), fmt_duration(dur)));
@@ -3250,9 +3305,23 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ChooseCounterKind { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::PutChosenCounter { target, count } => {
+        Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => {
             d.push(("target".into(), fmt_target(target)));
             d.push(("count".into(), fmt_quantity(count)));
+            if let Some(condition) = target_condition {
+                d.push((
+                    "target_condition".into(),
+                    format!(
+                        "chosen counter count {:?} {}",
+                        condition.comparator,
+                        fmt_quantity(&condition.rhs)
+                    ),
+                ));
+            }
         }
         Effect::GainEnergy { amount } => {
             d.push(("amount".into(), fmt_quantity(amount)));
@@ -3945,6 +4014,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         }
         TC::ControlsNone { filter } => format!("you control no {}", fmt_target(filter)),
         TC::AttackedThisTurn => "attacked this turn".into(),
+        TC::SourceAttackedThisCombat => "source attacked this combat".into(),
         TC::FirstCombatPhaseOfTurn => "first combat phase of the turn".into(),
         TC::CastSpellThisTurn { filter } => match filter {
             Some(f) => format!("cast a {} spell this turn", fmt_target(f)),
@@ -4178,6 +4248,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
     use crate::types::ability::ContinuousModification;
     match m {
         ContinuousModification::CopyValues { .. } => "copy values".into(),
+        // CR 707.2c (Metamorphic Alteration): parse-time marker for the enchanted
+        // host's copy — the runtime copy is the latched `CopyValues` TCE.
+        ContinuousModification::CopyChosen => "copy chosen".into(),
         ContinuousModification::SetName { name } => format!("set name {name}"),
         ContinuousModification::SetTextName { name } => format!("set text name {name}"),
         ContinuousModification::AddPower { value } => format!("power {:+}", value),
@@ -4207,6 +4280,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("grant all triggered abilities of {}", fmt_target(source))
         }
         ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
+        ContinuousModification::GrantReplacement { .. } => "grant replacement".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
         ContinuousModification::AddType { core_type } => {
             format!("add type {}", fmt_core_type(core_type))
@@ -4353,6 +4427,7 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
                 m,
                 ContinuousModification::GrantTrigger { .. }
                     | ContinuousModification::GrantAbility { .. }
+                    | ContinuousModification::GrantReplacement { .. }
             )
         })
         .map(fmt_modification)
@@ -4541,6 +4616,11 @@ pub fn build_parse_details(
                 }
                 ContinuousModification::GrantAbility { definition } => {
                     children.push(build_ability_item(definition));
+                }
+                ContinuousModification::GrantReplacement { replacement } => {
+                    if let Some(execute) = &replacement.execute {
+                        children.push(build_ability_item(execute));
+                    }
                 }
                 _ => {}
             }
@@ -5915,6 +5995,10 @@ fn static_has_unimplemented_parts(def: &StaticDefinition) -> bool {
                 ContinuousModification::GrantTrigger { trigger } => {
                     trigger_has_unimplemented_parts(trigger)
                 }
+                ContinuousModification::GrantReplacement { replacement } => replacement
+                    .execute
+                    .as_deref()
+                    .is_some_and(ability_definition_has_unimplemented_parts),
                 _ => false,
             })
 }
@@ -6008,6 +6092,11 @@ fn check_statics(
                 }
                 ContinuousModification::GrantTrigger { trigger } => {
                     check_trigger(trigger, trigger_registry, missing);
+                }
+                ContinuousModification::GrantReplacement { replacement } => {
+                    if let Some(execute) = &replacement.execute {
+                        collect_ability_missing_parts(execute, missing);
+                    }
                 }
                 _ => {}
             }
@@ -6928,6 +7017,10 @@ fn is_static_supported(
                 ContinuousModification::GrantTrigger { trigger } => {
                     is_trigger_supported(trigger, trigger_registry)
                 }
+                ContinuousModification::GrantReplacement { replacement } => replacement
+                    .execute
+                    .as_deref()
+                    .is_none_or(is_ability_supported),
                 _ => true,
             })
 }
@@ -7395,6 +7488,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
         QuantityRef::TriggeringDiscoverValue => ("TriggeringDiscoverValue", Handled),
+        QuantityRef::TriggeringScryLookCount => ("TriggeringScryLookCount", Handled),
+        QuantityRef::TriggeringScryBottomCount => ("TriggeringScryBottomCount", Handled),
         QuantityRef::Speed { .. } => ("Speed", Handled),
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
         QuantityRef::ObjectCountDistinct { .. } => ("ObjectCountDistinct", Handled),
@@ -9082,6 +9177,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                         && effective_lower.contains("becomes")
                 }
             },
+            StaticMode::UnspentManaLossCausesLifeLoss => {
+                effective_lower.contains("losing unspent mana")
+                    && effective_lower.contains("causes that player to lose that much life")
+            }
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
             }
@@ -11545,6 +11644,7 @@ mod tests {
                 ])],
                 duration: None,
                 target: None,
+                end_cost: None,
             },
         ));
 
@@ -12268,9 +12368,11 @@ mod tests {
                     source_controller: None,
                     source_object: None,
                     bypass_beneficiary: None,
+                    protection_does_not_remove: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
 
@@ -12315,9 +12417,11 @@ mod tests {
                     source_controller: None,
                     source_object: None,
                     bypass_beneficiary: None,
+                    protection_does_not_remove: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
 
@@ -13450,6 +13554,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -13484,6 +13589,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -13516,6 +13622,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -13666,6 +13773,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(
@@ -13698,6 +13806,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(
@@ -13740,6 +13849,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -13773,6 +13883,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -13808,6 +13919,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -13849,6 +13961,7 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             });
         }
 
@@ -13867,7 +13980,7 @@ mod tests {
         let mut face = make_face();
         face.static_abilities.push(
             StaticDefinition::new(StaticMode::MustBlockAttacker {
-                attacker: ObjectId(42),
+                attacker: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(42), 0),
             })
             .description("Target creature blocks this creature this turn if able.".to_string()),
         );
@@ -14017,6 +14130,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(

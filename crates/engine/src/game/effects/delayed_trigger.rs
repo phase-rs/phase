@@ -199,13 +199,16 @@ pub fn resolve(
         condition,
         crate::types::ability::DelayedTriggerCondition::WheneverEvent { .. }
     );
-    state.delayed_triggers.push(DelayedTrigger {
-        condition,
-        ability: delayed_ability,
-        controller: ability.controller,
-        source_id: ability.source_id,
-        one_shot,
-    });
+    crate::game::triggers::install_delayed_trigger(
+        state,
+        DelayedTrigger {
+            condition,
+            ability: Box::new(delayed_ability),
+            controller: ability.controller,
+            source_id: ability.source_id,
+            one_shot,
+        },
+    );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CreateDelayedTrigger,
@@ -768,11 +771,14 @@ fn snapshot_quantity_ref(
         } => {
             let filter_ctx =
                 crate::game::filter::FilterContext::from_source(state, ability.source_id);
+            // Latch routing is identity-gated inside the resolver: it engages
+            // only if the parent's target IS the latched trigger source.
             crate::game::quantity::resolve_mana_spent_to_cast_metric(
                 state,
                 target_object_id,
                 metric,
                 &filter_ctx,
+                ability.trigger_source.as_ref(),
             )
             .or(Some(0))
         }

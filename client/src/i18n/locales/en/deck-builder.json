@@ -71,6 +71,8 @@
     "moveToMain": "Move one {{name}} to main deck",
     "moveToTarget": "Move one {{name}} to {{target}}",
     "removeOne": "Remove one {{name}}",
+    "addOne": "Add one {{name}}",
+    "copyLimit": "{{name}} is at the copy limit",
     "makeCommander": "Make {{name}} the commander",
     "makeCommanderTitle": "Make this my commander",
     "chooseArtFor": "Choose art for {{name}}",

@@ -683,10 +683,10 @@ mod tests {
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::combat::{AttackerInfo, CombatState};
     use engine::game::scenario::{GameScenario, P0, P1};
-    use engine::types::ability::{BounceSelection, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{BounceSelection, EffectKind, ResolvedAbility, TargetFilter};
     use engine::types::game_state::{
-        PendingCast, StackEntry, StackEntryKind, TargetSelectionProgress, TargetSelectionSlot,
-        WaitingFor,
+        PendingCast, StackEntry, StackEntryKind, TargetEffectDetail, TargetSelectionProgress,
+        TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::CardId;
     use engine::types::keywords::WardCost;
@@ -808,7 +808,7 @@ mod tests {
             source_id: ObjectId(201),
             controller: P0,
             kind: StackEntryKind::Spell {
-                ability: Some(ResolvedAbility::new(
+                ability: Some(Box::new(ResolvedAbility::new(
                     Effect::Destroy {
                         target: TargetFilter::Any,
                         cant_regenerate: false,
@@ -816,7 +816,7 @@ mod tests {
                     vec![TargetRef::Object(creature)],
                     ObjectId(201),
                     P0,
-                )),
+                ))),
                 card_id: CardId(201),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
@@ -843,6 +843,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
@@ -914,6 +916,8 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(creature)],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: TargetSelectionProgress::default(),
@@ -967,6 +971,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),

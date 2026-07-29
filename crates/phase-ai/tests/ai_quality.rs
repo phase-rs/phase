@@ -521,7 +521,7 @@ fn does_not_cast_redundant_removal() {
             source_id: ObjectId(300),
             controller: P0,
             kind: StackEntryKind::Spell {
-                ability: Some(ResolvedAbility::new(
+                ability: Some(Box::new(ResolvedAbility::new(
                     Effect::DealDamage {
                         amount: QuantityExpr::Fixed { value: 3 },
                         target: TargetFilter::Any,
@@ -531,7 +531,7 @@ fn does_not_cast_redundant_removal() {
                     vec![TargetRef::Object(target)],
                     ObjectId(300),
                     P0,
-                )),
+                ))),
                 card_id: CardId(300),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,

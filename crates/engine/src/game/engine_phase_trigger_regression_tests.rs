@@ -2200,8 +2200,9 @@ fn unless_pay_success_sub_ability_fires_triggers_from_events() {
 }
 
 /// CR 603.3b + CR 701.22a: if an unless-payment branch pauses on a
-/// resolution choice, triggers produced by that branch wait until the choice
-/// finishes instead of clobbering the choice prompt.
+/// resolution choice, no scry trigger exists until the controller completes
+/// the top/bottom choice; its watchers then resolve without clobbering the
+/// prompt.
 #[test]
 fn unless_pay_resolution_choice_defers_branch_triggers() {
     let mut state = setup_game_at_main_phase();
@@ -2292,10 +2293,9 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
     };
     assert_eq!(player, PlayerId(0));
     assert_eq!(cards.len(), 2);
-    assert_eq!(
-        state.deferred_triggers.len(),
-        2,
-        "the two scry watcher triggers should be parked until ScryChoice resolves"
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "scry watchers must not trigger before the controller completes ScryChoice"
     );
 
     let hand_after_scry_prompt = state.players[0].hand.len();
@@ -2312,7 +2312,11 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
     }
 
     assert_eq!(state.players[0].hand.len(), hand_after_scry_prompt + 1);
-    assert_eq!(state.players[0].life, life_after_scry_prompt + 1);
+    assert_eq!(
+        state.players[0].life,
+        life_after_scry_prompt + 1,
+        "the completed-scry watcher resolves after ScryChoice finishes"
+    );
 }
 
 /// CR 118.12: When the unless cost is declined, the primary effect runs
@@ -3448,6 +3452,7 @@ fn copy_target_choice_resolves_become_copy() {
         source_id: clone_id,
         valid_targets: vec![target_id],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     // Player chooses to copy Grizzly Bears
@@ -3542,6 +3547,7 @@ fn copy_target_choice_applies_copied_enter_with_counters_replacement_before_sba(
         source_id: assassin,
         valid_targets: vec![ghave],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     apply_as_current(
@@ -3615,6 +3621,7 @@ fn echoing_deeps_copying_sunken_citadel_prompts_for_the_copied_color_choice() {
         source_id: deeps,
         valid_targets: vec![citadel],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     let result = apply_as_current(
@@ -3922,6 +3929,7 @@ fn copy_target_choice_fires_granted_etb_trigger_against_deferred_entry_event() {
         source_id: assassin,
         valid_targets: vec![bear],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     apply_as_current(
@@ -4103,6 +4111,7 @@ fn copy_target_choice_surfaces_interactive_trigger_prompt_for_deferred_entry() {
         source_id: assassin,
         valid_targets: vec![bear],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     let _waiting = apply_as_current(
@@ -4182,6 +4191,7 @@ fn copy_target_choice_rejects_invalid_target() {
         source_id: clone_id,
         valid_targets: vec![valid_id], // Bird is NOT in valid targets
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     // Try to choose invalid target
@@ -4332,6 +4342,7 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
         source_id: spidey,
         valid_targets: vec![elesh],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     let result = apply_as_current(
@@ -4508,6 +4519,7 @@ fn reflexive_when_you_do_fires_after_become_copy_replacement() {
         source_id: cloner,
         valid_targets: vec![source_card],
         max_mana_value: None,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
     };
 
     // Accumulate events across the full resolution so we can count

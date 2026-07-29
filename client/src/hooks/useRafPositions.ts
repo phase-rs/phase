@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { ObjectId } from "../adapter/types.ts";
+import type { BlockerAssignmentPair } from "../adapter/types.ts";
 import { objectAnchorSelector } from "../utils/objectAnchorSelector.ts";
 
 export interface LinePosition {
@@ -9,15 +9,16 @@ export interface LinePosition {
   length: number;
 }
 
-/** RAF polling for element positions — stabilizes after 10 unchanged frames.
- *  Pairs map: key → value, where both are ObjectIds with `data-object-id` attributes. */
-export function useRafPositions(pairs: Map<ObjectId, ObjectId>): Map<ObjectId, LinePosition> {
-  const [positions, setPositions] = useState<Map<ObjectId, LinePosition>>(new Map());
+/** RAF polling for element positions — stabilizes after 10 unchanged frames. */
+export function useRafPositions(
+  pairs: readonly BlockerAssignmentPair[],
+): Map<string, LinePosition> {
+  const [positions, setPositions] = useState<Map<string, LinePosition>>(new Map());
   const prevRectsRef = useRef<Map<string, DOMRect>>(new Map());
   const stableCountRef = useRef(0);
 
   useEffect(() => {
-    if (pairs.size === 0) {
+    if (pairs.length === 0) {
       setPositions(new Map());
       return;
     }
@@ -58,7 +59,7 @@ export function useRafPositions(pairs: Map<ObjectId, ObjectId>): Map<ObjectId, L
 
       prevRectsRef.current = currentRects;
 
-      const next = new Map<ObjectId, LinePosition>();
+      const next = new Map<string, LinePosition>();
       for (const [fromId, toId] of pairs) {
         const fromRect = currentRects.get(String(fromId));
         const toRect = currentRects.get(String(toId));
@@ -73,7 +74,7 @@ export function useRafPositions(pairs: Map<ObjectId, ObjectId>): Map<ObjectId, L
         };
         const dx = to.x - from.x;
         const dy = to.y - from.y;
-        next.set(fromId, { from, to, length: Math.sqrt(dx * dx + dy * dy) });
+        next.set(`${fromId}:${toId}`, { from, to, length: Math.sqrt(dx * dx + dy * dy) });
       }
       setPositions(next);
 

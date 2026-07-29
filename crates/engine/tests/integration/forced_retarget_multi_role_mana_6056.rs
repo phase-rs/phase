@@ -90,7 +90,7 @@ fn forced_retarget_of_both_mana_preserves_untouched_count_source_slot() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(1),
-            ability: Some(mana_ability),
+            ability: Some(Box::new(mana_ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -126,7 +126,7 @@ fn forced_retarget_of_both_mana_preserves_untouched_count_source_slot() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(2),
-            ability: Some(retarget_ability),
+            ability: Some(Box::new(retarget_ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },

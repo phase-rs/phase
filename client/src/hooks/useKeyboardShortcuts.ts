@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-import { isMultiplayerMode, useGameStore } from "../stores/gameStore";
+import { isAuthorityRemote, useGameStore } from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
 import { dispatchAction } from "../game/dispatch";
 import { getPlayerId } from "./usePlayerId";
@@ -141,7 +141,7 @@ export function useKeyboardShortcuts(): void {
           // Suppressed in multiplayer — the store's undo() already returns
           // early in that mode, but gating the shortcut here also avoids
           // swallowing the keystroke.
-          if (!e.ctrlKey && !e.metaKey && !isMultiplayerMode(gameMode)) {
+          if (!e.ctrlKey && !e.metaKey && !isAuthorityRemote(gameMode)) {
             e.preventDefault();
             if (stateHistory.length > 0) {
               undo();

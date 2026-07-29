@@ -374,7 +374,7 @@ fn upsert_keyword_contribution(
     // granted off-zone Toxic pushes rather than clobbering an unrelated printed
     // keyword that shares its (Unknown) kind. Non-summing keywords keep the
     // upsert-by-kind dedup below unchanged.
-    if !contribution.keyword.sums_across_instances() {
+    if !contribution.keyword.instances_must_coexist() {
         if let Some(existing) = keywords
             .iter_mut()
             .find(|existing| existing.keyword.kind() == contribution.keyword.kind())

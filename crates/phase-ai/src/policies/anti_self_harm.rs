@@ -1051,12 +1051,12 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardSelectionMode,
-        ContinuousModification, ControllerRef, DiscardSelfScope, FilterProp, PtValue, QuantityRef,
-        ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticDefinition, TargetFilter,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        ContinuousModification, ControllerRef, DiscardSelfScope, EffectKind, FilterProp, PtValue,
+        QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticDefinition,
+        TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use engine::types::game_state::{
-        CastingVariant, GameState, PendingCast, TargetSelectionSlot, WaitingFor,
+        CastingVariant, GameState, PendingCast, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
@@ -1124,6 +1124,8 @@ mod tests {
                     legal_targets,
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -1399,6 +1401,7 @@ mod tests {
                 }])],
             target: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
             duration: None,
+            end_cost: None,
         };
 
         let (decision, candidate) = make_target_selection_ctx(
@@ -1766,6 +1769,8 @@ mod tests {
                     legal_targets: legal_targets.clone(),
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -1852,6 +1857,8 @@ mod tests {
                     ],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -2001,6 +2008,7 @@ mod tests {
             static_abilities: Vec::new(),
             target: None,
             duration: None,
+            end_cost: None,
         };
         assert_eq!(effect_polarity(&effect), EffectPolarity::Contextual);
     }
@@ -2721,6 +2729,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(target_id)],
                     optional: true,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -2974,6 +2984,7 @@ mod tests {
                 static_abilities: Vec::new(),
                 target: None,
                 duration: None,
+                end_cost: None,
             },
             Vec::new(),
             aura_id,
@@ -2989,6 +3000,8 @@ mod tests {
                     legal_targets,
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -3282,11 +3295,11 @@ mod tests {
         token_obj.is_token = true;
 
         // Set up pending trigger with exile effect (like Seam Rip)
-        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+        state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
             source_id: ObjectId(200),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: None,
                     destination: Zone::Exile,
@@ -3305,7 +3318,7 @@ mod tests {
                 Vec::new(),
                 ObjectId(200),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -3316,7 +3329,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
 
         let config = AiConfig::default();
         let legal_targets = vec![TargetRef::Object(creature), TargetRef::Object(token)];
@@ -3330,6 +3343,8 @@ mod tests {
                     legal_targets: legal_targets.clone(),
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 target_constraints: Vec::new(),
@@ -3393,11 +3408,11 @@ mod tests {
     #[test]
     fn trigger_target_effects_are_extracted() {
         let mut state = make_state();
-        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+        state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
             source_id: ObjectId(200),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: None,
                     destination: Zone::Exile,
@@ -3416,7 +3431,7 @@ mod tests {
                 Vec::new(),
                 ObjectId(200),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -3427,7 +3442,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
 
         let config = AiConfig::default();
         let decision = AiDecisionContext {
@@ -3515,6 +3530,8 @@ mod tests {
                     legal_targets,
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -3609,6 +3626,7 @@ mod tests {
                 .affected(TargetFilter::Typed(TypedFilter::creature()))],
             duration: Some(engine::types::ability::Duration::UntilEndOfTurn),
             target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            end_cost: None,
         };
 
         // Score targeting own creature
