@@ -16831,6 +16831,10 @@ pub(super) fn try_finalize_pending_activation_mana_leg(
     pending.activation_cost = remaining;
     pending.activation_ability_index = Some(ability_index);
     pending.activation_residual = ActivationResidual::ManaLeg;
+    let target_selection_settled = matches!(
+        pending.activation_target_selection,
+        ActivationTargetSelection::Settled
+    );
     let pending_source_id = pending.object_id;
     state.pending_cast = Some(Box::new(pending));
     let waiting = casting_costs::maybe_pause_for_phyrexian_choice(
@@ -16846,11 +16850,15 @@ pub(super) fn try_finalize_pending_activation_mana_leg(
     if let Some(waiting) = waiting {
         return Ok(Some(waiting));
     }
-    // CR 601.2g-h + CR 602.2b: The shared payment entry point auto-pays only
-    // when this root is actually payable. A target-first activation with an
-    // insufficient or choice-bearing mana leg must instead expose ManaPayment
-    // after targets are declared, rather than failing target submission.
-    casting_costs::enter_payment_step(state, player, None, events).map(Some)
+    if target_selection_settled {
+        // CR 601.2g-h + CR 602.2b: A target-first activation has already
+        // declared its targets. An insufficient or choice-bearing mana leg
+        // therefore exposes ManaPayment rather than invalidating that target
+        // declaration.
+        casting_costs::enter_payment_step(state, player, None, events).map(Some)
+    } else {
+        casting_costs::finalize_automatic_mana_payment(state, player, events).map(Some)
+    }
 }
 
 /// CR 602.2b + CR 605.3b + CR 616.1: Finalize an activation mana cost that
@@ -16878,6 +16886,10 @@ pub(super) fn finalize_pending_activation_mana_payment(
         activation_payment_context(state, pending.object_id, Some(ability_index));
     let activation_ctx = activation_context.as_payment_context();
     let source_id = pending.object_id;
+    let target_selection_settled = matches!(
+        pending.activation_target_selection,
+        ActivationTargetSelection::Settled
+    );
     state.pending_cast = Some(Box::new(pending));
     if let Some(waiting) = casting_costs::maybe_pause_for_phyrexian_choice(
         state,
@@ -16891,9 +16903,14 @@ pub(super) fn finalize_pending_activation_mana_payment(
     ) {
         return Ok(waiting);
     }
-    // CR 601.2g-h + CR 602.2b: Preserve the same manual-payment boundary when
-    // this already-serialized root resumes after target declaration.
-    casting_costs::enter_payment_step(state, player, None, events)
+    if target_selection_settled {
+        // CR 601.2g-h + CR 602.2b: Preserve the manual-payment boundary only
+        // after target declaration; bare activations remain illegal when their
+        // automatic mana payment is unaffordable.
+        casting_costs::enter_payment_step(state, player, None, events)
+    } else {
+        casting_costs::finalize_automatic_mana_payment(state, player, events)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
