@@ -4839,25 +4839,41 @@ fn affected_objects_from_events(
 ) -> Vec<ObjectId> {
     let fallback_targets = ability.targets.as_slice();
     match effect {
-        // CR 508.1a + CR 608.2c + CR 603.7c: A mass "attack this turn if able"
-        // coercion (Maddening Imp's `{T}` `GenericEffect{MustAttack}`) moves no
-        // objects and emits NO object-affecting event, so — unlike every other arm
-        // here — its affected population is FILTER-driven: re-enumerate the
-        // battlefield by the governing filter at resolution time. The publish site
-        // runs on the identical post-resolution board state, so this yields exactly
-        // the resolution-time population that "those creatures" freezes. Mirrors
-        // the broadcast-static binding in `effect.rs` (`Some(filter)` arm).
+        // CR 508.1a + CR 608.2c + CR 603.7c + CR 611.2c + CR 615.11 (issue
+        // #6682): A mass "attack this turn if able" coercion (Maddening Imp's
+        // `{T}` `GenericEffect{MustAttack}`) or a Continuous-mode broadcast
+        // keyword/P-T grant (Mutational Advantage's "permanents you control
+        // with counters on them gain hexproof and indestructible") moves no
+        // objects and emits NO object-affecting event, so — unlike every other
+        // arm here — its affected population is FILTER-driven: re-enumerate
+        // the battlefield by the governing filter at resolution time. The
+        // publish site runs on the identical post-resolution board state, so
+        // this yields exactly the resolution-time population that "those
+        // creatures"/"those permanents" freezes — verified against Mutational
+        // Advantage's official ruling: "The set of permanents affected by
+        // Mutational Advantage is determined at the time Mutational Advantage
+        // resolves. Permanents that gain counters later in the turn won't
+        // become affected by this effect, and permanents that lose all of
+        // their counters later in the turn won't stop being affected."
+        // Mirrors the broadcast-static binding in `effect.rs` (`Some(filter)`
+        // arm). Broader than the parser-side `is_mass_coerce_static`
+        // (oracle_effect/mod.rs), which still gates only the MustAttack/
+        // MustAttackPlayer coercion pair for its own (unrelated)
+        // ParentTarget-rewrite purpose.
         Effect::GenericEffect {
             static_abilities,
             target,
             ..
         } => {
-            // Select the first coercion static (matching `is_mass_coerce_static`).
+            // Select the first static whose population is meant to be frozen
+            // at resolution rather than re-evaluated live at each future
+            // check — a coercion requirement or a Continuous grant.
             let Some(static_def) = static_abilities.iter().find(|sd| {
                 matches!(
                     sd.mode,
                     crate::types::statics::StaticMode::MustAttack
                         | crate::types::statics::StaticMode::MustAttackPlayer { .. }
+                        | crate::types::statics::StaticMode::Continuous
                 )
             }) else {
                 return Vec::new();

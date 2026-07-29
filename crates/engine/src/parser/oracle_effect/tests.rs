@@ -49545,12 +49545,19 @@ fn they_binds_producer_population_across_mass_effect_family() {
 
 /// CR 611.2c + CR 615.11 (issue #6682): Mutational Advantage's second clause
 /// ("Prevent all damage that would be dealt to those permanents this turn")
-/// must scope the shield to the SAME population its first clause locked onto
-/// ("Permanents you control with counters on them") — not the `Any` fallback
-/// that silently protected every permanent in the game, including
-/// opponents'. Verified against the official ruling: "The set of permanents
+/// must NOT collapse to the `Any` fallback that silently protected every
+/// permanent in the game, including opponents'. "Those permanents" resolves
+/// to a `TrackedSet` sentinel — `parse_target`'s existing dispatch for the
+/// phrase (shared with Energy Arc's target-derived "those creatures") —
+/// which `prevent_damage::resolve` then resolves to a concrete, FROZEN set
+/// id at shield-creation time (see
+/// `mutational_advantage_shield_freezes_population_at_resolution` in
+/// `game::effects::prevent_damage::tests` for the runtime freeze semantics:
+/// verified against the official ruling that "the set of permanents
 /// affected by Mutational Advantage is determined at the time Mutational
-/// Advantage resolves."
+/// Advantage resolves"). Binding directly to a live copy of the grant's
+/// filter would re-check "has a counter" at every future damage event,
+/// which the ruling explicitly forbids.
 #[test]
 fn mutational_advantage_prevent_binds_to_countered_permanents_population() {
     let def = parse_effect_chain(
@@ -49571,7 +49578,7 @@ fn mutational_advantage_prevent_binds_to_countered_permanents_population() {
             def.effect
         );
     };
-    let population = static_abilities
+    static_abilities
         .first()
         .and_then(|sd| sd.affected.clone())
         .expect("the grant clause must carry an affected population filter");
@@ -49584,14 +49591,12 @@ fn mutational_advantage_prevent_binds_to_countered_permanents_population() {
         panic!("expected PreventDamage, got {:?}", prevent.effect);
     };
     assert_eq!(
-        *target, population,
-        "the prevention shield must bind to the SAME population the grant locked onto, \
-         not Any"
-    );
-    assert_ne!(
         *target,
-        TargetFilter::Any,
-        "must never silently protect every permanent in the game"
+        TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0)
+        },
+        "\"those permanents\" must resolve to the TrackedSet sentinel, not a live copy \
+         of the grant's filter (which would re-check \"has a counter\" live) or Any"
     );
 }
 

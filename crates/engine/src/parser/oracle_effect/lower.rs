@@ -7092,7 +7092,6 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
 pub(super) fn try_parse_bidirectional_prevent(
     text: &str,
     parent_target_available: bool,
-    chain_prior_mass_population: &Option<TargetFilter>,
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     // Quick-reject via the bidirectional marker before spending parse effort.
@@ -7120,20 +7119,17 @@ pub(super) fn try_parse_bidirectional_prevent(
     let prevention_duration =
         nom_primitives::scan_preceded(rest, parse_duration).map(|(_, d, _)| d);
 
-    // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): isolate the anaphor
-    // phrase following the bidirectional marker and resolve it via the same
-    // three-tier recipient resolution `parse_prevent_effect` uses (chosen
-    // target anaphor / clause-derived population / any other recognized
-    // filter — Energy Arc's "those creatures" is the target-derived-anaphor
-    // tier). `None` when no tier recognizes it — a standalone "dealt to and
-    // dealt by that creature" with no prior target-selecting clause must NOT
-    // split into ParentTarget shields.
+    // CR 608.2c + CR 615: isolate the anaphor phrase following the
+    // bidirectional marker and resolve it via the same recipient resolution
+    // `parse_prevent_effect` uses (chosen target anaphor / any other
+    // recognized filter — Energy Arc's "those creatures" resolves via
+    // `parse_target`'s `TrackedSet` dispatch). `None` when no tier
+    // recognizes it — a standalone "dealt to and dealt by that creature"
+    // with no prior target-selecting clause must NOT split into ParentTarget
+    // shields.
     let anaphor_tp = TextPair::new(text, &lower).strip_after("dealt to and dealt by ")?;
-    let anaphor_filter = super::imperative::resolve_prevent_recipient(
-        anaphor_tp,
-        parent_target_available,
-        chain_prior_mass_population,
-    )?;
+    let anaphor_filter =
+        super::imperative::resolve_prevent_recipient(anaphor_tp, parent_target_available)?;
 
     // CR 615: the recipient ("to") shield — scoped to the chosen creature as
     // the damage RECIPIENT (target: ParentTarget, no source restriction).
@@ -11006,7 +11002,7 @@ mod tests {
         let text =
             "prevent the next 5 damage divided as you choose among any number of target creatures";
         assert!(
-            super::try_parse_bidirectional_prevent(text, true, &None).is_none(),
+            super::try_parse_bidirectional_prevent(text, true).is_none(),
             "distribute clause must not be claimed by the bidirectional interceptor"
         );
         // And the distribute path still parses it (ordering safety).
@@ -11023,7 +11019,7 @@ mod tests {
         use crate::types::ability::{PreventionScope, SubAbilityLink, TargetFilter};
         let text =
             "prevent all combat damage that would be dealt to and dealt by that creature this turn";
-        let clause = super::try_parse_bidirectional_prevent(text, true, &None)
+        let clause = super::try_parse_bidirectional_prevent(text, true)
             .expect("bidirectional split with gate enabled");
         match &clause.effect {
             Effect::PreventDamage {
@@ -11056,7 +11052,7 @@ mod tests {
         }
         // Gate off ⇒ no split.
         assert!(
-            super::try_parse_bidirectional_prevent(text, false, &None).is_none(),
+            super::try_parse_bidirectional_prevent(text, false).is_none(),
             "gate false ⇒ interceptor is a no-op"
         );
     }

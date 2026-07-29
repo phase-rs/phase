@@ -5165,11 +5165,6 @@ pub(super) fn parse_utility_imperative_ast(
                 // to. This is the one construction site where `ParseContext` is
                 // live; downstream lowering has only the captured flag.
                 parent_target_available: ctx.parent_target_available,
-                // CR 611.2c + CR 615.11 (issue #6682): capture the population
-                // an earlier same-chain Continuous-mode static grant locked
-                // onto, for a "those permanents"/"those creatures" recipient
-                // anaphor to bind to.
-                chain_prior_mass_population: ctx.chain_prior_mass_population.clone(),
             }),
             "regenerate" => Some(UtilityImperativeAst::Regenerate {
                 text: text.to_string(),
@@ -5853,8 +5848,7 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         UtilityImperativeAst::Prevent {
             text,
             parent_target_available,
-            chain_prior_mass_population,
-        } => parse_prevent_effect(&text, parent_target_available, chain_prior_mass_population),
+        } => parse_prevent_effect(&text, parent_target_available),
         UtilityImperativeAst::Regenerate { text } => {
             let lower = text.to_lowercase();
             let rest = tag::<_, _, OracleError<'_>>("regenerate ")
@@ -5915,17 +5909,6 @@ pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
     }
 }
 
-/// CR 608.2c: "those permanents"/"those creatures" head-noun check for the
-/// prevent-recipient dispatch below. Mirrors the identical phrase pair
-/// already listed in `oracle_target::parse_target`'s `TRACKED_SET_PHRASES`
-/// and `contains_explicit_tracked_set_pronoun` (this module) — kept as its
-/// own tiny combinator here (rather than a third shared list) because this
-/// call site needs an anchored prefix match on the recipient phrase, not a
-/// scan-anywhere-in-the-clause check.
-fn parse_those_population_anaphor(input: &str) -> OracleResult<'_, ()> {
-    value((), alt((tag("those permanents"), tag("those creatures")))).parse(input)
-}
-
 /// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): Resolve a prevent-damage
 /// recipient phrase — the text immediately following "dealt to " or "dealt to
 /// and dealt by " — to a `TargetFilter`. Shared by [`parse_prevent_effect`]
@@ -5935,34 +5918,31 @@ fn parse_those_population_anaphor(input: &str) -> OracleResult<'_, ()> {
 /// Tries, in priority order:
 /// 1. A singular chosen-target anaphor ("that creature"/"it"/"the creature"),
 ///    gated on `parent_target_available` (CR 608.2c, issue #1094).
-/// 2. "those permanents"/"those creatures" bound to the population an
-///    earlier same-chain Continuous-mode static grant locked onto
-///    (`chain_prior_mass_population`) — Mutational Advantage's official
-///    ruling: "The set of permanents affected by Mutational Advantage is
-///    determined at the time Mutational Advantage resolves."
-/// 3. Any other recipient phrase `parse_target` recognizes as a real filter —
+/// 2. Any other recipient phrase `parse_target` recognizes as a real filter —
 ///    mass typed recipients ("creatures"/"players"/"creatures you control" —
-///    Blinding Fog, Defend the Hearth) and target-derived "those creatures"
-///    anaphors that resolve to a `TrackedSet` sentinel when a chosen-target
-///    clause precedes them (Energy Arc; resolved to a concrete, stable set id
-///    at shield-creation time by `prevent_damage::resolve`).
+///    Blinding Fog, Defend the Hearth) AND "those permanents"/"those
+///    creatures", which `parse_target` already maps to a `TrackedSet`
+///    sentinel. The sentinel is resolved to a concrete, FROZEN set id at
+///    shield-creation time by `prevent_damage::resolve` — never left as a
+///    live filter — because the antecedent population must be locked in at
+///    resolution regardless of whether it came from a chosen-target clause
+///    (Energy Arc's untapped creatures) or a Continuous-mode static grant
+///    (Mutational Advantage's countered permanents: the resolution-time
+///    population is enumerated once by the widened `GenericEffect` arm in
+///    `game::effects::affected_objects_from_events`). Mutational Advantage's
+///    official ruling: "The set of permanents affected by Mutational
+///    Advantage is determined at the time Mutational Advantage resolves."
 ///
-/// Returns `None` only when none of the above recognize the phrase — the
-/// caller then falls back to the pre-existing `Any` default.
+/// Returns `None` only when neither tier recognizes the phrase — the caller
+/// then falls back to the pre-existing `Any` default.
 pub(super) fn resolve_prevent_recipient(
     recipient: TextPair<'_>,
     parent_target_available: bool,
-    chain_prior_mass_population: &Option<TargetFilter>,
 ) -> Option<TargetFilter> {
     if let Some((filter, _)) =
         parse_anaphoric_target_ref(recipient.original, parent_target_available)
     {
         return Some(filter);
-    }
-    if parse_those_population_anaphor(recipient.lower).is_ok() {
-        if let Some(filter) = chain_prior_mass_population.clone() {
-            return Some(filter);
-        }
     }
     // CR 608.2c: `ParentTarget`/`TriggeringSource`/`CostPaidObject`/`SelfRef`
     // are inherited-reference filters naming a specific already-established
@@ -5988,17 +5968,7 @@ pub(super) fn resolve_prevent_recipient(
 /// the same effect chain selected a target that a trailing anaphor ("that
 /// creature" / "the creature" / "it") can bind to via `ParentTarget`. When
 /// false the anaphor recognizer is a no-op and the target falls back to `Any`.
-///
-/// CR 611.2c + CR 615.11 (issue #6682): `chain_prior_mass_population` carries
-/// the population an earlier same-chain Continuous-mode static grant locked
-/// onto (Mutational Advantage's hexproof/indestructible clause), for a
-/// "those permanents"/"those creatures" recipient anaphor to bind to — see
-/// [`resolve_prevent_recipient`].
-fn parse_prevent_effect(
-    text: &str,
-    parent_target_available: bool,
-    chain_prior_mass_population: Option<TargetFilter>,
-) -> Effect {
+fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
     let lower = text.to_lowercase();
     let rest = tag::<_, _, OracleError<'_>>("prevent ")
         .parse(&*lower)
@@ -6078,16 +6048,13 @@ fn parse_prevent_effect(
         TargetFilter::Controller
     } else if let Some(filter) = TextPair::new(text, &lower)
         .strip_after("dealt to ")
-        .and_then(|tp| {
-            resolve_prevent_recipient(tp, parent_target_available, &chain_prior_mass_population)
-        })
+        .and_then(|tp| resolve_prevent_recipient(tp, parent_target_available))
     {
         // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): see
-        // `resolve_prevent_recipient` — a chosen-target anaphor, a
-        // clause-derived population anaphor, or any other recipient phrase
-        // `parse_target` recognizes. Strict superset of the prior `Any`
-        // fallback: a recipient phrase that no tier recognizes still falls
-        // through to `Any` below.
+        // `resolve_prevent_recipient` — a chosen-target anaphor or any other
+        // recipient phrase `parse_target` recognizes. Strict superset of the
+        // prior `Any` fallback: a recipient phrase that no tier recognizes
+        // still falls through to `Any` below.
         filter
     } else {
         // Default: "that would be dealt" with no specific target → Any
@@ -12046,7 +12013,6 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             UtilityImperativeAst::Prevent {
                 ref text,
                 parent_target_available,
-                ref chain_prior_mass_population,
             },
         )) => {
             // CR 615 + CR 608.2c (issue #1094): a bidirectional "dealt to and
@@ -12054,11 +12020,9 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // PreventDamage nodes — tried FIRST, before the distribute path
             // (mutually exclusive markers: no card combines "distributed among"
             // with "dealt to and dealt by").
-            if let Some(clause) = super::lower::try_parse_bidirectional_prevent(
-                text,
-                parent_target_available,
-                chain_prior_mass_population,
-            ) {
+            if let Some(clause) =
+                super::lower::try_parse_bidirectional_prevent(text, parent_target_available)
+            {
                 return clause;
             }
             if let Some(clause) = super::lower::try_parse_prevent_distribute(text) {
@@ -12071,7 +12035,6 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 UtilityImperativeAst::Prevent {
                     text: text.clone(),
                     parent_target_available,
-                    chain_prior_mass_population: chain_prior_mass_population.clone(),
                 },
             ))
         }
@@ -20452,7 +20415,6 @@ mod tests {
         let effect = parse_prevent_effect(
             "Prevent all damage target instant or sorcery spell would deal this turn.",
             false,
-            None,
         );
         let Effect::PreventDamage {
             amount,
@@ -20498,7 +20460,6 @@ mod tests {
         let effect = parse_prevent_effect(
             "Prevent the next 3 damage that would be dealt to target creature this turn.",
             false,
-            None,
         );
         let Effect::PreventDamage {
             amount,
@@ -20528,7 +20489,6 @@ mod tests {
         let effect = parse_prevent_effect(
             "Prevent all combat damage that other creatures would deal this turn.",
             false,
-            None,
         );
         let Effect::PreventDamage {
             amount,
@@ -20580,7 +20540,7 @@ mod tests {
             ),
         ];
         for (text, expected) in cases {
-            let effect = parse_prevent_effect(text, false, None);
+            let effect = parse_prevent_effect(text, false);
             let Effect::PreventDamage {
                 prevention_duration,
                 ..
@@ -20606,8 +20566,7 @@ mod tests {
 
         let planeswalker_text =
             "Prevent all damage that would be dealt to you and planeswalkers you control this turn.";
-        let Effect::PreventDamage { target, .. } =
-            parse_prevent_effect(planeswalker_text, false, None)
+        let Effect::PreventDamage { target, .. } = parse_prevent_effect(planeswalker_text, false)
         else {
             panic!("expected PreventDamage");
         };
@@ -20620,8 +20579,7 @@ mod tests {
 
         let permanents_text =
             "Prevent all damage that would be dealt to you and permanents you control this turn.";
-        let Effect::PreventDamage { target, .. } =
-            parse_prevent_effect(permanents_text, false, None)
+        let Effect::PreventDamage { target, .. } = parse_prevent_effect(permanents_text, false)
         else {
             panic!("expected PreventDamage");
         };
@@ -20638,7 +20596,7 @@ mod tests {
     #[test]
     fn prevent_plain_to_you_recipient_stays_controller() {
         let text = "Prevent all damage that would be dealt to you this turn.";
-        let Effect::PreventDamage { target, .. } = parse_prevent_effect(text, false, None) else {
+        let Effect::PreventDamage { target, .. } = parse_prevent_effect(text, false) else {
             panic!("expected PreventDamage");
         };
         assert_eq!(target, TargetFilter::Controller);
@@ -20657,7 +20615,7 @@ mod tests {
         let Effect::PreventDamage {
             damage_source_filter,
             ..
-        } = parse_prevent_effect(text, false, None)
+        } = parse_prevent_effect(text, false)
         else {
             panic!("expected PreventDamage");
         };
@@ -20679,83 +20637,67 @@ mod tests {
     /// genuinely unscoped prevent into a falsely-narrowed one.
     #[test]
     fn fog_with_no_recipient_phrase_stays_any() {
-        let effect = parse_prevent_effect(
-            "Prevent all damage that would be dealt this turn.",
-            false,
-            None,
-        );
+        let effect =
+            parse_prevent_effect("Prevent all damage that would be dealt this turn.", false);
         let Effect::PreventDamage { target, .. } = effect else {
             panic!("expected PreventDamage");
         };
         assert_eq!(target, TargetFilter::Any);
     }
 
-    /// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): `resolve_prevent_recipient`
-    /// tries a chosen-target anaphor, then a clause-derived population
-    /// anaphor, then any other `parse_target`-recognized recipient, in that
-    /// priority order, and returns `None` (not `Any`) only when nothing
-    /// recognizes the phrase.
+    /// CR 608.2c + CR 615.11 (issue #6682): `resolve_prevent_recipient` tries a
+    /// chosen-target anaphor, then any other `parse_target`-recognized
+    /// recipient, in that priority order, and returns `None` (not `Any`) only
+    /// when neither tier recognizes the phrase.
     #[test]
     fn resolve_prevent_recipient_tries_tiers_in_priority_order() {
-        // Tier 1: a singular chosen-target anaphor wins when available, even
-        // if a clause-derived population is ALSO present.
-        let population = TargetFilter::Typed(TypedFilter::creature());
+        // Tier 1: a singular chosen-target anaphor.
         let text = "that creature this turn.";
         let lower = text.to_lowercase();
         let tp = TextPair::new(text, &lower);
         assert_eq!(
-            resolve_prevent_recipient(tp, true, &Some(population.clone())),
+            resolve_prevent_recipient(tp, true),
             Some(TargetFilter::ParentTarget),
-            "a chosen-target anaphor must win over a clause-derived population"
+            "a chosen-target anaphor must resolve to ParentTarget"
         );
 
-        // Tier 2: "those permanents"/"those creatures" binds to the
-        // clause-derived population when no chosen target is available.
-        let text = "those permanents this turn.";
-        let lower = text.to_lowercase();
-        let tp = TextPair::new(text, &lower);
-        assert_eq!(
-            resolve_prevent_recipient(tp, false, &Some(population.clone())),
-            Some(population),
-            "\"those permanents\" must bind to the clause-derived population"
-        );
-
-        // Tier 3: a bare mass typed recipient with no antecedent at all.
+        // Tier 2: a bare mass typed recipient with no antecedent at all.
         let text = "creatures this turn.";
         let lower = text.to_lowercase();
         let tp = TextPair::new(text, &lower);
         let resolved =
-            resolve_prevent_recipient(tp, false, &None).expect("bare \"creatures\" must resolve");
+            resolve_prevent_recipient(tp, false).expect("bare \"creatures\" must resolve");
         assert!(
             matches!(&resolved, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)),
             "bare \"creatures\" must resolve to a Typed(Creature) filter, got {resolved:?}"
         );
 
-        // Tier 2 correctly declines (no population to bind to) but tier 3
-        // still recognizes "those permanents"/"those creatures" via
-        // `parse_target`'s own tracked-set dispatch — this is the
-        // TARGET-derived antecedent class (Energy Arc's "those creatures"
-        // referring to earlier-chosen targets, not a continuous-effect
-        // grant), so it must NOT collapse to `None`/`Any` either.
+        // Tier 2 also recognizes "those permanents"/"those creatures" via
+        // `parse_target`'s own tracked-set dispatch — covers BOTH the
+        // target-derived antecedent class (Energy Arc's "those creatures"
+        // referring to earlier-chosen targets) and the clause-derived
+        // antecedent class (Mutational Advantage's "those permanents"
+        // referring to a preceding Continuous-mode grant's population),
+        // since the runtime freezes the tracked set from whichever producer
+        // clause precedes it (see `game::effects::affected_objects_from_events`).
         let text = "those creatures this turn.";
         let lower = text.to_lowercase();
         let tp = TextPair::new(text, &lower);
         assert_eq!(
-            resolve_prevent_recipient(tp, false, &None),
+            resolve_prevent_recipient(tp, false),
             Some(TargetFilter::TrackedSet {
                 id: crate::types::identifiers::TrackedSetId(0)
             }),
-            "\"those creatures\" with no clause-derived population must still bind via \
-             parse_target's tracked-set dispatch (the target-derived antecedent class)"
+            "\"those creatures\" must bind via parse_target's tracked-set dispatch"
         );
 
-        // None of the tiers recognize a genuinely unclassified recipient
-        // phrase — `resolve_prevent_recipient` returns `None`, not `Any`.
+        // Neither tier recognizes a genuinely unclassified recipient phrase —
+        // `resolve_prevent_recipient` returns `None`, not `Any`.
         let text = "xyzzy this turn.";
         let lower = text.to_lowercase();
         let tp = TextPair::new(text, &lower);
         assert_eq!(
-            resolve_prevent_recipient(tp, false, &None),
+            resolve_prevent_recipient(tp, false),
             None,
             "an unclassified recipient phrase must fall through, not silently guess"
         );
