@@ -644,6 +644,7 @@ mod tests {
                 source_id: mockingbird_id,
                 valid_targets: vec![small, large],
                 max_mana_value: Some(4),
+                purpose: engine::types::ability::CopyTargetPurpose::BecomeCopy,
             },
             candidates: Vec::new(),
         };

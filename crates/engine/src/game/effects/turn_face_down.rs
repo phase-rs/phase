@@ -52,7 +52,21 @@ pub fn resolve(
         // writes these values into both live and base fields, so the layer
         // system then reapplies all continuous effects from the correct printed
         // baseline — not from an already-inflated one.
-        let snapshot = crate::game::printed_cards::snapshot_object_base_face(obj);
+        //
+        // CR 710.4 + CR 710.2: a FLIPPED flip permanent (CR 712.16 does not
+        // cover flip cards, so Ixidron / Cyber Conversion may legally turn one
+        // face down) already owns this slot: `flip::flip_permanent` stashed the
+        // NORMAL half there, and that half is what must reappear when the
+        // permanent leaves the battlefield. Overwriting it with a base snapshot
+        // — which, for a flipped permanent, is the ALTERNATIVE half — would put
+        // a flipped Kenzo the Hardhearted in the graveyard instead of Bushi
+        // Tenderfoot. Keep the flip stash; `zones::apply_zone_exit_cleanup`
+        // runs the CR 708.9 face-down restore BEFORE the CR 710.4 flip revert
+        // precisely so this single slot serves both.
+        let snapshot = match &obj.back_face {
+            Some(flip_stash) if obj.flipped => flip_stash.clone(),
+            _ => crate::game::printed_cards::snapshot_object_base_face(obj),
+        };
         // CR 708.2a + CR 205.1a: Apply the effect-specified (or default vanilla
         // 2/2) face-down body.
         crate::game::morph::apply_face_down_creature_characteristics(obj, &profile);

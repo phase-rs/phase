@@ -895,7 +895,7 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
                         controller,
                     );
                     ability.description = Some(name.to_string());
-                    ability
+                    Box::new(ability)
                 },
                 timestamp: 0,
                 target_constraints: Vec::new(),
@@ -924,7 +924,7 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
         controller: player,
         kind: StackEntryKind::Spell {
             card_id: CardId(1),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Player,
@@ -932,7 +932,7 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
                 vec![TargetRef::Player(PlayerId(1))],
                 copy_id,
                 player,
-            )),
+            ))),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },

@@ -96,11 +96,12 @@ describe("ZoneViewer exile face-down visibility (issue #2889)", () => {
       pendingAbilityChoice: null,
       debugInteractionMode: false,
     });
-    // Desktop hover path: `useInspectHoverProps` gates onMouseEnter on
-    // `useCanHover` (any-hover media query) and `useIsMobile` (jsdom's default
-    // 1024px innerWidth already reads as non-mobile).
+    // Every hover-capability query answers false — the remote-desktop shape.
+    // `useInspectHoverProps` gates on the event's own `pointerType` instead, so
+    // the desktop hover path must still run here; if it ever regresses back to
+    // a media query this stub is what turns the preview assertions red.
     window.matchMedia = ((query: string) => ({
-      matches: query === "(any-hover: hover)",
+      matches: false,
       media: query,
       onchange: null,
       addEventListener: vi.fn(),
@@ -323,7 +324,7 @@ describe("ZoneViewer exile face-down visibility (issue #2889)", () => {
 
     const cardImage = screen.getByTestId("card-image");
     const hoverTarget = cardImage.parentElement as HTMLElement;
-    fireEvent.mouseEnter(hoverTarget);
+    fireEvent.pointerEnter(hoverTarget, { pointerType: "mouse" });
 
     // The hover did wire up — `inspectObject` ran — but the preview must
     // render nothing for a face-down card with no look-permission.
@@ -331,6 +332,6 @@ describe("ZoneViewer exile face-down visibility (issue #2889)", () => {
     expect(screen.queryByAltText("Ghalta, Primal Hunter")).not.toBeInTheDocument();
     expect(document.querySelector("[data-card-preview]")).toBeNull();
 
-    fireEvent.mouseLeave(hoverTarget);
+    fireEvent.pointerLeave(hoverTarget, { pointerType: "mouse", relatedTarget: document.body });
   });
 });

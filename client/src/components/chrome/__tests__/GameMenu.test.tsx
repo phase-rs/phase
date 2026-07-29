@@ -112,4 +112,35 @@ describe("GameMenu", () => {
       "true",
     );
   });
+
+  // The takeback item's gate used to be `isOnlineMode && onRequestTakeback`,
+  // which hid it for desktop solo-vs-AI (`native-ai` reaches GamePage as
+  // `mode=ai`, so `isOnlineMode` is false) even though that game has a real
+  // server-authoritative takeback and no client-side undo. GamePage is now the
+  // single authority and gates on the transport; the menu only asks whether it
+  // was given a handler.
+  it("offers takeback whenever a handler is supplied, even outside online mode", () => {
+    const onRequestTakeback = vi.fn();
+    // `isOnlineMode: false` is the whole point — this is the desktop-solo
+    // shape, and it is what fails if the `isOnlineMode &&` gate comes back.
+    renderGameMenu({ isOnlineMode: false, onRequestTakeback });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+    fireEvent.click(screen.getByRole("button", { name: "Request Takeback" }));
+
+    expect(onRequestTakeback).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides takeback when no handler is supplied", () => {
+    // Paired negative: without it, "render always" would pass the test above.
+    renderGameMenu({ isOnlineMode: true, onRequestTakeback: undefined });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    // Reach guard: the menu really did open, so the absence below is the gate
+    // rather than an unrendered menu.
+    expect(screen.getByRole("button", { name: "Concede" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Request Takeback" })).toBeNull();
+  });
+
 });

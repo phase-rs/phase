@@ -15,6 +15,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_effect::parse_effect_chain;
+use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::strip_reminder_text;
 
@@ -121,7 +122,7 @@ fn is_chapter_body_continuation(line: &str) -> bool {
 /// the `(line, ETB replacement)` pair, and the set of consumed line indices.
 type SagaChaptersParse = (
     Vec<(usize, TriggerDefinition)>,
-    (usize, ReplacementDefinition),
+    (usize, ReplacementIr),
     HashSet<usize>,
 );
 
@@ -203,6 +204,15 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
     }
 
     // CR 714.3a: As a Saga enters the battlefield, its controller puts a lore counter on it.
+    //
+    // Provenance convention for a SYNTHESIZED rule item: the source text is the
+    // definition's own description. CR 714.3a prints no line — the rule applies
+    // from the subtype alone — so there is no Oracle slice to cite. Naming the
+    // first chapter's line instead would be a lie the anchor already tempts us
+    // into: `etb_line` points there for ordering, but the chapter-I trigger owns
+    // that text. A synthetic label cannot be located in the Oracle text, which is
+    // the honest answer for an item that was never printed.
+    const ETB_SYNTHETIC_SOURCE: &str = "Saga ETB lore counter";
     let etb_replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
@@ -214,7 +224,8 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
         ))
         .valid_card(TargetFilter::SelfRef)
         .destination_zone(Zone::Battlefield)
-        .description("Saga ETB lore counter".to_string());
+        .description(ETB_SYNTHETIC_SOURCE.to_string());
+    let etb_replacement = ReplacementIr::from_definition(ETB_SYNTHETIC_SOURCE, etb_replacement);
 
     // CR 714.3a: the ETB lore-counter replacement has no printed line of its own;
     // anchor it at the FIRST chapter's line so it emits at/near the front of the
@@ -318,7 +329,7 @@ mod tests {
         let (triggers, (_, etb), consumed) = parse_saga_chapters(lines, name);
         (
             triggers.into_iter().map(|(_, t)| t).collect(),
-            etb,
+            etb.definition,
             consumed,
         )
     }
@@ -811,6 +822,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 3 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             } => {}
             other => panic!("expected ExileTop(controller, 3), got {other:?}"),

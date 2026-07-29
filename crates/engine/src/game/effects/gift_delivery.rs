@@ -9,9 +9,9 @@ use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-/// CR 702.174: Deliver a gift to the opponent of the ability's controller.
+/// CR 702.174: Deliver a gift to the opponent chosen when the gift cost was paid.
 /// Gift delivery is a no-op when the gift wasn't promised (`additional_cost_paid == false`).
-/// When promised, the opponent receives the gift before the spell's other effects resolve.
+/// When promised, the chosen opponent receives the gift before the spell's other effects resolve.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -33,8 +33,14 @@ pub fn resolve(
         return Ok(());
     }
 
-    // In 2-player, the opponent is the next player after the controller.
-    let opponent = players::next_player(state, ability.controller);
+    // CR 702.174a/e: Deliver to the opponent chosen when the gift cost was paid.
+    // Prefer the cast-time SpellContext latch, then the finalize stamp on the
+    // source object. Never fall back to turn-order `next_player`.
+    let Some(opponent) = resolve_gift_recipient(state, ability) else {
+        // CR 800.4b / CR 609.3: Latched recipient left the game, or the cast
+        // path failed to stamp a recipient — do as much as possible (nothing).
+        return Ok(());
+    };
 
     // CR 702.174b: On a permanent, the gift ability triggers when the permanent enters.
     // CR 702.174j: For instants/sorceries, the gift effect always happens first.
@@ -88,6 +94,18 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 702.174a: Resolve the latched gift recipient.
+fn resolve_gift_recipient(state: &GameState, ability: &ResolvedAbility) -> Option<PlayerId> {
+    let candidate = ability.context.gift_recipient.or_else(|| {
+        state
+            .objects
+            .get(&ability.source_id)
+            .and_then(|obj| obj.gift_recipient)
+    })?;
+    // CR 800.4: Only deliver if the chosen player is still in the game.
+    players::is_alive(state, candidate).then_some(candidate)
 }
 
 /// Deliver "gift a card" — opponent draws one card.
@@ -177,6 +195,10 @@ mod tests {
             PlayerId(0),
         );
         ability.context.additional_cost_paid = promised;
+        if promised {
+            // CR 702.174a: Latched recipient (2p sole opponent = P1).
+            ability.context.gift_recipient = Some(PlayerId(1));
+        }
         ability
     }
 
@@ -199,6 +221,67 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, GameEvent::CardDrawn { player_id, .. } if *player_id == PlayerId(1))
         ));
+    }
+
+    #[test]
+    fn gift_card_uses_source_object_recipient_when_context_is_absent() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Gift Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source_id).unwrap().gift_recipient = Some(PlayerId(1));
+        let card_id = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+
+        let mut ability = make_gift_ability(GiftKind::Card, true);
+        ability.source_id = source_id;
+        ability.context.gift_recipient = None;
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.players[1].hand.contains(&card_id));
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == PlayerId(1))
+        ));
+    }
+
+    #[test]
+    fn gift_card_noops_for_eliminated_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Library,
+        );
+        state.players[1].is_eliminated = true;
+        let mut events = Vec::new();
+
+        let ability = make_gift_ability(GiftKind::Card, true);
+        assert_eq!(resolve_gift_recipient(&state, &ability), None);
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.players[1].library.contains(&card_id));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardDrawn { .. })));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::GiftDelivery,
+                ..
+            }
+        )));
     }
 
     #[test]

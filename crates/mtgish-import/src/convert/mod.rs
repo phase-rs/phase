@@ -834,7 +834,8 @@ fn convert_rule(
         // CR 614.2 + CR 615.1: Damage replacement effects. Maps the event
         // shape to `damage_*_filter` / `combat_scope` slots and the action
         // (PreventThatDamage / PreventSomeOfThatDamage / CancelThatDamage)
-        // to `damage_modification` (Minus { u32::MAX } / Minus). Other actions
+        // to `damage_modification` (PreventionMinus { u32::MAX } / PreventionMinus).
+        // Other actions
         // strict-fail until further engine extensions.
         Rule::ReplaceWouldDealDamage(event, actions) => {
             let mut reps = replacement::convert_replace_would_deal_damage(event, actions)?;
@@ -1342,6 +1343,7 @@ pub(crate) fn build_ability_from_actions(
                 static_abilities: vec![],
                 duration: None,
                 target: None,
+                end_cost: None,
             };
             let mut ability =
                 AbilityDefinition::new(kind, parent_effect).with_modal(modal, mode_abilities);

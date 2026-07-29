@@ -87,9 +87,7 @@ fn to_dtos(outs: Vec<Outbound>) -> Vec<OutboundDto> {
 /// `Broker::handle`, so this boundary crate is the only place that can answer
 /// them.
 fn reject_reply(message: &str) -> Vec<Outbound> {
-    vec![Outbound::ToSelf(LobbyServerMessage::Error {
-        message: message.to_string(),
-    })]
+    vec![Outbound::ToSelf(LobbyServerMessage::error(message))]
 }
 
 /// Whether a client frame can mutate the shared `LobbyManager` (and therefore

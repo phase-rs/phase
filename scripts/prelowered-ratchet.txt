@@ -1,0 +1,27 @@
+# Plan 05b burn-down ledger: textual `PreLowered` occurrences per file.
+#
+# Enforced by scripts/check-prelowered-ratchet.sh. Each number is a CEILING:
+# a change that lowers it passes, a change that raises it fails, and a file
+# that appears here with no entry fails outright (so a new PreLowered producer
+# cannot be smuggled into a third file).
+#
+# Format: <repo-relative path><whitespace><ceiling>
+#
+# --- burn-down: Class-B producers, target is 0 ------------------------------
+# These are the `OracleNodeIr::PreLowered*` emissions that Plan 05b converts to
+# real IR nodes. Every tranche that converts a producer must lower its number
+# in the same commit, which is what makes the burn-down visible in `git log`
+# on this one file.
+crates/engine/src/parser/oracle.rs         12
+crates/engine/src/parser/oracle_class.rs    3
+
+# --- infrastructure: NOT burn-down targets ----------------------------------
+# The variant declarations and their consumers. These legitimately survive
+# until the last producer is gone and the variants themselves are deleted, so
+# they are ceilings only — they are not expected to reach 0 before then.
+# 20 includes spell_payload's exhaustive consumer arms, not producers.
+crates/engine/src/parser/oracle_ir/doc.rs      20
+crates/engine/src/parser/oracle_ir/feature.rs   9
+
+# Prose references in the T1 witness-corpus comment.
+crates/engine/src/parser/oracle_ir/snapshot_tests.rs   2

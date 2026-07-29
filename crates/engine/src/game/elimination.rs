@@ -5,6 +5,9 @@ use crate::types::game_state::{ActiveSearchDecisionAuthority, GameState, Waiting
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::{
+    ResolvedPlayerLeaveCommand, ResolvedPlayerLeaveReplayInvariantError,
+};
 use crate::types::zones::Zone;
 
 use super::players;
@@ -578,13 +581,23 @@ fn do_eliminate(
     let planar_handoff =
         crate::game::planechase::prepare_player_left_game_handoff(state, player, leaving_set);
 
-    // Mark as eliminated
-    if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-        p.is_eliminated = true;
-    }
-    if !state.eliminated_players.contains(&player) {
-        state.eliminated_players.push(player);
-    }
+    // CR 733 + CR 800.4: open the leave's own execution node BEFORE the sweep, so
+    // every command it settles below — the owned-object exiles, the control
+    // reversions — is attributed to the departure rather than to whatever rules
+    // work happened to be live when the state-based action fired. The node stays
+    // active for the remainder of this function.
+    let leave_node = state.begin_player_leave_journal_node();
+    let enclosing_node = state.active_rules_execution_node.replace(leave_node);
+    let command = ResolvedPlayerLeaveCommand {
+        player,
+        cause: leave_node,
+    };
+    apply_resolved_player_leave(state, &command)
+        .expect("a living player must satisfy their own departure precondition");
+    state
+        .resolved_rules_journal
+        .record_player_leave(command)
+        .expect("resolved player leave must have a live journal cause");
 
     abandon_source_bound_resolution_prompt(state, player);
     retire_pending_zone_change_contexts_owned_by(state, player);
@@ -592,8 +605,20 @@ fn do_eliminate(
 
     crate::game::planechase::preserve_phenomenon_stack_abilities_for_handoff(state, planar_handoff);
 
-    // CR 800.4a: Remove spells they control from the stack
-    state.stack.retain(|entry| entry.controller != player);
+    // CR 800.4a: Remove spells they control from the stack, one at a time
+    // through the shared stack-removal authority — the same shape as the
+    // scheduled-control release below. A `retain` would drop several entries in
+    // one unjournalable mutation; removing by position instead records each
+    // entry with the index it occupied at the moment IT was removed, so a replay
+    // reproduces both the count and the surviving entries' relative order.
+    while let Some(idx) = state
+        .stack
+        .iter()
+        .position(|entry| entry.controller == player)
+    {
+        super::stack::remove_stack_entry_at(state, idx)
+            .expect("position yielded a live stack index");
+    }
 
     // CR 800.4a + CR 800.4b: A control-another-player effect (CR 723, e.g.
     // Mindslaver / Secret of Bloodbending) ends when EITHER party leaves the
@@ -910,7 +935,7 @@ fn do_eliminate(
                     source_id,
                     controller: new_holder,
                     condition: None,
-                    ability: venture_ability,
+                    ability: Box::new(venture_ability),
                     timestamp: 0,
                     target_constraints: Vec::new(),
                     distribute: None,
@@ -948,6 +973,38 @@ fn do_eliminate(
     }
 
     events.push(GameEvent::PlayerEliminated { player_id: player });
+
+    // The leave node covers this sweep only. Restoring the enclosing scope keeps
+    // a later, unrelated command from being attributed to the departure.
+    state.active_rules_execution_node = enclosing_node;
+}
+
+/// CR 800.4 + CR 104.3a: Installs one already-resolved player departure verbatim.
+///
+/// Deliberately re-runs none of the CR 104 loss conditions that produced the
+/// departure: whether this player lost was settled when the command was
+/// recorded.
+pub fn apply_resolved_player_leave(
+    state: &mut GameState,
+    command: &ResolvedPlayerLeaveCommand,
+) -> Result<(), ResolvedPlayerLeaveReplayInvariantError> {
+    let player = state
+        .players
+        .iter_mut()
+        .find(|p| p.id == command.player)
+        .ok_or(ResolvedPlayerLeaveReplayInvariantError::UnknownPlayer(
+            command.player,
+        ))?;
+    if player.is_eliminated {
+        return Err(ResolvedPlayerLeaveReplayInvariantError::AlreadyEliminated(
+            command.player,
+        ));
+    }
+    player.is_eliminated = true;
+    if !state.eliminated_players.contains(&command.player) {
+        state.eliminated_players.push(command.player);
+    }
+    Ok(())
 }
 
 /// CR 800.4a: A paused carrier retains trigger-source contexts from the
@@ -1369,6 +1426,7 @@ mod tests {
                     exile_duration: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
+                    face_down_in_exile: false,
                 },
                 crate::types::game_state::PendingBatchZoneMoveRequest {
                     object_id: surviving,
@@ -1384,6 +1442,7 @@ mod tests {
                     exile_duration: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
+                    face_down_in_exile: false,
                 },
             ],
             attempted: vec![leaving, surviving],

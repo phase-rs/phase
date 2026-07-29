@@ -1,0 +1,163 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 411
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 149,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Station (Tap another creature you control: Put charge counters equal to its power on ~. Station only as a sorcery. It's an artifact creature at 12+.)"
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "unknown",
+            "description": "Station"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": "Station",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    },
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 150,
+          "end_byte": 193,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "2+ | Other creatures you control get +1/+1."
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "Another"
+                }
+              ]
+            },
+            "modifications": [
+              {
+                "type": "AddPower",
+                "value": 1
+              },
+              {
+                "type": "AddToughness",
+                "value": 1
+              }
+            ],
+            "condition": {
+              "type": "HasCounters",
+              "counters": {
+                "type": "OfType",
+                "data": "charge"
+              },
+              "minimum": 2
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Other creatures you control get +1/+1."
+          },
+          "source_text": "Other creatures you control get +1/+1.",
+          "body_ir": null
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 2,
+          "last_line": 2,
+          "start_byte": 194,
+          "end_byte": 216,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "12+ | Flying, lifelink"
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [
+              {
+                "type": "AddKeyword",
+                "keyword": "Flying"
+              },
+              {
+                "type": "AddKeyword",
+                "keyword": "Lifelink"
+              }
+            ],
+            "condition": {
+              "type": "HasCounters",
+              "counters": {
+                "type": "OfType",
+                "data": "charge"
+              },
+              "minimum": 12
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "12+ | Flying, lifelink"
+          },
+          "source_text": "Flying, lifelink",
+          "body_ir": null
+        }
+      }
+    }
+  ],
+  "source_text": "Station (Tap another creature you control: Put charge counters equal to its power on this Spacecraft. Station only as a sorcery. It's an artifact creature at 12+.)\n2+ | Other creatures you control get +1/+1.\n12+ | Flying, lifelink",
+  "card_name": "Lumen-Class Frigate"
+}

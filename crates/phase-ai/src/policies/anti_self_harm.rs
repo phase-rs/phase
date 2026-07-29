@@ -954,6 +954,10 @@ fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
     // Non-land, non-creature tier-1 sources (mana rocks) that auto_tap would use
     // before creatures. Exclude sacrifice-for-mana sources (Treasures) — those are
     // tier 4 in auto_tap and would NOT be tapped before creature dorks.
+    // CR 701.21: the exclusion is `mana_abilities::is_renewable_mana_ability`, the
+    // single engine authority. The local copy this replaced matched only a
+    // `Composite` cost, so a Gold token (bare `Sacrifice`) defeated the stated
+    // intent and was counted as a renewable tier-1 rock.
     let non_creature_tier1_count = ctx
         .state
         .battlefield
@@ -964,9 +968,10 @@ fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
                     && !obj.tapped
                     && !obj.card_types.core_types.contains(&CoreType::Land)
                     && !obj.card_types.core_types.contains(&CoreType::Creature)
-                    && obj.abilities.iter().any(|a| {
-                        mana_abilities::is_mana_ability(a) && !ability_cost_requires_sacrifice(a)
-                    })
+                    && obj
+                        .abilities
+                        .iter()
+                        .any(mana_abilities::is_renewable_mana_ability)
             })
         })
         .count();
@@ -979,21 +984,6 @@ fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
 
     // Each creature tapped loses its blocking value during this combat.
     -(5.0 * creatures_tapped as f64)
-}
-
-/// Check if an ability's cost includes self-sacrifice (Treasure-style `{T}, Sacrifice`).
-/// Mirrors `mana_sources::cost_requires_sacrifice` which is private to the engine module.
-fn ability_cost_requires_sacrifice(ability: &engine::types::ability::AbilityDefinition) -> bool {
-    match &ability.cost {
-        Some(AbilityCost::Composite { costs }) => costs.iter().any(|c| {
-            matches!(
-                c,
-                AbilityCost::Sacrifice(cost)
-                    if matches!(cost.target, TargetFilter::SelfRef)
-            )
-        }),
-        _ => false,
-    }
 }
 
 /// Extract the fixed damage amount from the pending spell's DealDamage effect.
@@ -1051,12 +1041,12 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardSelectionMode,
-        ContinuousModification, ControllerRef, DiscardSelfScope, FilterProp, PtValue, QuantityRef,
-        ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticDefinition, TargetFilter,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        ContinuousModification, ControllerRef, DiscardSelfScope, EffectKind, FilterProp, PtValue,
+        QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticDefinition,
+        TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use engine::types::game_state::{
-        CastingVariant, GameState, PendingCast, TargetSelectionSlot, WaitingFor,
+        CastingVariant, GameState, PendingCast, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
@@ -1124,6 +1114,8 @@ mod tests {
                     legal_targets,
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -1399,6 +1391,7 @@ mod tests {
                 }])],
             target: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
             duration: None,
+            end_cost: None,
         };
 
         let (decision, candidate) = make_target_selection_ctx(
@@ -1766,6 +1759,8 @@ mod tests {
                     legal_targets: legal_targets.clone(),
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -1852,6 +1847,8 @@ mod tests {
                     ],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -2001,6 +1998,7 @@ mod tests {
             static_abilities: Vec::new(),
             target: None,
             duration: None,
+            end_cost: None,
         };
         assert_eq!(effect_polarity(&effect), EffectPolarity::Contextual);
     }
@@ -2721,6 +2719,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(target_id)],
                     optional: true,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -2974,6 +2974,7 @@ mod tests {
                 static_abilities: Vec::new(),
                 target: None,
                 duration: None,
+                end_cost: None,
             },
             Vec::new(),
             aura_id,
@@ -2989,6 +2990,8 @@ mod tests {
                     legal_targets,
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -3095,6 +3098,158 @@ mod tests {
         assert!(
             score < -4.0,
             "Should penalize pump spell that must tap creature blocker, got {score}"
+        );
+    }
+
+    /// Row 15 — the F-1 migration, driven through the production policy seam.
+    ///
+    /// CR 701.21: a **Gold** token's mana ability sacrifices its own source, so it
+    /// is NOT a renewable tier-1 rock and cannot spare a creature dork from being
+    /// tapped. The local `ability_cost_requires_sacrifice` this replaced matched
+    /// only a `Composite` cost, while Gold's cost is a **bare** `Sacrifice` — so
+    /// Gold fell to the `_ => false` arm and was counted as tier-1, defeating the
+    /// filter's own stated intent.
+    ///
+    /// Discrimination: with one dork, no lands, and a 1-mana pump, `shortfall`
+    /// is `1`. Counting Gold gives `creatures_at_risk = 1 - 1 = 0` and the
+    /// penalty never fires; excluding it gives `1 - 0 = 1` and the penalty does
+    /// fire. The `score < -4.0` assertion therefore flips exactly on this
+    /// migration.
+    ///
+    /// The paired positive (a Signet-shaped rock, bare `{T}`) proves the
+    /// discriminator is the self-sacrifice clause and not merely the presence of
+    /// a nonland artifact.
+    #[test]
+    fn gold_token_is_not_a_tier1_rock_but_a_signet_is() {
+        use engine::game::effects::token::predefined_token_abilities;
+        use engine::types::ability::{AbilityCost, AbilityKind, ManaContribution, ManaProduction};
+        use engine::types::mana::ManaColor;
+
+        /// Builds the shared fixture: opponent's combat, one non-sick creature
+        /// mana dork, no lands, a `{G}` pump in hand, plus `extra_abilities` on a
+        /// single untapped nonland artifact.
+        fn score_with_artifact(
+            extra_abilities: Vec<engine::types::ability::AbilityDefinition>,
+        ) -> f64 {
+            let mut state = make_state();
+            state.active_player = PlayerId(1);
+            state.phase = Phase::DeclareAttackers;
+
+            let dork_id = add_creature(&mut state, PlayerId(0), "Llanowar Elves", 1, 1);
+            let dork_obj = state.objects.get_mut(&dork_id).unwrap();
+            dork_obj.entered_battlefield_turn = Some(0);
+            let mut mana_ability = engine::types::ability::AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            );
+            mana_ability.cost = Some(AbilityCost::Tap);
+            Arc::make_mut(&mut dork_obj.abilities).push(mana_ability);
+
+            let artifact_id = create_object(
+                &mut state,
+                CardId(600),
+                PlayerId(0),
+                "Artifact".to_string(),
+                Zone::Battlefield,
+            );
+            let artifact = state.objects.get_mut(&artifact_id).unwrap();
+            artifact.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut artifact.abilities).extend(extra_abilities);
+
+            add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+
+            let spell_id = create_object(
+                &mut state,
+                CardId(500),
+                PlayerId(0),
+                "Giant Growth".to_string(),
+                Zone::Hand,
+            );
+            let spell_obj = state.objects.get_mut(&spell_id).unwrap();
+            spell_obj.card_types.core_types.push(CoreType::Instant);
+            spell_obj.mana_cost = ManaCost::Cost {
+                shards: vec![engine::types::mana::ManaCostShard::Green],
+                generic: 0,
+            };
+            spell_obj.abilities = Arc::new(vec![engine::types::ability::AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Pump {
+                    power: PtValue::Fixed(3),
+                    toughness: PtValue::Fixed(3),
+                    target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                },
+            )]);
+
+            let config = AiConfig::default();
+            let decision = AiDecisionContext {
+                waiting_for: WaitingFor::Priority {
+                    player: PlayerId(0),
+                },
+                candidates: Vec::new(),
+            };
+            let candidate = CandidateAction {
+                action: GameAction::CastSpell {
+                    object_id: spell_id,
+                    card_id: CardId(500),
+                    targets: Vec::new(),
+                    payment_mode: CastPaymentMode::Auto,
+                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+            };
+            let ctx = PolicyContext {
+                state: &state,
+                decision: &decision,
+                candidate: &candidate,
+                ai_player: PlayerId(0),
+                config: &config,
+                context: &crate::context::AiContext::empty(&config.weights),
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            };
+            AntiSelfHarmPolicy.score(&ctx)
+        }
+
+        // Verbatim production Gold ability — a BARE `Sacrifice(SelfRef)`.
+        let gold = predefined_token_abilities("Gold");
+        assert_eq!(gold.len(), 1);
+        assert!(
+            matches!(gold[0].cost, Some(AbilityCost::Sacrifice(_))),
+            "reach-guard: Gold's cost must be a BARE Sacrifice, not a Composite — \
+             if this ever changes, this row stops discriminating"
+        );
+
+        // A Signet-shaped renewable rock: bare `{T}`, no sacrifice.
+        let mut signet = engine::types::ability::AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+        signet.cost = Some(AbilityCost::Tap);
+
+        assert!(
+            score_with_artifact(gold) < -4.0,
+            "Gold self-sacrifices, so it cannot spare the dork — the penalty must fire"
+        );
+        assert!(
+            score_with_artifact(vec![signet]) > -4.0,
+            "a renewable Signet-shaped rock IS tier-1 and does spare the dork"
         );
     }
 
@@ -3282,11 +3437,11 @@ mod tests {
         token_obj.is_token = true;
 
         // Set up pending trigger with exile effect (like Seam Rip)
-        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+        state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
             source_id: ObjectId(200),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: None,
                     destination: Zone::Exile,
@@ -3305,7 +3460,7 @@ mod tests {
                 Vec::new(),
                 ObjectId(200),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -3316,7 +3471,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
 
         let config = AiConfig::default();
         let legal_targets = vec![TargetRef::Object(creature), TargetRef::Object(token)];
@@ -3330,6 +3485,8 @@ mod tests {
                     legal_targets: legal_targets.clone(),
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 target_constraints: Vec::new(),
@@ -3393,11 +3550,11 @@ mod tests {
     #[test]
     fn trigger_target_effects_are_extracted() {
         let mut state = make_state();
-        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+        state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
             source_id: ObjectId(200),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: None,
                     destination: Zone::Exile,
@@ -3416,7 +3573,7 @@ mod tests {
                 Vec::new(),
                 ObjectId(200),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -3427,7 +3584,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
 
         let config = AiConfig::default();
         let decision = AiDecisionContext {
@@ -3515,6 +3672,8 @@ mod tests {
                     legal_targets,
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -3609,6 +3768,7 @@ mod tests {
                 .affected(TargetFilter::Typed(TypedFilter::creature()))],
             duration: Some(engine::types::ability::Duration::UntilEndOfTurn),
             target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            end_cost: None,
         };
 
         // Score targeting own creature

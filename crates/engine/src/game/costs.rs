@@ -201,11 +201,10 @@ fn find_eligible_tap_creatures_targets(
 pub(crate) enum PaymentScope<'a> {
     Activation {
         excluded_sources: &'a HashSet<ObjectId>,
-        /// CR 106.6: Keyword tag of the activated ability whose cost is being
-        /// paid. Threaded into `PaymentContext::Activation` so tag-scoped mana
-        /// spend restrictions (Quinjet → power-up) gate eligible mana. Resolution
-        /// scope never carries a tag (resolution-time costs aren't activations).
-        ability_tag: Option<crate::types::ability::AbilityTag>,
+        /// CR 106.6: Exact activated ability whose mana cost is being paid.
+        /// This builds the live activation payment context, including any
+        /// source-chosen-color rider and keyword tag.
+        ability_index: Option<usize>,
     },
     /// `ability` is normally the PAYER-ADJUSTED `ResolvedAbility` clone
     /// (controller swapped to the resolved payer, per `effects/pay.rs`). All
@@ -263,8 +262,8 @@ fn payment_failed(reason: impl Into<String>) -> PaymentOutcome {
 pub enum PaymentOutcome {
     /// The cost was paid in full.
     Paid,
-    /// CR 616.1: a replacement-effect choice interrupted payment. Reserved
-    /// exclusively for the `pause_cost_payment_for_replacement_choice` path.
+    /// CR 614.6 + CR 616.1: replacement processing interrupted payment,
+    /// either for replacement ordering or for an interactive substitute.
     Paused { remaining_cost: Option<AbilityCost> },
     /// CR 601.2h / CR 118.12: the cost was not (fully) paid. The caller maps
     /// this to the scope-appropriate failure channel (see [`PaymentScope`]).
@@ -312,6 +311,26 @@ fn resume_cost_with_concrete_mana(
     }
     *first = concrete;
     combine_remaining_costs(None, &flattened).expect("a concrete mana suffix is never empty")
+}
+
+/// CR 118.12 + CR 605.3b + CR 616.1: A deferred Phyrexian-style life
+/// replacement begins only after the leading mana component was spent. Remove
+/// that committed prefix while retaining every later composite component.
+pub(crate) fn remaining_cost_after_paid_mana_prefix(cost: &AbilityCost) -> Option<AbilityCost> {
+    let mut flattened = Vec::new();
+    flatten_cost_components(cost, &mut flattened);
+    let first = flattened
+        .first()
+        .expect("a deferred mana-payment root is never empty");
+    assert!(
+        matches!(
+            first,
+            AbilityCost::Mana { .. } | AbilityCost::ManaDynamic { .. }
+        ),
+        "a deferred mana-payment root must begin with mana"
+    );
+    flattened.remove(0);
+    combine_remaining_costs(None, &flattened)
 }
 
 /// Flatten nested Composite nodes only while constructing a serialized payment
@@ -573,7 +592,7 @@ pub fn pay_ability_cost_for_activation(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
+    ability_index: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     pay_ability_cost_for_activation_with_cost_move_replacement(
@@ -581,7 +600,7 @@ pub fn pay_ability_cost_for_activation(
         player,
         source_id,
         cost,
-        ability_tag,
+        ability_index,
         events,
     )
 }
@@ -591,7 +610,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
+    ability_index: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
@@ -603,7 +622,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
         events,
         &PaymentScope::Activation {
             excluded_sources: &excluded_sources,
-            ability_tag,
+            ability_index,
         },
         None,
     )?;
@@ -760,23 +779,46 @@ fn pay_ability_cost_inner(
             // source permanent's types.
             PaymentScope::Activation {
                 excluded_sources,
-                ability_tag,
+                ability_index,
                 ..
             } => {
-                if excluded_sources.is_empty() {
-                    pay_ability_mana_cost(state, player, source_id, cost, *ability_tag, events)?;
+                let resume_at_resolution_depth = state.resolution_stack.len();
+                let payment = if excluded_sources.is_empty() {
+                    pay_ability_mana_cost(state, player, source_id, *ability_index, cost, events)?
                 } else {
                     pay_ability_mana_cost_excluding(
                         state,
                         player,
                         source_id,
+                        *ability_index,
                         cost,
-                        *ability_tag,
                         events,
                         excluded_sources,
                         // Top-level ability cost payment: no outer cost on the stack.
                         None,
-                    )?;
+                    )?
+                };
+                match payment {
+                    super::casting::ManaCostPayment::Paid(()) => {}
+                    super::casting::ManaCostPayment::Paused {
+                        remaining_life_payments,
+                        ..
+                    } => {
+                        // CR 107.4f + CR 118.3b + CR 119.4 + CR 616.1: The
+                        // announcing caller attaches its complete activation
+                        // root before returning control to a player.
+                        state.pending_deferred_life_cost_resume = Some(
+                            crate::types::game_state::DeferredLifeCostResume::Cast {
+                                player,
+                                pending: None,
+                                remaining_life_payments,
+                                resume_at_resolution_depth,
+                            },
+                        );
+                        return Ok(PaymentOutcome::Paused {
+                            remaining_cost: None,
+                        });
+                    }
                 }
             }
             // CR 118.12: Resolution-time mana payment uses the effect-context
@@ -805,7 +847,9 @@ fn pay_ability_cost_inner(
                     // CR 118.12 + CR 605.3b + CR 616.1: The mana ability
                     // cursor, rather than the unless-payment handler, owns
                     // the replacement choice and exact resume state.
-                    if mana_ability_cost_payment_is_paused(state) {
+                    if mana_ability_cost_payment_is_paused(state)
+                        || state.pending_deferred_life_cost_resume.is_some()
+                    {
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
                         });
@@ -849,7 +893,9 @@ fn pay_ability_cost_inner(
                     // CR 118.12 + CR 605.3b + CR 616.1: See the concrete
                     // mana-cost arm above; the replacement-aware cursor owns
                     // this pause as well.
-                    if mana_ability_cost_payment_is_paused(state) {
+                    if mana_ability_cost_payment_is_paused(state)
+                        || state.pending_deferred_life_cost_resume.is_some()
+                    {
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
                         });
@@ -903,7 +949,8 @@ fn pay_ability_cost_inner(
                         // continuation: it would retry a paid prefix or let the
                         // rider run before the unpaid cost is settled.
                         if matches!(scope, PaymentScope::Resolution { .. })
-                            && mana_ability_cost_payment_is_paused(state)
+                            && (mana_ability_cost_payment_is_paused(state)
+                                || state.pending_deferred_life_cost_resume.is_some())
                         {
                             return Ok(PaymentOutcome::Paused {
                                 remaining_cost: None,
@@ -943,6 +990,12 @@ fn pay_ability_cost_inner(
             };
             match result {
                 super::life_costs::PayLifeCostResult::Paid { .. } => {}
+                super::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution { .. }
+                | super::life_costs::PayLifeCostResult::DeferredReplacementChoice { .. } => {
+                    return Ok(PaymentOutcome::Paused {
+                        remaining_cost: None,
+                    });
+                }
                 super::life_costs::PayLifeCostResult::InsufficientLife
                 | super::life_costs::PayLifeCostResult::Prohibited => {
                     return Ok(payment_failed("Cannot pay life cost"));
@@ -1626,8 +1679,8 @@ pub(crate) fn can_pay(
     scope: &PaymentScope,
 ) -> bool {
     match scope {
-        PaymentScope::Activation { .. } => {
-            if !cost.is_payable(state, payer, source_id) {
+        PaymentScope::Activation { ability_index, .. } => {
+            if !cost.is_payable_for_activation(state, payer, source_id, *ability_index) {
                 return false;
             }
             // CR 118.12a: disjunctive activation costs resolve via
@@ -2241,7 +2294,7 @@ mod tests {
             let excluded = ability_mana_payment_excluded_sources(&cost, src);
             let scope = PaymentScope::Activation {
                 excluded_sources: &excluded,
-                ability_tag: None,
+                ability_index: Some(0),
             };
             assert!(
                 can_pay(&scenario.state, P0, src, &cost, &scope),
@@ -2270,7 +2323,7 @@ mod tests {
         let excluded = ability_mana_payment_excluded_sources(&cost, src);
         let scope = PaymentScope::Activation {
             excluded_sources: &excluded,
-            ability_tag: None,
+            ability_index: Some(0),
         };
         let mut events = Vec::new();
         let outcome = pay_ability_cost_inner(
@@ -2323,7 +2376,7 @@ mod tests {
             P0,
             src,
             &graveyard_cost,
-            None,
+            Some(0),
             &mut Vec::new(),
         );
         assert!(matches!(rejected, Err(EngineError::ActionNotAllowed(_))));
@@ -2339,7 +2392,7 @@ mod tests {
             P0,
             src,
             &battlefield_cost,
-            None,
+            Some(0),
             &mut Vec::new(),
         )
         .expect("battlefield self-return cost should be payable");
@@ -2356,7 +2409,7 @@ mod tests {
             cost,
             &PaymentScope::Activation {
                 excluded_sources: &excluded,
-                ability_tag: None,
+                ability_index: Some(0),
             },
         )
     }

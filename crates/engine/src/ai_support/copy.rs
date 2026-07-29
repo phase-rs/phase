@@ -12,6 +12,10 @@ pub fn copy_target_filter(effect_def: &AbilityDefinition) -> Option<&TargetFilte
 }
 
 pub fn copy_target_mana_value_ceiling(
+    // Callers must pass the *entering object's* cast-payment stamp
+    // (`GameObject::mana_spent_to_cast_amount`, including 0 when never cast),
+    // or a pre-cast AI projection of that stamp — never an unrelated resolving
+    // spell's `PendingSpellResolution.actual_mana_spent` (issue #6440).
     actual_mana_spent: u32,
     effect_def: &AbilityDefinition,
 ) -> Option<u32> {
@@ -88,6 +92,23 @@ mod tests {
         );
 
         assert_eq!(copy_target_mana_value_ceiling(4, &effect), Some(4));
+    }
+
+    #[test]
+    fn typed_copy_limit_zero_stamp_is_some_zero_not_unconstrained() {
+        // Issue #6440: uncast entry stamp is 0 — ceiling must be Some(0), never
+        // collapsing to None (which find_copy_targets treats as unconstrained).
+        let effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                recipient: TargetFilter::SelfRef,
+                duration: Some(Duration::Permanent),
+                mana_value_limit: Some(CopyManaValueLimit::AmountSpentToCastSource),
+                additional_modifications: Vec::new(),
+            },
+        );
+        assert_eq!(copy_target_mana_value_ceiling(0, &effect), Some(0));
     }
 
     #[test]

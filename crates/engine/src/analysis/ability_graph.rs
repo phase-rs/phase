@@ -884,6 +884,9 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c (Metamorphic Alteration): as-enters copy choice — no repeatable
+        // modeled axis at the candidate stage.
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::DoublePT { .. }
@@ -897,12 +900,16 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: a flip instruction carries no nested ability edge, exactly
+        // like `Transform`.
+        | Effect::FlipPermanent { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealFromHand { .. }
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::SwapChosenLabels { .. }
@@ -1887,6 +1894,11 @@ fn build_nodes(faces: &[&CardFace]) -> Vec<AbilityNode> {
                     ContinuousModification::GrantTrigger { trigger } => {
                         if let Some(def) = &trigger.execute {
                             nodes.push(build_node(&face.name, def, trigger_axis(trigger)));
+                        }
+                    }
+                    ContinuousModification::GrantReplacement { replacement } => {
+                        if let Some(def) = &replacement.execute {
+                            nodes.push(build_node(&face.name, def, None));
                         }
                     }
                     _ => {}

@@ -61,6 +61,19 @@ pub(crate) enum DocumentRelationIr {
         coerce: OracleItemId,
         punisher: OracleItemId,
     },
+    /// CR 614.15: A separate ability-word-prefixed paragraph (`override_item`)
+    /// can create a self-replacement effect for the preceding ability paragraph
+    /// (`base`). This relation binds that printed form across document items,
+    /// preserving the base item's source span and printed ability slot when
+    /// lowering folds the override into it.
+    ///
+    /// This is the cross-document-item boundary. `ReplaceMeaningKind::Instead`
+    /// remains the within-one-effect-chain form, where a clause replaces a prior
+    /// clause during one `parse_effect_chain` call.
+    SelfReplacementOverride {
+        base: OracleItemId,
+        override_item: OracleItemId,
+    },
     /// CR 607.2d: A "choose a [value]" producer linked to an ability that reads
     /// "the chosen [value]" back. One parameterized relation; `LinkedChoiceKind`
     /// distinguishes the value kind and the consumer surface that reads it.
@@ -130,4 +143,17 @@ pub(crate) enum LinkedChoiceKind {
     /// exists, so a resolution-scoped choice with no durable reader stays
     /// non-persisted.
     PersistedPlayer { choosers: Vec<OracleItemId> },
+    /// CR 607.2d + CR 707.2c + CR 614.12a: An as-enters permanent-object choice
+    /// gap (`chooser` — an Unimplemented ability whose Oracle text is
+    /// "As … enters, choose <permanent>") linked to a
+    /// `ContinuousModification::CopyChosen` static (`copy_static`). Applying
+    /// removes the gap ability and injects `Effect::ChoosePermanent` —
+    /// Metamorphic Alteration's Aura-host copy. Without this consumer relation
+    /// the choose line stays an ordinary Unimplemented ability (no Moved claim),
+    /// so non-CopyChosen cards (Dauntless Bodyguard, Scheming Fence) keep their
+    /// pre-existing unsupported shape.
+    CopyChosenHost {
+        chooser: OracleItemId,
+        copy_static: OracleItemId,
+    },
 }

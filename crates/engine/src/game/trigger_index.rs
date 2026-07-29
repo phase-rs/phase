@@ -594,6 +594,13 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::PermanentSacrificed { .. } => push(TriggerEventKey::Sacrificed),
         GameEvent::EffectResolved { kind, .. } => keys_from_effect_kind(*kind, &mut push),
         GameEvent::Unattached { .. } => push(TriggerEventKey::AttachmentChanged),
+        // CR 116.2c + CR 116.1: no printed trigger condition matches "a
+        // continuous effect ended". The special action doesn't use the stack, and
+        // any consequential board change (a Licid reverting to a creature and
+        // being unattached under CR 704.5p) emits its OWN indexed event.
+        // Explicitly inert rather than absent, so a future trigger family must
+        // classify it.
+        GameEvent::ContinuousEffectEnded { .. } => {}
         GameEvent::AttackersDeclared { .. } => push(TriggerEventKey::Attacks),
         GameEvent::BlockersDeclared { .. } => push(TriggerEventKey::Blocks),
         // CR 509.3c: an effect-driven "becomes blocked" is a Blocks-key event so
@@ -611,6 +618,15 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::TurnedFaceDown { .. } => {
             push(TriggerEventKey::FaceOrTransform);
         }
+        // CR 701.27b (by analogy): transforming and turning a permanent face
+        // up/down are distinct game actions that don't share triggers even
+        // though they use the same physical action; flipping is likewise its
+        // own game action. No printed flip card has a trigger that fires on
+        // flipping (a design fact about the card pool, not a CR statement).
+        // Deliberately dispatches NO trigger key — folding it into
+        // `FaceOrTransform` would consult transform/face-change triggers for an
+        // event none of them can match.
+        GameEvent::Flipped { .. } => {}
         GameEvent::DayNightChanged { .. } => push(TriggerEventKey::DayNightChanged),
         GameEvent::CardsRevealed { .. } => push(TriggerEventKey::Revealed),
         GameEvent::CrimeCommitted { .. } => push(TriggerEventKey::PlayerActionPerformed),
@@ -803,8 +819,10 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SearchLibrary
         | EffectKind::SearchOutsideGame
         | EffectKind::ExileTop
+        | EffectKind::ExileFaceDownPile
         | EffectKind::TargetOnly
         | EffectKind::Choose
+        | EffectKind::ChoosePermanent
         | EffectKind::OpponentGuess
         | EffectKind::ChooseDamageSource
         | EffectKind::Suspect
@@ -931,6 +949,12 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // action; its own `EffectResolved` dispatches no trigger key.
         | EffectKind::BecomeSaddled
         | EffectKind::Transform
+        // No printed flip card has a trigger that fires on flipping (a design
+        // fact about the card pool, not a CR statement), so — mirroring
+        // `Transform` above — this effect's `EffectResolved` dispatches no key;
+        // `GameEvent::Flipped` is a log/display notification and dispatches no
+        // key either.
+        | EffectKind::FlipPermanent
         | EffectKind::TurnFaceUp
         // CR 701.27b: a turned-face-down permanent fires any face-down trigger
         // via the dedicated `GameEvent::TurnedFaceDown`, not via this effect's

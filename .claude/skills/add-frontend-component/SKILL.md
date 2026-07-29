@@ -283,7 +283,7 @@ If your overlay is a card choice type, integrate into the existing `CardChoiceMo
     .targetSelection({ player: 0 })   // replaces waiting_for exactly
     .build();
   ```
-  Available: `gameObjectFactory` (card types, zones, `tapped()`, `named()`, `withId()`, `commander()`…), `gameStateFactory` (`withPlayers`, `withObjects`, `withStack`, `inPhase`, `commander()`, one method per `WaitingFor` variant), `waitingForFactory` (standalone `WaitingFor` builder), `playerFactory`, `buildEngineAdapterMock`. If your new `WaitingFor` variant or field has no convenience method, **add one to the factory class** — don't hand-roll object literals in tests; literals drift from the serde contract as types evolve.
+  Available: `gameObjectFactory` (card types, zones, `tapped()`, `named()`, `withId()`, `commander()`…), `gameStateFactory` (`withPlayers`, `withObjects`, `withStack`, `inPhase`, `commander()`, one method per `WaitingFor` variant), `waitingForFactory` (standalone `WaitingFor` builder), `playerFactory`, `buildEngineAdapterMock`. If a new `WaitingFor` variant needs a dedicated per-variant factory (for example, `SearchChoiceWaitingForFactory`), it **must extend `WaitingForFactory<T>`** so it inherits `withData` and the shared typed construction contract; then expose it through `waitingForFactory` and have the `gameStateFactory` convenience method delegate to that builder. Do not create an independent Fishery factory that reconstructs the union shape. If a new variant or field has no convenience method, **add one to this existing factory hierarchy** — don't hand-roll object literals in tests; literals drift from the serde contract as types evolve.
   Object, player, and stack-entry ids auto-increment via fishery `sequence`, so builds never collide — only chain `.withId()` when the test asserts on a specific id. Field values are otherwise deterministic (no faker): the engine contract is exact.
 
 - [ ] **Seed the store, don't mount providers.** Components read Zustand directly, so tests arrange by setting store state. Use `setGameStoreForTest` from `test/helpers/gameStoreHelpers.ts` (wraps `setState` in `act()` and returns a stubbed `dispatch`), and `cleanup` + reset in `afterEach`.
@@ -349,6 +349,7 @@ If your overlay is a card choice type, integrate into the existing `CardChoiceMo
 | Wrapping card/Oracle/enum text in `t()` | Double-localizes engine data; key never resolves | Leave engine pass-through raw; only `t()` frontend-authored text |
 | Hand-rolled `count === 1 ? "x" : "xs"` pluralization | Wrong for non-English CLDR rules | `key_one`/`key_other` + `t(key, { count })` |
 | Hand-rolled `GameState`/`GameObject` literals in tests | Silently drifts from serde contract as types evolve | Chain factory convenience methods; extend the factory class when one is missing |
+| Standalone per-variant `WaitingFor` factory | Loses `withData` behavior and duplicates the discriminated-union contract | Extend `WaitingForFactory<T>`, expose it through `waitingForFactory`, and delegate from `gameStateFactory` |
 | No dispatch-shape assertion in overlay tests | Wrong `GameAction` field names pass tests, fail in prod | Assert the exact action object on the `dispatch` mock |
 | No player-gate test | Multiplayer choice-leak regressions ship silently | Assert overlay absent when `waitingFor.data.player !== playerId` |
 

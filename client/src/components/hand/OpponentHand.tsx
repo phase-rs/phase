@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -134,6 +135,7 @@ function OpponentCardThumbnail({ cardId, cardName }: { cardId: ObjectId; cardNam
     return (
       <img
         src={src}
+        {...getCardImageSrcSetProps(src)}
         alt={cardName}
         // `pointer-events-auto` so the card is the hit-test target even when an
         // ancestor opts out of pointer events (the split-seat fan wrapper does,

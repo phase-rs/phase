@@ -68,7 +68,7 @@ describe("OpponentHud", () => {
     useGameStore.setState({
       gameState: createGameState({
         derived: {
-          turn_order: [{ player: 2, slot_index: 1, turns_from_now: 1 }],
+          turn_order: [{ player: 2, slot_index: 1, turns_from_now: 1, turn_number: 2 }],
         },
       }),
     });
@@ -84,9 +84,9 @@ describe("OpponentHud", () => {
         seat_order: [0, 3, 1, 2],
         derived: {
           turn_order: [
-            { player: 2, slot_index: 1, turns_from_now: 1 },
-            { player: 3, slot_index: 2, turns_from_now: 2 },
-            { player: 1, slot_index: 3, turns_from_now: 3 },
+            { player: 2, slot_index: 1, turns_from_now: 1, turn_number: 2 },
+            { player: 3, slot_index: 2, turns_from_now: 2, turn_number: 3 },
+            { player: 1, slot_index: 3, turns_from_now: 3, turn_number: 4 },
           ],
         },
       }),

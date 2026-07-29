@@ -87,6 +87,12 @@ export function DebugPanel() {
   // can open the panel straight to "actions" via `openSandboxTools()`.
   const activeTab = useUiStore((s) => s.debugPanelTab);
   const setActiveTab = useUiStore((s) => s.setDebugPanelTab);
+  // Deliberately NOT `!hasRemoteHumans(gameMode)`, despite reading like a
+  // company question. This is the set of modes whose adapter implements
+  // `restoreState`: `WasmAdapter` does; `WebSocketAdapter.restoreState`
+  // throws, as does the P2P adapter. Widening it to `native-ai` would light
+  // up a button that throws. Server-authoritative restore for
+  // wire-authoritative sessions is a separate piece of work.
   const canRestoreCheckpoints = gameMode === "ai" || gameMode === "local";
 
   const handleRestore = useCallback(async (state: GameState) => {
@@ -349,7 +355,15 @@ export function DebugPanel() {
             Turn Checkpoints
           </h3>
           {!canRestoreCheckpoints ? (
-            <p className="text-xs text-gray-600">Restore disabled in multiplayer</p>
+            /* Misleading twice over before: desktop solo-vs-AI is not
+               multiplayer, and the real reason is a transport limit rather
+               than a mode policy. Names the actual cause and points at the
+               affordance that does work. Hardcoded rather than `t()`-wrapped:
+               `client/src/i18n/README.md` lists dev/debug strings under
+               "Never wrap with t()". */
+            <p className="text-xs text-gray-600">
+              Restore needs the in-browser engine. Use Takeback to undo your last action.
+            </p>
           ) : turnCheckpoints.length === 0 ? (
             <p className="text-xs text-gray-600">No checkpoints yet (saved at turn start)</p>
           ) : (

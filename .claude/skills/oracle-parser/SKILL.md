@@ -453,7 +453,6 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `13b` | Kicker/Multikicker leftovers | skip (handled by keywords) | — |
 | `13c` | Vehicle tier lines "N+ \| keyword(s)" | skip | `oracle_classifier.rs` |
 | `13d` | "Activate only…" constraint line | skip | — |
-| `13e` | "X can't be 0." annotation → `min_x_value` on previous ability | defensive fallback | `oracle.rs` |
 | `14` | Ability word prefix ("Landfall —") — strip, map known words to typed conditions, re-classify the body | `strip_ability_word_with_name()` + `ability_word_to_condition()` | `oracle.rs` |
 | `14a` | Nom fallback dispatch — try effect, trigger, static, and replacement sub-parsers | `dispatch_line_nom()` | `oracle_dispatch.rs` |
 | `15` | Final fallback | `Effect::Unimplemented` with diagnostic trace | — |
@@ -919,7 +918,7 @@ grep -n "^704.5a" docs/MagicCompRules.txt   # Verify SBA rule
 - [ ] Runtime discriminating test when the change claims runtime behavior (see `/card-test`): parser shape tests alone are acceptable ONLY when unsupported semantics remain honestly `Unimplemented`/red in coverage
 - [ ] Snapshot tests: `oracle_ir/snapshot_tests.rs` (IR + lowered parity, insta), plus per-module `snapshot_tests.rs` in `oracle_static/`
 - [ ] `cargo coverage` — Unimplemented count should decrease
-- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
+- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p phase-engine` + `./scripts/gen-card-data.sh`.
 
 ### 9b. Adding a New Effect Type
 
@@ -991,7 +990,7 @@ The `crates/engine/src/parser/swallow_check.rs` module audits each card's parsed
 jq -r '[.[] | .parse_warnings // [] | .[]] | length' client/public/card-data.json
 
 # Top clustered warning patterns by likely shared fix.
-cargo run -p engine --bin coverage-report -- data --brief \
+cargo run -p phase-engine --bin coverage-report -- data --brief \
   --write-warning-patterns /tmp/parser-warning-patterns.json >/tmp/coverage.json
 jq -r '
   [.[] | select(.category=="swallowed-clause")]
@@ -1003,18 +1002,18 @@ jq -r '
 # Drill down into one exact warning pattern. This uses the same clustering
 # function as parser-warning-patterns.json and includes support status,
 # gap count, warning text, parsed labels, and gap details.
-cargo run -p engine --bin coverage-report -- data \
+cargo run -p phase-engine --bin coverage-report -- data \
   --warning-category swallowed-clause \
   --warning-pattern 'Replacement_Instead: instead' \
   --warning-limit 20 >/tmp/warning-drilldown.json
 
 # Drill down into a broader detector family when exact-pattern slices are too narrow.
-cargo run -p engine --bin coverage-report -- data \
+cargo run -p phase-engine --bin coverage-report -- data \
   --warning-detector Replacement_Instead \
   --warning-limit 20 >/tmp/warning-drilldown.json
 
 # Include the full parse_details tree and exported CardFace JSON when needed.
-cargo run -p engine --bin coverage-report -- data \
+cargo run -p phase-engine --bin coverage-report -- data \
   --warning-detector DynamicQty \
   --warning-full \
   --warning-limit 5 >/tmp/warning-drilldown-full.json

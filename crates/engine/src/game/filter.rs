@@ -76,6 +76,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -311,6 +312,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -757,6 +759,22 @@ impl<'a> FilterContext<'a> {
         }
     }
 
+    /// CR 608.2c: Full ability context with an explicit object chosen by an
+    /// earlier instruction as the recipient-relative authority for "other."
+    pub fn from_ability_with_recipient(
+        ability: &'a ResolvedAbility,
+        recipient_id: ObjectId,
+    ) -> Self {
+        Self {
+            source_id: ability.source_id,
+            source_controller: Some(ability.controller),
+            ability: Some(ability),
+            trigger_source: ability.trigger_source.as_ref(),
+            recipient_id: Some(recipient_id),
+            scoped_iteration_player: None,
+        }
+    }
+
     /// CR 109.4: Full ability context with an explicit controller override.
     /// Use when the filter controller differs from `ability.controller`
     /// (e.g., "creature that player controls" mass-move dispatched to a target
@@ -961,6 +979,22 @@ pub(crate) fn controller_ref_player(
         ControllerRef::ActivePlayer => Some(state.active_player),
     }
 }
+/// Whether `filter` references the resolution-local `last_zone_changed_ids`
+/// ledger population (bare or nested inside compound filters).
+pub(crate) fn filter_contains_last_zone_changed(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::LastZoneChanged => true,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_contains_last_zone_changed)
+        }
+        TargetFilter::Not { filter } => filter_contains_last_zone_changed(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            filter_contains_last_zone_changed(filter)
+        }
+        _ => false,
+    }
+}
+
 /// Check if an object matches a typed TargetFilter against the given context.
 ///
 /// This is the unified entry point for filter evaluation. Build a
@@ -2162,6 +2196,7 @@ fn filter_inner_for_object(
             .is_some_and(|attached| attached == object_id),
         TargetFilter::LastCreated => state.last_created_token_ids.contains(&object_id),
         TargetFilter::LastRevealed => state.last_revealed_ids.contains(&object_id),
+        TargetFilter::LastZoneChanged => state.last_zone_changed_ids.contains(&object_id),
         // CR 608.2k: "the sacrificed/exiled/discarded <noun>" — the specific
         // untargeted object previously referred to by this ability. Resolve
         // through the documented `cost_paid_object → effect_context_object`
@@ -2680,6 +2715,7 @@ fn zone_change_filter_inner(
         ),
         TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -2992,6 +3028,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -3308,6 +3345,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }

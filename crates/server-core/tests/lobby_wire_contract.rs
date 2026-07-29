@@ -82,6 +82,33 @@ fn non_lobby_frame_routes_to_reject() {
 /// frame serialized by the canonical enum.
 #[test]
 fn lobby_server_messages_byte_identical_to_canonical() {
+    // Error without a code remains byte-identical to existing peers.
+    let lb_error = lb::LobbyServerMessage::error("legacy error");
+    let sc_error = sc::ServerMessage::error("legacy error");
+    assert_eq!(
+        serde_json::to_string(&lb_error).unwrap(),
+        r#"{"type":"Error","data":{"message":"legacy error"}}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&lb_error).unwrap(),
+        serde_json::to_string(&sc_error).unwrap()
+    );
+
+    // Typed errors use the identical canonical and broker wire shape.
+    let lb_typed = lb::LobbyServerMessage::Error {
+        message: "deck invalid".into(),
+        code: Some(lb::ServerErrorCode::DeckRejected),
+    };
+    let sc_typed = sc::ServerMessage::deck_rejected("deck invalid");
+    assert_eq!(
+        serde_json::to_string(&lb_typed).unwrap(),
+        r#"{"type":"Error","data":{"message":"deck invalid","code":"deck_rejected"}}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&lb_typed).unwrap(),
+        serde_json::to_string(&sc_typed).unwrap()
+    );
+
     // Pong.
     let lb_pong = lb::LobbyServerMessage::Pong { timestamp: 7 };
     let sc_pong = sc::ServerMessage::Pong { timestamp: 7 };
