@@ -4314,21 +4314,31 @@ pub(crate) fn finish_target_selected_activated_ability_at_payment_boundary(
     finish_activated_ability_at_payment_boundary(state, player, pending, events)
 }
 
-/// CR 601.2c + CR 601.2g-h + CR 602.2b: Targeted activations whose payment
-/// boundary must first process a mana leg or bind announced X defer their
-/// interactive residual until that common boundary has run.
+/// Identifies which target-first activation handoff is deciding whether to
+/// surface an interactive residual before returning to the payment authority.
+#[derive(Clone, Copy)]
+pub(crate) enum TargetFirstPaymentHandoff {
+    BeforeManaPayment,
+    AfterManaPayment,
+}
+
+/// CR 601.2c + CR 601.2g-h + CR 602.2b: Targeted activations whose handoff
+/// must process an unpaid mana leg or bind announced X defer their interactive
+/// residual until that common boundary has run.
 ///
-/// This is deliberately limited to the target-declaration transition. The
-/// shared interactive-cost dispatcher also resumes ordinary activation and
+/// This is deliberately limited to target-first handoffs. The shared
+/// interactive-cost dispatcher also resumes ordinary activation and
 /// craft/material flows, which must retain their established routing.
 pub(crate) fn target_first_activation_defers_interactive_costs_to_payment_boundary(
     pending: &PendingCast,
+    handoff: TargetFirstPaymentHandoff,
 ) -> bool {
     let Some(cost) = pending.activation_cost.as_ref() else {
         return false;
     };
 
-    extract_mana_leg(cost).is_some_and(|(mana_cost, _)| !mana_cost.is_without_paying_mana())
+    (matches!(handoff, TargetFirstPaymentHandoff::BeforeManaPayment)
+        && extract_mana_leg(cost).is_some_and(|(mana_cost, _)| !mana_cost.is_without_paying_mana()))
         || (pending.ability.chosen_x.is_some() && cost_has_targeted_symbolic_counter_removal(cost))
 }
 

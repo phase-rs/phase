@@ -23,6 +23,7 @@ use super::casting_costs::{
     cost_has_x, drain_deferred_triggers_after_stack_object_announcement, enter_payment_step,
     finish_pending_cast_cost_or_pay,
     target_first_activation_defers_interactive_costs_to_payment_boundary,
+    TargetFirstPaymentHandoff,
 };
 use super::engine::EngineError;
 use super::restrictions;
@@ -393,7 +394,10 @@ pub(crate) fn handle_select_targets(
         let mut pending = pending;
         pending.ability = ability;
         pending.activation_target_selection = ActivationTargetSelection::Settled;
-        if !target_first_activation_defers_interactive_costs_to_payment_boundary(&pending) {
+        if !target_first_activation_defers_interactive_costs_to_payment_boundary(
+            &pending,
+            TargetFirstPaymentHandoff::BeforeManaPayment,
+        ) {
             if let Some(waiting_for) =
                 super::casting_costs::surface_next_unpaid_interactive_activation_cost(
                     state,
@@ -505,7 +509,10 @@ pub(crate) fn handle_choose_target(
                 let mut pending = pending;
                 pending.ability = ability;
                 pending.activation_target_selection = ActivationTargetSelection::Settled;
-                if !target_first_activation_defers_interactive_costs_to_payment_boundary(&pending) {
+                if !target_first_activation_defers_interactive_costs_to_payment_boundary(
+                    &pending,
+                    TargetFirstPaymentHandoff::BeforeManaPayment,
+                ) {
                     if let Some(waiting_for) =
                         super::casting_costs::surface_next_unpaid_interactive_activation_cost(
                             state,
@@ -553,6 +560,9 @@ pub(crate) fn finish_activation_after_automatic_mana_payment(
     if matches!(
         pending.activation_target_selection,
         ActivationTargetSelection::Settled
+    ) && !target_first_activation_defers_interactive_costs_to_payment_boundary(
+        &pending,
+        TargetFirstPaymentHandoff::AfterManaPayment,
     ) {
         if let Some(waiting) =
             super::casting_costs::surface_next_unpaid_interactive_activation_cost(

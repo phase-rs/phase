@@ -3,14 +3,15 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, Effect, QuantityExpr,
-    ReplacementDefinition, SacrificeCost, TapCreaturesRequirement, TargetFilter, TargetRef,
-    TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, CounterCostSelection, Effect,
+    QuantityExpr, ReplacementDefinition, SacrificeCost, TapCreaturesRequirement, TargetFilter,
+    TargetRef, TypedFilter, REMOVE_COUNTER_COST_X,
 };
 use engine::types::actions::GameAction;
+use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::{PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::{EtbTapState, Zone};
@@ -265,6 +266,125 @@ fn target_first_mana_payment_precedes_sacrifice_and_can_be_cancelled() {
         runner.state().deferred_triggers.is_empty(),
         "rejecting cancellation must neither leak nor duplicate the local trigger"
     );
+}
+
+/// CR 601.2c + CR 601.2g-h + CR 602.2b: an activation with an ordinary mana
+/// leg and a targeted symbolic remove-X-counters cost must lock its effect
+/// target, pay mana, then bind X before it asks which permanent pays counters.
+///
+/// The separate target and counter-source objects make this discriminate the
+/// post-mana continuation: surfacing the symbolic residual directly either
+/// exposes the wrong count or bypasses the counter-source choice entirely.
+#[test]
+fn target_first_mana_then_targeted_x_counter_cost_binds_x_before_payment_choice() {
+    let charge = CounterType::Generic("charge".to_string());
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Mana and Counter Battery", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: engine::types::ability::QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    AbilityCost::RemoveCounter {
+                        count: REMOVE_COUNTER_COST_X,
+                        counter_type: CounterMatch::OfType(charge.clone()),
+                        target: Some(TargetFilter::Typed(TypedFilter::artifact())),
+                        selection: CounterCostSelection::SingleObject,
+                    },
+                ],
+            }),
+        )
+        .id();
+    let counter_source = scenario
+        .add_creature(P0, "Charge Battery", 1, 1)
+        .as_artifact()
+        .id();
+    let target = scenario.add_creature(P1, "Damage Target", 3, 3).id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(91_001),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&counter_source)
+        .expect("counter source exists")
+        .counters
+        .insert(charge.clone(), 2);
+
+    activate(&mut runner, source);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseXValue { .. }
+    ));
+    runner
+        .act(GameAction::ChooseX { value: 2 })
+        .expect("X announcement must resume target selection");
+    choose_target(&mut runner, target);
+
+    let WaitingFor::PayCost {
+        kind,
+        choices,
+        count,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "mana payment must resume at the concrete counter-cost choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        kind,
+        PayCostKind::RemoveCounter {
+            counter_type: CounterMatch::OfType(charge.clone()),
+            count: 2,
+            selection: CounterCostSelection::SingleObject,
+        }
+    );
+    assert_eq!(count, 1, "one counter source must be selected");
+    assert!(choices.contains(&counter_source));
+    assert!(
+        runner.state().battlefield.contains(&target),
+        "the effect target remains declared while the counter source is chosen"
+    );
+    assert!(runner.state().stack.is_empty());
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![counter_source],
+        })
+        .expect("selecting the counter source must pay the bound X cost");
+    assert_eq!(
+        runner.state().objects[&counter_source]
+            .counters
+            .get(&charge),
+        None,
+        "the selected source pays exactly the announced two counters"
+    );
+    assert_eq!(runner.state().stack.len(), 1);
 }
 
 fn targeted_damage_cost_ability(cost: AbilityCost) -> AbilityDefinition {
