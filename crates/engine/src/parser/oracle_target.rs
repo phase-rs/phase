@@ -17012,4 +17012,222 @@ mod tests {
             "expected Or filter, got {f:?}"
         );
     }
+
+    // ---- CR 109.2: BARE postnominal superlative (no "among" clause) ----
+
+    /// Extract the sole superlative `FilterProp` from a parsed target filter,
+    /// plus the population it ranks over.
+    fn bare_superlative_parts(filter: &TargetFilter) -> (&FilterProp, &TargetFilter) {
+        let tf = typed_leg(filter).expect("expected a Typed target filter");
+        let prop = tf
+            .properties
+            .iter()
+            .find(|p| {
+                matches!(
+                    p,
+                    FilterProp::Cmc {
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::Aggregate { .. }
+                        },
+                        ..
+                    } | FilterProp::PtComparison {
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::Aggregate { .. }
+                        },
+                        ..
+                    }
+                )
+            })
+            .expect("expected a superlative FilterProp carrying an Aggregate");
+        let population = match prop {
+            FilterProp::Cmc {
+                value:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { filter, .. },
+                    },
+                ..
+            }
+            | FilterProp::PtComparison {
+                value:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { filter, .. },
+                    },
+                ..
+            } => filter,
+            _ => unreachable!("matched above"),
+        };
+        (prop, population)
+    }
+
+    /// CR 109.2 + CR 202.3 — Culling Scales, verbatim clause. The bare superlative
+    /// ranks over the ENCLOSING noun phrase ("nonland permanent"), so the emitted
+    /// population must reproduce that type conjunction and must itself carry NO
+    /// properties (a population that nested the superlative inside itself would make
+    /// `resolve_filter_threshold` recurse without bound).
+    ///
+    /// Reverting the materialization block leaves `properties: []` here — the exact
+    /// misparse this fixes, where the ability could destroy ANY nonland permanent.
+    #[test]
+    fn bare_superlative_lowest_mana_value_ranks_over_enclosing_noun_phrase() {
+        let (filter, rest) = parse_target("target nonland permanent with the lowest mana value");
+        assert!(
+            rest.trim().is_empty(),
+            "whole phrase consumed, got {rest:?}"
+        );
+        let (prop, population) = bare_superlative_parts(&filter);
+        let FilterProp::Cmc {
+            comparator, value, ..
+        } = prop
+        else {
+            panic!("expected Cmc, got {prop:?}");
+        };
+        assert_eq!(*comparator, Comparator::EQ, "ties are all legal targets");
+        let QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function, property, ..
+            },
+        } = value
+        else {
+            unreachable!()
+        };
+        assert_eq!(*function, AggregateFunction::Min, "lowest → Min");
+        assert_eq!(*property, ObjectProperty::ManaValue);
+
+        let pop = typed_leg(population).expect("population should be a Typed filter");
+        assert!(pop.type_filters.contains(&TypeFilter::Permanent));
+        assert!(pop
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+        assert!(
+            pop.properties.is_empty(),
+            "the population must not contain the superlative prop itself, got {:?}",
+            pop.properties
+        );
+    }
+
+    /// CR 109.2 — "greatest power" on a controller-scoped noun phrase (Triumph of
+    /// Gerrard's chapter text). The trailing "you control" belongs to the noun
+    /// phrase, so it must appear on BOTH the candidate filter and the ranked
+    /// population: ranking a controller-scoped candidate against a global
+    /// population would pick the wrong creature.
+    #[test]
+    fn bare_superlative_greatest_power_carries_controller_onto_population() {
+        let (filter, _) = parse_target("target creature you control with the greatest power");
+        let tf = typed_leg(&filter).expect("typed");
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        let (prop, population) = bare_superlative_parts(&filter);
+        let FilterProp::PtComparison { stat, value, .. } = prop else {
+            panic!("expected PtComparison, got {prop:?}");
+        };
+        assert_eq!(*stat, PtStat::Power);
+        let QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate { function, .. },
+        } = value
+        else {
+            unreachable!()
+        };
+        assert_eq!(*function, AggregateFunction::Max, "greatest → Max");
+        let pop = typed_leg(population).expect("typed population");
+        assert_eq!(
+            pop.controller,
+            Some(ControllerRef::You),
+            "the population must inherit the noun phrase's controller"
+        );
+    }
+
+    /// CR 109.2 — the explicit "among <set>" form keeps its own authority and is
+    /// unchanged by the bare-form pass. Regression guard for the 37 corpus cards
+    /// that already worked: the population here is the EXPLICIT set, not the
+    /// enclosing noun phrase, so it must NOT inherit "nonland permanent".
+    #[test]
+    fn among_form_population_still_comes_from_the_explicit_set() {
+        let (filter, _) =
+            parse_target("target creature with the greatest power among creatures you control");
+        let (_, population) = bare_superlative_parts(&filter);
+        let pop = typed_leg(population).expect("typed population");
+        assert!(pop.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(pop.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 109.2a — a description containing "card" plus a zone names cards in that
+    /// zone, a population this change does not model, so the superlative must NOT
+    /// be materialized.
+    ///
+    /// Reach-guarded: the same filter must still carry the graveyard zone prop,
+    /// proving the phrase really was parsed and only the superlative was declined —
+    /// without that guard this assertion would pass on any total parse failure.
+    #[test]
+    fn card_in_nonbattlefield_zone_does_not_materialize_a_superlative() {
+        let (filter, _) =
+            parse_target("target creature card in your graveyard with the greatest power");
+        let tf = typed_leg(&filter).expect("typed");
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }
+            )),
+            "reach-guard: the graveyard zone must still be parsed, got {:?}",
+            tf.properties
+        );
+        assert!(
+            !tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { .. }
+                    },
+                    ..
+                } | FilterProp::PtComparison {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { .. }
+                    },
+                    ..
+                }
+            )),
+            "CR 109.2a: no superlative may be emitted for a card-in-zone population, got {:?}",
+            tf.properties
+        );
+    }
+
+    /// The head's `not(alphanumeric1)` word boundary: a longer word starting with a
+    /// property keyword must not half-match. Reach-guarded by the positive twin so
+    /// the negative cannot pass because the phrase failed to parse at all.
+    #[test]
+    fn bare_superlative_head_requires_a_word_boundary() {
+        assert!(
+            nom_filter::parse_superlative_property_head("with the greatest powerstone").is_err(),
+            "\"powerstone\" must not half-match the \"power\" property keyword"
+        );
+        assert!(
+            nom_filter::parse_superlative_property_head("with the greatest power").is_ok(),
+            "positive twin: the bare property keyword must still parse"
+        );
+    }
+
+    /// Every superlative adjective maps to the right aggregate direction through
+    /// the relocated shared atom, for every property axis.
+    #[test]
+    fn bare_superlative_head_covers_both_axes() {
+        for (word, want_fn) in [
+            ("greatest", AggregateFunction::Max),
+            ("highest", AggregateFunction::Max),
+            ("least", AggregateFunction::Min),
+            ("lowest", AggregateFunction::Min),
+            ("smallest", AggregateFunction::Min),
+        ] {
+            for (noun, want_prop) in [
+                ("power", ObjectProperty::Power),
+                ("toughness", ObjectProperty::Toughness),
+                ("mana value", ObjectProperty::ManaValue),
+            ] {
+                let text = format!("with the {word} {noun}");
+                let (_, (f, p)) = nom_filter::parse_superlative_property_head(&text)
+                    .unwrap_or_else(|e| panic!("{text:?} should parse: {e:?}"));
+                assert_eq!(f, want_fn, "failed for {text:?}");
+                assert_eq!(p, want_prop, "failed for {text:?}");
+            }
+        }
+    }
 }
