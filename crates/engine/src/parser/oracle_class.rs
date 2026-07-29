@@ -1,4 +1,4 @@
-use super::oracle_ir::doc::{OracleNodeIr, PrintedTriggerIndex};
+use super::oracle_ir::doc::{OracleNodeIr, PrintedTriggerIndex, UnsupportedAbilityIr};
 use crate::parser::oracle_nom::error::OracleError;
 use nom::bytes::complete::tag;
 use nom::Parser;
@@ -11,7 +11,7 @@ use crate::types::ability::{
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
-use super::oracle::{has_unimplemented, make_unimplemented};
+use super::oracle::has_unimplemented;
 use super::oracle_classifier::{
     is_effect_sentence_candidate, is_granted_static_line, is_replacement_pattern, is_static_pattern,
 };
@@ -164,6 +164,7 @@ pub(crate) fn parse_class_oracle_text(
                     ],
                     ..AbilityShellIr::default()
                 },
+                die_results: vec![],
             };
             items.push((
                 *level_line,
@@ -353,10 +354,29 @@ pub(crate) fn parse_class_oracle_text(
                 }
             }
 
-            // Fallback: unimplemented
+            // Fallback: the honest-failure residual (Plan 05b U0-62).
+            //
+            // Two routes reach here, and **the discard on the second one is
+            // deliberate and preserved exactly.** Route one is a line no
+            // recognizer above claimed at all. Route two is an effect-sentence
+            // candidate whose chain DID parse, but whose lowered root contains an
+            // `Unimplemented` — that `ir` is thrown away and the residual is
+            // rebuilt from `line`. Keeping the partial chain instead would be a
+            // *behavior* change, not a conversion: it would name the failed
+            // clause rather than the fixed `"unknown"` sentinel and would move
+            // the coverage key. `ir` is scoped inside the `if` block above, so
+            // the discard is structural here rather than a convention a later
+            // edit could quietly drop.
+            //
+            // `min_x_value: 0` is the floor the discarded shape carried:
+            // `AbilityDefinition::new` defaults it to 0 and nothing on either
+            // route raises it before this point.
             items.push((
                 line_index,
-                OracleNodeIr::PreLoweredSpell(make_unimplemented(line)),
+                OracleNodeIr::Unsupported {
+                    unsupported: UnsupportedAbilityIr::unknown(line),
+                    min_x_value: 0,
+                },
             ));
         }
     }

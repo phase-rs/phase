@@ -38,6 +38,7 @@ use super::ramp_timing::RampTimingPolicy;
 use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
 use super::redundancy_avoidance::RedundancyAvoidancePolicy;
+use super::sacrifice_cost_mana_gate::SacrificeCostManaGatePolicy;
 use super::sacrifice_land_protection::SacrificeLandProtectionPolicy;
 use super::sacrifice_value::SacrificeValuePolicy;
 use super::self_cost_value::SelfCostValuePolicy;
@@ -112,11 +113,17 @@ pub enum PolicyId {
     SpellslingerKeepablesMulligan,
     CombatTaxPayment,
     ReactiveSelfProtection,
+    /// CR 601.2f + CR 702.34a: a cast whose mandatory sacrifice cost — an
+    /// additional cost, or a flashback alternative cost — could only be paid by
+    /// spending mana sources the plan still needs.
+    SacrificeCostManaGate,
     SacrificeLandProtection,
     SelfCostValue,
     ComboLineProgress,
     CedhKeepablesMulligan,
     FixedDeckKeepMulligan,
+    /// Universal mulligan card-count floor — see `policies::mulligan::card_floor`.
+    MulliganCardFloor,
     PlaneswalkerLoyalty,
     EquipmentPriority,
     SpellskitePriority,
@@ -376,6 +383,7 @@ impl Default for PolicyRegistry {
             Box::new(SpellslingerCastingPolicy),
             Box::new(super::combat_tax::CombatTaxPaymentPolicy),
             Box::new(ReactiveSelfProtectionPolicy),
+            Box::new(SacrificeCostManaGatePolicy),
             Box::new(SacrificeLandProtectionPolicy),
             Box::new(SelfCostValuePolicy),
             Box::new(super::combo_line::ComboLinePolicy::new()),

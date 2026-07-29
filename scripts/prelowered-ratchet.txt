@@ -12,14 +12,15 @@
 # real IR nodes. Every tranche that converts a producer must lower its number
 # in the same commit, which is what makes the burn-down visible in `git log`
 # on this one file.
-crates/engine/src/parser/oracle.rs         15
-crates/engine/src/parser/oracle_class.rs    4
+crates/engine/src/parser/oracle.rs         12
+crates/engine/src/parser/oracle_class.rs    3
 
 # --- infrastructure: NOT burn-down targets ----------------------------------
 # The variant declarations and their consumers. These legitimately survive
 # until the last producer is gone and the variants themselves are deleted, so
 # they are ceilings only — they are not expected to reach 0 before then.
-crates/engine/src/parser/oracle_ir/doc.rs      16
+# 20 includes spell_payload's exhaustive consumer arms, not producers.
+crates/engine/src/parser/oracle_ir/doc.rs      20
 crates/engine/src/parser/oracle_ir/feature.rs   9
 
 # Prose references in the T1 witness-corpus comment.

@@ -37,6 +37,60 @@ use crate::types::ability::{
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 
+/// Closed category for an unsupported ability residual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) enum UnsupportedAbilityCategory {
+    Unknown,
+    TriggerStructure,
+    StaticStructure,
+    ReplacementStructure,
+    EffectStructure,
+}
+
+impl UnsupportedAbilityCategory {
+    /// The stable coverage key emitted only when lowering to `Effect::Unimplemented`.
+    pub(crate) const fn legacy_name(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::TriggerStructure => "trigger_structure",
+            Self::StaticStructure => "static_structure",
+            Self::ReplacementStructure => "replacement_structure",
+            Self::EffectStructure => "effect_structure",
+        }
+    }
+}
+
+/// Lossless parser-internal representation of an unsupported ability.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct UnsupportedAbilityIr {
+    pub(crate) category: UnsupportedAbilityCategory,
+    pub(crate) fragment: String,
+    pub(crate) description: String,
+}
+
+impl UnsupportedAbilityIr {
+    pub(crate) fn unknown(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            category: UnsupportedAbilityCategory::Unknown,
+            fragment: text.clone(),
+            description: text,
+        }
+    }
+
+    pub(crate) fn new(
+        category: UnsupportedAbilityCategory,
+        fragment: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            category,
+            fragment: fragment.into(),
+            description: description.into(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Source identity
 // ---------------------------------------------------------------------------
@@ -343,6 +397,44 @@ pub(crate) enum OracleNodeIr {
     /// Strive per-target surcharge.
     StriveCost(ManaCost),
 
+    /// A printed line no recognizer claimed — the shared honest-failure
+    /// residual, in IR form.
+    ///
+    /// # Why a node and not a chain parse
+    ///
+    /// Two sites in the parser build this residual today and both do the same
+    /// thing: they retain the exact data used to produce an
+    /// `Effect::Unimplemented`, including the root definition description.
+    /// **That exact payload is load-bearing for coverage** —
+    /// `game/coverage.rs` and the parser-gap tooling key on it. Re-deriving the
+    /// residual by running the effect-chain parser over the line would produce a
+    /// *different* `name` (whatever clause the chain failed inside), which is why
+    /// this is a node carrying the raw text rather than a chain seeded with a
+    /// gap clause. Lowered by `oracle::lower_unsupported_node`, the sole
+    /// definition-construction authority for residuals.
+    ///
+    /// # Why it carries a CR 601.2b X floor
+    ///
+    /// The residual is a *spell* for every accounting purpose: it is emitted
+    /// through the ability channel, it occupies a CR 707.9a printed ability slot,
+    /// and it lands on the `spells_emitted` stack. That makes it reachable by
+    /// `DocEmitter::raise_last_spell_min_x`, whose `spell_min_x_mut().expect(..)`
+    /// is sound only while **every** node on that stack can name where its floor
+    /// lives. Carrying `min_x_value` keeps that invariant total. Omitting it
+    /// would not merely lose a floor — it would turn a compile-time-guaranteed
+    /// `Some` into a runtime panic on a structurally reachable path, which is the
+    /// failure mode the exhaustive matches over this enum exist to prevent.
+    ///
+    /// The pre-lowered spell shape this replaces already carried the field (it is
+    /// an `AbilityDefinition` root field), so this is a preservation, not a
+    /// widening.
+    Unsupported {
+        unsupported: UnsupportedAbilityIr,
+        /// CR 601.2b: the floor on this residual's announced X ("X can't be 0").
+        /// `0` means "no floor", mirroring the root field's own encoding.
+        min_x_value: u32,
+    },
+
     // -----------------------------------------------------------------------
     // PLAN-05 DEBT — pre-lowered escape hatches.
     //
@@ -369,16 +461,65 @@ pub(crate) enum OracleNodeIr {
     PreLoweredSpell(AbilityDefinition),
 }
 
+/// Borrowed representation of the three spell payload shapes.
+pub(crate) enum SpellPayloadIr<'a> {
+    /// An IR-native spell or activated-ability body.
+    Ir(&'a AbilityIr),
+    /// An already-lowered spell or activated-ability definition.
+    Lowered(&'a AbilityDefinition),
+    /// An honest unsupported spell residual that lowers to a definition.
+    Residual {
+        unsupported: &'a UnsupportedAbilityIr,
+        min_x_value: u32,
+    },
+}
+
 impl OracleNodeIr {
+    /// Returns this node's spell payload, if it has one.
+    ///
+    /// Exhaustive over the enum on purpose: a future spell payload must enter
+    /// this layer before a reader can lower or borrow it.
+    pub(crate) fn spell_payload(&self) -> Option<SpellPayloadIr<'_>> {
+        match self {
+            OracleNodeIr::Spell(ir) => Some(SpellPayloadIr::Ir(ir)),
+            OracleNodeIr::PreLoweredSpell(def) => Some(SpellPayloadIr::Lowered(def)),
+            OracleNodeIr::Unsupported {
+                unsupported,
+                min_x_value,
+            } => Some(SpellPayloadIr::Residual {
+                unsupported,
+                min_x_value: *min_x_value,
+            }),
+            OracleNodeIr::Trigger(_)
+            | OracleNodeIr::Static(_)
+            | OracleNodeIr::Replacement(_)
+            | OracleNodeIr::Keyword(_)
+            | OracleNodeIr::Modal(_)
+            | OracleNodeIr::AdditionalCost(_)
+            | OracleNodeIr::CastingRestriction(_)
+            | OracleNodeIr::CastingOption(_)
+            | OracleNodeIr::SolveCondition(_)
+            | OracleNodeIr::StriveCost(_)
+            | OracleNodeIr::PreLoweredTrigger(_)
+            | OracleNodeIr::PreLoweredStatic(_)
+            | OracleNodeIr::PreLoweredReplacement(_) => None,
+        }
+    }
+
     /// CR 601.2b: the floor on this spell node's announced X ("X can't be 0"),
     /// whichever shape holds it — `None` for every non-spell node.
     ///
-    /// Both spell shapes store the floor as a `u32` whose `0` means "no floor",
-    /// but at different layers: a pre-lowered definition carries the resolved
-    /// root field, while an `AbilityIr` carries the shell's pre-lowering stamp.
-    /// They are interchangeable for raising a floor because
-    /// `apply_ability_shell_envelope` applies the shell's value onto the lowered
-    /// root with `max` — so `max`-ing either one yields `max(lowered, v)`.
+    /// All three spell shapes store the floor as a `u32` whose `0` means "no
+    /// floor", but at three different layers: a pre-lowered definition carries
+    /// the resolved root field, an `AbilityIr` carries the shell's pre-lowering
+    /// stamp, and the residual carries it on the node itself (it holds text, not
+    /// a definition, so there is no root or shell to put it on until
+    /// `lower_unsupported_node` builds one).
+    ///
+    /// All three are interchangeable for raising a floor because every path
+    /// applies its value with `max` — `apply_ability_shell_envelope` for the
+    /// shell, `lower_unsupported_node` for the residual — so `max`-ing any of
+    /// them yields `max(lowered, v)`.
     ///
     /// Exposed as a `&mut u32` rather than a `mutate(f)` closure so the caller
     /// cannot express anything but a floor change. The general closure mutator
@@ -392,6 +533,11 @@ impl OracleNodeIr {
         match self {
             OracleNodeIr::Spell(ir) => Some(&mut ir.shell.min_x_value),
             OracleNodeIr::PreLoweredSpell(def) => Some(&mut def.min_x_value),
+            // The residual is a spell for slot accounting, so it is reachable
+            // here and must name its floor. `lower_unsupported_node` applies it
+            // with `max`, so raising it here composes the same way the other two
+            // shapes do.
+            OracleNodeIr::Unsupported { min_x_value, .. } => Some(min_x_value),
             OracleNodeIr::Trigger(_)
             | OracleNodeIr::Static(_)
             | OracleNodeIr::Replacement(_)
@@ -861,7 +1007,14 @@ impl OracleDocBuilder {
             // Pushing IS the increment: `ability_index()` reads `spells_emitted.len()`.
             // Reached only after the duplicate/conflict/fragment early-returns above,
             // so a rejected `emit` mutates neither counter.
-            OracleNodeIr::Spell(_) | OracleNodeIr::PreLoweredSpell(_) => {
+            // The residual joins this arm because it lowers to an
+            // `AbilityDefinition` pushed onto `result.abilities` exactly like the
+            // other two spell shapes — so it consumes a printed ability slot, and
+            // omitting it would shift every ability printed after an unrecognized
+            // line one CR 707.9a slot low.
+            OracleNodeIr::Spell(_)
+            | OracleNodeIr::PreLoweredSpell(_)
+            | OracleNodeIr::Unsupported { .. } => {
                 self.spells_emitted.push(slot.id);
             }
             OracleNodeIr::Trigger(_) | OracleNodeIr::PreLoweredTrigger(_) => {
@@ -953,6 +1106,13 @@ impl OracleDocBuilder {
         self.items.values().find(|i| i.id == id).map(|i| &i.node)
     }
 
+    /// Peek the most-recently emitted spell item's stable document id. The same
+    /// emission-order stack backs the node peek, so a cross-item relation can
+    /// name the preceding spell without removing or re-emitting it.
+    pub(crate) fn peek_last_spell_id(&self) -> Option<OracleItemId> {
+        self.spells_emitted.last().copied()
+    }
+
     /// Finish, producing items already in Oracle source order.
     ///
     /// # CR 707.9a printed-slot stamping does NOT happen here
@@ -1023,9 +1183,10 @@ enum PrintedItemKind {
 /// `slot`, the item's position among the card's printed abilities.
 ///
 /// The lowering-seam entry point (`lower_oracle_ir`, `oracle.rs`). It takes the
-/// definition rather than the node because both spell node shapes converge on
-/// one here: the pre-lowered shape lends its definition and `Spell` has just
-/// been lowered by `lower_ability_ir`, and CR 707.9a does not distinguish them —
+/// definition rather than the node because all three spell node shapes converge
+/// on one here: the pre-lowered shape lends its definition, `Spell` has just
+/// been lowered by `lower_ability_ir`, and the residual has just been built by
+/// `lower_unsupported_node`. CR 707.9a does not distinguish them —
 /// a printed ability occupies its printed slot however the parser represented it.
 pub(crate) fn stamp_printed_ability_slot(def: &mut AbilityDefinition, slot: usize) {
     stamp_retained_printed_slot(def, slot, PrintedItemKind::Ability);

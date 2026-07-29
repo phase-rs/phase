@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1503
 expression: "&ir"
 ---
 {
@@ -311,7 +310,8 @@ expression: "&ir"
               }
             ],
             "description": "Solved — {1}{B}, Sacrifice this ~: Search your library for a card, put it into your hand, then shuffle. Activate only as a sorcery."
-          }
+          },
+          "die_results": []
         }
       }
     }

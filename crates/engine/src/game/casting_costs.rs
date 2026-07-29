@@ -6116,13 +6116,10 @@ fn apply_defiler_mana_reduction(
         return;
     };
 
+    // CR 118.7b/c/d: unmatched or excess colored reduction spills over to
+    // generic, same as any other cost reduction (`apply_shard_reduction`).
     for shard in reduction_shards {
-        if let Some(pos) = spell_shards
-            .iter()
-            .position(|candidate| super::casting::cost_shard_matches_reduction(*candidate, *shard))
-        {
-            spell_shards.remove(pos);
-        }
+        super::casting::apply_shard_reduction(spell_shards, spell_generic, *shard);
     }
     *spell_generic = spell_generic.saturating_sub(*reduction_generic);
 }
@@ -16887,6 +16884,162 @@ mod tests {
                 } if *player_id == PlayerId(0)
             )),
             "Should emit LifeChanged event"
+        );
+    }
+
+    /// CR 118.7b: a Defiler reduction shard with no matching colored component
+    /// in the spell's cost must spill over to reduce generic mana instead of
+    /// being silently dropped. Regression coverage for `apply_defiler_mana_reduction`
+    /// through its actual consumer, `handle_defiler_payment` — a bare
+    /// matching-shard check on `apply_defiler_mana_reduction` alone would not
+    /// catch a future regression that decouples the two.
+    #[test]
+    fn handle_defiler_payment_spills_unmatched_colored_shard_to_generic() {
+        use crate::types::mana::ManaCostShard;
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Creature".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "Permanent".to_string(),
+                description: None,
+            },
+            Vec::new(),
+            spell_id,
+            PlayerId(0),
+        );
+
+        // {3} generic, no colored pips at all.
+        let mut pending = PendingCast::new(
+            spell_id,
+            CardId(1),
+            ability,
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 3,
+            },
+        );
+        // Force the reduced cost to land in `state.pending_cast` (rather than
+        // being auto-paid away) so it can be asserted on directly.
+        pending.payment_mode = CastPaymentMode::Manual;
+
+        // A green Defiler reduction unit has nothing to match — it must spill
+        // into generic instead of being dropped.
+        let mana_reduction = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+
+        let mut events = Vec::new();
+        handle_defiler_payment(
+            &mut state,
+            PlayerId(0),
+            pending,
+            2,
+            &mana_reduction,
+            true,
+            &mut events,
+        )
+        .expect("manual payment step should be entered");
+
+        let pending_cast = state
+            .pending_cast
+            .as_ref()
+            .expect("manual payment mode must stash the reduced pending cast");
+        assert_eq!(
+            pending_cast.cost,
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            },
+            "the unmatched green reduction unit must spill over to generic (3 -> 2), not be dropped (3 -> 3)",
+        );
+    }
+
+    /// CR 118.7c: a Defiler reduction that exceeds the spell's matching
+    /// colored component reduces that color to nothing, then spills the
+    /// excess to generic — again exercised through `handle_defiler_payment`
+    /// rather than the private helper directly.
+    #[test]
+    fn handle_defiler_payment_spills_excess_beyond_matching_color_to_generic() {
+        use crate::types::mana::ManaCostShard;
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Creature".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "Permanent".to_string(),
+                description: None,
+            },
+            Vec::new(),
+            spell_id,
+            PlayerId(0),
+        );
+
+        // {2}{G}{G}: only two green pips to match against.
+        let mut pending = PendingCast::new(
+            spell_id,
+            CardId(1),
+            ability,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+                generic: 2,
+            },
+        );
+        pending.payment_mode = CastPaymentMode::Manual;
+
+        // Three green reduction units — one more than the cost has green pips
+        // for. The third must spill the excess into generic.
+        let mana_reduction = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::Green,
+                ManaCostShard::Green,
+                ManaCostShard::Green,
+            ],
+            generic: 0,
+        };
+
+        let mut events = Vec::new();
+        handle_defiler_payment(
+            &mut state,
+            PlayerId(0),
+            pending,
+            2,
+            &mana_reduction,
+            true,
+            &mut events,
+        )
+        .expect("manual payment step should be entered");
+
+        let pending_cast = state
+            .pending_cast
+            .as_ref()
+            .expect("manual payment mode must stash the reduced pending cast");
+        assert_eq!(
+            pending_cast.cost,
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            },
+            "both green pips must be removed and the excess third unit must spill to generic (2 -> 1), not leave generic untouched (2 -> 2)",
         );
     }
 

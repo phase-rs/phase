@@ -354,7 +354,15 @@ pub(crate) fn begin_variable_speed_payment(
 
 /// CR 107.3a + CR 118.3: X in an activation/additional cost is chosen as part
 /// of activating or casting, bounded by the resources available to pay fully.
-pub(crate) fn sacrifice_cost_bounds(count: u32, eligible_len: usize) -> (usize, usize) {
+///
+/// `pub` as the single authority for the `u32::MAX` X-sentinel encoding, so a
+/// cast-time cost gate in `phase-ai` reads the engine's own minimum rather than
+/// re-spelling the sentinel. That is a *prospective* single-authority argument,
+/// not a measured divergence: for every `count < u32::MAX` this returns
+/// `(n, n)`, which a hand-rolled `count as usize` matches exactly. It becomes
+/// load-bearing the day a third bounds shape ("up to N") is added, at which
+/// point a copy would desynchronize with no compile error.
+pub fn sacrifice_cost_bounds(count: u32, eligible_len: usize) -> (usize, usize) {
     if count == u32::MAX {
         (0, eligible_len)
     } else {
@@ -7684,17 +7692,33 @@ pub(super) fn cost_shard_matches_reduction(
         || cost_shard == reduction
 }
 
-fn apply_shard_reduction(shards: &mut Vec<ManaCostShard>, reduction: ManaCostShard) {
+/// CR 118.7b + CR 118.7c + CR 118.7d: Apply one unit of colored/colorless mana
+/// reduction. If the cost still has a matching component, remove it. Otherwise
+/// — the cost never had that color/colorless component (118.7b), or this
+/// reduction unit is the excess beyond what the component had left (118.7c/d)
+/// — the unit spills over to reduce the generic component instead. A
+/// reduction can never touch a mismatched color's pip, and each unit reduces
+/// exactly one cost component (colored/colorless match XOR generic
+/// spillover), never both.
+pub(super) fn apply_shard_reduction(
+    shards: &mut Vec<ManaCostShard>,
+    generic: &mut u32,
+    reduction: ManaCostShard,
+) {
     if let Some(index) = shards
         .iter()
         .position(|shard| cost_shard_matches_reduction(*shard, reduction))
     {
         shards.remove(index);
+    } else {
+        *generic = generic.saturating_sub(1);
     }
 }
 
-/// CR 601.2f: Apply a single cost modification (reduce or raise) to a mana cost.
-/// ReduceCost removes matching mana symbols and generic mana (not below zero).
+/// CR 601.2f + CR 118.7: Apply a single cost modification (reduce or raise) to a
+/// mana cost. ReduceCost removes matching mana symbols, spilling any unmatched
+/// or excess colored/colorless reduction over to generic mana (CR 118.7b/c/d)
+/// in addition to reducing generic mana directly (CR 118.7a), floored at zero.
 /// RaiseCost adds the specified symbols and generic mana.
 fn apply_cost_mod_to_mana(
     mana_cost: &mut ManaCost,
@@ -7730,7 +7754,7 @@ fn apply_cost_mod_to_mana(
     } else {
         for _ in 0..multiplier {
             for shard in mod_shards {
-                apply_shard_reduction(shards, *shard);
+                apply_shard_reduction(shards, generic, *shard);
             }
         }
         *generic = generic.saturating_sub(mod_generic);
@@ -16385,7 +16409,16 @@ fn find_pay_life_cost(
 /// CR 118.3: Find permanents controlled by `player` matching `filter` on the battlefield.
 /// The source is eligible when it matches the printed filter; "another" is
 /// represented by `FilterProp::Another` and enforced by `matches_target_filter`.
-pub(super) fn find_eligible_sacrifice_targets(
+///
+/// The single authority for sacrifice-cost eligibility. Three conditions, and all
+/// three matter: controller (CR 701.21a — "a player can't sacrifice … something
+/// that's a permanent they don't control"), the `player_cant_sacrifice_as_cost`
+/// static (Yasharn, Angel of Jubilation), and the filter itself. Callers must not
+/// re-derive this — an AI-side copy that omits the static check over-counts
+/// eligible fodder under a "players can't sacrifice" effect. `pub` so `phase-ai`'s
+/// cast-time cost gates share it with the payment path in `cost_payability.rs` and
+/// `casting_costs.rs`.
+pub fn find_eligible_sacrifice_targets(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,

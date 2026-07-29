@@ -100,8 +100,8 @@ use crate::types::ability::{
     ChoiceType, ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard,
     ConjureSource, ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope,
     CopyRetargetPermission, CopyScale, DamageModification, DamageSource, DelayedTriggerCondition,
-    DelayedTriggerLifetime, DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope,
-    FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
+    DelayedTriggerLifetime, DieResultBranch, DoubleTarget, Duration, Effect, EffectOutcomeSignal,
+    EffectScope, FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
     KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, MultiTargetSpec,
     NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerpetualModification,
     PlayPermissionInvalidation, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
@@ -156,8 +156,8 @@ use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
-    EffectChainIr, OtherwiseKind, PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind,
-    ReplicateKind, ShellStage,
+    DieResultBranchIr, EffectChainIr, OtherwiseKind, PlayerScopeRewrite, PriorModifier,
+    ReplaceMeaningKind, ReplicateKind, ShellStage,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -26858,7 +26858,8 @@ pub(crate) enum ChainLoweringMode {
 ///
 /// # The order is pinned and behavior-load-bearing
 ///
-/// **chain → finalize → anchor → `sub_link` → envelope stamps → stages.**
+/// **chain → die results → finalize → anchor → `sub_link` → envelope stamps →
+/// stages.**
 ///
 /// It is not an aesthetic choice: it reproduces what the whole-body recognizers
 /// in `oracle.rs` do by hand. Every one of them stamps its root fields *after*
@@ -26866,8 +26867,31 @@ pub(crate) enum ChainLoweringMode {
 /// runs the `extract_*` folds last. Reordering — in particular running a stage
 /// before the stamps — changes output, because both stages write root fields
 /// that a stamp may also write. Do not reorder for elegance.
+///
+/// CR 706.3b: the die-result table is part of the *same* ability as the roll, so
+/// it is attached before `finalize_effect_chain` rather than after — finalize and
+/// the anchor then see the complete effect, exactly as they would for an ability
+/// whose table was printed inline. Attaching it later would hand those two a
+/// `RollDie` with an empty results vector and then mutate the result behind them.
+/// The step is a no-op on an empty `die_results`, which is what keeps every
+/// non-die producer byte-identical.
 pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     let mut def = lower_effect_chain_ir(&ir.body);
+    if !ir.die_results.is_empty() {
+        if let Some(Effect::RollDie { results, .. }) =
+            super::oracle_special::find_terminal_roll_die(&mut def)
+        {
+            *results = ir
+                .die_results
+                .iter()
+                .map(|DieResultBranchIr { min, max, effect }| DieResultBranch {
+                    min: *min,
+                    max: *max,
+                    effect: Box::new(lower_ability_ir(effect)),
+                })
+                .collect();
+        }
+    }
     finalize_effect_chain(&mut def);
     apply_owner_library_reveal_anchor_from_text(&mut def, &ir.source_text);
     // CR 608.2c: a root the chain cannot describe (it has no previous boundary).
@@ -26928,6 +26952,14 @@ fn apply_ability_shell_envelope(def: &mut AbilityDefinition, shell: &AbilityShel
     def.min_x_value = def.min_x_value.max(shell.min_x_value);
     // CR 707.10: monotone OR, so a `false` default can never clear the flag.
     def.cant_be_copied |= shell.cant_be_copied;
+    // CR 608.2d: the controller's "you may" choice. Monotone OR for the same
+    // reason as `cant_be_copied` — and here the reason is load-bearing rather
+    // than merely tidy: `lower_effect_chain_ir` legitimately sets this from the
+    // printed text, so an assignment would let every producer building a
+    // `default()` shell CLEAR a flag the chain had already established. The OR is
+    // what keeps `AbilityShellIr::default()` a no-op and the widening
+    // byte-identical by construction.
+    def.optional |= shell.optional;
     if let Some(description) = &shell.description {
         def.description = Some(description.clone());
     }
@@ -26964,6 +26996,7 @@ pub(crate) fn parse_ability_ir(
             source_text: text.to_string(),
             body,
             shell: AbilityShellIr::default(),
+            die_results: vec![],
         };
     }
     if let Some(body) = parse_for_each_attacker_copy_blocker_ir(text, kind, ctx) {
@@ -26971,6 +27004,7 @@ pub(crate) fn parse_ability_ir(
             source_text: text.to_string(),
             body,
             shell: AbilityShellIr::default(),
+            die_results: vec![],
         };
     }
     if let ChainLoweringMode::WithContext = mode {
@@ -26979,6 +27013,7 @@ pub(crate) fn parse_ability_ir(
                 source_text: text.to_string(),
                 body,
                 shell: AbilityShellIr::default(),
+                die_results: vec![],
             };
         }
     }
@@ -26992,12 +27027,14 @@ pub(crate) fn parse_ability_ir(
                 sub_link: Some(SubAbilityLink::SequentialSibling),
                 ..AbilityShellIr::default()
             },
+            die_results: vec![],
         };
     }
     AbilityIr {
         source_text: text.to_string(),
         body: parse_effect_chain_ir(text, kind, ctx),
         shell: AbilityShellIr::default(),
+        die_results: vec![],
     }
 }
 

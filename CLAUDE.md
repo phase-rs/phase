@@ -60,7 +60,7 @@ When creating or participating in an agent team (whether triggered by `/batch-me
 
 ### CRITICAL: Use Tilt Logs Instead of Running Builds
 
-**Tilt is always running and continuously rebuilds on file changes.** Do NOT run `cargo build`, `cargo clippy`, `cargo test -p engine`, `pnpm run type-check`, or `pnpm lint` directly — these compete for cargo target locks and queue up redundant builds. Instead, check the Tilt logs for the relevant resource to see if your changes compiled/passed. NEVER run `cargo clean` or `cargo-sweep` on `target/` while Tilt is up — deleting artifacts mid-build corrupts fingerprints and forces a full ~30-minute dependency rebuild.
+**Tilt is always running and continuously rebuilds on file changes.** Do NOT run `cargo build`, `cargo clippy`, `cargo test -p phase-engine`, `pnpm run type-check`, or `pnpm lint` directly — these compete for cargo target locks and queue up redundant builds. Instead, check the Tilt logs for the relevant resource to see if your changes compiled/passed. NEVER run `cargo clean` or `cargo-sweep` on `target/` while Tilt is up — deleting artifacts mid-build corrupts fingerprints and forces a full ~30-minute dependency rebuild.
 
 **New engine tests go in `crates/engine/tests/integration/`** (add a `mod` line to `tests/integration/main.rs`), never as a new top-level file in `crates/engine/tests/` — each top-level file becomes its own ~130MB test binary that re-links the whole engine on every change (guarded by the `no_top_level_test_binaries` test).
 

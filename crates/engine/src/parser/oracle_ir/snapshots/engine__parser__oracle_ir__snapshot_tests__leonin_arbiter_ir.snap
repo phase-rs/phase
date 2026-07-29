@@ -22,22 +22,13 @@ expression: "&ir"
         "fragment": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "static_structure",
-            "description": "Static pattern matched but line failed static parser: Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn."
+        "Unsupported": {
+          "unsupported": {
+            "category": "StaticStructure",
+            "fragment": "Static pattern matched but line failed static parser: Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn.",
+            "description": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn."
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     }

@@ -1,7 +1,7 @@
 //! Serialization adapter between this repo's MTG engine (`GameState` /
 //! `GameAction`) and the external ManaBrew wire protocol.
 //!
-//! Pinned upstream: `manabrew-protocol` **2.0.0** (crates.io, 2026-07-24).
+//! Pinned upstream: `manabrew-protocol` **3.0.0** (crates.io, 2026-07-28).
 //! [`PROTOCOL_VERSION`] is the crate major, which is how upstream defines the
 //! wire version.
 //!
@@ -37,25 +37,445 @@ use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
 use engine::types::{GameAction, ObjectId};
+pub use manabrew_protocol::display::DisplayEvent;
+pub use manabrew_protocol::game::{
+    CardDto, CardIdentity, CardView, ClassLevelDto, CombatAssignmentDto, DayTime, GameViewDto,
+    PlayerDto, PlayerStatus, SagaChapterDto, StackObjectDto, StepKind, TargetingIntent, ZoneDto,
+    ZoneKind,
+};
+/// Wire vocabulary keeps `Dto` suffixes where the engine already owns the
+/// unqualified type names.
+pub use manabrew_protocol::game::{
+    Mana as ManaDto, ManaColor as ManaColorDto, PlayerCounterKind as PlayerCounterKindDto,
+};
+pub use manabrew_protocol::prompts::choose_attackers::AttackerOptionDto;
+pub use manabrew_protocol::prompts::choose_blockers::BlockableAttackerDto;
+pub use manabrew_protocol::prompts::common::{
+    ActivatableAbilityInfo, AlternativeCostKind, AttackAssignment, AttackTargetDto,
+    AttackTargetKind, AvailableAction, AvailableActionKind, BlockAssignment,
+    CombatDamageAssignmentEntry, PaymentAction, PaymentActionKind, PaymentResourceKind,
+    PlayCardMode, PromptPresentation,
+};
+/// Target wire references use `Dto` suffixes to remain distinct from the
+/// engine's target types.
+pub use manabrew_protocol::prompts::common::{
+    TargetKind as TargetKindDto, TargetRef as TargetRefDto,
+};
+pub use manabrew_protocol::prompts::scry::ScryDestination;
+pub use manabrew_protocol::prompts::{
+    ChooseActionInput, ChooseActionOutput, ChooseAttackersInput, ChooseAttackersOutput,
+    ChooseBlockersInput, ChooseBlockersOutput, ChooseBoardTargetsInput, ChooseBoardTargetsOutput,
+    ChooseBooleanInput, ChooseBooleanOutput, ChooseCardsInput, ChooseCardsOutput, ChooseColorInput,
+    ChooseColorOutput, ChooseCombatDamageAssignmentInput, ChooseCombatDamageAssignmentOutput,
+    ChooseDamageAssignmentOrderInput, ChooseDamageAssignmentOrderOutput, ChooseFromSelectionInput,
+    ChooseFromSelectionOutput, ChooseNumberInput, ChooseNumberOutput, DiceRollEntry,
+    DiceRolledInput, DiceRolledOutput, GameOverInput, MulliganInput, MulliganPutBackOutput,
+    PassUntil, PayManaCostInput, PayManaCostOutput, ReorderInput, ReorderItem, ReorderOutput,
+    ResponseViolation, RevealCardsInput, RevealCardsOutput, ScryInput, ScryOutput, SelectionOption,
+};
+use manabrew_protocol::prompts::{
+    PromptInput as UpstreamPromptInput, PromptOutput as UpstreamPromptOutput,
+};
+pub use manabrew_protocol::transport::{
+    DirectiveInput, ProtocolError, ProtocolErrorCode, StateUpdate,
+};
 use serde::{Deserialize, Serialize};
 
+/// Deliberate local extension of upstream's mulligan answer.
+///
+/// `MulliganUseSerumPowder` is absent from `manabrew-protocol` 3.0.0, but
+/// Phase models `MulliganChoice::UseSerumPowder` and needs the committed object
+/// id. It is safe because this client-to-engine answer is exchanged only
+/// between this adapter and its paired client; third-party clients are not
+/// expected to emit the local variant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum MulliganOutput {
+    MulliganDecision { keep: bool },
+    MulliganUseSerumPowder { card_id: String },
+}
+
+/// Deliberate local extension of upstream's mulligan put-back prompt.
+///
+/// `excluded_card_id` marks the Serum Powder object committed to a pending
+/// `UseSerumPowder` continuation, so the paired client cannot offer it in the
+/// bottom-cards picker. `None` preserves the upstream v3 wire exactly; peers
+/// that do not know the additive field may drop it. `cards` remains upstream's
+/// [`CardDto`], not a local mirror.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MulliganPutBackInput {
+    pub hand_card_ids: Vec<String>,
+    pub cards: Vec<CardDto>,
+    pub count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_card_id: Option<String>,
+}
+
+/// Extension-aware prompt input.
+///
+/// Every non-Serum-Powder family stays as an upstream value. This wrapper is
+/// necessary because upstream's closed `PromptInput` cannot carry the one
+/// deliberate local [`MulliganPutBackInput`] superset.
+#[derive(Debug, Clone)]
+pub enum PromptInput {
+    Upstream(UpstreamPromptInput),
+    MulliganPutBack(MulliganPutBackInput),
+}
+
+impl PromptInput {
+    #[allow(non_snake_case)]
+    pub fn Mulligan(input: MulliganInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::Mulligan(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseAction(input: ChooseActionInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseAction(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseAttackers(input: ChooseAttackersInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseAttackers(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBlockers(input: ChooseBlockersInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseBlockers(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBoardTargets(input: ChooseBoardTargetsInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseBoardTargets(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBoolean(input: ChooseBooleanInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseBoolean(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseFromSelection(input: ChooseFromSelectionInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseFromSelection(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn GameOver(input: GameOverInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::GameOver(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn RevealCards(input: RevealCardsInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::RevealCards(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Scry(input: ScryInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::Scry(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseColor(input: ChooseColorInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseColor(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseNumber(input: ChooseNumberInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseNumber(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseDamageAssignmentOrder(input: ChooseDamageAssignmentOrderInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseDamageAssignmentOrder(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseCombatDamageAssignment(input: ChooseCombatDamageAssignmentInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseCombatDamageAssignment(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn PayManaCost(input: PayManaCostInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::PayManaCost(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseCards(input: ChooseCardsInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::ChooseCards(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Reorder(input: ReorderInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::Reorder(input))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn DiceRolled(input: DiceRolledInput) -> Self {
+        Self::Upstream(UpstreamPromptInput::DiceRolled(input))
+    }
+
+    pub fn validate_response(
+        &self,
+        output: &PromptOutput,
+    ) -> std::result::Result<(), ResponseViolation> {
+        match (self, output) {
+            (
+                Self::MulliganPutBack(_),
+                PromptOutput::Upstream(UpstreamPromptOutput::MulliganPutBack(_)),
+            ) => Ok(()),
+            (Self::Upstream(UpstreamPromptInput::Mulligan(_)), PromptOutput::Mulligan(_)) => Ok(()),
+            (Self::Upstream(input), PromptOutput::Upstream(output)) => {
+                input.validate_response(output)
+            }
+            _ => Err(ResponseViolation::WrongPromptType),
+        }
+    }
+}
+
+impl From<UpstreamPromptInput> for PromptInput {
+    fn from(input: UpstreamPromptInput) -> Self {
+        match input {
+            UpstreamPromptInput::MulliganPutBack(input) => {
+                Self::MulliganPutBack(MulliganPutBackInput {
+                    hand_card_ids: input.hand_card_ids,
+                    cards: input.cards,
+                    count: input.count,
+                    excluded_card_id: None,
+                })
+            }
+            input => Self::Upstream(input),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum PromptInputWire<'a> {
+    MulliganPutBack(&'a MulliganPutBackInput),
+}
+
+impl Serialize for PromptInput {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Upstream(input) => input.serialize(serializer),
+            Self::MulliganPutBack(input) => {
+                PromptInputWire::MulliganPutBack(input).serialize(serializer)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PromptInput {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("mulliganPutBack") {
+            serde_json::from_value(value)
+                .map(Self::MulliganPutBack)
+                .map_err(<D::Error as serde::de::Error>::custom)
+        } else {
+            serde_json::from_value::<UpstreamPromptInput>(value)
+                .map(Self::from)
+                .map_err(<D::Error as serde::de::Error>::custom)
+        }
+    }
+}
+
+/// Extension-aware prompt output.
+///
+/// Every non-Serum-Powder family stays as an upstream value. This wrapper is
+/// necessary because upstream's closed `PromptOutput` cannot carry the one
+/// deliberate local [`MulliganOutput`] superset.
+#[derive(Debug, Clone)]
+pub enum PromptOutput {
+    Mulligan(MulliganOutput),
+    Upstream(UpstreamPromptOutput),
+}
+
+impl PromptOutput {
+    #[allow(non_snake_case)]
+    pub fn MulliganPutBack(output: MulliganPutBackOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::MulliganPutBack(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseAction(output: ChooseActionOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseAction(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseAttackers(output: ChooseAttackersOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseAttackers(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBlockers(output: ChooseBlockersOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseBlockers(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBoardTargets(output: ChooseBoardTargetsOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseBoardTargets(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseBoolean(output: ChooseBooleanOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseBoolean(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseFromSelection(output: ChooseFromSelectionOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseFromSelection(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn RevealCards(output: RevealCardsOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::RevealCards(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Scry(output: ScryOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::Scry(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseColor(output: ChooseColorOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseColor(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseNumber(output: ChooseNumberOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseNumber(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseDamageAssignmentOrder(output: ChooseDamageAssignmentOrderOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseDamageAssignmentOrder(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseCombatDamageAssignment(output: ChooseCombatDamageAssignmentOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseCombatDamageAssignment(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn PayManaCost(output: PayManaCostOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::PayManaCost(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ChooseCards(output: ChooseCardsOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::ChooseCards(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Reorder(output: ReorderOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::Reorder(output))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn DiceRolled(output: DiceRolledOutput) -> Self {
+        Self::Upstream(UpstreamPromptOutput::DiceRolled(output))
+    }
+}
+
+impl From<UpstreamPromptOutput> for PromptOutput {
+    fn from(output: UpstreamPromptOutput) -> Self {
+        match output {
+            UpstreamPromptOutput::Mulligan(
+                manabrew_protocol::prompts::MulliganOutput::MulliganDecision { keep },
+            ) => Self::Mulligan(MulliganOutput::MulliganDecision { keep }),
+            output => Self::Upstream(output),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "output", rename_all = "camelCase")]
+enum PromptOutputWire<'a> {
+    Mulligan(&'a MulliganOutput),
+}
+
+impl Serialize for PromptOutput {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Mulligan(output) => PromptOutputWire::Mulligan(output).serialize(serializer),
+            Self::Upstream(output) => output.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PromptOutput {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("mulligan") {
+            let output = value
+                .get("output")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            serde_json::from_value(output)
+                .map(Self::Mulligan)
+                .map_err(<D::Error as serde::de::Error>::custom)
+        } else {
+            serde_json::from_value::<UpstreamPromptOutput>(value)
+                .map(Self::from)
+                .map_err(<D::Error as serde::de::Error>::custom)
+        }
+    }
+}
+
+/// Extension-aware transport envelope. Its fields are upstream protocol types
+/// except for the prompt wrapper required to carry the two documented local
+/// mulligan members above.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentPrompt {
+    pub prompt_id: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub deciding_player_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_card: Option<CardDto>,
+    pub input: PromptInput,
+}
+
+/// Extension-aware client message. Directives retain the upstream type; only
+/// responses need the local prompt-output wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ClientToServerMessage {
+    Response {
+        prompt_id: u32,
+        action: PromptOutput,
+    },
+    Directive {
+        directive: DirectiveInput,
+    },
+}
+
 /// Wire version of the pinned upstream protocol. Upstream defines the wire
-/// version as the `manabrew-protocol` crate major, so 2.0.0 => 2.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// version as the `manabrew-protocol` crate major, so 3.0.0 => 3.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub type Result<T> = std::result::Result<T, AdapterError>;
-
-/// Why a [`PromptOutput`] is not a legal answer to a given [`PromptInput`].
-///
-/// Distinct from [`AdapterError`]: this is the formal prompt/response contract
-/// check, and maps onto exactly two of the five wire [`ProtocolErrorCode`]s.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResponseViolation {
-    /// The output's prompt family is not the open prompt's family.
-    WrongPromptType,
-    /// The echoed action id was never advertised by the open prompt.
-    UnknownActionId(String),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterError {
@@ -235,1114 +655,6 @@ pub fn prepare_snapshot_with_prompt_id(
     })
 }
 
-/// CR 500: turn steps and phases, as the protocol enumerates them.
-///
-/// Thirteen variants against the engine's twelve `Phase`s. The extra one is
-/// `CombatFirstStrikeDamage`, and the engine's twelve is not a gap: CR 510.4
-/// gives the phase a *second* combat damage step rather than a differently
-/// named one, so one `Phase::CombatDamage` entered twice is the faithful
-/// model. The adapter still never produces this variant — see
-/// [`phase_step`] and `local.first-strike-damage-step-unproducible`.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum StepKind {
-    #[default]
-    Untap,
-    Upkeep,
-    Draw,
-    Main1,
-    CombatBegin,
-    CombatDeclareAttackers,
-    CombatDeclareBlockers,
-    CombatFirstStrikeDamage,
-    CombatDamage,
-    CombatEnd,
-    Main2,
-    EndOfTurn,
-    Cleanup,
-}
-
-/// CR 400.1: the six zones the protocol models. The engine's `Zone::Stack` has
-/// no counterpart — stack contents travel as `GameViewDto.stack`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum ZoneKind {
-    Battlefield,
-    Hand,
-    Library,
-    Graveyard,
-    Exile,
-    Command,
-}
-
-/// CR 731.1: the day/night designation. The engine models this as
-/// `Option<DayNight>`, where `None` means neither.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum DayTime {
-    #[default]
-    Neither,
-    Day,
-    Night,
-}
-
-/// A seat's standing in the game.
-///
-/// The engine records only `Player::is_eliminated` — it never persists *why* a
-/// player left — so this adapter emits `Playing` or `Lost` and **never**
-/// `Conceded`. See `local.player-concede-status-unsourceable`.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PlayerStatus {
-    #[default]
-    Playing,
-    Lost,
-    Conceded,
-}
-
-/// CR 122: player-borne counters. Named `Dto` to avoid colliding with the
-/// engine's own `PlayerCounterKind`, whose variant set differs (the engine
-/// tracks energy as a plain field, and spells `Radiation` as `Rad`).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum PlayerCounterKindDto {
-    Poison,
-    Energy,
-    Experience,
-    Radiation,
-    Ticket,
-}
-
-/// A non-mana resource tapped or released to help pay a cost.
-///
-/// Only `Convoke` is reachable from this engine (`GameAction::TapForConvoke`);
-/// there is no engine action for Delve or Improvise, and none for releasing any
-/// of the three. See `local.payment-resource-actions-missing`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PaymentResourceKind {
-    Convoke,
-    Improvise,
-    Delve,
-}
-
-/// The five conformance failure modes a conforming engine must be able to
-/// report (`conformance.mdx:28-33, :50`).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub enum ProtocolErrorCode {
-    StalePrompt,
-    WrongPlayer,
-    WrongPromptType,
-    UnknownActionId,
-    InvalidShape,
-}
-
-/// A wire-level rejection sent back to one client.
-///
-/// Distinct from [`AdapterError`], which is this crate's internal Rust failure
-/// type; [`protocol_error_for`] maps one onto the other.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProtocolError {
-    pub code: ProtocolErrorCode,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_id: Option<u32>,
-}
-
-/// CR 118.9 / 601.2b: alternative costs a spell may be cast for.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum AlternativeCostKind {
-    Flashback,
-    Spectacle,
-    Evoke,
-    Dash,
-    Blitz,
-    Escape,
-    Overload,
-    Madness,
-    Foretell,
-    Emerge,
-    Suspend,
-    Morph,
-    Megamorph,
-    Bestow,
-    Warp,
-    SacrificeAlt,
-    Plot,
-    Awaken,
-    Disturb,
-    Harmonize,
-    Freerunning,
-    Impending,
-    Mayhem,
-    #[serde(rename = "moreThanMeetsTheEye")]
-    MTMtE,
-    Mutate,
-    Prowl,
-    Sneak,
-    Surge,
-    WebSlinging,
-    Plotted,
-}
-
-/// How a card is being put onto the stack or the battlefield.
-///
-/// Display-only: the client echoes just `action_id`, which resolves through
-/// [`ActionTableEntry`] back to the original `GameAction`, so `mode` never
-/// round-trips. `BackFaceLand` is **unproducible** here — `GameAction::PlayLand`
-/// carries no face discriminator (the MDFC face is a separate, later
-/// `ChooseModalFace`), and inferring it from card data would be game logic in a
-/// serialization boundary.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum PlayCardMode {
-    Normal,
-    BackFaceLand,
-    RoomRightSplit,
-    Alternative { cost: AlternativeCostKind },
-    StaticAlternative,
-    ForetellExile,
-    UnlockDoor,
-}
-
-/// A client decision that is not an answer to any open prompt.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum DirectiveInput {
-    Concede,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StateUpdate {
-    pub game_view: GameViewDto,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentPrompt {
-    pub prompt_id: u32,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub deciding_player_id: String,
-    /// The full source card, not just its id — so the recipient can render it
-    /// even when the source lies outside their visible state. Built from raw
-    /// engine state; see `PreparedManabrewSnapshot::source_card_object`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_card: Option<CardDto>,
-    pub input: PromptInput,
-}
-
-/// One `(zone, owner)` bucket. Battlefield entries are bucketed by
-/// **controller** rather than owner (CR 110.2), matching upstream.
-///
-/// `count` is the truthful total and may exceed `cards.len()` when the
-/// recipient may not identify every card in the zone.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ZoneDto {
-    pub zone: ZoneKind,
-    pub owner_id: String,
-    /// Engine order. The library is top-first (the engine stores it front-first
-    /// and the top card is `library.front()`), so index 0 is the top card.
-    /// Every other zone is passed through in the engine's own order — notably
-    /// the graveyard, which the engine appends to, so index 0 is the *oldest*
-    /// card rather than the top of the pile.
-    pub cards: Vec<CardView>,
-    pub count: usize,
-}
-
-/// A card as one recipient may see it.
-///
-/// `Hidden` is for cards in a **hidden zone** whose identity the recipient may
-/// not learn (a face-down exile, CR 406.3). A face-down *battlefield* permanent
-/// is never `Hidden` — the permanent itself is public (CR 400.2 / CR 708.2), so
-/// it travels as a `Visible` entry whose identity fields are redacted while its
-/// public state (tapped, counters, damage) survives.
-// `Visible` is the dominant variant — most cards in most zones are visible —
-// and these views are built once per state update, serialized, and dropped.
-// Boxing to even out the variants would trade one `Vec` allocation for a heap
-// allocation per card, so the flat layout is deliberate.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "visibility",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum CardView {
-    Visible(CardDto),
-    Hidden { id: String },
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct GameViewDto {
-    pub game_id: String,
-    pub turn: u32,
-    pub step: StepKind,
-    pub combat_assignments: Vec<CombatAssignmentDto>,
-    pub active_player_id: String,
-    pub priority_player_id: String,
-    pub players: Vec<PlayerDto>,
-    pub zones: Vec<ZoneDto>,
-    pub stack: Vec<StackObjectDto>,
-    pub game_over: bool,
-    pub winner_id: Option<String>,
-    pub monarch_id: Option<String>,
-    pub initiative_holder_id: Option<String>,
-    pub day_time: DayTime,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CombatAssignmentDto {
-    pub blocker_id: String,
-    pub attacker_id: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PlayerDto {
-    pub id: String,
-    pub name: String,
-    pub status: PlayerStatus,
-    pub is_human: bool,
-    pub life: i32,
-    pub counters: BTreeMap<PlayerCounterKindDto, u32>,
-    pub mana_pool: BTreeMap<ManaColorDto, u32>,
-    pub commander_damage: HashMap<String, i32>,
-    pub has_city_blessing: bool,
-    pub ring_level: i32,
-    pub speed: i32,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CardIdentity {
-    pub name: String,
-    pub set_code: String,
-    pub card_number: String,
-    pub is_token: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CardDto {
-    pub id: String,
-    pub identity: CardIdentity,
-    pub color: String,
-    pub mana_cost: String,
-    pub cmc: i32,
-    pub types: Vec<String>,
-    pub subtypes: Vec<String>,
-    pub supertypes: Vec<String>,
-    pub power: Option<String>,
-    pub toughness: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_power: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_toughness: Option<i32>,
-    pub text: String,
-    pub controller_id: String,
-    pub owner_id: String,
-    pub tapped: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_crewed: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_attacking: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attacking_player_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attack_target_id: Option<String>,
-    pub keywords: Vec<String>,
-    /// Keyed by the engine's canonical `CounterType` serialization key
-    /// ("P1P1", "M1M1", "loyalty", …) — **not** its `display_phrase()` prose
-    /// form ("+1/+1"), which is for player-facing text.
-    pub counters: BTreeMap<String, u32>,
-    pub damage: i32,
-    pub summoning_sick: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_copy: bool,
-    pub is_double_faced: bool,
-    pub is_transformed: bool,
-    pub is_face_down: bool,
-    pub is_bestowed: bool,
-    pub phased_out: bool,
-    pub exerted: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_ring_bearer: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attached_to: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachment_ids: Vec<String>,
-    /// CR 712.4a / CR 730.2: the card ids merged under this top card — the
-    /// engine's `GameObject::merged_components`, covering mutate and meld.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub merged_card_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub flashback_cost: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kicker_cost: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effective_mana_cost: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub madness_cost: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_madness_exiled: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_plotted: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_warp_exiled: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub foil: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub would_die_in_combat: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct StackObjectDto {
-    pub id: String,
-    pub source_id: String,
-    pub controller_id: String,
-    pub identity: CardIdentity,
-    pub text: String,
-    pub is_permanent_spell: bool,
-    pub is_casting: bool,
-    pub targets: Vec<TargetRefDto>,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum TargetingIntent {
-    #[default]
-    Damage,
-    Destroy,
-    Sacrifice,
-    Exile,
-    Bounce,
-    Mill,
-    Discard,
-    Counter,
-    Tap,
-    Untap,
-    Copy,
-    Buff,
-    Debuff,
-    Heal,
-    LoseLife,
-    Reveal,
-    Draw,
-    Fetch,
-    GainControl,
-    Fight,
-    Attach,
-    Attack,
-    Block,
-    Hostile,
-    Friendly,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum TargetKindDto {
-    Player,
-    Card,
-    Spell,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct TargetRefDto {
-    pub kind: TargetKindDto,
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent: Option<TargetingIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oracle: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum PromptInput {
-    ChooseAction(ChooseActionInput),
-    PayManaCost(PayManaCostInput),
-    Mulligan(MulliganInput),
-    MulliganPutBack(MulliganPutBackInput),
-    ChooseAttackers(ChooseAttackersInput),
-    ChooseBlockers(ChooseBlockersInput),
-    ChooseBoardTargets(ChooseBoardTargetsInput),
-    ChooseBoolean(ChooseBooleanInput),
-    ChooseCards(ChooseCardsInput),
-    ChooseColor(ChooseColorInput),
-    ChooseCombatDamageAssignment(ChooseCombatDamageAssignmentInput),
-    ChooseDamageAssignmentOrder(ChooseDamageAssignmentOrderInput),
-    ChooseFromSelection(ChooseFromSelectionInput),
-    ChooseNumber(ChooseNumberInput),
-    RevealCards(RevealCardsInput),
-    Scry(ScryInput),
-    Reorder(ReorderInput),
-    DiceRolled(DiceRolledInput),
-    GameOver(GameOverInput),
-}
-
-/// A client's answer to an open prompt, as a **two-level** union: the outer tag
-/// names the prompt family, and the family's own output nests under `output`.
-///
-/// Wire form: `{"type":"chooseNumber","output":{"type":"numberDecision","chosenNumber":3}}`
-///
-/// The nesting is deliberate and **asymmetric with [`PromptInput`]**, which is
-/// internally tagged with no `content` and therefore *flattens*
-/// (`{"type":"chooseAction","actions":[…]}`). Adding `content` to `PromptInput`
-/// for symmetry would silently break every prompt.
-///
-/// Carrying the family in the tag is also what removes the old
-/// `state.waiting_for` sniffing: an `act` output no longer has to be guessed
-/// between priority and mana payment.
-///
-/// There is no `GameOver` arm — that prompt is terminal and takes no response.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", content = "output", rename_all = "camelCase")]
-pub enum PromptOutput {
-    Mulligan(MulliganOutput),
-    MulliganPutBack(MulliganPutBackOutput),
-    ChooseAction(ChooseActionOutput),
-    ChooseAttackers(ChooseAttackersOutput),
-    ChooseBlockers(ChooseBlockersOutput),
-    ChooseBoardTargets(ChooseBoardTargetsOutput),
-    ChooseBoolean(ChooseBooleanOutput),
-    ChooseFromSelection(ChooseFromSelectionOutput),
-    RevealCards(RevealCardsOutput),
-    Scry(ScryOutput),
-    ChooseColor(ChooseColorOutput),
-    ChooseNumber(ChooseNumberOutput),
-    ChooseDamageAssignmentOrder(ChooseDamageAssignmentOrderOutput),
-    ChooseCombatDamageAssignment(ChooseCombatDamageAssignmentOutput),
-    PayManaCost(PayManaCostOutput),
-    ChooseCards(ChooseCardsOutput),
-    Reorder(ReorderOutput),
-    DiceRolled(DiceRolledOutput),
-}
-
-/// Everything a client can send the engine.
-///
-/// This is the single client→engine union: a prompt answer, or a directive that
-/// belongs to no prompt.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ClientToServerMessage {
-    Response {
-        prompt_id: u32,
-        /// Upstream names this field `action`, not `output`.
-        action: PromptOutput,
-    },
-    Directive {
-        directive: DirectiveInput,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PromptPresentation {
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub targets: Vec<TargetRefDto>,
-}
-
-/// CR 105.1: the five colors plus colorless. Ordered/hashable because it keys
-/// `PlayerDto::mana_pool`'s `BTreeMap`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ManaColorDto {
-    #[serde(rename = "W")]
-    White,
-    #[serde(rename = "U")]
-    Blue,
-    #[serde(rename = "B")]
-    Black,
-    #[serde(rename = "R")]
-    Red,
-    #[serde(rename = "G")]
-    Green,
-    #[serde(rename = "C")]
-    Colorless,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ManaDto {
-    pub color: ManaColorDto,
-    pub amount: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivatableAbilityInfo {
-    pub card_id: String,
-    pub ability_index: usize,
-    pub description: String,
-    pub is_mana_ability: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub produced_mana: Option<Vec<ManaDto>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum AvailableActionKind {
-    Cast {
-        card_id: String,
-        mode: PlayCardMode,
-        label: String,
-    },
-    ActivateAbility(ActivatableAbilityInfo),
-    UndoMana {
-        card_id: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AvailableAction {
-    pub id: String,
-    #[serde(flatten)]
-    pub kind: AvailableActionKind,
-}
-
-/// A single move available *while paying a cost* — the mana-payment analogue of
-/// [`AvailableActionKind`].
-///
-/// `PayLife` is emitted for exactly one thing: a Phyrexian payment route that
-/// spends life (CR 107.4f), advertised from the engine's own
-/// `SubmitPhyrexianChoices` legal actions so the echoed id always resolves.
-/// `UseResource` for Delve or Improvise and every `ReleaseResource` form stay
-/// unemitted — no engine action backs them, and advertising an id the engine
-/// would then reject violates the `UnknownActionId` obligation. See
-/// `local.payment-resource-actions-missing`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum PaymentActionKind {
-    ActivateManaAbility(ActivatableAbilityInfo),
-    UndoMana {
-        card_id: String,
-    },
-    UseResource {
-        card_id: String,
-        resource: PaymentResourceKind,
-    },
-    ReleaseResource {
-        card_id: String,
-        resource: PaymentResourceKind,
-    },
-    PayLife {
-        amount: u32,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PaymentAction {
-    pub id: String,
-    #[serde(flatten)]
-    pub kind: PaymentActionKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum AttackTargetKind {
-    Player,
-    Planeswalker,
-    Battle,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AttackTargetDto {
-    pub id: String,
-    pub label: String,
-    pub kind: AttackTargetKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AttackAssignment {
-    pub attacker_id: String,
-    pub target_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BlockAssignment {
-    pub blocker_id: String,
-    pub attacker_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CombatDamageAssignmentEntry {
-    pub assignee_id: String,
-    pub damage: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseActionInput {
-    pub actions: Vec<AvailableAction>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PassUntil {
-    pub player_id: String,
-    pub phase: StepKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseActionOutput {
-    Pass {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        until: Option<PassUntil>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        exhaust_stack: bool,
-    },
-    RestoreSnapshot {
-        checkpoint_id: u64,
-    },
-    Act {
-        action_id: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PayManaCostInput {
-    pub presentation: PromptPresentation,
-    pub card_id: String,
-    pub card_name: String,
-    pub mana_cost: String,
-    pub can_confirm_from_pool: bool,
-    pub actions: Vec<PaymentAction>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum PayManaCostOutput {
-    Act {
-        action_id: String,
-    },
-    Pay {
-        #[serde(default)]
-        auto: bool,
-    },
-    Cancel,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct MulliganInput {
-    pub hand_card_ids: Vec<String>,
-    pub mulligan_count: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum MulliganOutput {
-    MulliganDecision { keep: bool },
-    MulliganUseSerumPowder { card_id: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct MulliganPutBackInput {
-    pub hand_card_ids: Vec<String>,
-    pub cards: Vec<CardDto>,
-    pub count: usize,
-    /// The earmarked Serum Powder object committed to a pending
-    /// `UseSerumPowder` continuation, if any — the client must not offer it
-    /// as selectable in the bottom-cards picker. `None` for both `Keep`
-    /// resolutions and the (unrelated) `OpeningHandBottomCards` phase.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub excluded_card_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum MulliganPutBackOutput {
-    MulliganPutBackDecision { card_ids: Vec<String> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AttackerOptionDto {
-    pub attacker_id: String,
-    pub valid_target_ids: Vec<String>,
-    pub must_attack: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseAttackersInput {
-    pub attackers: Vec<AttackerOptionDto>,
-    pub attack_targets: Vec<AttackTargetDto>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseAttackersOutput {
-    DeclareAttackers { assignments: Vec<AttackAssignment> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BlockableAttackerDto {
-    pub attacker_id: String,
-    pub valid_blocker_ids: Vec<String>,
-    pub min_blockers: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_blockers: Option<u32>,
-    pub must_be_blocked: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseBlockersInput {
-    pub attackers: Vec<BlockableAttackerDto>,
-    pub available_blocker_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseBlockersOutput {
-    DeclareBlockers { assignments: Vec<BlockAssignment> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseBoardTargetsInput {
-    pub presentation: PromptPresentation,
-    pub candidates: Vec<TargetRefDto>,
-    #[serde(default)]
-    pub hostile: bool,
-    pub intent: TargetingIntent,
-    pub min_targets: i32,
-    pub max_targets: i32,
-    pub chosen_targets: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseBoardTargetsOutput {
-    BoardTargets { chosen: Vec<TargetRefDto> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseBooleanInput {
-    pub presentation: PromptPresentation,
-    pub confirm_label: String,
-    pub deny_label: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseBooleanOutput {
-    Decision { value: bool },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseCardsInput {
-    pub presentation: PromptPresentation,
-    pub cards: Vec<CardDto>,
-    pub min: usize,
-    pub max: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseCardsOutput {
-    ChooseCardsDecision { chosen_card_ids: Vec<String> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseColorInput {
-    pub presentation: PromptPresentation,
-    pub valid_colors: Vec<String>,
-    pub amount: u32,
-    pub repeat_allowed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseColorOutput {
-    ColorDecision {
-        chosen_colors: BTreeMap<String, u32>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseCombatDamageAssignmentInput {
-    pub attacker_id: String,
-    pub blocker_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub defender_id: Option<String>,
-    pub total_damage: i32,
-    pub attacker_has_deathtouch: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseCombatDamageAssignmentOutput {
-    CombatDamageAssignmentDecision {
-        assignments: Vec<CombatDamageAssignmentEntry>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseDamageAssignmentOrderInput {
-    pub attacker_id: String,
-    pub blocker_ids: Vec<String>,
-    pub blocker_cards: Vec<CardDto>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseDamageAssignmentOrderOutput {
-    DamageAssignmentOrderDecision { ordered_blocker_ids: Vec<String> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SelectionOption {
-    pub label: String,
-    pub weight: usize,
-    pub can_repeat: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseFromSelectionInput {
-    pub presentation: PromptPresentation,
-    pub options: Vec<SelectionOption>,
-    pub min_total: usize,
-    pub max_total: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseFromSelectionOutput {
-    SelectionDecision { chosen_indices: Vec<usize> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChooseNumberInput {
-    pub presentation: PromptPresentation,
-    pub min: i32,
-    pub max: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChooseNumberOutput {
-    NumberDecision { chosen_number: Option<i32> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct RevealCardsInput {
-    pub presentation: PromptPresentation,
-    pub cards: Vec<CardDto>,
-    pub zone: ZoneKind,
-    pub owner_player_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum RevealCardsOutput {
-    RevealCardsAcknowledged,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum ScryDestination {
-    LibraryTop,
-    LibraryBottom,
-    Graveyard,
-    Exile,
-    Hand,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ScryInput {
-    pub presentation: PromptPresentation,
-    pub cards: Vec<CardDto>,
-    pub zones: Vec<ScryDestination>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ScryOutput {
-    ScryDecision { zone_card_ids: Vec<Vec<String>> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ReorderItem {
-    pub id: String,
-    pub card: CardDto,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oracle: Option<String>,
-}
-
-/// Renamed from `ReorderCardsInput`: the wire tag changed from `reorderCards`
-/// to `reorder` in v2, and the Rust name should not contradict it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ReorderInput {
-    pub presentation: PromptPresentation,
-    pub items: Vec<ReorderItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ReorderOutput {
-    ReorderDecision { ordered_ids: Vec<String> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DiceRollEntry {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub player_id: Option<String>,
-    pub natural_results: Vec<i32>,
-    pub final_results: Vec<i32>,
-    pub ignored_rolls: Vec<i32>,
-    #[serde(default)]
-    pub highlighted: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DiceRolledInput {
-    pub presentation: PromptPresentation,
-    pub sides: i32,
-    pub rolls: Vec<DiceRollEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_card_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum DiceRolledOutput {
-    DiceRolledAcknowledged,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GameOverInput {}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UnsupportedCapability {
@@ -1356,11 +668,13 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
     &UNSUPPORTED_PROTOCOL_CAPABILITIES
 }
 
-/// Gaps between this engine and protocol 2.0.0, machine-readable.
+/// Gaps and deliberate local wire divergences from protocol 3.0.0,
+/// machine-readable.
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
-/// `local.` = the protocol has the primitive but this engine cannot source it.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 83] = [
+/// `local.` = the protocol has the primitive but this engine cannot source it,
+/// or a documented adapter-local extension is intentionally in use.
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 87] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1884,6 +1198,30 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 83] = [
         reason: "CR 732: the interactive loop-shortcut protocol (DeclareShortcut, RespondToShortcut, DeclineShortcut, PrecastCopyShortcut) is opt-in behind Phase's LoopDetectionMode::Interactive, which a ManaBrew client never sets — so these actions are not reachable through this adapter rather than being unmappable. Left unsupported deliberately: mapping a shortcut negotiation a client cannot opt into would advertise a play it can never legally make.",
         suggested_protocol_extension: "None needed upstream until a client can opt into interactive loop detection; CR 732.1 shortcuts are a table convention the protocol has no reason to model first.",
     },
+    UnsupportedCapability {
+        code: "local.serum-powder-mulligan-vendor-extension",
+        area: "mulligan",
+        reason: "Deliberate adapter-local divergence from manabrew-protocol 3.0.0, not an unsupported capability. MulliganOutput::MulliganUseSerumPowder carries the committed Serum Powder card id from client to engine, and MulliganPutBackInput::excluded_card_id prevents that committed card from appearing in the following bottom-cards picker. The first is safe only for the paired client and adapter; the second is an additive field that older peers may drop.",
+        suggested_protocol_extension: "None required for this paired deployment. Keep both member names under review whenever the upstream protocol version changes.",
+    },
+    UnsupportedCapability {
+        code: "local.class-level-details-unsourceable",
+        area: "card-view",
+        reason: "CardDto::class_levels requires ordered ClassLevelDto values containing each level's printed oracle and cost. GameObject exposes only the current class_level; GameState and DerivedViews do not retain the printed Class section boundaries, source text, or costs after parsing. Reading raw card text and reconstructing sections here would derive game data at the serialization boundary, so class_levels is empty.",
+        suggested_protocol_extension: "No protocol change: the engine must expose an ordered Class presentation view with level, oracle, and optional cost.",
+    },
+    UnsupportedCapability {
+        code: "local.saga-chapter-details-unsourceable",
+        area: "card-view",
+        reason: "CardDto::saga_chapters requires each printed chapter group and its oracle text. GameObject exposes final_chapter_number but GameState and DerivedViews do not retain printable Saga chapter groups or source text after lowering trigger definitions. Re-parsing raw card text in this adapter would violate the serialization-boundary contract, so saga_chapters is empty.",
+        suggested_protocol_extension: "No protocol change: the engine must expose a Saga presentation view with chapter groups and oracle text.",
+    },
+    UnsupportedCapability {
+        code: "local.class-level-up-flag-unsourceable",
+        area: "actions",
+        reason: "ActivatableAbilityInfo::is_class_level_up has no direct engine source. GameAction::ActivateAbility carries only source_id and ability_index; classifying an activation by inspecting its lowered ability definition would re-interpret engine state in this adapter. The field is therefore left None.",
+        suggested_protocol_extension: "No protocol change: have the engine include an explicit class-level-up presentation flag with each activatable ability.",
+    },
 ];
 
 pub enum AvailableActionConversion {
@@ -1984,28 +1322,6 @@ pub fn build_prompt(
 /// Prompt id reserved by the protocol for engine-synthesized absent-player
 /// defaults (timeout / disconnect). It must never be accepted as a real answer.
 pub const RESERVED_ABSENT_PLAYER_PROMPT_ID: u32 = 0;
-
-/// A narration event broadcast to every seat. Purely informational — no
-/// response is expected.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum DisplayEvent {
-    CardPlayed {
-        card_id: String,
-        card_name: String,
-        set_code: String,
-        player_id: String,
-    },
-    TurnChanged {
-        active_player_id: String,
-        active_player_name: String,
-        turn_number: u32,
-    },
-}
 
 fn build_prompt_input(
     prepared: &PreparedManabrewSnapshot,
@@ -2792,64 +2108,6 @@ fn choice_label(choice: &InteractionChoice) -> String {
     }
 }
 
-impl PromptInput {
-    /// The formal prompt/response contract: a response is valid only if its
-    /// output family matches this prompt **and** every echoed action id was
-    /// advertised by it.
-    ///
-    /// These are two of the five conformance obligations; the other three
-    /// (stale prompt id, wrong player, unparseable shape) are enforced by
-    /// [`translate_client_message`] and by deserialization respectively.
-    pub fn validate_response(
-        &self,
-        output: &PromptOutput,
-    ) -> std::result::Result<(), ResponseViolation> {
-        match (self, output) {
-            (PromptInput::ChooseAction(input), PromptOutput::ChooseAction(out)) => match out {
-                ChooseActionOutput::Act { action_id }
-                    if !input.actions.iter().any(|a| a.id == *action_id) =>
-                {
-                    Err(ResponseViolation::UnknownActionId(action_id.clone()))
-                }
-                _ => Ok(()),
-            },
-            (PromptInput::PayManaCost(input), PromptOutput::PayManaCost(out)) => match out {
-                PayManaCostOutput::Act { action_id }
-                    if !input.actions.iter().any(|a| a.id == *action_id) =>
-                {
-                    Err(ResponseViolation::UnknownActionId(action_id.clone()))
-                }
-                _ => Ok(()),
-            },
-            (PromptInput::Mulligan(_), PromptOutput::Mulligan(_))
-            | (PromptInput::MulliganPutBack(_), PromptOutput::MulliganPutBack(_))
-            | (PromptInput::ChooseAttackers(_), PromptOutput::ChooseAttackers(_))
-            | (PromptInput::ChooseBlockers(_), PromptOutput::ChooseBlockers(_))
-            | (PromptInput::ChooseBoardTargets(_), PromptOutput::ChooseBoardTargets(_))
-            | (PromptInput::ChooseBoolean(_), PromptOutput::ChooseBoolean(_))
-            | (PromptInput::ChooseFromSelection(_), PromptOutput::ChooseFromSelection(_))
-            | (PromptInput::RevealCards(_), PromptOutput::RevealCards(_))
-            | (PromptInput::Scry(_), PromptOutput::Scry(_))
-            | (PromptInput::ChooseColor(_), PromptOutput::ChooseColor(_))
-            | (PromptInput::ChooseNumber(_), PromptOutput::ChooseNumber(_))
-            | (
-                PromptInput::ChooseDamageAssignmentOrder(_),
-                PromptOutput::ChooseDamageAssignmentOrder(_),
-            )
-            | (
-                PromptInput::ChooseCombatDamageAssignment(_),
-                PromptOutput::ChooseCombatDamageAssignment(_),
-            )
-            | (PromptInput::ChooseCards(_), PromptOutput::ChooseCards(_))
-            | (PromptInput::Reorder(_), PromptOutput::Reorder(_))
-            | (PromptInput::DiceRolled(_), PromptOutput::DiceRolled(_)) => Ok(()),
-            // Includes every `GameOver` pairing: that prompt is terminal and
-            // `PromptOutput` has no matching arm.
-            _ => Err(ResponseViolation::WrongPromptType),
-        }
-    }
-}
-
 /// Map an internal [`AdapterError`] onto the wire [`ProtocolError`] a client
 /// receives. The two stay distinct types: one is this crate's failure mode, the
 /// other is a protocol message.
@@ -2981,66 +2239,79 @@ pub fn translate_response(
         });
     }
 
-    match output {
-        PromptOutput::ChooseAction(out) => translate_choose_action_output(out, context, state),
-        PromptOutput::PayManaCost(out) => translate_pay_mana_output(out, context),
-        PromptOutput::Mulligan(MulliganOutput::MulliganDecision { keep }) => {
-            Ok(GameAction::MulliganDecision {
-                choice: if keep {
-                    engine::types::actions::MulliganChoice::Keep
-                } else {
-                    engine::types::actions::MulliganChoice::Mulligan
-                },
-            })
-        }
+    let output = match output {
         PromptOutput::Mulligan(MulliganOutput::MulliganUseSerumPowder { card_id }) => {
-            Ok(GameAction::MulliganDecision {
+            return Ok(GameAction::MulliganDecision {
                 choice: engine::types::actions::MulliganChoice::UseSerumPowder {
                     object_id: parse_object_id(&card_id)?,
                 },
-            })
+            });
         }
-        PromptOutput::MulliganPutBack(MulliganPutBackOutput::MulliganPutBackDecision {
+        PromptOutput::Mulligan(MulliganOutput::MulliganDecision { keep }) => {
+            UpstreamPromptOutput::Mulligan(
+                manabrew_protocol::prompts::MulliganOutput::MulliganDecision { keep },
+            )
+        }
+        PromptOutput::Upstream(output) => output,
+    };
+
+    match output {
+        UpstreamPromptOutput::ChooseAction(out) => {
+            translate_choose_action_output(out, context, state)
+        }
+        UpstreamPromptOutput::PayManaCost(out) => translate_pay_mana_output(out, context),
+        UpstreamPromptOutput::Mulligan(
+            manabrew_protocol::prompts::MulliganOutput::MulliganDecision { keep },
+        ) => Ok(GameAction::MulliganDecision {
+            choice: if keep {
+                engine::types::actions::MulliganChoice::Keep
+            } else {
+                engine::types::actions::MulliganChoice::Mulligan
+            },
+        }),
+        UpstreamPromptOutput::MulliganPutBack(MulliganPutBackOutput::MulliganPutBackDecision {
             card_ids,
         }) => Ok(GameAction::SelectCards {
             cards: parse_object_ids(&card_ids)?,
         }),
-        PromptOutput::ChooseAttackers(ChooseAttackersOutput::DeclareAttackers { assignments }) => {
-            Ok(GameAction::DeclareAttackers {
-                attacks: assignments
-                    .iter()
-                    .map(|assignment| {
-                        Ok((
-                            parse_object_id(&assignment.attacker_id)?,
-                            parse_attack_target_id(&assignment.target_id)?,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-                bands: Vec::new(),
-            })
-        }
-        PromptOutput::ChooseBlockers(ChooseBlockersOutput::DeclareBlockers { assignments }) => {
-            Ok(GameAction::DeclareBlockers {
-                assignments: assignments
-                    .iter()
-                    .map(|assignment| {
-                        Ok((
-                            parse_object_id(&assignment.blocker_id)?,
-                            parse_object_id(&assignment.attacker_id)?,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            })
-        }
-        PromptOutput::ChooseBoardTargets(ChooseBoardTargetsOutput::BoardTargets { chosen }) => {
-            Ok(GameAction::SelectTargets {
-                targets: chosen
-                    .iter()
-                    .map(target_ref_from_dto)
-                    .collect::<Result<Vec<_>>>()?,
-            })
-        }
-        PromptOutput::ChooseNumber(ChooseNumberOutput::NumberDecision { chosen_number }) => {
+        UpstreamPromptOutput::ChooseAttackers(ChooseAttackersOutput::DeclareAttackers {
+            assignments,
+        }) => Ok(GameAction::DeclareAttackers {
+            attacks: assignments
+                .iter()
+                .map(|assignment| {
+                    Ok((
+                        parse_object_id(&assignment.attacker_id)?,
+                        parse_attack_target_id(&assignment.target_id)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            bands: Vec::new(),
+        }),
+        UpstreamPromptOutput::ChooseBlockers(ChooseBlockersOutput::DeclareBlockers {
+            assignments,
+        }) => Ok(GameAction::DeclareBlockers {
+            assignments: assignments
+                .iter()
+                .map(|assignment| {
+                    Ok((
+                        parse_object_id(&assignment.blocker_id)?,
+                        parse_object_id(&assignment.attacker_id)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        }),
+        UpstreamPromptOutput::ChooseBoardTargets(ChooseBoardTargetsOutput::BoardTargets {
+            chosen,
+        }) => Ok(GameAction::SelectTargets {
+            targets: chosen
+                .iter()
+                .map(target_ref_from_dto)
+                .collect::<Result<Vec<_>>>()?,
+        }),
+        UpstreamPromptOutput::ChooseNumber(ChooseNumberOutput::NumberDecision {
+            chosen_number,
+        }) => {
             match chosen_number {
                 // CR 107.3 + CR 107.1b: X is a value its controller chooses, and
                 // a negative number can never be chosen — so a declined or
@@ -3059,9 +2330,9 @@ pub fn translate_response(
                 }),
             }
         }
-        PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
-            chosen_indices,
-        }) => match &state.waiting_for {
+        UpstreamPromptOutput::ChooseFromSelection(
+            ChooseFromSelectionOutput::SelectionDecision { chosen_indices },
+        ) => match &state.waiting_for {
             // The two bespoke producers of this family. Their answer is a list
             // of mode indices — one response covering several picks — which is
             // not the one-choice-per-answer shape the projection returns, so it
@@ -3073,10 +2344,10 @@ pub fn translate_response(
             }
             _ => interaction_selection_action(state, context.deciding_player, &chosen_indices),
         },
-        PromptOutput::ChooseColor(ChooseColorOutput::ColorDecision { chosen_colors }) => {
+        UpstreamPromptOutput::ChooseColor(ChooseColorOutput::ColorDecision { chosen_colors }) => {
             translate_color_decision(&state.waiting_for, chosen_colors)
         }
-        PromptOutput::ChooseCombatDamageAssignment(
+        UpstreamPromptOutput::ChooseCombatDamageAssignment(
             ChooseCombatDamageAssignmentOutput::CombatDamageAssignmentDecision { assignments },
         ) => Ok(GameAction::AssignCombatDamage {
             mode: Default::default(),
@@ -3092,7 +2363,7 @@ pub fn translate_response(
             trample_damage: 0,
             controller_damage: 0,
         }),
-        PromptOutput::Scry(ScryOutput::ScryDecision { zone_card_ids }) => {
+        UpstreamPromptOutput::Scry(ScryOutput::ScryDecision { zone_card_ids }) => {
             let bottom = zone_card_ids.get(1).cloned().unwrap_or_default();
             Ok(GameAction::SelectCards {
                 cards: parse_object_ids(&bottom)?,
@@ -3103,7 +2374,7 @@ pub fn translate_response(
         // `output_family_matches_waiting` has already established that the
         // pairing is legal, so any other state here is unreachable rather than
         // merely unhandled.
-        PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value }) => {
+        UpstreamPromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value }) => {
             match &state.waiting_for {
                 // CR 603.12: accept or decline the optional trigger.
                 WaitingFor::OptionalEffectChoice { .. } | WaitingFor::OpponentMayChoice { .. } => {
@@ -3138,7 +2409,9 @@ pub fn translate_response(
                 }),
             }
         }
-        PromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision { chosen_card_ids }) => {
+        UpstreamPromptOutput::ChooseCards(ChooseCardsOutput::ChooseCardsDecision {
+            chosen_card_ids,
+        }) => {
             match &state.waiting_for {
                 // CR 701.9b: an effect that causes a discard lets the affected
                 // player choose which cards, so the chosen cards are exactly the
@@ -3157,7 +2430,7 @@ pub fn translate_response(
         // CR 603.3b: `ReorderItem::id` is the trigger's index in the prompt's
         // list (see the `OrderTriggers` prompt arm), so the answer parses back
         // into `GameAction::OrderTriggers { order: Vec<usize> }` directly.
-        PromptOutput::Reorder(ReorderOutput::ReorderDecision { ordered_ids }) => {
+        UpstreamPromptOutput::Reorder(ReorderOutput::ReorderDecision { ordered_ids }) => {
             let order = ordered_ids
                 .iter()
                 .map(|id| {
@@ -3172,9 +2445,9 @@ pub fn translate_response(
         // Families the adapter models on the wire but cannot yet drive into the
         // engine. `output_family_matches_waiting` already rejects these, so this
         // arm is the belt-and-braces leg of the same contract.
-        PromptOutput::ChooseDamageAssignmentOrder(_)
-        | PromptOutput::RevealCards(_)
-        | PromptOutput::DiceRolled(_) => Err(AdapterError::IllegalResponseForPrompt {
+        UpstreamPromptOutput::ChooseDamageAssignmentOrder(_)
+        | UpstreamPromptOutput::RevealCards(_)
+        | UpstreamPromptOutput::DiceRolled(_) => Err(AdapterError::IllegalResponseForPrompt {
             response_kind: "unsupportedOutput",
         }),
     }
@@ -3267,6 +2540,7 @@ pub fn convert_available_action(
                 ability_index: *ability_index,
                 description: String::new(),
                 is_mana_ability: false,
+                is_class_level_up: None,
                 cost: None,
                 produced_mana: None,
             }),
@@ -3279,6 +2553,7 @@ pub fn convert_available_action(
                     ability_index: selection.ability_index.unwrap_or(0),
                     description: "Activate mana ability".to_string(),
                     is_mana_ability: true,
+                    is_class_level_up: None,
                     cost: None,
                     produced_mana: None,
                 }),
@@ -3435,6 +2710,7 @@ pub fn convert_available_action(
                     object_name(state, *creature_to_return)
                 ),
                 is_mana_ability: false,
+                is_class_level_up: None,
                 cost: None,
                 produced_mana: None,
             }),
@@ -3932,6 +3208,18 @@ fn build_card_dto<L: CardTextLookup>(
         base_toughness: board_state_visible
             .then_some(object.base_toughness)
             .flatten(),
+        // The engine derives this from the Saga's own trigger definitions.
+        final_chapter: identity_visible
+            .then(|| object.final_chapter_number().map(|chapter| chapter as i32))
+            .flatten(),
+        // The current Class level is an engine-owned object characteristic.
+        class_level: identity_visible
+            .then(|| object.class_level.map(i32::from))
+            .flatten(),
+        // The engine does not expose the printable Class/Saga sections; the
+        // capability registry records both omissions.
+        class_levels: Vec::new(),
+        saga_chapters: Vec::new(),
         text,
         controller_id: encode_player_id(object.controller),
         owner_id: encode_player_id(object.owner),
@@ -4483,6 +3771,7 @@ pub fn convert_payment_action(action: &GameAction, id: String) -> PaymentActionC
                     ability_index: selection.ability_index.unwrap_or(0),
                     description: "Activate mana ability".to_string(),
                     is_mana_ability: true,
+                    is_class_level_up: None,
                     cost: None,
                     produced_mana: None,
                 }),
@@ -4507,6 +3796,7 @@ pub fn convert_payment_action(action: &GameAction, id: String) -> PaymentActionC
                 ability_index: *ability_index,
                 description: String::new(),
                 is_mana_ability: true,
+                is_class_level_up: None,
                 cost: None,
                 produced_mana: None,
             }),
@@ -4655,13 +3945,32 @@ fn output_family_matches_waiting(
     state: &GameState,
     viewer: PlayerId,
 ) -> bool {
+    match output {
+        PromptOutput::Mulligan(_) => match &state.waiting_for {
+            WaitingFor::MulliganDecision { pending, .. } => {
+                pending_entry_for_viewer(state, viewer, pending)
+                    .is_ok_and(|entry| matches!(entry.phase, MulliganDecisionPhase::Declare))
+            }
+            _ => false,
+        },
+        PromptOutput::Upstream(output) => output_family_matches_upstream(output, state, viewer),
+    }
+}
+
+fn output_family_matches_upstream(
+    output: &UpstreamPromptOutput,
+    state: &GameState,
+    viewer: PlayerId,
+) -> bool {
     let waiting_for = &state.waiting_for;
     match output {
-        PromptOutput::ChooseAction(_) => matches!(waiting_for, WaitingFor::Priority { .. }),
-        PromptOutput::PayManaCost(_) => matches!(waiting_for, WaitingFor::ManaPayment { .. }),
-        // A declare-point response (keep/mulligan or use Serum Powder) is only
-        // legal while the viewer's own entry is in the `Declare` phase.
-        PromptOutput::Mulligan(_) => match waiting_for {
+        UpstreamPromptOutput::ChooseAction(_) => matches!(waiting_for, WaitingFor::Priority { .. }),
+        UpstreamPromptOutput::PayManaCost(_) => {
+            matches!(waiting_for, WaitingFor::ManaPayment { .. })
+        }
+        // A declare-point response (keep or mulligan) is only legal while the
+        // viewer's own entry is in the `Declare` phase.
+        UpstreamPromptOutput::Mulligan(_) => match waiting_for {
             WaitingFor::MulliganDecision { pending, .. } => {
                 pending_entry_for_viewer(state, viewer, pending)
                     .is_ok_and(|entry| matches!(entry.phase, MulliganDecisionPhase::Declare))
@@ -4671,7 +3980,7 @@ fn output_family_matches_waiting(
         // A bottom-cards selection is legal while the viewer's own entry is in
         // the `BottomCards` sub-phase, or during the unrelated
         // `OpeningHandBottomCards` phase.
-        PromptOutput::MulliganPutBack(_) => match waiting_for {
+        UpstreamPromptOutput::MulliganPutBack(_) => match waiting_for {
             WaitingFor::MulliganDecision { pending, .. } => {
                 pending_entry_for_viewer(state, viewer, pending).is_ok_and(|entry| {
                     matches!(entry.phase, MulliganDecisionPhase::BottomCards { .. })
@@ -4682,19 +3991,19 @@ fn output_family_matches_waiting(
             }
             _ => false,
         },
-        PromptOutput::ChooseAttackers(_) => {
+        UpstreamPromptOutput::ChooseAttackers(_) => {
             matches!(waiting_for, WaitingFor::DeclareAttackers { .. })
         }
-        PromptOutput::ChooseBlockers(_) => {
+        UpstreamPromptOutput::ChooseBlockers(_) => {
             matches!(waiting_for, WaitingFor::DeclareBlockers { .. })
         }
-        PromptOutput::ChooseBoardTargets(_) => matches!(
+        UpstreamPromptOutput::ChooseBoardTargets(_) => matches!(
             waiting_for,
             WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
         ),
         // Like `ChooseFromSelection`, reachable both bespoke (X, CR 107.3) and
         // generically, so the open-prompt check carries it rather than a list.
-        PromptOutput::ChooseNumber(_) => {
+        UpstreamPromptOutput::ChooseNumber(_) => {
             matches!(waiting_for, WaitingFor::ChooseXValue { .. })
                 || open_prompt_is_generic_number(state, viewer)
         }
@@ -4711,18 +4020,22 @@ fn output_family_matches_waiting(
         // projection alone would be wrong: `WaitingFor::Priority` also projects
         // a finite list, and would then accept a `chooseFromSelection` answer to
         // a `chooseAction` prompt.
-        PromptOutput::ChooseFromSelection(_) => open_prompt_is_generic_selection(state, viewer),
-        PromptOutput::ChooseColor(_) => matches!(waiting_for, WaitingFor::ChooseManaColor { .. }),
-        PromptOutput::ChooseCombatDamageAssignment(_) => {
+        UpstreamPromptOutput::ChooseFromSelection(_) => {
+            open_prompt_is_generic_selection(state, viewer)
+        }
+        UpstreamPromptOutput::ChooseColor(_) => {
+            matches!(waiting_for, WaitingFor::ChooseManaColor { .. })
+        }
+        UpstreamPromptOutput::ChooseCombatDamageAssignment(_) => {
             matches!(waiting_for, WaitingFor::AssignCombatDamage { .. })
         }
         // CR 701.42a: surveil shares scry's partition shape, differing only in
         // the second destination carried by `ScryInput::zones`.
-        PromptOutput::Scry(_) => matches!(
+        UpstreamPromptOutput::Scry(_) => matches!(
             waiting_for,
             WaitingFor::ScryChoice { .. } | WaitingFor::SurveilChoice { .. }
         ),
-        PromptOutput::ChooseBoolean(_) => matches!(
+        UpstreamPromptOutput::ChooseBoolean(_) => matches!(
             waiting_for,
             WaitingFor::OptionalEffectChoice { .. }
                 | WaitingFor::OpponentMayChoice { .. }
@@ -4733,16 +4046,16 @@ fn output_family_matches_waiting(
         // Reachable both bespoke (discard, CR 701.9b) and generically, so the
         // bespoke match stays primary and the open-prompt check carries the rest
         // rather than a list that would rot as the engine reclassifies states.
-        PromptOutput::ChooseCards(_) => {
+        UpstreamPromptOutput::ChooseCards(_) => {
             matches!(waiting_for, WaitingFor::DiscardChoice { .. })
                 || open_prompt_is_generic_cards(state, viewer)
         }
-        PromptOutput::Reorder(_) => matches!(waiting_for, WaitingFor::OrderTriggers { .. }),
+        UpstreamPromptOutput::Reorder(_) => matches!(waiting_for, WaitingFor::OrderTriggers { .. }),
         // Modeled on the wire, but this adapter emits no prompt that accepts
         // them, so no `WaitingFor` can legally receive one.
-        PromptOutput::ChooseDamageAssignmentOrder(_)
-        | PromptOutput::RevealCards(_)
-        | PromptOutput::DiceRolled(_) => false,
+        UpstreamPromptOutput::ChooseDamageAssignmentOrder(_)
+        | UpstreamPromptOutput::RevealCards(_)
+        | UpstreamPromptOutput::DiceRolled(_) => false,
     }
 }
 
@@ -4772,21 +4085,23 @@ fn open_prompt(state: &GameState, viewer: PlayerId) -> Option<PromptInput> {
 fn open_prompt_is_generic_selection(state: &GameState, viewer: PlayerId) -> bool {
     matches!(
         open_prompt(state, viewer),
-        Some(PromptInput::ChooseFromSelection(_))
+        Some(PromptInput::Upstream(
+            UpstreamPromptInput::ChooseFromSelection(_)
+        ))
     )
 }
 
 fn open_prompt_is_generic_cards(state: &GameState, viewer: PlayerId) -> bool {
     matches!(
         open_prompt(state, viewer),
-        Some(PromptInput::ChooseCards(_))
+        Some(PromptInput::Upstream(UpstreamPromptInput::ChooseCards(_)))
     )
 }
 
 fn open_prompt_is_generic_number(state: &GameState, viewer: PlayerId) -> bool {
     matches!(
         open_prompt(state, viewer),
-        Some(PromptInput::ChooseNumber(_))
+        Some(PromptInput::Upstream(UpstreamPromptInput::ChooseNumber(_)))
     )
 }
 
@@ -4794,23 +4109,26 @@ fn open_prompt_is_generic_number(state: &GameState, viewer: PlayerId) -> bool {
 fn output_family(output: &PromptOutput) -> &'static str {
     match output {
         PromptOutput::Mulligan(_) => "mulligan",
-        PromptOutput::MulliganPutBack(_) => "mulliganPutBack",
-        PromptOutput::ChooseAction(_) => "chooseAction",
-        PromptOutput::ChooseAttackers(_) => "chooseAttackers",
-        PromptOutput::ChooseBlockers(_) => "chooseBlockers",
-        PromptOutput::ChooseBoardTargets(_) => "chooseBoardTargets",
-        PromptOutput::ChooseBoolean(_) => "chooseBoolean",
-        PromptOutput::ChooseFromSelection(_) => "chooseFromSelection",
-        PromptOutput::RevealCards(_) => "revealCards",
-        PromptOutput::Scry(_) => "scry",
-        PromptOutput::ChooseColor(_) => "chooseColor",
-        PromptOutput::ChooseNumber(_) => "chooseNumber",
-        PromptOutput::ChooseDamageAssignmentOrder(_) => "chooseDamageAssignmentOrder",
-        PromptOutput::ChooseCombatDamageAssignment(_) => "chooseCombatDamageAssignment",
-        PromptOutput::PayManaCost(_) => "payManaCost",
-        PromptOutput::ChooseCards(_) => "chooseCards",
-        PromptOutput::Reorder(_) => "reorder",
-        PromptOutput::DiceRolled(_) => "diceRolled",
+        PromptOutput::Upstream(output) => match output {
+            UpstreamPromptOutput::Mulligan(_) => "mulligan",
+            UpstreamPromptOutput::MulliganPutBack(_) => "mulliganPutBack",
+            UpstreamPromptOutput::ChooseAction(_) => "chooseAction",
+            UpstreamPromptOutput::ChooseAttackers(_) => "chooseAttackers",
+            UpstreamPromptOutput::ChooseBlockers(_) => "chooseBlockers",
+            UpstreamPromptOutput::ChooseBoardTargets(_) => "chooseBoardTargets",
+            UpstreamPromptOutput::ChooseBoolean(_) => "chooseBoolean",
+            UpstreamPromptOutput::ChooseFromSelection(_) => "chooseFromSelection",
+            UpstreamPromptOutput::RevealCards(_) => "revealCards",
+            UpstreamPromptOutput::Scry(_) => "scry",
+            UpstreamPromptOutput::ChooseColor(_) => "chooseColor",
+            UpstreamPromptOutput::ChooseNumber(_) => "chooseNumber",
+            UpstreamPromptOutput::ChooseDamageAssignmentOrder(_) => "chooseDamageAssignmentOrder",
+            UpstreamPromptOutput::ChooseCombatDamageAssignment(_) => "chooseCombatDamageAssignment",
+            UpstreamPromptOutput::PayManaCost(_) => "payManaCost",
+            UpstreamPromptOutput::ChooseCards(_) => "chooseCards",
+            UpstreamPromptOutput::Reorder(_) => "reorder",
+            UpstreamPromptOutput::DiceRolled(_) => "diceRolled",
+        },
     }
 }
 
@@ -5166,7 +4484,7 @@ fn mana_shard_symbol(shard: &ManaCostShard) -> &'static str {
 // variants would only add indirection to the payload the relay is about to
 // serialize anyway. Upstream makes the same call on its `AgentMessage`.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -5293,7 +4611,9 @@ mod tests {
 
     use engine::game::interaction::bind_interaction_authority;
     use engine::game::zones::create_object;
-    use engine::types::ability::{Effect, EffectKind, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{
+        CounterTriggerFilter, Effect, EffectKind, ResolvedAbility, TargetFilter, TriggerDefinition,
+    };
     use engine::types::counter::CounterType;
     use engine::types::game_state::{
         MulliganDecisionEntry, MulliganDecisionPhase, OutsideGameChoiceEntry,
@@ -5302,6 +4622,7 @@ mod tests {
     };
     use engine::types::identifiers::CardId;
     use engine::types::interaction::InteractionSessionId;
+    use engine::types::triggers::TriggerMode;
     use pretty_assertions::assert_eq;
 
     fn lookup(_: &GameObject) -> Option<String> {
@@ -5407,7 +4728,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_the_pinned_crate_major() {
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 3);
     }
 
     // -------------------------------------------------------------- state ---
@@ -5522,10 +4843,8 @@ mod tests {
             };
             let until_json = serde_json::to_value(&until).unwrap();
             assert_eq!(until_json["phase"], expected);
-            assert_eq!(
-                serde_json::from_value::<PassUntil>(until_json).unwrap(),
-                until
-            );
+            let round_trip: PassUntil = serde_json::from_value(until_json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(round_trip).unwrap(), until_json);
         }
     }
 
@@ -6420,7 +5739,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("an unmapped waiting state is served by the projection, not refused");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("a finite candidate list is ChooseFromSelection's shape, got {prompt:?}");
         };
         let labels = input
@@ -6486,7 +5805,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Select schema is served by the projection");
-        let PromptInput::ChooseCards(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseCards(input)) = prompt else {
             panic!("a subset choice over objects is ChooseCards, got {prompt:?}");
         };
         assert_eq!(
@@ -6560,7 +5879,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Select schema over objects is served by the projection");
-        let PromptInput::ChooseCards(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseCards(input)) = prompt else {
             panic!("a non-targeting selection over objects is ChooseCards, got {prompt:?}");
         };
         assert_eq!(
@@ -6686,7 +6005,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Sequence schema is served by the projection");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("an ordered sequence stays in the labelled family, got {prompt:?}");
         };
         assert_eq!(
@@ -6740,7 +6059,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Select schema is served by the projection");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("a non-candidate role stays in the labelled family, got {prompt:?}");
         };
         assert_eq!(
@@ -6783,7 +6102,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Number schema is served by the projection");
-        let PromptInput::ChooseNumber(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseNumber(input)) = prompt else {
             panic!("a numeric range is ChooseNumber, not a selection, got {prompt:?}");
         };
         assert_eq!(
@@ -6844,7 +6163,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt = build_prompt_input(&prepared, &lookup)
             .expect("a Sequence schema is served by the projection");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("an ordered subset still renders as ChooseFromSelection, got {prompt:?}");
         };
         assert_eq!(
@@ -6957,7 +6276,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt =
             build_prompt_input(&prepared, &lookup).expect("a reveal is served by the projection");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("a reveal renders as labelled options, got {prompt:?}");
         };
         assert_eq!(
@@ -7040,7 +6359,7 @@ mod tests {
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
         let prompt =
             build_prompt_input(&prepared, &lookup).expect("a reveal is served by the projection");
-        let PromptInput::ChooseFromSelection(input) = prompt else {
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
             panic!("a reveal renders as labelled options, got {prompt:?}");
         };
         assert_eq!(
@@ -7127,10 +6446,8 @@ mod tests {
                 }
             })
         );
-        assert_eq!(
-            serde_json::from_value::<ClientToServerMessage>(json).unwrap(),
-            message
-        );
+        let round_trip: ClientToServerMessage = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), json);
     }
 
     #[test]
@@ -7316,10 +6633,8 @@ mod tests {
         let update = build_state_update(&prepared, &lookup).unwrap();
 
         let mut value = serde_json::to_value(&update).unwrap();
-        assert_eq!(
-            serde_json::from_value::<StateUpdate>(value.clone()).unwrap(),
-            update
-        );
+        let round_trip: StateUpdate = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
 
         value
             .as_object_mut()
@@ -7339,10 +6654,8 @@ mod tests {
         .unwrap();
 
         let mut value = serde_json::to_value(&prompt).unwrap();
-        assert_eq!(
-            serde_json::from_value::<AgentPrompt>(value.clone()).unwrap(),
-            prompt
-        );
+        let round_trip: AgentPrompt = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
 
         value
             .as_object_mut()
@@ -7381,6 +6694,8 @@ mod tests {
             "kickerCost",
             "effectiveManaCost",
             "madnessCost",
+            "finalChapter",
+            "classLevel",
         ] {
             assert!(
                 !object.contains_key(omitted),
@@ -7391,8 +6706,61 @@ mod tests {
             !object.contains_key("zoneId"),
             "zoneId was removed in v2 — the zone is carried by ZoneDto"
         );
+        assert_eq!(object["classLevels"], serde_json::json!([]));
+        assert_eq!(object["sagaChapters"], serde_json::json!([]));
 
-        assert_eq!(serde_json::from_value::<CardDto>(value).unwrap(), card);
+        let round_trip: CardDto = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
+    }
+
+    #[test]
+    fn card_dto_uses_engine_supplied_saga_and_class_state() {
+        let mut state = GameState::new_two_player(7);
+        let class_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Wizard Class".to_string(),
+            Zone::Battlefield,
+        );
+        let saga_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "The Eldest Reborn".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&class_id).unwrap().class_level = Some(2);
+        let saga = state.objects.get_mut(&saga_id).unwrap();
+        saga.card_types.subtypes.push("Saga".to_string());
+        saga.trigger_definitions = vec![
+            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
+                CounterTriggerFilter {
+                    counter_type: CounterType::Lore,
+                    threshold: Some(1),
+                },
+            ),
+            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
+                CounterTriggerFilter {
+                    counter_type: CounterType::Lore,
+                    threshold: Some(3),
+                },
+            ),
+        ]
+        .into();
+
+        let cards = CardBuildContext {
+            card_lookup: &lookup,
+        };
+        let class = build_card_dto(&state, state.objects.get(&class_id).unwrap(), &cards).unwrap();
+        let saga = build_card_dto(&state, state.objects.get(&saga_id).unwrap(), &cards).unwrap();
+
+        assert_eq!(class.class_level, Some(2));
+        assert_eq!(class.final_chapter, None);
+        assert_eq!(saga.final_chapter, Some(3));
+        assert_eq!(saga.class_level, None);
+        assert!(class.class_levels.is_empty());
+        assert!(saga.saga_chapters.is_empty());
     }
 
     /// One representative instance of every `PromptInput` variant, paired with
@@ -7600,8 +6968,12 @@ mod tests {
         for (tag, input) in &cases {
             let value = serde_json::to_value(input).unwrap();
             assert_eq!(value["type"], *tag, "wrong discriminant tag for {tag}");
-            let back: PromptInput = serde_json::from_value(value).unwrap();
-            assert_eq!(&back, input, "round-trip mismatch for {tag}");
+            let back: PromptInput = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(back).unwrap(),
+                value,
+                "round-trip mismatch for {tag}"
+            );
         }
     }
 
@@ -7709,7 +7081,7 @@ mod tests {
     /// All five `ProtocolErrorCode` variants must have a wire producer.
     #[test]
     fn every_protocol_error_code_has_a_producer() {
-        let produced: HashSet<_> = [
+        let produced: Vec<_> = [
             protocol_error_for(
                 &AdapterError::PromptIdMismatch {
                     expected: 1,
@@ -7744,6 +7116,13 @@ mod tests {
             produced.len(),
             5,
             "each of the five conformance failures must map to a distinct code"
+        );
+        assert!(
+            produced
+                .iter()
+                .enumerate()
+                .all(|(index, code)| !produced[..index].contains(code)),
+            "each conformance failure must map to a distinct code"
         );
         for code in [
             ProtocolErrorCode::StalePrompt,
@@ -7789,10 +7168,8 @@ mod tests {
         let mut value = serde_json::to_value(&error).unwrap();
         assert_eq!(value["code"], "wrongPlayer");
         assert_eq!(value["promptId"], 9);
-        assert_eq!(
-            serde_json::from_value::<ProtocolError>(value.clone()).unwrap(),
-            error
-        );
+        let round_trip: ProtocolError = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
 
         value
             .as_object_mut()
@@ -8004,6 +7381,24 @@ mod tests {
                 choice: engine::types::actions::MulliganChoice::UseSerumPowder { object_id },
             } if object_id == powder
         ));
+
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 1,
+                phase: MulliganDecisionPhase::BottomCards {
+                    count: 1,
+                    then: PendingMulliganAction::UseSerumPowder { object_id: powder },
+                },
+            }],
+            free_first_mulligan: false,
+        };
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 7).unwrap();
+        let PromptInput::MulliganPutBack(input) = build_prompt_input(&prepared, &lookup).unwrap()
+        else {
+            panic!("a Serum Powder continuation must build a mulligan put-back prompt");
+        };
+        assert_eq!(input.excluded_card_id, Some(encode_object_id(powder)));
     }
 
     #[test]
@@ -8393,7 +7788,10 @@ mod tests {
         })
         .collect();
 
-        assert_eq!(modes, vec![PlayCardMode::Normal, PlayCardMode::Normal]);
+        assert_eq!(
+            serde_json::to_value(modes).unwrap(),
+            serde_json::json!([{"type": "normal"}, {"type": "normal"}])
+        );
     }
 
     /// Sneak, web-slinging, and foretell have exact v2 counterparts and were
@@ -8717,13 +8115,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 83);
+        assert_eq!(capabilities.len(), 87);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 83, "capability codes must be unique");
+        assert_eq!(codes.len(), 87, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(
@@ -8877,9 +8275,9 @@ mod tests {
     }
 
     /// Every gap this migration introduced or surfaced must be recorded, and
-    /// every entry v2 made obsolete must be gone.
+    /// every entry superseded by the current protocol must be gone.
     #[test]
-    fn capability_registry_reflects_v2_reality() {
+    fn capability_registry_reflects_v3_reality() {
         let codes: HashSet<_> = unsupported_protocol_capabilities()
             .iter()
             .map(|capability| capability.code)
@@ -8899,6 +8297,10 @@ mod tests {
             "local.dungeon-room-unsupported",
             "local.room-right-split-mode-unproducible",
             "local.counter-key-vocabulary-unverifiable",
+            "local.serum-powder-mulligan-vendor-extension",
+            "local.class-level-details-unsourceable",
+            "local.saga-chapter-details-unsourceable",
+            "local.class-level-up-flag-unsourceable",
         ] {
             assert!(codes.contains(expected), "missing new gap `{expected}`");
         }
@@ -8925,6 +8327,9 @@ mod tests {
             // Phyrexian route is advertised as `PayLife` (CR 107.4f).
             "local.ninjutsu-cast-unsupported",
             "local.phyrexian-payment-unsupported",
+            // The two local Serum Powder members are intentional vendor
+            // extensions, not an upstream protocol gap.
+            "upstream.serum-powder-mulligan-missing",
         ] {
             assert!(
                 !codes.contains(obsolete),
@@ -8961,6 +8366,25 @@ mod tests {
     /// never emits it.
     #[test]
     fn vendor_extensions_are_deliberate_and_isolated() {
+        let without_extension = serde_json::to_value(MulliganPutBackInput {
+            hand_card_ids: vec![],
+            cards: vec![],
+            count: 1,
+            excluded_card_id: None,
+        })
+        .unwrap();
+        assert!(without_extension.get("excludedCardId").is_none());
+        assert_eq!(
+            serde_json::to_string(&MulliganPutBackInput {
+                hand_card_ids: vec![],
+                cards: vec![],
+                count: 1,
+                excluded_card_id: None,
+            })
+            .unwrap(),
+            r#"{"handCardIds":[],"cards":[],"count":1}"#
+        );
+
         let json = serde_json::to_value(MulliganPutBackInput {
             hand_card_ids: vec![],
             cards: vec![],
@@ -8973,14 +8397,33 @@ mod tests {
         // A peer that does not know the field simply drops it.
         let mut without = json.clone();
         without.as_object_mut().unwrap().remove("excludedCardId");
-        assert!(serde_json::from_value::<MulliganPutBackInput>(without).is_ok());
+        let round_trip = serde_json::from_value::<MulliganPutBackInput>(without).unwrap();
+        assert_eq!(round_trip.excluded_card_id, None);
 
+        let serum_powder = serde_json::to_value(MulliganOutput::MulliganUseSerumPowder {
+            card_id: "card-1".to_string(),
+        })
+        .unwrap();
+        assert_eq!(serum_powder["type"], "mulliganUseSerumPowder");
+        assert_eq!(serum_powder["cardId"], "card-1");
         assert_eq!(
-            serde_json::to_value(MulliganOutput::MulliganUseSerumPowder {
+            serde_json::to_string(&MulliganOutput::MulliganUseSerumPowder {
                 card_id: "card-1".to_string(),
             })
-            .unwrap()["type"],
-            "mulliganUseSerumPowder"
+            .unwrap(),
+            r#"{"type":"mulliganUseSerumPowder","cardId":"card-1"}"#
         );
+    }
+
+    #[test]
+    fn non_extended_mulligan_dtos_remain_upstream_v3_types() {
+        let _: manabrew_protocol::prompts::MulliganInput = MulliganInput {
+            hand_card_ids: vec!["card-1".to_string()],
+            mulligan_count: 1,
+        };
+        let _: manabrew_protocol::prompts::MulliganPutBackOutput =
+            MulliganPutBackOutput::MulliganPutBackDecision {
+                card_ids: vec!["card-1".to_string()],
+            };
     }
 }

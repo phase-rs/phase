@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1309
 expression: "&ir"
 ---
 {
@@ -23,22 +22,13 @@ expression: "&ir"
         "fragment": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
             "description": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll."
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },
