@@ -1864,8 +1864,8 @@ fn build_replacement_exec(
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
-        // CR 800.4a: opponent-scoped player choice when the schema
-        // filter narrows to opponents; broader player choice
+        // CR 102.1-102.3 + CR 608.2d: opponent-scoped player choice when the
+        // schema filter narrows to opponents; broader player choice
         // otherwise. Re-uses the existing `players_to_controller`
         // bridge for opponent detection.
         A::ChooseAPlayer(players) => {

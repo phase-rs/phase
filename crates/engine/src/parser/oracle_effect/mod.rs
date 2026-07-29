@@ -20788,12 +20788,22 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // CR 119.3 (issue #6381): "that player gains N life" / "target player
         // gains N life" — the imperative path defaults `player` to the
         // no-subject `Controller` (the "you gain life" reading); inject the
-        // parsed subject when the sentence actually names a different
-        // recipient. Without this arm, EVERY "[non-you subject] gains N life"
-        // clause silently credited the ability's controller instead (the
-        // "Offering" cycle's "that player gains 2 life for each creature they
-        // control" — Benevolent/Infernal/Intellectual/Sylvan Offering).
-        Effect::GainLife { player, .. } if *player == TargetFilter::Controller => {
+        // parsed subject when the sentence actually names a different,
+        // genuinely player-denoting recipient. Without this arm, EVERY
+        // "[non-you subject] gains N life" clause silently credited the
+        // ability's controller instead (the "Offering" cycle's "that player
+        // gains 2 life for each creature they control" — Benevolent/Infernal/
+        // Intellectual/Sylvan Offering). Gated on `target_filter_can_target_player`
+        // (mirrors the `thread_for_each_subject` GainLife arm) so an
+        // unresolved compound subject ("you and that player each gain that
+        // much life" — Angel of Destiny, where the "each"-bodied split
+        // doesn't cover `GainLife` and falls back to a non-player `Any`
+        // subject) leaves the safer `Controller` default alone instead of
+        // rebinding to a nonsensical recipient.
+        Effect::GainLife { player, .. }
+            if *player == TargetFilter::Controller
+                && target_filter_can_target_player(&subject_filter) =>
+        {
             *player = subject_filter;
         }
         // CR 400.7: "shuffle [subject]'s graveyard into their library" — inject

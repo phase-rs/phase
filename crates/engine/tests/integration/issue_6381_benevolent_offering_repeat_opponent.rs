@@ -13,11 +13,12 @@
 //! instead of 2 life per creature they control.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::ChoiceType;
+use engine::types::ability::{ChoiceType, ControllerRef, Effect, TargetFilter, TypedFilter};
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::triggers::TriggerMode;
 
 const BENEVOLENT_OFFERING: &str = "Choose an opponent. You and that player each create three 1/1 white Spirit \
      creature tokens with flying.\nChoose an opponent. You gain 2 life for each creature you control and that \
@@ -152,5 +153,115 @@ fn benevolent_offering_allows_choosing_the_same_opponent_twice() {
         6,
         "the chosen opponent must gain 2 life per creature controlled (3 Spirits) \
          — this is the reported defect: it read 0 before the fix"
+    );
+}
+
+/// Intellectual Offering shares Benevolent Offering's "Choose an opponent.
+/// You and that player each <body>." shape, so it exercises the SAME
+/// `try_parse_compound_subject_each` fix: "that player" must rebind to the
+/// resolution-scoped chosen player (`ChosenPlayer { index }`), not the
+/// unrelated vote/fan-out `ScopedPlayer` axis. Locks in that the whole
+/// "Offering" cycle — not just Benevolent Offering — benefits.
+#[test]
+fn intellectual_offering_second_draw_binds_to_chosen_opponent() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Intellectual Offering",
+            true,
+            "Choose an opponent. You and that player each draw three cards.\nChoose an opponent. Untap all nonland permanents you control and all nonland permanents that player controls.",
+        )
+        .id();
+    let runner = scenario.build();
+    let ability = &runner.state().objects.get(&spell).unwrap().abilities[0];
+    assert!(
+        matches!(
+            ability.effect.as_ref(),
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                ..
+            }
+        ),
+        "head must be Choose(Opponent), got {:?}",
+        ability.effect
+    );
+    let first_draw = ability.sub_ability.as_ref().expect("first Draw node");
+    assert!(
+        matches!(
+            first_draw.effect.as_ref(),
+            Effect::Draw {
+                target: TargetFilter::OriginalController,
+                ..
+            }
+        ),
+        "the caster's draw must target OriginalController, got {:?}",
+        first_draw.effect
+    );
+    let second_draw = first_draw.sub_ability.as_ref().expect("second Draw node");
+    assert!(
+        matches!(
+            second_draw.effect.as_ref(),
+            Effect::Draw {
+                target: TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::ChosenPlayer { index: 0 }),
+                    ..
+                }),
+                ..
+            }
+        ),
+        "the chosen opponent's draw must bind to ChosenPlayer{{index: 0}}, not ScopedPlayer, got {:?}",
+        second_draw.effect
+    );
+}
+
+/// Regression guard for the fix above: `inject_subject_target`'s new
+/// `GainLife` arm must NOT rebind the recipient when the detected subject
+/// isn't a genuine player reference. Angel of Destiny's "you and that player
+/// each gain that much life" is a compound subject that `GainLife` doesn't
+/// support in `rewrite_recipient_on_link` (Token/Draw/Discard/Mill/Pump/
+/// GenericEffect only), so it falls through to a non-player-denoting subject
+/// filter; the safe no-subject `Controller` default must survive rather than
+/// being corrupted into an incoherent recipient. This is a pre-existing gap
+/// (the damaged player still doesn't gain life) — not fixed here — but the
+/// `player` field must stay a well-defined `Controller`, not silently swap to
+/// something meaningless.
+#[test]
+fn angel_of_destiny_combat_damage_gain_life_keeps_well_defined_recipient() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Angel of Destiny",
+            3,
+            4,
+            "Flying, double strike\nWhenever a creature you control deals combat damage to a player, you and that player each gain that much life.\nAt the beginning of your end step, if you have at least 15 life more than your starting life total, each player this creature attacked this turn loses the game.",
+        )
+        .id();
+    let runner = scenario.build();
+    let obj = runner.state().objects.get(&creature).unwrap();
+    let damage_trigger = obj
+        .trigger_definitions
+        .iter_unchecked()
+        .find(|entry| matches!(entry.definition.mode, TriggerMode::DamageDone))
+        .expect("Angel of Destiny must have a DamageDone trigger");
+    let execute = damage_trigger
+        .definition
+        .execute
+        .as_ref()
+        .expect("DamageDone trigger must have an execute body");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "GainLife.player must stay the well-defined Controller default, not an \
+         unresolved compound-subject filter like Any, got {:?}",
+        execute.effect
     );
 }
