@@ -2450,12 +2450,41 @@ fn apply_parent_chain_context(
 /// NOT inherit an earlier instruction's already-chosen recipient, or every
 /// replicated instruction in a chain collapses onto whichever single object
 /// the first one picked (Kathril, Aspect Warper, issue #6321 / PR #6533).
+///
+/// CR 406.6 + CR 607.2a (issue #6437, Fight Rigging / Collector's Cage): a sub
+/// whose own effect targets a BARE `TargetFilter::ExiledBySource` resolves
+/// that reference itself, at its own resolution, against this source's
+/// durable `exile_links` (`cast_from_zone::resolve`'s no-target
+/// `ExiledBySource` branch) — it never needs a pre-chosen object. "Put a
+/// +1/+1 counter on target creature you control. Then ... you may play the
+/// exiled card" chains a targeted clause before the linked-exile clause in
+/// the SAME resolution; without this guard the counter's targeted creature
+/// propagates into the exiled-card sub as if IT were the card to play, and
+/// `CastFromZone` proceeds to grant a cast permission (and, for a
+/// battlefield object, an exile-delivery move) on the targeted creature
+/// instead of the hidden card.
+///
+/// Gated on `!effect_refs_parent_target`: a COMPOSED filter like Jodah's
+/// cleanup rider (`And { ExiledBySource, Typed(DistinctFrom { ParentTarget })
+/// }`, sweeping the "misses" while excluding the cast hit) also references
+/// `ExiledBySource`, but STILL needs the propagated parent target so
+/// `ParentTarget` can resolve to the hit and exclude it from the sweep — the
+/// declined-branch dispatcher (this function's `Chaos-Wand cleanup` caller)
+/// already ANDs this predicate with its own `effect_refs_parent_target`
+/// check for exactly that reason, so excluding the composed case here too
+/// would strand the exclusion and sweep the hit itself onto the library
+/// bottom alongside the misses.
 /// Every other sub keeps today's behavior: parent targets propagate when the
 /// sub declares none of its own.
 fn should_propagate_parent_targets(ability: &ResolvedAbility, sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
         && !ability.targets.is_empty()
         && sub.target_choice_timing != TargetChoiceTiming::Resolution
+        && !(sub
+            .effect
+            .target_filter()
+            .is_some_and(TargetFilter::references_exiled_by_source)
+            && !effect_refs_parent_target(&sub.effect))
 }
 
 fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
@@ -10425,10 +10454,39 @@ fn resolve_chain_body(
             // gated subs ("When you discard a card this way, put a counter on target
             // Faerie") keep inheriting their selected target through the parent
             // chain; their condition decides whether the sub fires.
+            //
+            // CR 406.6 + CR 607.2a (issue #6437, Fight Rigging / Collector's
+            // Cage): a sub targeting a BARE `TargetFilter::ExiledBySource`
+            // ("the exiled card") is ALSO independent — it resolves its own
+            // object at its own resolution against this source's durable
+            // `exile_links` (`cast_from_zone::resolve`'s no-target
+            // `ExiledBySource` branch), never from an inherited object target.
+            // `extract_target_filter_from_effect` returns `None` for it (its
+            // `is_context_ref` guard), so without this arm it fell through to
+            // the default "no independent slot" case and inherited whatever
+            // object the PARENT clause targeted ("put a +1/+1 counter on
+            // target creature you control. Then ... you may play the exiled
+            // card") — treating the targeted creature as the card to license,
+            // which `grant_lingering_permissions` then routed through the
+            // exile-delivery batch instead of the hidden card.
+            //
+            // Gated on `!effect_refs_parent_target`: a COMPOSED filter like
+            // Jodah's cleanup rider (`And { ExiledBySource, DistinctFrom {
+            // ParentTarget } }`, sweeping the "misses" while excluding the
+            // cast hit) also references `ExiledBySource` but STILL needs the
+            // propagated parent target so `ParentTarget` can resolve to the
+            // hit and exclude it — treating it as independent here stranded
+            // that exclusion, sweeping the hit itself to the library bottom
+            // alongside the misses.
             let has_independent_target_slot =
-                crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
+                (crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
                     && !effect_refs_parent_target(&sub.effect)
-                    && !sub_ability_target_belongs_to_reflexive_context(sub);
+                    && !sub_ability_target_belongs_to_reflexive_context(sub))
+                    || (sub
+                        .effect
+                        .target_filter()
+                        .is_some_and(TargetFilter::references_exiled_by_source)
+                        && !effect_refs_parent_target(&sub.effect));
             sub_with_targets.targets = ability
                 .targets
                 .iter()

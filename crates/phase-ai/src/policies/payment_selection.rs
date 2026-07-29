@@ -11,12 +11,12 @@ use engine::types::player::PlayerId;
 use engine::types::statics::CrewAction;
 use engine::types::zones::{ExileCostSourceZone, Zone};
 
-use crate::eval::evaluate_creature;
+use crate::card_value::cost_card_value;
 use crate::features::DeckFeatures;
 
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
-use super::strategy_helpers::sacrifice_cost;
+use super::strategy_helpers::{permanent_board_value, sacrifice_cost};
 
 pub struct PaymentSelectionPolicy;
 
@@ -252,9 +252,16 @@ fn crew_or_saddle_score(ctx: &PolicyContext<'_>) -> Option<f64> {
         .iter()
         .map(|&id| object_crew_power_contribution(ctx.state, id, action).max(0) as u32)
         .sum();
+    // Crew/saddle taps the creature rather than giving it up, so the same
+    // give-up authority is scaled hard (0.05). A creature-land tapped to crew
+    // is priced by `permanent_board_value`'s dominance rule, `max(land, body)`: for a
+    // 1/1 Dryad Arbor that is the land value (tapping it for a Vehicle costs a
+    // mana source for the turn), for an animated Treetop Village it is the
+    // body. There is no `Land`-first branch to match — the land reading is a
+    // floor, not a short-circuit.
     let preservation_cost: f64 = creature_ids
         .iter()
-        .map(|&id| permanent_value(ctx.state, id) * 0.05)
+        .map(|&id| permanent_board_value(ctx.state, id, ctx.penalties()) * 0.05)
         .sum();
 
     // CR 702.122a / CR 702.171a: Crew and saddle only need total power at
@@ -284,8 +291,10 @@ fn station_activation_score(ctx: &PolicyContext<'_>) -> Option<f64> {
 
     let contribution =
         object_crew_power_contribution(ctx.state, *creature_id, CrewAction::Station).max(0) as u32;
-    let preservation_cost =
-        permanent_value(ctx.state, *creature_id) * 0.05 + f64::from(contribution) * 0.02;
+    // Station spends the creature the same way crew does — same authority,
+    // same 0.05 scaling.
+    let preservation_cost = permanent_board_value(ctx.state, *creature_id, ctx.penalties()) * 0.05
+        + f64::from(contribution) * 0.02;
 
     let Some(remaining) = next_station_threshold_remaining(ctx.state, *spacecraft_id) else {
         return Some(-preservation_cost);
@@ -384,6 +393,30 @@ fn station_counter() -> CounterType {
     CounterType::Generic("charge".to_string())
 }
 
+/// What it costs the AI to spend `obj_id` on a `PayCostKind`.
+///
+/// **Every kind prices board presence through
+/// `strategy_helpers::permanent_board_value`; kinds that surrender a permanent
+/// add the command-zone repurchase term through `strategy_helpers::sacrifice_cost`.**
+/// This function previously carried a private `permanent_value` twin that
+/// disagreed with that authority on two axes at once: it priced a land at 3.0
+/// against the authority's `sacrifice_land_penalty` (4.5), and it tested
+/// `Creature` **before** `Land` where the authority tested `Land` first, so a
+/// creature-land (Dryad Arbor, an animated Treetop Village) came out of the two
+/// functions with opposite *classifications*, not merely opposite prices. Both
+/// are now one call, so divergence is structurally impossible.
+///
+/// The resolution was not "pick the twin's order or the authority's". By
+/// CR 300.2 ("Some objects have more than one card type ... Such objects
+/// combine the aspects of each of those card types") a creature-land is a
+/// creature **and** a land simultaneously, so
+/// neither first-match order is correct — `sacrifice_cost` prices such a
+/// permanent by **dominance**, `max(land, creature)`. See its `Land` branch.
+///
+/// The per-kind economics live at the call sites as multipliers on that one
+/// scalar, which is where they belong: `ReturnToHand` halves it because the
+/// card comes back, `RemoveCounter` and `TapCreatures` scale it because the
+/// permanent is not given up at all, and the exile family pays it in full.
 fn payment_cost(
     state: &GameState,
     obj_id: ObjectId,
@@ -391,86 +424,54 @@ fn payment_cost(
     penalties: &crate::config::PolicyPenalties,
 ) -> f64 {
     match kind {
-        PayCostKind::Discard => card_value(state, obj_id),
+        PayCostKind::Discard => cost_card_value(state, obj_id),
         // CR 701.20a + CR 701.20b: Revealing doesn't move the card — it stays
         // in hand — so the real resource cost is ~0, mirroring Behold's
         // reveal-from-hand branch.
-        PayCostKind::Reveal => card_value(state, obj_id) * 0.1,
-        PayCostKind::ReturnToHand => 0.5 + permanent_value(state, obj_id) * 0.5,
+        PayCostKind::Reveal => cost_card_value(state, obj_id) * 0.1,
+        PayCostKind::ReturnToHand => 0.5 + permanent_board_value(state, obj_id, penalties) * 0.5,
         PayCostKind::ExileFromZone { zone } => match zone {
-            ExileCostSourceZone::Hand => card_value(state, obj_id) * 1.2,
-            ExileCostSourceZone::Graveyard => 0.1 + card_value(state, obj_id) * 0.2,
+            ExileCostSourceZone::Hand => cost_card_value(state, obj_id) * 1.2,
+            ExileCostSourceZone::Graveyard => 0.1 + cost_card_value(state, obj_id) * 0.2,
         },
         PayCostKind::ExileMaterials { .. } => match state.objects.get(&obj_id).map(|o| o.zone) {
-            Some(Zone::Battlefield) => permanent_value(state, obj_id),
-            Some(Zone::Graveyard) => 0.1 + card_value(state, obj_id) * 0.2,
-            _ => card_value(state, obj_id),
+            Some(Zone::Battlefield) => sacrifice_cost(state, obj_id, penalties),
+            Some(Zone::Graveyard) => 0.1 + cost_card_value(state, obj_id) * 0.2,
+            _ => cost_card_value(state, obj_id),
         },
         // CR 701.13: Exile a battlefield permanent you control as a cost
         // (Food Chain class) — valued like the battlefield ExileMaterials case.
-        PayCostKind::ExilePermanent { .. } => permanent_value(state, obj_id),
+        PayCostKind::ExilePermanent { .. } => sacrifice_cost(state, obj_id, penalties),
         PayCostKind::ExileFromManaZone { zone } => match zone {
-            Zone::Battlefield => permanent_value(state, obj_id),
-            Zone::Hand => card_value(state, obj_id) * 1.2,
-            Zone::Graveyard => 0.1 + card_value(state, obj_id) * 0.2,
-            _ => card_value(state, obj_id) * 0.5,
+            Zone::Battlefield => sacrifice_cost(state, obj_id, penalties),
+            Zone::Hand => cost_card_value(state, obj_id) * 1.2,
+            Zone::Graveyard => 0.1 + cost_card_value(state, obj_id) * 0.2,
+            Zone::Library | Zone::Stack | Zone::Exile | Zone::Command => {
+                cost_card_value(state, obj_id) * 0.5
+            }
         },
-        PayCostKind::RemoveCounter { .. } => permanent_value(state, obj_id) * 0.5,
-        PayCostKind::TapCreatures { .. } => permanent_value(state, obj_id) * 0.35,
+        PayCostKind::RemoveCounter { .. } => permanent_board_value(state, obj_id, penalties) * 0.5,
+        PayCostKind::TapCreatures { .. } => permanent_board_value(state, obj_id, penalties) * 0.35,
         // CR 117.1 + CR 601.2b: "exile any number" aggregate-threshold cost
         // (Baron Helmut Zemo's Boast). `AbilityCost::ExileWithAggregate` is a
         // zone-parameterized building block, so value the chosen card by its
         // source `zone` — mirroring `ExileFromManaZone` — rather than assuming
         // graveyard fuel: a hand/battlefield aggregate exile spends real cards.
         PayCostKind::ExileAggregate { zone, .. } => match zone {
-            Zone::Battlefield => permanent_value(state, obj_id),
-            Zone::Hand => card_value(state, obj_id) * 1.2,
-            Zone::Graveyard => 0.1 + card_value(state, obj_id) * 0.2,
-            _ => card_value(state, obj_id) * 0.5,
+            Zone::Battlefield => sacrifice_cost(state, obj_id, penalties),
+            Zone::Hand => cost_card_value(state, obj_id) * 1.2,
+            Zone::Graveyard => 0.1 + cost_card_value(state, obj_id) * 0.2,
+            Zone::Library | Zone::Stack | Zone::Exile | Zone::Command => {
+                cost_card_value(state, obj_id) * 0.5
+            }
         },
-        PayCostKind::Behold { .. } => card_value(state, obj_id) * 0.1,
+        PayCostKind::Behold { .. } => cost_card_value(state, obj_id) * 0.1,
         // CR 701.3d: Unattaching an Equipment as a cost keeps it on the
         // battlefield (only the attachment link is removed), so the real resource
         // cost is ~0 — the AI should treat the chosen Equipment as free to detach.
         PayCostKind::UnattachFrom { .. } => 0.0,
         PayCostKind::Sacrifice => sacrifice_cost(state, obj_id, penalties),
     }
-}
-
-fn permanent_value(state: &GameState, obj_id: ObjectId) -> f64 {
-    let Some(obj) = state.objects.get(&obj_id) else {
-        return 0.0;
-    };
-    if obj.card_types.core_types.contains(&CoreType::Creature) {
-        return evaluate_creature(state, obj_id);
-    }
-    if obj.card_types.core_types.contains(&CoreType::Land) {
-        return 3.0;
-    }
-    if obj.is_token {
-        return 0.4;
-    }
-    (obj.mana_cost.mana_value() as f64).min(4.0)
-}
-
-fn card_value(state: &GameState, obj_id: ObjectId) -> f64 {
-    let Some(obj) = state.objects.get(&obj_id) else {
-        return 0.0;
-    };
-
-    let mut value = 0.0;
-    if obj.card_types.core_types.contains(&CoreType::Creature) {
-        let power = obj.power.unwrap_or(obj.base_power.unwrap_or(0)).max(0) as f64;
-        let toughness = obj
-            .toughness
-            .unwrap_or(obj.base_toughness.unwrap_or(0))
-            .max(0) as f64;
-        value += power * 1.5 + toughness;
-    }
-    if obj.card_types.core_types.contains(&CoreType::Land) {
-        value += 3.0;
-    }
-    value + obj.mana_cost.mana_value() as f64 * 0.5
 }
 
 #[cfg(test)]
@@ -481,8 +482,8 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        ContinuousModification, Effect, QuantityExpr, ResolvedAbility, StaticCondition,
-        StaticDefinition, TargetFilter,
+        ContinuousModification, CounterCostSelection, Effect, QuantityExpr, ResolvedAbility,
+        StaticCondition, StaticDefinition, TargetFilter,
     };
     use engine::types::game_state::{CastingVariant, PendingCast, StackEntry, StackEntryKind};
     use engine::types::identifiers::CardId;
@@ -624,6 +625,17 @@ mod tests {
         obj.power = Some(power);
         obj.base_toughness = Some(power);
         obj.toughness = Some(power);
+        id
+    }
+
+    fn make_commander(state: &mut GameState, name: &str) -> ObjectId {
+        let id = make_creature(state, name, Zone::Battlefield, 4);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.is_commander = true;
+        obj.mana_cost = ManaCost::generic(4);
+        obj.base_mana_cost = ManaCost::generic(4);
+        state.format_config.command_zone = true;
+        state.commander_cast_count.insert(id, 1);
         id
     }
 
@@ -1152,6 +1164,54 @@ mod tests {
         assert!(one_score > two_score);
     }
 
+    /// The battlefield give-up arms are priced by the SINGLE authority
+    /// (`strategy_helpers::sacrifice_cost`), not by a private twin.
+    ///
+    /// FAILS ON THE DELETED `permanent_value`: it priced a land at a hardcoded
+    /// **3.0** while the authority prices it at `sacrifice_land_penalty`
+    /// (**4.5**) and caps a noncreature at **4.0** — so under the twin the land
+    /// was the *cheaper* permanent to exile and scored higher, and this
+    /// assertion inverts.
+    ///
+    /// `ExilePermanent` is chosen because `discard_spends_last_playable_land`
+    /// gates hard on `PayCostKind::Discard`, so no land-retention penalty can
+    /// confound the comparison.
+    #[test]
+    fn battlefield_exile_prices_a_land_by_the_single_give_up_authority() {
+        let mut state = GameState::new_two_player(42);
+        let land = make_land(&mut state, "Swamp", Zone::Battlefield);
+        let artifact = make_artifact(&mut state, "Gilded Lotus", Zone::Battlefield);
+        state.objects.get_mut(&artifact).unwrap().mana_cost = ManaCost::Cost {
+            shards: Vec::new(),
+            generic: 5,
+        };
+
+        let waiting_for = |choices: Vec<ObjectId>| WaitingFor::PayCost {
+            player: AI,
+            kind: PayCostKind::ExilePermanent { filter: None },
+            choices,
+            count: 1,
+            min_count: 1,
+            resume: CostResume::Spell { spell: pending() },
+        };
+
+        let land_score = score_for(&state, waiting_for(vec![land, artifact]), vec![land]);
+        let artifact_score = score_for(&state, waiting_for(vec![land, artifact]), vec![artifact]);
+
+        assert!(
+            artifact_score > land_score,
+            "an MV-5 artifact caps at {} and must be preferred over a land \
+             priced at {}: artifact={artifact_score} land={land_score}",
+            crate::policies::strategy_helpers::NONCREATURE_SACRIFICE_CAP,
+            crate::config::PolicyPenalties::default().sacrifice_land_penalty
+        );
+        assert!(
+            land_score < 0.0,
+            "reach-guard: the arm really priced the land (a 0.0 score would \
+             mean the policy short-circuited before `payment_cost`)"
+        );
+    }
+
     #[test]
     fn sacrifice_cost_is_left_to_sacrifice_value_policy() {
         let mut state = GameState::new_two_player(42);
@@ -1235,5 +1295,78 @@ mod tests {
             saddle_score_for(&state, mount, 8, vec![exact, oversized], vec![oversized]);
 
         assert!(exact_score > oversized_score);
+    }
+
+    /// The pricing reach guard is asserted first; every zero below is therefore
+    /// a real partition result, not a format-off vacuity.
+    #[test]
+    fn command_zone_premium_reaches_surrender_costs_but_not_payment_uses() {
+        let mut state = GameState::new_two_player(42);
+        let commander = make_commander(&mut state, "Commander");
+        let bear = make_creature(&mut state, "Bear", Zone::Battlefield, 4);
+        let penalties = crate::config::PolicyPenalties::default();
+        let delta = |kind: PayCostKind| {
+            payment_cost(&state, commander, &kind, &penalties)
+                - payment_cost(&state, bear, &kind, &penalties)
+        };
+
+        assert_eq!(delta(PayCostKind::Sacrifice), 6.0);
+        assert_eq!(
+            delta(PayCostKind::ExilePermanent { filter: None }),
+            6.0,
+            "reach guard: a surrendered permanent carries the literal premium"
+        );
+        assert_eq!(delta(PayCostKind::TapCreatures { aggregate: None }), 0.0);
+        assert_eq!(
+            delta(PayCostKind::RemoveCounter {
+                counter_type: CounterMatch::Any,
+                count: 1,
+                selection: CounterCostSelection::SingleObject,
+            }),
+            0.0
+        );
+        assert_eq!(delta(PayCostKind::ReturnToHand), 0.0);
+        assert_eq!(
+            payment_cost(
+                &state,
+                commander,
+                &PayCostKind::UnattachFrom {
+                    filter: TargetFilter::Any,
+                },
+                &penalties,
+            ),
+            0.0,
+            "unattaching never consults either board-value authority"
+        );
+    }
+
+    /// Crew and station return absolute policy scores, so their equal values on
+    /// the same premium-reached state pin the two least-obvious repoints.
+    #[test]
+    fn crew_and_station_use_board_value_not_surrender_value() {
+        let mut state = GameState::new_two_player(42);
+        let commander = make_commander(&mut state, "Commander");
+        let bear = make_creature(&mut state, "Bear", Zone::Battlefield, 4);
+        let penalties = crate::config::PolicyPenalties::default();
+        assert_eq!(
+            payment_cost(&state, commander, &PayCostKind::Sacrifice, &penalties)
+                - payment_cost(&state, bear, &PayCostKind::Sacrifice, &penalties),
+            6.0,
+            "reach guard: this exact state must price the commander premium before \
+             the board-value equalities can prove the partition"
+        );
+        let vehicle = make_artifact(&mut state, "Vehicle", Zone::Battlefield);
+        let spacecraft = make_spacecraft_with_threshold(&mut state, 0, 4);
+
+        assert_eq!(
+            crew_score_for(&state, vehicle, 4, vec![commander, bear], vec![commander]),
+            crew_score_for(&state, vehicle, 4, vec![commander, bear], vec![bear]),
+            "crew score must not leak the command-zone premium"
+        );
+        assert_eq!(
+            station_score_for(&state, spacecraft, vec![commander, bear], commander),
+            station_score_for(&state, spacecraft, vec![commander, bear], bear),
+            "station score must not leak the command-zone premium"
+        );
     }
 }

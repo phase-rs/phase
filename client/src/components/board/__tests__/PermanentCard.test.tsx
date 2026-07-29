@@ -14,6 +14,7 @@ import {
   buildPriorityWaitingFor,
   buildTargetSelectionProgress,
   buildTargetSelectionWaitingFor,
+  buildTriggerTargetSelectionWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
 import { AttachmentFan } from "../AttachmentFan.tsx";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
@@ -528,6 +529,60 @@ describe("PermanentCard", () => {
 
     expect(container.querySelector('[data-object-id="2"]')).not.toBeNull();
     expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
+  });
+
+  it("opens the full attachment chooser when a host has a targetable attachment", () => {
+    // Regression: Rampaging Yao Guai can target Darksteel Plate while it is
+    // attached beside Skullclamp on Bastion Protector. The targetable Plate
+    // expands into only a narrow overlapping board peek, so clicking the host
+    // must expose the fan's full-size cards and let the engine-authorized
+    // target dispatch unambiguously.
+    const darksteelPlate = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      attachments: [],
+      name: "Darksteel Plate",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    const gameState = makeState();
+    gameState.objects[1] = { ...gameState.objects[1], name: "Bastion Protector", attachments: [2, 4] };
+    gameState.objects[2] = { ...gameState.objects[2], name: "Skullclamp" };
+    gameState.objects[4] = darksteelPlate;
+    gameState.battlefield = [1, 2, 3, 4];
+    const waitingFor = buildTriggerTargetSelectionWaitingFor({
+      data: {
+        player: 0,
+        target_slots: [],
+        selection: buildTargetSelectionProgress({ current_legal_targets: [{ Object: 4 }] }),
+      },
+    });
+    gameState.waiting_for = waitingFor;
+    useGameStore.setState({ gameState, waitingFor });
+    useUiStore.setState({ attachmentFanHostId: null });
+
+    const { container } = renderPermanent(new Set([4]));
+    render(<AttachmentFan />);
+
+    fireEvent.click(container.querySelector('[data-object-id="1"]') as HTMLElement);
+
+    const fan = document.querySelector("[data-attachment-fan]");
+    expect(fan).not.toBeNull();
+    const darksteelCard = fan?.querySelector('[aria-label="Darksteel Plate"]') as HTMLElement;
+    expect(darksteelCard).not.toBeNull();
+
+    fireEvent.click(darksteelCard);
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: { Object: 4 } },
+    });
   });
 
   it("auto-expands collapsed attachments when one is activatable (re-equip)", () => {

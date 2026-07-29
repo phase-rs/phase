@@ -1,8 +1,8 @@
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityBlockKind, AbilityBlockReason, AbilityCondition,
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
-    AdditionalCost, CardPlayMode, CardSelectionMode, CastTimingPermission, CastingPermission,
-    ChoiceType, ContinuousModification, CostObjectCount, CostPaidObjectSnapshot,
+    AdditionalCost, BoardWideCostModifier, CardPlayMode, CardSelectionMode, CastTimingPermission,
+    CastingPermission, ChoiceType, ContinuousModification, CostObjectCount, CostPaidObjectSnapshot,
     CounterCostSelection, Duration, Effect, EffectKind, FilterProp, GameRestriction,
     ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity,
     QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
@@ -354,7 +354,15 @@ pub(crate) fn begin_variable_speed_payment(
 
 /// CR 107.3a + CR 118.3: X in an activation/additional cost is chosen as part
 /// of activating or casting, bounded by the resources available to pay fully.
-pub(crate) fn sacrifice_cost_bounds(count: u32, eligible_len: usize) -> (usize, usize) {
+///
+/// `pub` as the single authority for the `u32::MAX` X-sentinel encoding, so a
+/// cast-time cost gate in `phase-ai` reads the engine's own minimum rather than
+/// re-spelling the sentinel. That is a *prospective* single-authority argument,
+/// not a measured divergence: for every `count < u32::MAX` this returns
+/// `(n, n)`, which a hand-rolled `count as usize` matches exactly. It becomes
+/// load-bearing the day a third bounds shape ("up to N") is added, at which
+/// point a copy would desynchronize with no compile error.
+pub fn sacrifice_cost_bounds(count: u32, eligible_len: usize) -> (usize, usize) {
     if count == u32::MAX {
         (0, eligible_len)
     } else {
@@ -7184,8 +7192,6 @@ fn collect_battlefield_cost_modifiers(
     target_sensitive_only: bool,
     casting_variant: Option<CastingVariant>,
 ) -> Vec<CostModification> {
-    use crate::types::ability::ControllerRef;
-
     // CR 202.3d + CR 702.102b: a pre-payment `CastingVariant::Fuse` cast presents
     // the COMBINED characteristics of both halves to a `ModifyCost` static's
     // `spell_filter`. The `fused_split_spell` marker is not yet set at this seam.
@@ -7219,37 +7225,31 @@ fn collect_battlefield_cost_modifiers(
         let source_controller = src_obj.controller;
 
         {
-            let (amount, spell_filter, dynamic_count, is_raise) = match &def.mode {
-                StaticMode::ModifyCost {
-                    mode: CostModifyMode::Reduce,
-                    amount,
-                    spell_filter,
-                    dynamic_count,
-                } => (amount, spell_filter, dynamic_count, false),
-                StaticMode::ModifyCost {
-                    mode: CostModifyMode::Raise,
-                    amount,
-                    spell_filter,
-                    dynamic_count,
-                } => (amount, spell_filter, dynamic_count, true),
-                _ => continue,
+            // CR 601.2f + CR 113.6: single structural authority for "is this a
+            // board-wide cost modifier, and what are its terms" — shared with
+            // deck-time analysis (`phase-ai`'s `features::cost_reduction`) so the
+            // two cannot drift. It rejects `Minimum` and `SelfRef` (the latter is
+            // self-cost-reduction, handled by `apply_self_spell_cost_modifiers`
+            // for the spell being cast and never applied from a battlefield
+            // permanent to other spells).
+            let Some(modifier) = def.board_wide_cost_modifier() else {
+                continue;
             };
+            let BoardWideCostModifier {
+                mode,
+                amount,
+                spell_filter,
+                dynamic_count,
+                caster_scope,
+                condition: _,
+            } = modifier;
+            let is_raise = matches!(mode, CostModifyMode::Raise);
 
-            let has_target_filter = spell_filter
-                .as_ref()
-                .is_some_and(cost_filter_has_target_ref);
+            let has_target_filter = spell_filter.is_some_and(cost_filter_has_target_ref);
             if target_sensitive_only && !has_target_filter {
                 continue;
             }
             if selected_ability.is_none() && has_target_filter {
-                continue;
-            }
-
-            // CR 113.6: SelfRef statics are self-cost-reduction ("this spell costs
-            // {N} less") — handled by apply_self_spell_cost_modifiers for the spell
-            // being cast. They must never apply from a battlefield permanent to
-            // other spells.
-            if matches!(def.affected, Some(TargetFilter::SelfRef)) {
                 continue;
             }
 
@@ -7267,12 +7267,8 @@ fn collect_battlefield_cost_modifiers(
 
             // CR 601.2f: Check player scope — does this modifier apply to spells the caster casts?
             // Must run before condition check so QuantityComparison resolves against the caster.
-            if let Some(TargetFilter::Typed(ref tf)) = def.affected {
-                match tf.controller {
-                    Some(ControllerRef::You) if caster != source_controller => continue,
-                    Some(ControllerRef::Opponent) if caster == source_controller => continue,
-                    _ => {} // No controller restriction or matches
-                }
+            if !caster_scope.admits(caster, source_controller) {
+                continue;
             }
 
             // CR 601.2f: Check static condition — "as long as" / "during your turn"
@@ -7291,7 +7287,7 @@ fn collect_battlefield_cost_modifiers(
             }
 
             // CR 601.2f: Check spell type filter — does the spell match?
-            if let Some(ref filter) = spell_filter {
+            if let Some(filter) = spell_filter {
                 let matches = if let Some(ability) = selected_ability {
                     spell_matches_cost_filter_with_selected_targets_for(
                         state, caster, spell_id, filter, bf_id, ability, fused,
@@ -7306,7 +7302,7 @@ fn collect_battlefield_cost_modifiers(
 
             // CR 601.2f: Calculate the modification amount.
             let base_amount = amount.clone();
-            let multiplier = if let Some(ref qty_ref) = dynamic_count {
+            let multiplier = if let Some(qty_ref) = dynamic_count {
                 let qty_expr = crate::types::ability::QuantityExpr::Ref {
                     qty: qty_ref.clone(),
                 };
@@ -7684,17 +7680,33 @@ pub(super) fn cost_shard_matches_reduction(
         || cost_shard == reduction
 }
 
-fn apply_shard_reduction(shards: &mut Vec<ManaCostShard>, reduction: ManaCostShard) {
+/// CR 118.7b + CR 118.7c + CR 118.7d: Apply one unit of colored/colorless mana
+/// reduction. If the cost still has a matching component, remove it. Otherwise
+/// — the cost never had that color/colorless component (118.7b), or this
+/// reduction unit is the excess beyond what the component had left (118.7c/d)
+/// — the unit spills over to reduce the generic component instead. A
+/// reduction can never touch a mismatched color's pip, and each unit reduces
+/// exactly one cost component (colored/colorless match XOR generic
+/// spillover), never both.
+pub(super) fn apply_shard_reduction(
+    shards: &mut Vec<ManaCostShard>,
+    generic: &mut u32,
+    reduction: ManaCostShard,
+) {
     if let Some(index) = shards
         .iter()
         .position(|shard| cost_shard_matches_reduction(*shard, reduction))
     {
         shards.remove(index);
+    } else {
+        *generic = generic.saturating_sub(1);
     }
 }
 
-/// CR 601.2f: Apply a single cost modification (reduce or raise) to a mana cost.
-/// ReduceCost removes matching mana symbols and generic mana (not below zero).
+/// CR 601.2f + CR 118.7: Apply a single cost modification (reduce or raise) to a
+/// mana cost. ReduceCost removes matching mana symbols, spilling any unmatched
+/// or excess colored/colorless reduction over to generic mana (CR 118.7b/c/d)
+/// in addition to reducing generic mana directly (CR 118.7a), floored at zero.
 /// RaiseCost adds the specified symbols and generic mana.
 fn apply_cost_mod_to_mana(
     mana_cost: &mut ManaCost,
@@ -7730,7 +7742,7 @@ fn apply_cost_mod_to_mana(
     } else {
         for _ in 0..multiplier {
             for shard in mod_shards {
-                apply_shard_reduction(shards, *shard);
+                apply_shard_reduction(shards, generic, *shard);
             }
         }
         *generic = generic.saturating_sub(mod_generic);
@@ -16385,7 +16397,16 @@ fn find_pay_life_cost(
 /// CR 118.3: Find permanents controlled by `player` matching `filter` on the battlefield.
 /// The source is eligible when it matches the printed filter; "another" is
 /// represented by `FilterProp::Another` and enforced by `matches_target_filter`.
-pub(super) fn find_eligible_sacrifice_targets(
+///
+/// The single authority for sacrifice-cost eligibility. Three conditions, and all
+/// three matter: controller (CR 701.21a — "a player can't sacrifice … something
+/// that's a permanent they don't control"), the `player_cant_sacrifice_as_cost`
+/// static (Yasharn, Angel of Jubilation), and the filter itself. Callers must not
+/// re-derive this — an AI-side copy that omits the static check over-counts
+/// eligible fodder under a "players can't sacrifice" effect. `pub` so `phase-ai`'s
+/// cast-time cost gates share it with the payment path in `cost_payability.rs` and
+/// `casting_costs.rs`.
+pub fn find_eligible_sacrifice_targets(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,

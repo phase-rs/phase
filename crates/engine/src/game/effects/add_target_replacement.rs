@@ -1,4 +1,4 @@
-use crate::game::targeting::resolve_event_context_target;
+use crate::game::targeting::{extract_source_from_event, resolve_event_context_target};
 use crate::types::ability::{
     AbilityDefinition, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, EffectError,
     EffectKind, ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
@@ -6,6 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
 use crate::types::replacements::ReplacementEvent;
 
 pub(crate) fn expiry_from_duration(
@@ -45,6 +46,76 @@ fn replacement_with_ability_expiry(
     freeze_damage_modification_x(&mut replacement, ability);
     freeze_parent_copy_target(&mut replacement, ability);
     replacement
+}
+
+/// CR 603.2 + CR 603.3b + CR 117.3b: Concretize
+/// `TRIGGERING_SPELL_PLACEHOLDER` — the parse-time sentinel
+/// `parse_whenever_you_cast_enters_with_trigger` embeds inside a floating
+/// (`TargetFilter::None`) replacement's `valid_card` — to the SPECIFIC spell
+/// object referenced by the currently-resolving triggered ability's own
+/// originating event (Runadi, Behemoth Caller and the Wildgrowth Archaic
+/// cousin family — issue #6492 review).
+///
+/// Without this, a bare type/mana-value filter would let a DIFFERENT
+/// qualifying creature — cast by the active player during the CR 117.3b
+/// priority window between this trigger resolving and the originally-cast
+/// spell resolving — consume the one-shot install first, leaving the intended
+/// entrant uncountered. `state.current_trigger_event` is exactly this
+/// ability's own trigger event (set by `push_resolving_trigger_context` for
+/// the duration of its resolution — see `game/triggers.rs`), so
+/// `extract_source_from_event` yields the specific cast spell's `ObjectId`.
+///
+/// If the event carries no extractable source, this fails CLOSED — matching
+/// no object via the `ObjectId(0)` sentinel (never a real permanent) — rather
+/// than silently widening back to the bare filter, which would reopen the
+/// exact bug this binding exists to close.
+///
+/// No-op for every other floating-replacement install (Kaya's until-EOT token
+/// doubler, Rankle and Torbran's damage-modification shields): none of them
+/// ever embed the placeholder, so the walk finds nothing to replace.
+fn bind_replacement_to_trigger_source(replacement: &mut ReplacementDefinition, state: &GameState) {
+    let Some(valid_card) = replacement.valid_card.as_mut() else {
+        return;
+    };
+    if !target_filter_contains_placeholder(valid_card) {
+        return;
+    }
+    let bound = state
+        .current_trigger_event
+        .as_ref()
+        .and_then(extract_source_from_event)
+        .unwrap_or(ObjectId(0));
+    concretize_triggering_spell_placeholder(valid_card, bound);
+}
+
+fn target_filter_contains_placeholder(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::SpecificObject { id } => {
+            *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_contains_placeholder)
+        }
+        TargetFilter::Not { filter } => target_filter_contains_placeholder(filter),
+        _ => false,
+    }
+}
+
+fn concretize_triggering_spell_placeholder(filter: &mut TargetFilter, bound: ObjectId) {
+    match filter {
+        TargetFilter::SpecificObject { id }
+            if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER =>
+        {
+            *id = bound;
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for f in filters.iter_mut() {
+                concretize_triggering_spell_placeholder(f, bound);
+            }
+        }
+        TargetFilter::Not { filter } => concretize_triggering_spell_placeholder(filter, bound),
+        _ => {}
+    }
 }
 
 // CR 614.12a + CR 707.2: If the resolving spell chose the object to copy, bind
@@ -237,7 +308,8 @@ pub fn resolve(
     // Slaughter's "If a source you control would deal damage this turn,
     // it deals that much damage plus 1 instead.").
     if matches!(target, TargetFilter::None) {
-        let replacement = replacement_with_ability_expiry(replacement, ability);
+        let mut replacement = replacement_with_ability_expiry(replacement, ability);
+        bind_replacement_to_trigger_source(&mut replacement, state);
         state.pending_damage_replacements.push(replacement);
         attached += 1;
     } else {

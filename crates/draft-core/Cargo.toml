@@ -5,7 +5,7 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
-engine = { path = "../engine" }
+engine = { path = "../engine", package = "phase-engine" }
 serde = { workspace = true }
 rand = "0.9"
 rand_chacha = "0.9"

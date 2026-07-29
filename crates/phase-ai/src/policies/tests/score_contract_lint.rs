@@ -23,7 +23,7 @@ const LEGACY_SCORE_LITERAL_COUNTS: &[(&str, usize)] = &[
     ("equipment_priority.rs", 1),
     ("etb_value.rs", 1),
     ("evasion_removal_priority.rs", 0),
-    ("free_outlet_activation.rs", 8),
+    ("free_outlet_activation.rs", 6),
     ("hand_disruption.rs", 1),
     ("hold_mana_up.rs", 3),
     ("interaction_reservation.rs", 1),

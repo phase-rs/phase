@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 411
 expression: "&ir"
 ---
 {
@@ -23,22 +22,13 @@ expression: "&ir"
         "fragment": "Station (Tap another creature you control: Put charge counters equal to its power on ~. Station only as a sorcery. It's an artifact creature at 12+.)"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Station",
             "description": "Station"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Station",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },
