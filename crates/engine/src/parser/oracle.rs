@@ -3828,8 +3828,8 @@ impl<'a> DocEmitter<'a> {
     /// body and stamps the result in the same step — see `OracleDocBuilder::
     /// finish`'s doc block for why moving it there is order-equivalent to the
     /// `finish()`-time walk it replaced.
-    fn ability_ir_at(&mut self, line: usize, ir: AbilityIr) {
-        self.emit_at(line, OracleNodeIr::Spell(ir));
+    fn ability_ir_at(&mut self, line: usize, ir: AbilityIr) -> OracleItemId {
+        self.emit_at(line, OracleNodeIr::Spell(ir))
     }
     /// Emit the honest-failure residual for a line the parser could not model.
     ///
@@ -5197,12 +5197,7 @@ pub(crate) fn parse_oracle_ir(
             i += 1;
             // CR 706.3b: Preserve table rows as trigger IR until body lowering
             // attaches them before finalization.
-            let mut lowered_for_die_guard = lower_ability_ir(&ability_ir);
-            if has_roll_die_pattern(&lower)
-                && find_terminal_roll_die(&mut lowered_for_die_guard).is_some()
-            {
-                i = attach_trigger_die_result_branches(&mut triggers, &lines, i);
-            }
+            i = attach_trigger_die_result_branches(&mut triggers, &lines, i);
             for __item in triggers {
                 emitter.trigger_ir_at(item_line, TriggerNodeIr::Parsed(Box::new(__item)));
             }
