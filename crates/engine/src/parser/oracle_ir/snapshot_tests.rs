@@ -181,6 +181,12 @@ fn nonterminal_activated_die_roll_does_not_consume_following_ability() {
     assert!(matches!(&ir.items[0].node, OracleNodeIr::Spell(_)));
     assert!(matches!(&ir.items[1].node, OracleNodeIr::Spell(_)));
     assert_eq!(lowered.abilities.len(), 2);
+    let first = &lowered.abilities[0];
+    assert!(matches!(first.effect.as_ref(), Effect::RollDie { .. }));
+    assert!(matches!(
+        first.sub_ability.as_deref().map(|sub| sub.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
     assert!(
         lowered
             .abilities

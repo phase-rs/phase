@@ -8540,6 +8540,27 @@ fn parses_urza_tower_conditional_mana_as_delta() {
     }
 }
 
+#[test]
+fn activated_mana_instead_delta_preserves_non_instead_condition() {
+    let mut ability = parse(
+        "{T}: Add {C}. If you control an Urza's Mine and an Urza's Power-Plant, add {C}{C}{C} instead.",
+        "Urza's Tower",
+        &[],
+        &["Land"],
+        &["Urza's", "Tower"],
+    )
+    .abilities
+    .remove(0);
+    let before = ability.clone();
+
+    normalize_activated_mana_instead_delta(&mut ability);
+
+    assert_eq!(
+        ability, before,
+        "the normalizer must leave an already-lowered non-replacement condition intact"
+    );
+}
+
 /// CR 205.3i + CR 614.1a + CR 605.1a: All three Urza lands share a single
 /// parsed shape — an activated mana ability (`{T}: Add {C}.` per CR 605.1a)
 /// plus a conditional `Add {C}{C}{C} instead` sub-ability whose "instead"

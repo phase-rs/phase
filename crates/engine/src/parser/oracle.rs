@@ -8485,7 +8485,11 @@ pub(crate) fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition
     let Some(sub) = def.sub_ability.as_mut() else {
         return;
     };
-    let Some(AbilityCondition::ConditionInstead { inner }) = sub.condition.take() else {
+    let Some(condition) = sub.condition.take() else {
+        return;
+    };
+    let AbilityCondition::ConditionInstead { inner } = condition else {
+        sub.condition = Some(condition);
         return;
     };
     let Effect::Mana {
