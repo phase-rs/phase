@@ -6355,7 +6355,7 @@ pub(crate) fn parse_oracle_ir(
                 .push(AbilityRootTransform::SetMinXValue(spell_min_x_value));
             ability_ir
                 .root_transforms
-                .push(AbilityRootTransform::SetDescription(description));
+                .push(AbilityRootTransform::SetDescription(description.clone()));
             // CR 608.2c: Compose ability word condition with chain-extracted condition.
             // When both exist (e.g., Revolt + MV ≤ 4), compose through
             // `merge_ability_condition` which dedupes structurally-equal conditions
