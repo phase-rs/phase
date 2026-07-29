@@ -109,6 +109,13 @@ export function export_replay_log(): string;
 export function getFormatRegistry(): any;
 
 /**
+ * Engine-owned AI escape action for the current waiting state.
+ * Same deadlock-safe fallback the search path uses when scoring cannot choose.
+ * Returns null when no legal escape exists.
+ */
+export function get_ai_fallback_action(): any;
+
+/**
  * Get the AI's chosen action for the current game state.
  * `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard",
  * "CEDH" (case-insensitive; see `AiDifficulty::from_label`).
@@ -476,6 +483,7 @@ export interface InitOutput {
     readonly export_replay_log: () => [number, number, number, number];
     readonly getFormatRegistry: () => any;
     readonly get_ai_action: (a: number, b: number, c: number) => [number, number, number];
+    readonly get_ai_fallback_action: () => [number, number, number];
     readonly get_ai_scored_candidates: (a: number, b: number, c: number, d: bigint) => [number, number, number];
     readonly get_card_face_data: (a: number, b: number) => any;
     readonly get_card_parse_details: (a: number, b: number) => any;

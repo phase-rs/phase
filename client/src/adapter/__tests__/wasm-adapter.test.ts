@@ -35,8 +35,10 @@ const mockWorkerClient = {
   })),
   getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
   getAiAction: vi.fn().mockResolvedValue(null),
+  getAiFallbackAction: vi.fn().mockResolvedValue(null),
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
+  resumeMultiplayerHostState: vi.fn().mockResolvedValue(undefined),
   ping: vi.fn().mockResolvedValue("phase-rs engine ready"),
   takeLastPanic: vi.fn().mockResolvedValue(null),
   dispose: vi.fn(),
@@ -324,6 +326,43 @@ describe("WasmAdapter", () => {
     });
   });
 
+  describe("resumeMultiplayerHostState", () => {
+    it("loads the card database then resumes on the worker", async () => {
+      await adapter.initialize();
+      const mockState = buildGameState({
+        turn_number: 3,
+        phase: "PreCombatMain",
+        players: [],
+      });
+
+      await adapter.resumeMultiplayerHostState(mockState);
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.resumeMultiplayerHostState).toHaveBeenCalledWith(
+        JSON.stringify(mockState),
+      );
+      expect(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0])
+        .toBeLessThan(
+          mockWorkerClient.resumeMultiplayerHostState.mock.invocationCallOrder[0],
+        );
+    });
+
+    it("throws when the card database fails to load and does not resume", async () => {
+      await adapter.initialize();
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error("boom"));
+      const mockState = buildGameState({
+        turn_number: 3,
+        phase: "PreCombatMain",
+        players: [],
+      });
+
+      await expect(adapter.resumeMultiplayerHostState(mockState)).rejects.toThrow(
+        "Card database failed to load",
+      );
+      expect(adapter.cardDbLoaded).toBe(false);
+      expect(mockWorkerClient.resumeMultiplayerHostState).not.toHaveBeenCalled();
+    });
+  });
+
   describe("initializeGame", () => {
     it("delegates to worker client with seed", async () => {
       await adapter.initialize();
@@ -344,6 +383,14 @@ describe("WasmAdapter", () => {
       await adapter.initialize();
       await adapter.getAiAction("Medium", 1);
       expect(mockWorkerClient.getAiAction).toHaveBeenCalledWith("Medium", 1);
+    });
+  });
+
+  describe("getAiFallbackAction", () => {
+    it("delegates to worker client", async () => {
+      await adapter.initialize();
+      await adapter.getAiFallbackAction();
+      expect(mockWorkerClient.getAiFallbackAction).toHaveBeenCalledOnce();
     });
   });
 

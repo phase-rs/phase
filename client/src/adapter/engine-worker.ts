@@ -12,6 +12,7 @@ import init, {
   get_game_state,
   get_filtered_game_state,
   get_ai_action,
+  get_ai_fallback_action,
   get_ai_scored_candidates,
   select_action_from_scores,
   get_legal_actions_js,
@@ -69,6 +70,7 @@ type EngineRequest =
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
   | { type: "getAiAction"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiFallbackAction"; id: number }
   | {
       type: "getAiScoredCandidates";
       id: number;
@@ -368,6 +370,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       case "getAiAction": {
         const aiResult = get_ai_action(msg.difficulty, msg.playerId);
         result(msg.id, aiResult ?? null);
+        break;
+      }
+
+      case "getAiFallbackAction": {
+        const fallback = get_ai_fallback_action();
+        result(msg.id, fallback ?? null);
         break;
       }
 

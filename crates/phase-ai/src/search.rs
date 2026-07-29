@@ -783,7 +783,13 @@ pub fn emit_trace_for_candidate(
 /// In release builds we still emit `CancelCast` to keep the match running, but
 /// debug builds panic so the gap surfaces during testing instead of silently
 /// degrading AI play into cast/cancel churn.
-fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameAction> {
+/// Deadlock-safe escape hatch when tactical scoring cannot produce an action.
+/// The WASM bridge exposes this for client AI-controller escape — callers must
+/// not invent actions from legal-action enumeration order (#6393).
+///
+/// `config` supplies policy penalties used by selection escapes (e.g. sacrifice
+/// value ordering); difficulty/search knobs are unused here.
+pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameAction> {
     // CR 601.2c: A spell's target step must use the engine's current legal
     // target list. `target_slots` is a historical snapshot and can be stale
     // after earlier selections; if no current legal action remains, abort the
@@ -5771,7 +5777,7 @@ mod tests {
             persist_player: None,
         };
 
-        let action = fallback_action(&state).expect("fallback returns ChooseOption");
+        let action = fallback_action_default(&state).expect("fallback returns ChooseOption");
         assert!(
             matches!(action, GameAction::ChooseOption { ref choice } if choice == "Forest"),
             "expected Forest from legal_actions, got {action:?}"
@@ -5798,7 +5804,7 @@ mod tests {
             "test premise: empty all_card_names must yield no legal ChooseOption"
         );
         assert_eq!(
-            fallback_action(&state),
+            fallback_action_default(&state),
             None,
             "empty legal set must not fabricate a NamedChoice option"
         );

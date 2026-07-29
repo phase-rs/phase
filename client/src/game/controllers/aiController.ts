@@ -293,15 +293,20 @@ export function createAIController(config: AIControllerConfig): AIController {
       }
       return Promise.resolve(null);
     }
-    return adapter.getLegalActions().then((result) => {
-      if (waitingFor.type === "Priority") {
+    if (waitingFor.type === "Priority") {
+      return adapter.getLegalActions().then((result) => {
         return (
           result.actions.find((a) => a.type === "PassPriority") ??
           { type: "PassPriority" }
         );
-      }
-      return result.actions[0] ?? null;
-    });
+      });
+    }
+    // Non-Priority: engine owns escape selection via fallback_action. Legal-
+    // action list order is not a decision contract (#6393 review).
+    if (!adapter.getAiFallbackAction) {
+      return Promise.resolve(null);
+    }
+    return Promise.resolve(adapter.getAiFallbackAction());
   }
 
   async function runEscapeFallback(
