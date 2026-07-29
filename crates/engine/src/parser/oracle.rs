@@ -55,7 +55,7 @@ use super::oracle_classifier::{
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
-use super::oracle_dispatch::dispatch_line_nom;
+use super::oracle_dispatch::{dispatch_line_nom, NomDispatchIr};
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     lower_ability_ir, parse_ability_ir_standalone, parse_ability_ir_with_context,
@@ -68,7 +68,7 @@ use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
     stamp_printed_ability_slot, stamp_printed_trigger_slot, OracleDocBuilder, OracleDocIr,
     OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan, OracleUnitSource,
-    PrintedAbilityIndex, PrintedTriggerIndex, SpellPayloadIr,
+    PrintedAbilityIndex, PrintedTriggerIndex, SpellPayloadIr, UnsupportedAbilityIr,
 };
 use super::oracle_ir::effect_chain::{AbilityIr, ShellStage};
 use super::oracle_ir::feature::ItemIdTracks;
@@ -90,7 +90,7 @@ use super::oracle_modal::{
 use super::oracle_replacement::{
     find_copy_verb_present, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir, parse_replacement_line,
-    parse_replacement_line_ir,
+    parse_replacement_line_ir, parse_whenever_you_cast_enters_with_trigger,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -664,7 +664,10 @@ fn lower_spell_node(node: &OracleNodeIr) -> Option<AbilityDefinition> {
     node.spell_payload().map(|payload| match payload {
         SpellPayloadIr::Ir(ir) => lower_ability_ir(ir),
         SpellPayloadIr::Lowered(def) => def.clone(),
-        SpellPayloadIr::Residual { text, min_x_value } => lower_unsupported_node(text, min_x_value),
+        SpellPayloadIr::Residual {
+            unsupported,
+            min_x_value,
+        } => lower_unsupported_node(unsupported, min_x_value),
     })
 }
 
@@ -1222,9 +1225,10 @@ fn item_ability(item: &OracleItemIr) -> Option<Cow<'_, AbilityDefinition>> {
     item.node.spell_payload().map(|payload| match payload {
         SpellPayloadIr::Lowered(def) => Cow::Borrowed(def),
         SpellPayloadIr::Ir(ir) => Cow::Owned(lower_ability_ir(ir)),
-        SpellPayloadIr::Residual { text, min_x_value } => {
-            Cow::Owned(lower_unsupported_node(text, min_x_value))
-        }
+        SpellPayloadIr::Residual {
+            unsupported,
+            min_x_value,
+        } => Cow::Owned(lower_unsupported_node(unsupported, min_x_value)),
     })
 }
 
@@ -1917,7 +1921,7 @@ fn ability_chain_has_player_choice(def: &AbilityDefinition) -> bool {
     matches!(
         def.effect.as_ref(),
         Effect::Choose {
-            choice_type: ChoiceType::Player | ChoiceType::Opponent { .. },
+            choice_type: ChoiceType::Player { .. } | ChoiceType::Opponent { .. },
             ..
         }
     ) || def
@@ -2002,7 +2006,7 @@ fn filter_references_source_chosen_player(filter: &TargetFilter) -> bool {
 /// sub-ability chain) to `persist: true` so its choice is stored durably.
 fn persist_player_choice_in_ability(def: &mut AbilityDefinition) {
     if let Effect::Choose {
-        choice_type: ChoiceType::Player | ChoiceType::Opponent { .. },
+        choice_type: ChoiceType::Player { .. } | ChoiceType::Opponent { .. },
         persist,
         ..
     } = def.effect.as_mut()
@@ -3037,8 +3041,11 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
             // CR 707.9a printed ability slot, push. The residual is stamped like
             // any other ability because a "…except it has this ability" clause
             // counts printed slots, not supported ones.
-            OracleNodeIr::Unsupported { text, min_x_value } => {
-                let mut def = lower_unsupported_node(text, *min_x_value);
+            OracleNodeIr::Unsupported {
+                unsupported,
+                min_x_value,
+            } => {
+                let mut def = lower_unsupported_node(unsupported, *min_x_value);
                 stamp_printed_ability_slot(&mut def, result.abilities.len());
                 result.abilities.push(def);
                 ability_ids.push(item.id);
@@ -3783,17 +3790,26 @@ impl<'a> DocEmitter<'a> {
     /// `spells_emitted` stack), and the node lands in the same slot-accounting
     /// arm, so the residual still consumes its CR 707.9a printed ability slot.
     ///
-    /// Takes the text `String`, not a definition: the whole point of the node is
-    /// that the definition is built once, at the lowering seam, by
+    /// Takes the lossless residual payload, not a definition: the whole point of
+    /// the node is that the definition is built once, at the lowering seam, by
     /// `lower_unsupported_node`. `min_x_value` is seeded at the `0` its
     /// definition-shaped predecessor carried; a standalone "X can't be 0."
     /// annotation paragraph still raises it through `raise_last_spell_min_x`.
     fn unsupported_at(&mut self, line: usize, text: String) {
+        self.unsupported_ir_at(line, UnsupportedAbilityIr::unknown(text), 0);
+    }
+
+    fn unsupported_ir_at(
+        &mut self,
+        line: usize,
+        unsupported: UnsupportedAbilityIr,
+        min_x_value: u32,
+    ) {
         self.emit_at(
             line,
             OracleNodeIr::Unsupported {
-                text,
-                min_x_value: 0,
+                unsupported,
+                min_x_value,
             },
         );
     }
@@ -5028,9 +5044,6 @@ pub(crate) fn parse_oracle_ir(
         // are CR 614.1c replacement effects, not triggered abilities — despite
         // the "whenever"/"when" framing. Intercept before the generic trigger
         // dispatch routes them through the SpellCast / ChangesZone matcher.
-        // Applies to Wildgrowth Archaic and cousin cards (Runadi, Boreal
-        // Outrider, Torgal, Dragon Broodmother, …). `parse_replacement_line`
-        // handles all the compositional variants (fixed / X / "where X is …").
         //
         // CR 603.2 exclusion: an ETB-with-counter TRIGGER ("… enters with a
         // counter on it, <consequence>") watches for ANY (untyped) counter and
@@ -5048,6 +5061,23 @@ pub(crate) fn parse_oracle_ir(
             && scan_contains(&lower, "enters with")
             && !scan_contains(&lower, "enters this way,")
         {
+            // CR 603.1 + CR 603.3 + CR 614.1c/614.12: "Whenever you cast [spell],
+            // that [subject] enters with … counter(s) on it[, where X is …]"
+            // (Wildgrowth Archaic and cousin cards — Runadi, Boreal Outrider,
+            // Torgal, Dragon Broodmother, …) is a TRIGGERED ability (CR 603.1),
+            // not an object-hosted static replacement — the entering-with-counters
+            // effect must survive the source leaving the battlefield after the
+            // trigger resolves but before the cast spell does (issue #6492
+            // review). Try this shape's dedicated trigger recognizer FIRST so it
+            // never falls through to the generic object-hosted replacement path.
+            if let Some(trigger) = parse_whenever_you_cast_enters_with_trigger(&line, card_name) {
+                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
+                i += 1;
+                continue;
+            }
+            // Every other "… enters with …" shape here (kicker-conditional
+            // "if ~ was kicked, it enters with …", external "[type] enters
+            // with …", etc.) is a genuine CR 614.1c object-hosted replacement.
             if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
                 emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 i += 1;
@@ -6590,20 +6620,17 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // Priority 14a: Nom dispatch — try effect, trigger, static, and replacement
-        // sub-parsers. Returns the full AbilityDefinition so that fields beyond
-        // `effect` (e.g. `distribute`, `multi_target`) are preserved.
-        let nom_def = dispatch_line_nom(&line, card_name, ctx.host_self_reference.clone());
-        if !matches!(*nom_def.effect, Effect::Unimplemented { .. }) {
-            emitter.ability_at(item_line, nom_def);
-            i += 1;
-            continue;
+        // Priority 14a: the dispatcher parses once and retains successful spell IR.
+        // Priority 15: its exact unsupported payload reaches final lowering unchanged.
+        match dispatch_line_nom(&line, card_name, ctx.host_self_reference.clone()) {
+            NomDispatchIr::Spell(mut ir) => {
+                ir.shell.min_x_value = ir.shell.min_x_value.max(min_x_value);
+                emitter.ability_ir_at(item_line, ir);
+            }
+            NomDispatchIr::Unsupported(unsupported) => {
+                emitter.unsupported_ir_at(item_line, unsupported, min_x_value)
+            }
         }
-
-        // Priority 15: Final fallback — the unimplemented def already carries
-        // diagnostic info from dispatch_line_nom; push it as-is.
-        tracing::debug!(oracle_text = line, "unimplemented ability line");
-        emitter.ability_at(item_line, nom_def);
         i += 1;
     }
 
@@ -8307,36 +8334,29 @@ fn x_annotation_min_value(line: &str) -> u32 {
 ///
 /// Lower an `OracleNodeIr::Unsupported` residual to the definition it stands for.
 ///
-/// Delegates to `make_unimplemented` rather than rebuilding the definition, so
-/// the node and the two hand-built residual sites cannot drift: there is exactly
-/// one place the `name: "unknown"` / `description: text` pair is constructed, and
-/// the coverage tooling that keys on that pair sees the same value whichever
-/// route produced it.
+/// The only authority that constructs a residual definition. It delegates to
+/// `Effect::unimplemented` so every IR producer preserves the coverage payload
+/// without constructing an effect literal itself.
 ///
 /// CR 601.2b: the floor is applied with `max`, matching
 /// `apply_ability_shell_envelope` — the node's `0` default can then never lower a
 /// floor, and the operation composes with a later raise the same way both other
 /// spell shapes do.
-fn lower_unsupported_node(text: &str, min_x_value: u32) -> AbilityDefinition {
-    let mut def = make_unimplemented(text);
+pub(super) fn lower_unsupported_node(
+    unsupported: &UnsupportedAbilityIr,
+    min_x_value: u32,
+) -> AbilityDefinition {
+    tracing::debug!(
+        oracle_text = unsupported.description,
+        "unimplemented ability line"
+    );
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented(unsupported.category.legacy_name(), &unsupported.fragment),
+    )
+    .description(unsupported.description.clone());
     def.min_x_value = def.min_x_value.max(min_x_value);
     def
-}
-
-/// Create an Unimplemented fallback ability.
-///
-/// Private since Plan 05b D13: with both hand-built residual sites converted to
-/// `OracleNodeIr::Unsupported`, `lower_unsupported_node` is the only caller, so
-/// the residual now has a single construction authority reachable only through
-/// the node. A new residual producer must go through the node rather than
-/// minting a definition of its own.
-fn make_unimplemented(line: &str) -> AbilityDefinition {
-    tracing::debug!(oracle_text = line, "unimplemented ability line");
-    // `Effect::unimplemented` is the single authority CLAUDE.md mandates; it
-    // expands to exactly the literal this line used to spell out
-    // (`name`, `description: Some(fragment)`), so the swap is a value identity.
-    AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("unknown", line))
-        .description(line.to_string())
 }
 
 /// Check if an AbilityDefinition (or its sub_ability chain) contains Unimplemented effects.

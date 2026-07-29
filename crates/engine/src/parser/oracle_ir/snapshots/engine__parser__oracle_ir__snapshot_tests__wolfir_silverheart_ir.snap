@@ -22,22 +22,13 @@ expression: "&ir"
         "fragment": "Soulbond (You may pair ~ with another unpaired creature when either enters. They remain paired for as long as you control both of them.)"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Soulbond",
             "description": "Soulbond"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Soulbond",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },

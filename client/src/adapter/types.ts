@@ -3535,6 +3535,12 @@ export interface EngineAdapter {
    */
   getSnapshot(): Promise<EngineSnapshot>;
   getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null> | GameAction | null;
+  /**
+   * Engine-owned deadlock-safe AI escape action for the current waiting state.
+   * Null when no legal escape exists. Non-Priority AI escape must use this —
+   * never invent from `getLegalActions()` enumeration order (#6393).
+   */
+  getAiFallbackAction?(): Promise<GameAction | null> | GameAction | null;
   resolveAll?(
     requester: number,
     aiSeats: { playerId: number; difficulty: string }[],

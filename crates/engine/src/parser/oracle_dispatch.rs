@@ -1,12 +1,21 @@
-use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
+use crate::types::ability::{AbilityKind, TargetFilter};
 
 use super::oracle::has_unimplemented;
 use super::oracle_classifier::{
     has_trigger_prefix, is_damage_prevention_pattern, is_effect_sentence_candidate,
     is_replacement_pattern, is_static_pattern,
 };
-use super::oracle_effect::parse_effect_chain_with_context;
+use super::oracle_effect::{lower_ability_ir, parse_ability_ir_with_context};
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::doc::{UnsupportedAbilityCategory, UnsupportedAbilityIr};
+use super::oracle_ir::effect_chain::AbilityIr;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[allow(clippy::large_enum_variant)] // Intentional: successful dispatch retains parser IR without an extra allocation.
+pub(super) enum NomDispatchIr {
+    Spell(AbilityIr),
+    Unsupported(UnsupportedAbilityIr),
+}
 
 /// CR 303.4 + CR 702.103: `host_self_reference` carries the enclosing card's
 /// typed attachment-host self-reference (set by `parse_oracle_ir` for
@@ -14,15 +23,11 @@ use super::oracle_ir::context::ParseContext;
 /// through this nom path remaps to the enchanted host. `None` for non-Aura
 /// cards leaves `ParentTarget` semantics intact.
 ///
-/// Returns the full `AbilityDefinition` so that fields beyond `effect`
-/// (e.g. `distribute`, `multi_target`) survive to the calling `parse_oracle_ir`
-/// loop. Callers that previously wrapped the result in `AbilityDefinition::new`
-/// must use the returned def directly.
 pub(super) fn dispatch_line_nom(
     line: &str,
     card_name: &str,
     host_self_reference: Option<TargetFilter>,
-) -> AbilityDefinition {
+) -> NomDispatchIr {
     let lower = line.to_lowercase();
     let mut ctx = ParseContext {
         subject: None,
@@ -33,67 +38,52 @@ pub(super) fn dispatch_line_nom(
     };
 
     if is_effect_sentence_candidate(&lower) || is_damage_prevention_pattern(&lower) {
-        let def = parse_effect_chain_with_context(line, AbilityKind::Spell, &mut ctx);
-        if !has_unimplemented(&def) {
-            // Return the full AbilityDefinition so callers retain distribute,
-            // multi_target, and any other parsed metadata.
-            return def;
+        let ir = parse_ability_ir_with_context(line, AbilityKind::Spell, &mut ctx);
+        if !has_unimplemented(&lower_ability_ir(&ir)) {
+            return NomDispatchIr::Spell(ir);
         }
     }
 
     let lower_trimmed = lower.trim_start();
     if has_trigger_prefix(lower_trimmed) {
-        return AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::unimplemented(
-                "trigger_structure",
-                format!("Trigger prefix matched but line failed trigger parser: {line}"),
-            ),
-        )
-        .description(line.to_string());
+        return NomDispatchIr::Unsupported(UnsupportedAbilityIr::new(
+            UnsupportedAbilityCategory::TriggerStructure,
+            format!("Trigger prefix matched but line failed trigger parser: {line}"),
+            line,
+        ));
     }
 
     if is_static_pattern(&lower) {
-        return AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::unimplemented(
-                "static_structure",
-                format!("Static pattern matched but line failed static parser: {line}"),
-            ),
-        )
-        .description(line.to_string());
+        return NomDispatchIr::Unsupported(UnsupportedAbilityIr::new(
+            UnsupportedAbilityCategory::StaticStructure,
+            format!("Static pattern matched but line failed static parser: {line}"),
+            line,
+        ));
     }
 
     if is_replacement_pattern(&lower) {
-        return AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::unimplemented(
-                "replacement_structure",
-                format!("Replacement pattern matched but line failed replacement parser: {line}"),
-            ),
-        )
-        .description(line.to_string());
+        return NomDispatchIr::Unsupported(UnsupportedAbilityIr::new(
+            UnsupportedAbilityCategory::ReplacementStructure,
+            format!("Replacement pattern matched but line failed replacement parser: {line}"),
+            line,
+        ));
     }
 
     if is_effect_sentence_candidate(&lower) {
-        return AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::unimplemented(
-                "effect_structure",
-                format!("Effect sentence candidate but line failed effect parser: {line}"),
-            ),
-        )
-        .description(line.to_string());
+        return NomDispatchIr::Unsupported(UnsupportedAbilityIr::new(
+            UnsupportedAbilityCategory::EffectStructure,
+            format!("Effect sentence candidate but line failed effect parser: {line}"),
+            line,
+        ));
     }
 
-    AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("unknown", line))
-        .description(line.to_string())
+    NomDispatchIr::Unsupported(UnsupportedAbilityIr::unknown(line))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::MultiTargetSpec;
+    use crate::types::ability::{Effect, MultiTargetSpec};
     use crate::types::game_state::DistributionUnit;
 
     /// Issue #4266 regression: `dispatch_line_nom` was returning `*def.effect`,
@@ -107,11 +97,14 @@ mod tests {
     /// the `.distribute` / `.multi_target` field accesses below will not compile.
     #[test]
     fn dispatch_line_nom_preserves_distribute_and_multi_target_for_divided_damage() {
-        let def = dispatch_line_nom(
+        let NomDispatchIr::Spell(ir) = dispatch_line_nom(
             "~ deals 2 damage divided as you choose among one or two targets.",
             "Forked Bolt",
             None,
-        );
+        ) else {
+            panic!("Forked Bolt must dispatch as an IR-native spell");
+        };
+        let def = lower_ability_ir(&ir);
         assert_eq!(
             def.distribute,
             Some(DistributionUnit::Damage),
@@ -122,5 +115,28 @@ mod tests {
             Some(MultiTargetSpec::fixed(1, 2)),
             "multi_target lost by dispatch_line_nom"
         );
+    }
+
+    #[test]
+    fn dispatch_line_nom_preserves_structural_residual_payload() {
+        let line = "Whenever unsupported trigger structure";
+        let NomDispatchIr::Unsupported(unsupported) = dispatch_line_nom(line, "Test Card", None)
+        else {
+            panic!("unsupported trigger must retain its structural category");
+        };
+        assert_eq!(
+            unsupported.category,
+            UnsupportedAbilityCategory::TriggerStructure
+        );
+        let def = crate::parser::oracle::lower_unsupported_node(&unsupported, 0);
+        let Effect::Unimplemented { name, description } = def.effect.as_ref() else {
+            panic!("expected unimplemented residual: {def:?}");
+        };
+        assert_eq!(name, "trigger_structure");
+        assert_eq!(
+            description.as_deref(),
+            Some("Trigger prefix matched but line failed trigger parser: Whenever unsupported trigger structure")
+        );
+        assert_eq!(def.description.as_deref(), Some(line));
     }
 }

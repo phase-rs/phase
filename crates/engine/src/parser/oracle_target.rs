@@ -5680,6 +5680,18 @@ fn parse_counter_spec_after_lead(
         |input| {
             let (input, expr) = nom_quantity::parse_quantity_expr_number(input)?;
             let (input, _) = tag_e::<_, _, OracleError<'_>>(" ").parse(input)?;
+            // CR 122.1: "with N or more/or greater <type> counters" — redundant
+            // with the already-GE `with` lead (mirrors the CMC "N or greater"
+            // handling above `parse_counter_suffix`'s call site), but the
+            // qualifier must still be consumed here or it leaks into the
+            // counter-type slice below (issue #6492: "or more +1/+1" parsed as
+            // a garbage counter type on Runadi, Behemoth Caller's haste static).
+            let input = alt((
+                tag_e::<_, _, OracleError<'_>>("or more "),
+                tag_e("or greater "),
+            ))
+            .parse(input)
+            .map_or(input, |(rest, _)| rest);
             Ok((input, expr))
         },
     ));
@@ -11941,6 +11953,46 @@ mod tests {
                 comparator: Comparator::GE,
                 count: QuantityExpr::Fixed { value: 1 },
             } if s == "oil"
+        ));
+    }
+
+    /// CR 122.1 + CR 613.4c: issue #6492 — Runadi, Behemoth Caller's haste
+    /// static ("Creatures you control with three or more +1/+1 counters on
+    /// them have haste.") requires "three or more" to consume cleanly instead
+    /// of leaking "or more" into the counter-type slice (`Generic("or more
+    /// +1/+1")` pre-fix — no creature ever matched the filter, so haste never
+    /// applied). "with N counters" is already GE per the `with` lead, so "or
+    /// more"/"or greater" is a redundant qualifier that must be consumed, not
+    /// carried into the counter type.
+    #[test]
+    fn parse_counter_suffix_three_or_more_plus1plus1() {
+        let result = parse_counter_suffix(" with three or more +1/+1 counters on them");
+        assert!(result.is_some());
+        let (prop, _consumed) = result.unwrap();
+        assert!(matches!(
+            prop,
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 3 },
+            }
+        ));
+    }
+
+    /// Sibling coverage: "or greater" (not just "or more") must also be
+    /// stripped cleanly.
+    #[test]
+    fn parse_counter_suffix_two_or_greater_stun() {
+        let result = parse_counter_suffix(" with two or greater stun counters on it");
+        assert!(result.is_some());
+        let (prop, _consumed) = result.unwrap();
+        assert!(matches!(
+            prop,
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Stun),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 2 },
+            }
         ));
     }
 

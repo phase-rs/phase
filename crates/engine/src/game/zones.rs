@@ -1421,6 +1421,18 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
     mark_simultaneous_departures(slice, &departed);
 }
 
+/// CR 406.6 + CR 607.2a (issue #6437): Snapshot `source_id`'s linked exiles at
+/// the moment it leaves the battlefield, for a leaves-the-battlefield
+/// trigger's later `ExiledBySource` lookup (`filter.rs`'s `trigger_source.
+/// is_some()` branch). Every `ExileLinkKind` is kind-agnostically readable via
+/// `ExiledBySource` (`HideawayLookable`'s and `CraftMaterial`'s own doc
+/// comments say so explicitly) and the LIVE lookup
+/// (`players::linked_exile_cards_for_source`) does not filter by kind either —
+/// this snapshot must match that surface exactly, or a card whose "play the
+/// exiled card" clause resolves via a TRIGGERED ability (Fight Rigging's
+/// begin-of-combat trigger, as opposed to Windbrisk Heights' activated
+/// ability) silently finds nothing: Hideaway's link is `HideawayLookable`, and
+/// a `TrackedBySource`-only filter here dropped it before the previous fix.
 pub(crate) fn capture_linked_exile_snapshot(
     state: &GameState,
     source_id: ObjectId,
@@ -1433,13 +1445,7 @@ pub(crate) fn capture_linked_exile_snapshot(
     state
         .exile_links
         .iter()
-        .filter(|link| {
-            link.source_id == source_id
-                && matches!(
-                    link.kind,
-                    crate::types::game_state::ExileLinkKind::TrackedBySource
-                )
-        })
+        .filter(|link| link.source_id == source_id)
         .filter_map(|link| {
             state.objects.get(&link.exiled_id).and_then(|obj| {
                 (obj.zone == Zone::Exile).then(|| crate::types::game_state::LinkedExileSnapshot {

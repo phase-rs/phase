@@ -783,7 +783,13 @@ pub fn emit_trace_for_candidate(
 /// In release builds we still emit `CancelCast` to keep the match running, but
 /// debug builds panic so the gap surfaces during testing instead of silently
 /// degrading AI play into cast/cancel churn.
-fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameAction> {
+/// Deadlock-safe escape hatch when tactical scoring cannot produce an action.
+/// The WASM bridge exposes this for client AI-controller escape — callers must
+/// not invent actions from legal-action enumeration order (#6393).
+///
+/// `config` supplies policy penalties used by selection escapes (e.g. sacrifice
+/// value ordering); difficulty/search knobs are unused here.
+pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameAction> {
     // CR 601.2c: A spell's target step must use the engine's current legal
     // target list. `target_slots` is a historical snapshot and can be stale
     // after earlier selections; if no current legal action remains, abort the
@@ -1162,12 +1168,13 @@ fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameAction> {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
 
-        // Named choice: pick the first option if available.
-        WaitingFor::NamedChoice { options, .. } => {
-            options.first().map(|choice| GameAction::ChooseOption {
-                choice: choice.clone(),
-            })
-        }
+        // Named choice: prefer an engine-legal ChooseOption. CardName prompts
+        // intentionally keep `options` empty and synthesize candidates from
+        // `all_card_names` (#6248); reading `options.first()` softlocks after
+        // restore when rehydrate succeeded but options stayed empty (#6393).
+        WaitingFor::NamedChoice { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|a| matches!(a, GameAction::ChooseOption { .. })),
 
         // CR 608.2d: opponent-guess fallback — any printed guess is legal. The
         // hidden-info determinization in `choose_action` already pre-empts this
@@ -5745,6 +5752,61 @@ mod tests {
         assert!(
             random_card_predicate_guess(&state, PlayerId(1), &mut rng).is_none(),
             "ordinary land/nonland kind choices are strategic choices, not random guesses"
+        );
+    }
+
+    /// Issue #6393: CardName NamedChoice keeps `options` empty and synthesizes
+    /// candidates from `all_card_names`. Fallback must ask `legal_actions`, not
+    /// `options.first()`, or restore softlocks after a successful rehydrate.
+    #[test]
+    fn named_choice_card_name_fallback_uses_legal_actions_when_options_empty() {
+        let mut state = make_state();
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state.all_card_names = vec!["Forest".to_string(), "Island".to_string()].into();
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+            source: None,
+            persist_player: None,
+        };
+
+        let action = fallback_action_default(&state).expect("fallback returns ChooseOption");
+        assert!(
+            matches!(action, GameAction::ChooseOption { ref choice } if choice == "Forest"),
+            "expected Forest from legal_actions, got {action:?}"
+        );
+    }
+
+    /// Issue #6393: when rehydrate never populated `all_card_names`, CardName
+    /// prompts have zero legal actions — fallback must return None rather than
+    /// inventing an option from the empty `options` list.
+    #[test]
+    fn named_choice_card_name_fallback_none_when_all_card_names_empty() {
+        let mut state = make_state();
+        state.all_card_names = Vec::new().into();
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+            source: None,
+            persist_player: None,
+        };
+
+        assert!(
+            engine::ai_support::legal_actions(&state).is_empty(),
+            "test premise: empty all_card_names must yield no legal ChooseOption"
+        );
+        assert_eq!(
+            fallback_action_default(&state),
+            None,
+            "empty legal set must not fabricate a NamedChoice option"
         );
     }
 

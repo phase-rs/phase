@@ -117,7 +117,8 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
 
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::{
-    choose_action_with_session, score_candidates_with_session, AiSession, SessionCache,
+    choose_action_with_session, fallback_action, score_candidates_with_session, AiSession,
+    SessionCache,
 };
 thread_local! {
     /// Game state uses Cell<Option<T>> with take/set to avoid RefCell borrow poisoning.
@@ -1802,6 +1803,31 @@ pub fn replay_seek_js(target: u32) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn clear_replay_playback() {
     REPLAY_PLAYER.with(|cell| cell.set(None));
+}
+
+/// Engine-owned AI escape action for the current waiting state.
+///
+/// Returns the same deadlock-safe `fallback_action` the search path uses when
+/// scoring cannot choose — never invents from legal-action list order. Null
+/// when no legal escape exists (#6393).
+#[wasm_bindgen]
+pub fn get_ai_fallback_action() -> Result<JsValue, JsValue> {
+    with_state_mut(|state| {
+        // Freshly-restored states carry dirty layers; flush so candidate
+        // generation matches `get_ai_action` / `get_legal_actions_js`.
+        engine::game::layers::flush_layers(state);
+        // Escape uses policy penalties from config (sacrifice ordering); Medium
+        // is the controller's default seat difficulty for softlock recovery.
+        let config = create_config_for_players(
+            AiDifficulty::Medium,
+            Platform::Wasm,
+            state.players.len() as u8,
+        );
+        match fallback_action(state, &config) {
+            Some(action) => Ok(to_js(&action)),
+            None => Ok(JsValue::NULL),
+        }
+    })?
 }
 
 /// Get the AI's chosen action for the current game state.

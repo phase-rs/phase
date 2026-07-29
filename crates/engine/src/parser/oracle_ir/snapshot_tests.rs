@@ -7,6 +7,8 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
+use crate::types::ability::MultiTargetSpec;
+use crate::types::game_state::DistributionUnit;
 
 /// Parse Oracle text through both IR and lowering layers.
 fn parse_two_layer(
@@ -82,6 +84,32 @@ fn swallow_diagnostics_are_homed_in_the_doc_ir_channel() {
     assert_eq!(
         lowered.parse_warnings, ir.diagnostics,
         "parse_warnings must be a copy of OracleDocIr.diagnostics, not a separate sink"
+    );
+}
+
+#[test]
+fn forked_bolt_preserves_distribution_metadata_after_parse() {
+    let (_, lowered) = parse_two_layer(
+        "Forked Bolt deals 2 damage divided as you choose among one or two targets.",
+        "Forked Bolt",
+        &["Instant"],
+        &[],
+    );
+
+    assert_eq!(
+        lowered.abilities.len(),
+        1,
+        "Forked Bolt must lower one spell"
+    );
+    assert_eq!(
+        lowered.abilities[0].distribute,
+        Some(DistributionUnit::Damage),
+        "Forked Bolt distribution metadata lost during document lowering"
+    );
+    assert_eq!(
+        lowered.abilities[0].multi_target,
+        Some(MultiTargetSpec::fixed(1, 2)),
+        "Forked Bolt target-count metadata lost during document lowering"
     );
 }
 

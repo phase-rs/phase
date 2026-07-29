@@ -25993,6 +25993,91 @@ fn colored_cost_reduction_can_remove_hybrid_symbol_once() {
     );
 }
 
+/// CR 118.7b: a colored reduction shard with no matching component anywhere in
+/// the cost converts to a generic reduction instead of being discarded. Mirrors
+/// Aang, Master of Elements' `{W}{U}{B}{R}{G}` reduction against an all-generic
+/// spell (issue #6405) — none of the five colors are present, so all five
+/// units must spill over to reduce the {5} generic cost to {0}.
+#[test]
+fn colored_cost_reduction_spills_to_generic_when_cost_has_no_matching_color() {
+    let mut cost = ManaCost::Cost {
+        generic: 5,
+        shards: vec![],
+    };
+    let reduction = ManaCost::Cost {
+        generic: 0,
+        shards: vec![
+            ManaCostShard::White,
+            ManaCostShard::Blue,
+            ManaCostShard::Black,
+            ManaCostShard::Red,
+            ManaCostShard::Green,
+        ],
+    };
+    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    assert_eq!(
+        cost,
+        ManaCost::Cost {
+            generic: 0,
+            shards: vec![],
+        }
+    );
+}
+
+/// CR 118.7c: a colored reduction that exceeds the cost's component of that
+/// color reduces the color to nothing, then spills the excess to generic. A
+/// {2}{R} cost hit by Aang's five-color reduction loses its lone red pip (1
+/// unit) and then 4 more units spill to generic, flooring {2} at {0}.
+#[test]
+fn colored_cost_reduction_spills_excess_beyond_matching_color_to_generic() {
+    let mut cost = ManaCost::Cost {
+        generic: 2,
+        shards: vec![ManaCostShard::Red],
+    };
+    let reduction = ManaCost::Cost {
+        generic: 0,
+        shards: vec![
+            ManaCostShard::White,
+            ManaCostShard::Blue,
+            ManaCostShard::Black,
+            ManaCostShard::Red,
+            ManaCostShard::Green,
+        ],
+    };
+    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    assert_eq!(
+        cost,
+        ManaCost::Cost {
+            generic: 0,
+            shards: vec![],
+        }
+    );
+}
+
+/// CR 118.7b: a reduction shard never reduces a mismatched color's pip — a
+/// {G} cost is untouched by a {W} reduction unit (which instead spills to
+/// generic), so the green pip must survive.
+#[test]
+fn colored_cost_reduction_never_touches_mismatched_color_pip() {
+    let mut cost = ManaCost::Cost {
+        generic: 0,
+        shards: vec![ManaCostShard::Green],
+    };
+    let reduction = ManaCost::Cost {
+        generic: 0,
+        shards: vec![ManaCostShard::White],
+    };
+    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    assert_eq!(
+        cost,
+        ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::Green],
+        },
+        "a colored reduction must never cancel a differently-colored pip"
+    );
+}
+
 /// CR 601.2f: "The total cost is the mana cost ... plus all ... cost
 /// increases, and minus all cost reductions. ... If the mana component of the
 /// total cost is reduced to nothing by cost reduction effects, it is considered

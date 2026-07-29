@@ -43,13 +43,14 @@ use crate::types::ability::{
     PermissionGrantee, PlayerFilter, PreventionAmount, QuantityExpr, QuantityModification,
     QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-    TypeFilter, TypedFilter,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::CastFrequency;
+use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 /// Parse a replacement effect line into a ReplacementDefinition.
@@ -698,16 +699,17 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         );
     }
 
-    // --- "Whenever you cast [spell], that [subject] enters with ... counter(s) on it" ---
-    // CR 614.1c: Despite the "whenever you cast" framing, "enters with" is a
-    // replacement effect (not a triggered ability), so Wildgrowth Archaic and
-    // its cousin family (Runadi, Boreal Outrider, Torgal, …) are modeled as
-    // static replacements on the *cast spell itself*, not delayed triggers.
-    // This branch must run before `parse_enters_with_counters` so the
-    // "whenever you cast …" prefix is recognized first.
-    if let Some(def) = parse_whenever_you_cast_enters_with(&norm_lower, &text) {
-        return Some(def);
-    }
+    // NOTE: "Whenever you cast [spell], that [subject] enters with ... counter(s)
+    // on it" (Wildgrowth Archaic, Runadi, Boreal Outrider, Torgal, …) is NOT
+    // handled here. CR 603.1 + CR 603.3: "whenever" IS a triggered ability that
+    // goes on the stack — the effect it creates must survive the source leaving
+    // the battlefield before the cast spell resolves (issue #6492 review).
+    // Modeled as a `TriggerDefinition` by `parse_whenever_you_cast_enters_with_trigger`,
+    // dispatched from the Priority 5-pre interceptor in `oracle.rs` BEFORE this
+    // function is ever reached for that shape — `parse_whenever_you_cast_enters_with`
+    // (below) is reused only as the core ChangeZone/PutCounter builder for that
+    // trigger's floating-replacement payload, never as a standalone object-hosted
+    // replacement.
 
     // --- "[Subject] enters/escapes with N [type] counter(s)" ---
     // CR 614.1c: Handles "enters with", "escapes with" (CR 702.138), and
@@ -2111,7 +2113,7 @@ fn front_opponent_choice_for_nontargeted_look(reveal: &Effect) -> Option<(Effect
     // observable outcome.
     let choose_opponent = Effect::Choose {
         // CR 608.2d + CR 102.3: the controller chooses one opponent.
-        choice_type: ChoiceType::Opponent { restriction: None },
+        choice_type: ChoiceType::opponent(),
         persist: true,
         // Same controller-choice selection mode as the fronted card-name choice.
         selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -4728,11 +4730,19 @@ fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> Ab
 
 /// CR 614.1c + CR 601.2: Parse "Whenever you cast a [spell], that [subject]
 /// enters with [an additional] [count] [type] counter(s) on it[, where X is
-/// [quantity]]" as a replacement effect on the *cast spell itself*.
+/// [quantity]]" into the `ChangeZone` + `PutCounter` replacement payload for
+/// this shape. Wildgrowth Archaic and its cousin family (Runadi, Boreal
+/// Outrider, Torgal, …) all share this shape.
 ///
-/// Despite the "whenever you cast" framing, CR 614.1c classifies "enters with"
-/// as a replacement effect, not a triggered ability. Wildgrowth Archaic and its
-/// cousin family (Runadi, Boreal Outrider, Torgal, …) all share this shape.
+/// CR 603.1 + CR 603.3: "whenever" is a triggered ability that goes on the
+/// stack — the entering-with-counters EFFECT (CR 614.1c/614.12) only applies
+/// once that ability resolves. This function builds only the reusable
+/// replacement PAYLOAD (the `ChangeZone`/`PutCounter` shape keyed to the spell
+/// filter); it is never returned as a top-level, object-hosted replacement.
+/// `parse_whenever_you_cast_enters_with_trigger` is the actual recognizer —
+/// it wraps this payload in `Effect::AddTargetReplacement { target: None, .. }`
+/// so the triggered ability installs a floating, filter-scoped replacement
+/// that survives the source leaving the battlefield (issue #6492 review).
 ///
 /// Composition:
 ///   "whenever you cast " → spell filter → ", that " → subject →
@@ -4828,21 +4838,18 @@ fn parse_whenever_you_cast_enters_with(
     .parse(rest)
     .ok()?;
 
-    // Optional trailing "where X is [quantity]" clause.
+    // Optional trailing "where X is [quantity]" clause. Delegate to
+    // `parse_enters_with_where_x_suffix` — the single authority for this tail
+    // grammar, already shared with the self-ETB `parse_enters_with_counters`
+    // path — so composite/offset quantities ("its mana value minus 4"; CR
+    // 107.1 arithmetic over a CR 202.3 mana-value reference) resolve here too,
+    // not just atomic `QuantityRef`s. The previous atomic-only
+    // `parse_quantity_ref` call silently failed (via `?`) on any composite
+    // expression, misrouting the whole ability to the generic self-ETB
+    // fallback (Runadi, Behemoth Caller — issue #6492).
     let count_expr = match fixed_count {
         Some(n) => QuantityExpr::Fixed { value: n as i32 },
-        None => {
-            // Expect ", where x is " then a quantity ref.
-            let (rest, _) = alt((
-                tag::<_, _, OracleError<'_>>(", where x is "),
-                tag(", where X is "),
-            ))
-            .parse(rest)
-            .ok()?;
-            let qty_text = rest.trim_end_matches('.').trim();
-            let qty = crate::parser::oracle_quantity::parse_quantity_ref(qty_text)?;
-            QuantityExpr::Ref { qty }
-        }
+        None => parse_enters_with_where_x_suffix(rest)?,
     };
 
     let put_counter = AbilityDefinition::new(
@@ -4862,6 +4869,82 @@ fn parse_whenever_you_cast_enters_with(
             .valid_card(TargetFilter::Typed(spell_typed))
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
+    )
+}
+
+/// CR 603.1 + CR 603.3 + CR 614.1c/614.12: The actual recognizer for "Whenever
+/// you cast a [spell], that [subject] enters with ... counter(s) on it[,
+/// where X is [quantity]]" (Wildgrowth Archaic, Runadi, Boreal Outrider,
+/// Torgal, …).
+///
+/// "Whenever" is a triggered ability — it goes on the stack ABOVE the spell
+/// that triggered it (CR 603.3b) and resolves first. Modeling this whole
+/// sentence as an object-hosted static replacement (the pre-#6492-review
+/// design) is rules-wrong: the entering-with-counters effect must survive the
+/// source leaving the battlefield after the trigger resolves but before the
+/// cast spell does. Instead, this builds a real `TriggerDefinition`
+/// (`TriggerMode::SpellCast`, matching the same spell filter) whose resolving
+/// effect installs a FLOATING replacement via `Effect::AddTargetReplacement {
+/// target: TargetFilter::None, .. }` — pushed to `GameState::pending_damage_replacements`
+/// under the `ObjectId(0)` sentinel (see `add_target_replacement.rs`), which the
+/// replacement scan (`find_applicable_replacements`) admits independent of any
+/// object's zone. `consume_on_apply` makes it one-shot.
+///
+/// CR 117.3b: after Runadi's trigger resolves, the active player receives
+/// priority BEFORE the originally-cast spell resolves, and could cast a
+/// second qualifying flash creature in response — a bare filter-scoped
+/// one-shot install would let that INTERLOPING spell's battlefield entry
+/// consume the replacement first, leaving the original entrant uncountered.
+/// This is closed by AND-ing the spell filter with
+/// `TargetFilter::SpecificObject { id: TRIGGERING_SPELL_PLACEHOLDER }` — a
+/// parse-time placeholder id that `Effect::AddTargetReplacement`'s resolve
+/// function (`add_target_replacement.rs`) concretizes to the SPECIFIC spell
+/// object named by `state.current_trigger_event` (this trigger's own
+/// originating `SpellCast` event — CR 603.2) at install time, so only that
+/// exact spell's entry can ever satisfy it.
+pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
+    text: &str,
+    card_name: &str,
+) -> Option<TriggerDefinition> {
+    let text = strip_reminder_text(text);
+    let normalized = replace_self_refs(&text, card_name);
+    let norm_lower = normalized.to_lowercase();
+
+    let mut replacement = parse_whenever_you_cast_enters_with(&norm_lower, &text)?;
+    let spell_filter = replacement.valid_card.clone()?;
+    // CR 614.1c: one qualifying entry, then gone — this floating install must
+    // never persist to affect a second, later cast of the same shape.
+    replacement.consume_on_apply = true;
+    // CR 603.2 + CR 117.3b: bind to the SPECIFIC spell that caused this trigger,
+    // not just any spell matching the type/mana-value filter — see the
+    // interleaving-flash-creature note in the doc comment above.
+    // `TRIGGERING_SPELL_PLACEHOLDER` is concretized to the real triggering
+    // spell's id (or `ObjectId(0)`, matching nothing) by
+    // `Effect::AddTargetReplacement`'s resolve function at install time.
+    replacement.valid_card = Some(TargetFilter::And {
+        filters: vec![
+            spell_filter.clone(),
+            TargetFilter::SpecificObject {
+                id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
+            },
+        ],
+    });
+
+    let install = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::AddTargetReplacement {
+            replacement: Box::new(replacement),
+            target: TargetFilter::None,
+        },
+    );
+
+    Some(
+        TriggerDefinition::new(TriggerMode::SpellCast)
+            .valid_card(spell_filter)
+            .valid_target(TargetFilter::Controller)
+            .trigger_zones(vec![Zone::Battlefield])
+            .execute(install)
+            .description(text.to_string()),
     )
 }
 
@@ -14669,7 +14752,10 @@ mod tests {
             matches!(
                 &*execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::Opponent { restriction: None },
+                    choice_type: ChoiceType::Opponent {
+                        restriction: None,
+                        ..
+                    },
                     persist: true,
                     ..
                 }
@@ -14780,7 +14866,10 @@ mod tests {
             matches!(
                 &*mid.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::Opponent { restriction: None },
+                    choice_type: ChoiceType::Opponent {
+                        restriction: None,
+                        ..
+                    },
                     persist: true,
                     ..
                 }
@@ -19619,38 +19708,60 @@ mod tests {
         );
     }
 
-    /// CR 614.1c + CR 601.2h + CR 202.2: Wildgrowth Archaic's replacement line
+    /// CR 603.1 + CR 603.3 + CR 614.1c/614.12: Wildgrowth Archaic's ability
     /// ("Whenever you cast a creature spell, that creature enters with X
     /// additional +1/+1 counters on it, where X is the number of colors of
-    /// mana spent to cast it.") parses into a `ChangeZone` replacement on the
-    /// entering creature with a self-scoped spent-mana counter quantity.
+    /// mana spent to cast it.") parses into a `SpellCast` TRIGGER — not an
+    /// object-hosted replacement (issue #6492 review: "whenever" is a
+    /// triggered ability per CR 603.1/603.3, so the entering-with-counters
+    /// effect must survive the source leaving the battlefield after the
+    /// trigger resolves but before the cast spell does). The trigger's
+    /// resolution installs a floating, one-shot `ChangeZone` replacement via
+    /// `Effect::AddTargetReplacement`.
     #[test]
-    fn parses_wildgrowth_archaic_replacement() {
+    fn parses_wildgrowth_archaic_trigger() {
         let text = "Whenever you cast a creature spell, that creature enters with X additional +1/+1 counters on it, where X is the number of colors of mana spent to cast it.";
-        let def = parse_replacement_line(text, "Wildgrowth Archaic")
-            .expect("Wildgrowth line should parse as a replacement");
-        assert_eq!(def.event, ReplacementEvent::ChangeZone);
-        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        let trigger = parse_whenever_you_cast_enters_with_trigger(text, "Wildgrowth Archaic")
+            .expect("Wildgrowth line should parse as a trigger");
+        assert_eq!(trigger.mode, TriggerMode::SpellCast);
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
 
-        // valid_card: creature controlled by the Archaic's controller.
-        let TargetFilter::Typed(ref tf) = def.valid_card.as_ref().expect("valid_card set") else {
-            panic!("expected Typed filter, got {:?}", def.valid_card);
+        // valid_card: creature spell.
+        let TargetFilter::Typed(ref tf) = trigger.valid_card.as_ref().expect("valid_card set")
+        else {
+            panic!("expected Typed filter, got {:?}", trigger.valid_card);
         };
         assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
         assert_eq!(tf.controller, Some(ControllerRef::You));
 
-        // execute: PutCounter { target: SelfRef, count: Ref(self spent-mana colors) }.
-        let exec = def.execute.as_ref().expect("execute set");
-        let Effect::PutCounter {
-            counter_type,
-            count,
+        // execute: AddTargetReplacement { target: None, replacement: one-shot
+        // ChangeZone + PutCounter { target: SelfRef, count: Ref(self spent-mana colors) } }.
+        let exec = trigger.execute.as_ref().expect("execute set");
+        let Effect::AddTargetReplacement {
+            replacement,
             target,
         } = &*exec.effect
         else {
-            panic!("expected PutCounter, got {:?}", exec.effect);
+            panic!("expected AddTargetReplacement, got {:?}", exec.effect);
+        };
+        assert_eq!(target, &TargetFilter::None);
+        assert!(
+            replacement.consume_on_apply,
+            "floating install must be one-shot (CR 614.1c: one qualifying entry, then gone)"
+        );
+        assert_eq!(replacement.event, ReplacementEvent::ChangeZone);
+        assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
+        let put_counter = replacement.execute.as_ref().expect("execute set");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target: put_target,
+        } = &*put_counter.effect
+        else {
+            panic!("expected PutCounter, got {:?}", put_counter.effect);
         };
         assert_eq!(counter_type, &CounterType::Plus1Plus1);
-        assert_eq!(target, &TargetFilter::SelfRef);
+        assert_eq!(put_target, &TargetFilter::SelfRef);
         assert_eq!(
             count,
             &QuantityExpr::Ref {
@@ -19663,11 +19774,134 @@ mod tests {
     }
 
     /// Regression: a plain "Whenever you cast" trigger without an "enters with"
-    /// body must NOT be misrouted to the replacement path.
+    /// body must NOT be misrouted to either the trigger recognizer above or the
+    /// object-hosted replacement path.
     #[test]
     fn plain_whenever_you_cast_is_not_replacement() {
         let text = "Whenever you cast a creature spell, draw a card.";
         assert!(parse_replacement_line(text, "Filler").is_none());
+        assert!(parse_whenever_you_cast_enters_with_trigger(text, "Filler").is_none());
+    }
+
+    /// CR 603.1 + CR 603.3 + CR 614.1c/614.12 + CR 202.3 + CR 107.1: Runadi,
+    /// Behemoth Caller's first ability ("Whenever you cast a creature spell
+    /// with mana value 5 or greater, that creature enters with X additional
+    /// +1/+1 counters on it, where X is its mana value minus 4.") parses into
+    /// a `SpellCast` trigger (not a static replacement scoped to Runadi
+    /// herself — issue #6492 regression), whose resolution installs a
+    /// floating one-shot `ChangeZone` replacement gated on mana value >= 5,
+    /// with a composite offset quantity over the entering creature's own
+    /// mana value.
+    #[test]
+    fn parses_runadi_behemoth_caller_trigger() {
+        let text = "Whenever you cast a creature spell with mana value 5 or greater, that creature enters with X additional +1/+1 counters on it, where X is its mana value minus 4.";
+        let trigger = parse_whenever_you_cast_enters_with_trigger(text, "Runadi, Behemoth Caller")
+            .expect("Runadi's first ability should parse as a trigger");
+        assert_eq!(trigger.mode, TriggerMode::SpellCast);
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+
+        // valid_card: creature with mana value >= 5, controlled by Runadi's controller.
+        let TargetFilter::Typed(ref tf) = trigger.valid_card.as_ref().expect("valid_card set")
+        else {
+            panic!("expected Typed filter, got {:?}", trigger.valid_card);
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 5 },
+                }
+            )),
+            "valid_card must gate on mana value >= 5, got {:?}",
+            tf.properties
+        );
+
+        // execute: AddTargetReplacement { target: None, replacement: one-shot
+        // ChangeZone + PutCounter { target: SelfRef, count: Offset(its mana value, -4) } }.
+        let exec = trigger.execute.as_ref().expect("execute set");
+        let Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } = &*exec.effect
+        else {
+            panic!("expected AddTargetReplacement, got {:?}", exec.effect);
+        };
+        assert_eq!(target, &TargetFilter::None);
+        assert!(
+            replacement.consume_on_apply,
+            "floating install must be one-shot, or it would apply to a later, \
+             unrelated qualifying spell too"
+        );
+        // valid_card must AND the spell filter with a `SpecificObject` leaf
+        // carrying the trigger-source placeholder — `Effect::AddTargetReplacement`
+        // concretizes this to the SPECIFIC triggering spell's id at install
+        // time, so a different qualifying creature entering during the
+        // post-trigger priority window can't steal the install.
+        let TargetFilter::And { filters } =
+            replacement.valid_card.as_ref().expect("valid_card set")
+        else {
+            panic!(
+                "expected valid_card to be an And{{spell filter, trigger-source \
+                 placeholder}}, got {:?}",
+                replacement.valid_card
+            );
+        };
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::SpecificObject { id }
+                    if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
+            )),
+            "valid_card must carry the trigger-source placeholder, got {filters:?}"
+        );
+        assert_eq!(replacement.event, ReplacementEvent::ChangeZone);
+        assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
+        let put_counter = replacement.execute.as_ref().expect("execute set");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target: put_target,
+        } = &*put_counter.effect
+        else {
+            panic!("expected PutCounter, got {:?}", put_counter.effect);
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert_eq!(put_target, &TargetFilter::SelfRef);
+        assert_eq!(
+            count,
+            &QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: crate::types::ability::ObjectScope::Recipient,
+                    },
+                }),
+                offset: -4,
+            },
+            "count must be the entering creature's own mana value minus 4, not a \
+             garbage literal or Runadi's own mana value"
+        );
+    }
+
+    /// Regression: an unparseable composite quantity in the "where X is" clause
+    /// must still fail closed (return `None`) rather than silently absorbing
+    /// the condition text as a garbage counter-type literal — the exact
+    /// failure mode issue #6492 reported before the fix. Checked against both
+    /// the internal payload builder and the public trigger recognizer.
+    #[test]
+    fn whenever_you_cast_enters_with_garbage_quantity_fails_closed() {
+        let text = "Whenever you cast a creature spell with mana value 5 or greater, that creature enters with X additional +1/+1 counters on it, where X is its unrecognized nonsense value minus 4.";
+        assert!(
+            parse_whenever_you_cast_enters_with(&text.to_lowercase(), text).is_none(),
+            "an unparseable quantity clause must fail this combinator closed, not \
+             succeed with a wrong AST"
+        );
+        assert!(
+            parse_whenever_you_cast_enters_with_trigger(text, "Filler").is_none(),
+            "the trigger recognizer must also fail closed when its payload builder does"
+        );
     }
 
     /// Regression: "Whenever you cast" with a fixed additional counter amount
@@ -19676,9 +19910,14 @@ mod tests {
     #[test]
     fn parses_fixed_count_variant() {
         let text = "Whenever you cast a creature spell, that creature enters with an additional +1/+1 counter on it.";
-        let def = parse_replacement_line(text, "Filler").expect("should parse");
-        let exec = def.execute.as_ref().expect("execute set");
-        let Effect::PutCounter { count, .. } = &*exec.effect else {
+        let trigger =
+            parse_whenever_you_cast_enters_with_trigger(text, "Filler").expect("should parse");
+        let exec = trigger.execute.as_ref().expect("execute set");
+        let Effect::AddTargetReplacement { replacement, .. } = &*exec.effect else {
+            panic!("expected AddTargetReplacement, got {:?}", exec.effect);
+        };
+        let put_counter = replacement.execute.as_ref().expect("execute set");
+        let Effect::PutCounter { count, .. } = &*put_counter.effect else {
             panic!("expected PutCounter");
         };
         assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
