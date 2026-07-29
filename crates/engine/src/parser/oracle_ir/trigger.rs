@@ -207,24 +207,6 @@ impl VoteIr {
             self.in_trigger,
         )
     }
-
-    /// Compatibility lowering for non-trigger callers that have not yet moved
-    /// to trigger-body IR. Trigger parsing uses [`Self::effect_chain`] instead.
-    pub(crate) fn into_ability(self, kind: AbilityKind) -> AbilityDefinition {
-        let vote = AbilityDefinition::new(kind, self.vote);
-        match self.pre_vote_choose {
-            Some(choice_type) => AbilityDefinition::new(
-                kind,
-                Effect::Choose {
-                    choice_type,
-                    persist: true,
-                    selection: TargetSelectionMode::Random,
-                },
-            )
-            .sub_ability(vote),
-            None => vote,
-        }
-    }
 }
 
 /// CR 700.3: Typed pile-separation trigger body.
@@ -273,12 +255,6 @@ impl PileIr {
             self.actor.clone(),
             self.in_trigger,
         )
-    }
-
-    /// Compatibility lowering for non-trigger callers that still consume a
-    /// lowered definition. Trigger parsing uses [`Self::effect_chain`] instead.
-    pub(crate) fn into_ability(self, kind: AbilityKind) -> AbilityDefinition {
-        AbilityDefinition::new(kind, self.effect)
     }
 }
 
