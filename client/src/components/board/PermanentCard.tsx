@@ -342,7 +342,6 @@ export const PermanentCard = memo(function PermanentCard({
     incomingAttackerCounts,
     manaTappableObjectIds,
     selectableManaCostCreatureIds,
-    selectableSacrificeObjectIds,
     undoableTapObjectIds,
     validAttackerIds,
     validTargetObjectIds,

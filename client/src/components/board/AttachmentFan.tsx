@@ -13,14 +13,6 @@ import { dispatchInteraction } from "../../game/dispatch.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
-import {
-  boardChoiceMaxSelection,
-  buildBoardChoiceAction,
-  canConfirmBoardChoice,
-  getBoardChoiceView,
-  isBoardChoiceImmediate,
-} from "../../viewmodel/gameStateView.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { fanGeometry, spreadFactor } from "../card/fanGeometry.ts";
 

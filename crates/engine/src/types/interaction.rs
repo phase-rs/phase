@@ -1139,6 +1139,7 @@ pub struct ViewerInteraction {
     pub can_submit: bool,
     pub auto_pass_recommended: bool,
     pub opportunities: Vec<InteractionOpportunity>,
+    #[serde(default)]
     pub attachment_fans: Vec<InteractionAttachmentFan>,
     pub availability: InteractionAvailability,
 }
