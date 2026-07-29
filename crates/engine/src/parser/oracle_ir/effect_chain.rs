@@ -337,7 +337,7 @@ fn is_zero(v: &u32) -> bool {
 ///
 /// # Why an ordered `Vec` and not a set of booleans
 ///
-/// Both stages are folds that rewrite the `sub_ability` chain *and* write a root
+/// These stages are folds that rewrite the `sub_ability` chain *and* write a root
 /// field, so their position relative to the field stamps is behavior-load-bearing
 /// — a plain field bag cannot express "run these two, in this order, after the
 /// stamps":
@@ -353,10 +353,14 @@ fn is_zero(v: &u32) -> bool {
 ///
 /// Variants are named for the transform, not for a call site, so the list stays
 /// a description of *what runs* rather than of *who asked*.
-// Both variants are constructed by the T8-A2 recognizers (Channel, Boast,
-// Exhaust, Forecast), each of which lists them in this order.
+// The extraction variants are constructed by the T8-A2 recognizers (Channel,
+// Boast, Exhaust, Forecast), each of which lists them in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum ShellStage {
+    /// CR 106.6: normalize an activated mana ability's `instead` alternative
+    /// into the additional-mana delta used by the existing mana authority.
+    /// Runs `oracle::normalize_activated_mana_instead_delta`.
+    NormalizeActivatedManaInstead,
     /// CR 601.2f: fold a trailing self-referential "this ability costs {X} less
     /// to activate" node out of the `sub_ability` chain into `cost_reduction`.
     /// Runs `oracle::extract_cost_reduction_from_chain`.

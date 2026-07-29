@@ -8462,7 +8462,7 @@ pub(super) fn parse_activated_with_self_ref_fallback(
     }
 }
 
-fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition) {
+pub(crate) fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition) {
     let Effect::Mana {
         produced:
             ManaProduction::Colorless {

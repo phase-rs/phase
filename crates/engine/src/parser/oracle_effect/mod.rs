@@ -26977,6 +26977,9 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     apply_ability_shell_envelope(&mut def, &ir.shell);
     for stage in &ir.shell.stages {
         match stage {
+            ShellStage::NormalizeActivatedManaInstead => {
+                crate::parser::oracle::normalize_activated_mana_instead_delta(&mut def);
+            }
             ShellStage::ExtractCostReduction => {
                 crate::parser::oracle::extract_cost_reduction_from_chain(&mut def);
             }
