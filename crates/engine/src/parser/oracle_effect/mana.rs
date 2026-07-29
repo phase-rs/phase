@@ -4017,6 +4017,36 @@ mod tests {
         }
     }
 
+    /// CR 106.1b: A fixed count-prefixed colorless amount ("Add three {C}.")
+    /// yields a `Fixed` quantity and NO target role — the sentence names no
+    /// player, so `target` stays `None`. Companion to
+    /// `parse_add_mana_target_player_that_much_colorless` (which carries a
+    /// recipient role): this guards the plain fixed-count path against
+    /// spuriously stamping a role or a dynamic quantity.
+    #[test]
+    fn parse_add_fixed_count_colorless_no_target() {
+        let effect =
+            try_parse_add_mana_effect("Add three {C}.").expect("'Add three {C}.' must parse");
+        match effect {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                target,
+                ..
+            } => {
+                assert_eq!(
+                    count,
+                    QuantityExpr::Fixed { value: 3 },
+                    "'three' must be a fixed count of 3, got {count:?}"
+                );
+                assert_eq!(
+                    target, None,
+                    "a bare fixed colorless add names no player, so no role"
+                );
+            }
+            other => panic!("expected colorless Effect::Mana, got {other:?}"),
+        }
+    }
+
     /// CR 106.1: `{C}{C} for each X` preserves the literal symbol count as a
     /// `Multiply` factor; `{C} for each X` emits a bare `Ref` (no `Multiply`).
     #[test]

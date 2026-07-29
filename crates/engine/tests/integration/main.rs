@@ -166,6 +166,7 @@ mod flashback_nonmana_payability;
 mod flickerwisp_delayed_return;
 mod floodpits_drowner;
 mod flowstone_surge_mixed_anthem;
+mod forced_retarget_multi_role_mana_6056;
 mod foretell_pipeline;
 mod frenzy_attacker_unblocked_pump;
 mod frodo_ringbearer_must_be_blocked_gate;

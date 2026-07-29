@@ -69,7 +69,7 @@ pub fn resolve(
     }
 
     if let Some(filter) = forced_to {
-        // CR 115.7: Forced retarget — resolve the new target from the filter,
+        // CR 115.7a/b: Forced retarget — resolve the new target from the filter,
         // but only apply it if the targeted stack entry could legally target it.
         let legal_new_targets = legal_new_targets_for_stack_entry(state, stack_entry_index);
         let new_targets = find_legal_targets(state, filter, ability.controller, ability.source_id);
@@ -77,8 +77,16 @@ pub fn resolve(
             .into_iter()
             .find(|target| legal_new_targets.contains(target))
         {
-            if let Some(stack_ability) = state.stack[stack_entry_index].ability_mut() {
-                stack_ability.targets = vec![new_target];
+            // CR 115.7b: "change a target" replaces exactly ONE of the targeted
+            // stack entry's targets; every other declared target stays in place.
+            // For a multi-role mana ability (`ManaTargetRole::Both`, two declared
+            // target slots per CR 601.2c) that means replacing only the slot the
+            // new target is legal for — never collapsing the whole target list to
+            // `vec![new_target]`, which would delete the untouched slot.
+            let updated =
+                forced_retarget_targets(state, &stack_ability, &current_targets, new_target);
+            if let Some(stack_ability_mut) = state.stack[stack_entry_index].ability_mut() {
+                stack_ability_mut.targets = updated;
             }
         }
         events.push(GameEvent::EffectResolved {
@@ -111,6 +119,51 @@ pub fn resolve(
     };
     // EffectResolved is emitted by the engine handler after RetargetSpell action is submitted.
     Ok(())
+}
+
+/// CR 115.7a + CR 115.7b: Compute the targeted stack entry's full new target
+/// list after a forced single-target retarget, replacing exactly ONE slot and
+/// preserving every other declared target in place.
+///
+/// CR 601.2c: A multi-role mana ability (`ManaTargetRole::Both`) declares two
+/// independent instances of "target" — a recipient slot and a count-source slot
+/// — surfaced positionally by `role.surfaced_filters()`. The slot to replace is
+/// the FIRST whose filter the new target satisfies, mirroring the interactive
+/// assignment seam `ability_utils::retarget_slot_violation` (which zips the same
+/// `surfaced_filters()` against submitted targets), so the forced and
+/// interactive paths agree on slot identity.
+///
+/// A single-target spell/ability (`mana_multi_role == None`, one target at slot
+/// 0) replaces index 0 — byte-for-byte identical to the previous
+/// `vec![new_target]`. The `slot >= len` arm is defensive: a validated retarget
+/// always lands in an existing slot.
+fn forced_retarget_targets(
+    state: &GameState,
+    stack_ability: &ResolvedAbility,
+    current_targets: &[TargetRef],
+    new_target: TargetRef,
+) -> Vec<TargetRef> {
+    let slot = crate::types::ability::mana_multi_role(&stack_ability.effect)
+        .and_then(|role| {
+            role.surfaced_filters().position(|(_slot, filter)| {
+                // CR 115.7a: a target can be changed only to another LEGAL
+                // target *for the slot it lands in*.
+                !crate::game::targeting::validate_targets_for_ability(
+                    state,
+                    std::slice::from_ref(&new_target),
+                    filter,
+                    stack_ability,
+                )
+                .is_empty()
+            })
+        })
+        .unwrap_or(0);
+    if slot >= current_targets.len() {
+        return vec![new_target];
+    }
+    let mut targets = current_targets.to_vec();
+    targets[slot] = new_target;
+    targets
 }
 
 /// Extract the target filter from an effect variant, if it has a standard `target` field.

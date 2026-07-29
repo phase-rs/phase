@@ -3112,7 +3112,7 @@ fn legacy_effect(x: &Effect) -> bool {
         }
 
         // ---- Options-only carriers ----
-        // CR 603.10a (D5): `Effect::Mana`'s target is a ROLE (`ManaTargetRole`),
+        // CR 601.2c (D5): `Effect::Mana`'s target is a ROLE (`ManaTargetRole`),
         // not a bare `Option<TargetFilter>`, so it can no longer share the
         // or-pattern below. It must still be scanned: several shipping mana
         // cards carry exactly the frozen event-context tags this visitor exists
@@ -6448,42 +6448,7 @@ mod tests {
         AbilityKind, ChoiceType, Comparator, CountScope, PtValue, TargetSelectionMode,
     };
 
-    /// The five distinct filter shapes carried by an `Effect::Mana` target in
-    /// the shipping card set, each paired with the role the parser stamps.
-    /// Ten of the eleven fixture entries are CONTEXT-REF recipients; Carpet of
-    /// Flowers is the sole count source.
-    fn mana_fixture_roles() -> Vec<(&'static str, crate::types::ability::ManaTargetRole)> {
-        use crate::types::ability::{ControllerRef, ManaTargetRole, TargetFilter, TypedFilter};
-        let recipient = |f: TargetFilter| ManaTargetRole::Recipient { recipient: f };
-        vec![
-            (
-                "Belbe / Blinkmoth Urn",
-                recipient(TargetFilter::ScopedPlayer),
-            ),
-            (
-                "Bubbling Muck / High Tide / Mana Flare",
-                recipient(TargetFilter::TriggeringPlayer),
-            ),
-            (
-                "Fertile Ground / Utopia Sprawl / Wild Growth / Shimmerwilds Growth",
-                recipient(TargetFilter::ParentTargetController),
-            ),
-            (
-                "Spectral Searchlight",
-                recipient(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
-                )),
-            ),
-            (
-                "Carpet of Flowers",
-                ManaTargetRole::CountSource {
-                    count_source: TargetFilter::Typed(
-                        TypedFilter::default().controller(ControllerRef::Opponent),
-                    ),
-                },
-            ),
-        ]
-    }
+    use crate::game::test_fixtures::mana_fixture_roles;
 
     /// Matrix rows 15b + 17 — zero delta for the D5 frozen-event-tag visitor,
     /// which reads `Effect::Mana`'s target DIRECTLY and bypasses

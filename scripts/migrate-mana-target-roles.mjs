@@ -148,11 +148,36 @@ const STATE_ONLY_CARDS = new Set([
   "rousing refrain",
 ]);
 
-/** Field name carrying the filter inside each role variant. */
+/** Field name carrying the filter inside each SINGLE-FILTER role variant. */
 const FIELD_BY_ROLE = {
   Recipient: "recipient",
   CountSource: "count_source",
 };
+
+/**
+ * Field name carrying the legacy filter inside a role envelope, or a hard error
+ * for roles that cannot be reconstructed from a single legacy `TargetFilter`.
+ *
+ * A `Both` role declares TWO independent filters — a recipient and a count
+ * source (CR 601.2c) — but a legacy `Effect::Mana.target` carried only ONE bare
+ * filter. There is no way to split one filter into two roles, so a `Both`
+ * mapping (or any future role missing from `FIELD_BY_ROLE`) cannot be migrated
+ * automatically. Fail loudly and demand a dedicated migration rather than emit a
+ * malformed `{ role: "Both", undefined: <filter> }` envelope, which is exactly
+ * what `{ role, [FIELD_BY_ROLE[role]]: ... }` produced before this guard.
+ */
+function envelopeField(role) {
+  const field = FIELD_BY_ROLE[role];
+  if (field === undefined) {
+    throw new Error(
+      `Cannot migrate mana role "${role}" from a single legacy TargetFilter: ` +
+        `it has no single-filter field in FIELD_BY_ROLE. A "Both" role needs TWO ` +
+        `filters (recipient + count source) that one legacy filter cannot ` +
+        `reconstruct. Add a dedicated migration for this card's Oracle text.`,
+    );
+  }
+  return field;
+}
 
 const args = process.argv.slice(2);
 const checkOnly = args.includes("--check");
@@ -207,7 +232,7 @@ if (stateMode) {
         if (role === undefined) {
           unknown.push(nextOwner);
         } else {
-          node.target = { role, [FIELD_BY_ROLE[role]]: node.target };
+          node.target = { role, [envelopeField(role)]: node.target };
           migrated.push(`${nextOwner} -> ${role}`);
         }
       }
@@ -268,7 +293,7 @@ for (const [name, card] of Object.entries(cards)) {
         } else {
           // Wrap the existing filter verbatim — the filter itself is unchanged
           // by the migration, only the role envelope around it is new.
-          node.target = { role, [FIELD_BY_ROLE[role]]: node.target };
+          node.target = { role, [envelopeField(role)]: node.target };
           migrated.push(`${name} -> ${role}`);
         }
       }

@@ -3840,42 +3840,7 @@ mod tests {
 
     use super::*;
 
-    /// The five distinct filter shapes carried by an `Effect::Mana` target in
-    /// the shipping card set, each paired with the role the parser stamps.
-    /// Ten of the eleven fixture entries are CONTEXT-REF recipients; Carpet of
-    /// Flowers is the sole count source.
-    fn mana_fixture_roles() -> Vec<(&'static str, crate::types::ability::ManaTargetRole)> {
-        use crate::types::ability::{ControllerRef, ManaTargetRole, TargetFilter, TypedFilter};
-        let recipient = |f: TargetFilter| ManaTargetRole::Recipient { recipient: f };
-        vec![
-            (
-                "Belbe / Blinkmoth Urn",
-                recipient(TargetFilter::ScopedPlayer),
-            ),
-            (
-                "Bubbling Muck / High Tide / Mana Flare",
-                recipient(TargetFilter::TriggeringPlayer),
-            ),
-            (
-                "Fertile Ground / Utopia Sprawl / Wild Growth / Shimmerwilds Growth",
-                recipient(TargetFilter::ParentTargetController),
-            ),
-            (
-                "Spectral Searchlight",
-                recipient(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
-                )),
-            ),
-            (
-                "Carpet of Flowers",
-                ManaTargetRole::CountSource {
-                    count_source: TargetFilter::Typed(
-                        TypedFilter::default().controller(ControllerRef::Opponent),
-                    ),
-                },
-            ),
-        ]
-    }
+    use crate::game::test_fixtures::mana_fixture_roles;
 
     /// Matrix rows 15c + 20 — CR 605.1a classification is unchanged. This reader
     /// also bypasses `Effect::target_filter()`.
