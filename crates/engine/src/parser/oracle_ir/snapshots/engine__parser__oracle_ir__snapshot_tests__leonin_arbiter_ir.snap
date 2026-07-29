@@ -24,7 +24,7 @@ expression: "&ir"
       "node": {
         "Unsupported": {
           "unsupported": {
-            "name": "static_structure",
+            "category": "StaticStructure",
             "fragment": "Static pattern matched but line failed static parser: Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn.",
             "description": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn."
           },

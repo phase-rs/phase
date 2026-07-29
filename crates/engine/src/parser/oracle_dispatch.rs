@@ -7,7 +7,7 @@ use super::oracle_classifier::{
 };
 use super::oracle_effect::{lower_ability_ir, parse_ability_ir_with_context};
 use super::oracle_ir::context::ParseContext;
-use super::oracle_ir::doc::UnsupportedAbilityIr;
+use super::oracle_ir::doc::{UnsupportedAbilityCategory, UnsupportedAbilityIr};
 use super::oracle_ir::effect_chain::AbilityIr;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -47,7 +47,7 @@ pub(super) fn dispatch_line_nom(
     let lower_trimmed = lower.trim_start();
     if has_trigger_prefix(lower_trimmed) {
         return NomDispatchIr::Unsupported(UnsupportedAbilityIr::new(
-            "trigger_structure",
+            UnsupportedAbilityCategory::TriggerStructure,
             format!("Trigger prefix matched but line failed trigger parser: {line}"),
             line,
         ));
@@ -55,7 +55,7 @@ pub(super) fn dispatch_line_nom(
 
     if is_static_pattern(&lower) {
         return NomDispatchIr::Unsupported(UnsupportedAbilityIr::new(
-            "static_structure",
+            UnsupportedAbilityCategory::StaticStructure,
             format!("Static pattern matched but line failed static parser: {line}"),
             line,
         ));
@@ -63,7 +63,7 @@ pub(super) fn dispatch_line_nom(
 
     if is_replacement_pattern(&lower) {
         return NomDispatchIr::Unsupported(UnsupportedAbilityIr::new(
-            "replacement_structure",
+            UnsupportedAbilityCategory::ReplacementStructure,
             format!("Replacement pattern matched but line failed replacement parser: {line}"),
             line,
         ));
@@ -71,7 +71,7 @@ pub(super) fn dispatch_line_nom(
 
     if is_effect_sentence_candidate(&lower) {
         return NomDispatchIr::Unsupported(UnsupportedAbilityIr::new(
-            "effect_structure",
+            UnsupportedAbilityCategory::EffectStructure,
             format!("Effect sentence candidate but line failed effect parser: {line}"),
             line,
         ));
@@ -124,6 +124,10 @@ mod tests {
         else {
             panic!("unsupported trigger must retain its structural category");
         };
+        assert_eq!(
+            unsupported.category,
+            UnsupportedAbilityCategory::TriggerStructure
+        );
         let def = crate::parser::oracle::lower_unsupported_node(&unsupported, 0);
         let Effect::Unimplemented { name, description } = def.effect.as_ref() else {
             panic!("expected unimplemented residual: {def:?}");

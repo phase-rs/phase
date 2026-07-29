@@ -3796,15 +3796,20 @@ impl<'a> DocEmitter<'a> {
     /// definition-shaped predecessor carried; a standalone "X can't be 0."
     /// annotation paragraph still raises it through `raise_last_spell_min_x`.
     fn unsupported_at(&mut self, line: usize, text: String) {
-        self.unsupported_ir_at(line, UnsupportedAbilityIr::unknown(text));
+        self.unsupported_ir_at(line, UnsupportedAbilityIr::unknown(text), 0);
     }
 
-    fn unsupported_ir_at(&mut self, line: usize, unsupported: UnsupportedAbilityIr) {
+    fn unsupported_ir_at(
+        &mut self,
+        line: usize,
+        unsupported: UnsupportedAbilityIr,
+        min_x_value: u32,
+    ) {
         self.emit_at(
             line,
             OracleNodeIr::Unsupported {
                 unsupported,
-                min_x_value: 0,
+                min_x_value,
             },
         );
     }
@@ -6604,9 +6609,12 @@ pub(crate) fn parse_oracle_ir(
         // Priority 14a: the dispatcher parses once and retains successful spell IR.
         // Priority 15: its exact unsupported payload reaches final lowering unchanged.
         match dispatch_line_nom(&line, card_name, ctx.host_self_reference.clone()) {
-            NomDispatchIr::Spell(ir) => emitter.ability_ir_at(item_line, ir),
+            NomDispatchIr::Spell(mut ir) => {
+                ir.shell.min_x_value = ir.shell.min_x_value.max(min_x_value);
+                emitter.ability_ir_at(item_line, ir);
+            }
             NomDispatchIr::Unsupported(unsupported) => {
-                emitter.unsupported_ir_at(item_line, unsupported)
+                emitter.unsupported_ir_at(item_line, unsupported, min_x_value)
             }
         }
         i += 1;
@@ -8330,7 +8338,7 @@ pub(super) fn lower_unsupported_node(
     );
     let mut def = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::unimplemented(&unsupported.name, &unsupported.fragment),
+        Effect::unimplemented(unsupported.category.legacy_name(), &unsupported.fragment),
     )
     .description(unsupported.description.clone());
     def.min_x_value = def.min_x_value.max(min_x_value);

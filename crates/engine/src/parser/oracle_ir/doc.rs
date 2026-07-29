@@ -37,10 +37,33 @@ use crate::types::ability::{
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 
+/// Closed category for an unsupported ability residual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) enum UnsupportedAbilityCategory {
+    Unknown,
+    TriggerStructure,
+    StaticStructure,
+    ReplacementStructure,
+    EffectStructure,
+}
+
+impl UnsupportedAbilityCategory {
+    /// The stable coverage key emitted only when lowering to `Effect::Unimplemented`.
+    pub(crate) const fn legacy_name(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::TriggerStructure => "trigger_structure",
+            Self::StaticStructure => "static_structure",
+            Self::ReplacementStructure => "replacement_structure",
+            Self::EffectStructure => "effect_structure",
+        }
+    }
+}
+
 /// Lossless parser-internal representation of an unsupported ability.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct UnsupportedAbilityIr {
-    pub(crate) name: String,
+    pub(crate) category: UnsupportedAbilityCategory,
     pub(crate) fragment: String,
     pub(crate) description: String,
 }
@@ -49,19 +72,19 @@ impl UnsupportedAbilityIr {
     pub(crate) fn unknown(text: impl Into<String>) -> Self {
         let text = text.into();
         Self {
-            name: "unknown".to_string(),
+            category: UnsupportedAbilityCategory::Unknown,
             fragment: text.clone(),
             description: text,
         }
     }
 
     pub(crate) fn new(
-        name: impl Into<String>,
+        category: UnsupportedAbilityCategory,
         fragment: impl Into<String>,
         description: impl Into<String>,
     ) -> Self {
         Self {
-            name: name.into(),
+            category,
             fragment: fragment.into(),
             description: description.into(),
         }

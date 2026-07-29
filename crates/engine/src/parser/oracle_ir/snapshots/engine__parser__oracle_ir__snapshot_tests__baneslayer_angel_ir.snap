@@ -24,7 +24,7 @@ expression: "&ir"
       "node": {
         "Unsupported": {
           "unsupported": {
-            "name": "unknown",
+            "category": "Unknown",
             "fragment": "Flying, first strike, lifelink, protection from Demons and from Dragons",
             "description": "Flying, first strike, lifelink, protection from Demons and from Dragons"
           },

@@ -24,7 +24,7 @@ expression: "&ir"
       "node": {
         "Unsupported": {
           "unsupported": {
-            "name": "unknown",
+            "category": "Unknown",
             "fragment": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
             "description": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll."
           },

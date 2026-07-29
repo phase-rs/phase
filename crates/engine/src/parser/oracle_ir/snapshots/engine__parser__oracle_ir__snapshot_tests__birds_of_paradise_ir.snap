@@ -24,7 +24,7 @@ expression: "&ir"
       "node": {
         "Unsupported": {
           "unsupported": {
-            "name": "unknown",
+            "category": "Unknown",
             "fragment": "Flying",
             "description": "Flying"
           },
