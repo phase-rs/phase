@@ -11,6 +11,7 @@ use super::oracle_ir::doc::UnsupportedAbilityIr;
 use super::oracle_ir::effect_chain::AbilityIr;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[allow(clippy::large_enum_variant)] // Intentional: successful dispatch retains parser IR without an extra allocation.
 pub(super) enum NomDispatchIr {
     Spell(AbilityIr),
     Unsupported(UnsupportedAbilityIr),
