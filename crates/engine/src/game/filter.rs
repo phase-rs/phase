@@ -1982,13 +1982,25 @@ fn filter_inner_for_object(
                             _ => return false,
                         }
                     }
+                    // CR 508.5a: "defending player controls" — match the object's
+                    // controller against the defending player. Routed through the
+                    // single-authority `source_defending_player` so an attachment
+                    // source (Equipment/Aura), whose own captured combat status has
+                    // no defending player, still resolves the defender of the
+                    // *attacking creature* via the triggering event rather than
+                    // fizzling (issue #6678). A bespoke `.map().unwrap_or_else()`
+                    // here collapsed the captured `None` into `Some(None)` and
+                    // suppressed that fallback.
                     ControllerRef::DefendingPlayer => {
-                        let defending_player = trigger_source
-                            .map(|source| source.combat_status.defending_player)
-                            .unwrap_or_else(|| {
-                                crate::game::combat::resolve_defending_player(state, source_id)
-                            });
-                        match defending_player {
+                        let source_ctx = source_context_from_filter(
+                            state,
+                            source_id,
+                            source_controller,
+                            ability,
+                            trigger_source,
+                            recipient_id,
+                        );
+                        match source_defending_player(state, &source_ctx) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
@@ -3731,14 +3743,27 @@ struct SourceContext<'a> {
     recipient_id: Option<ObjectId>,
 }
 
-/// Source-relative controller references must use the triggered source's
-/// captured facts. Falling back to `source.id` after that object has changed
-/// zones would let a recycled storage id answer a different ability's filter.
+/// CR 508.5 + CR 508.5a: Source-relative "defending player" resolution. Prefer
+/// the triggered source's captured combat facts — an attacking creature's own
+/// attack trigger snapshots its defending player, and that captured fact must
+/// answer even after the source changes zones (a recycled storage id must never
+/// answer a different ability's filter).
+///
+/// But an attachment/anthem source (Equipment, Aura) is NOT itself the attacker:
+/// `capture_combat_status` finds it absent from `combat.attackers` and records
+/// `defending_player: None`. "Whenever equipped creature attacks, ... defending
+/// player controls" (Captain America's Shield, Greatsword of Tyr, and the rest
+/// of that class) must then resolve the defender of the *attacking creature*,
+/// carried by the triggering event. So a captured `None` is "no answer here",
+/// not "no defender" — fall through to `resolve_defending_player`, which reads
+/// the triggering event's attacker. Using `.map().unwrap_or_else()` collapsed
+/// that captured `None` into a spurious `Some(None)` and suppressed the
+/// fallback, silently fizzling the ability (issue #6678).
 fn source_defending_player(state: &GameState, source: &SourceContext<'_>) -> Option<PlayerId> {
     source
         .trigger_source
-        .map(|context| context.combat_status.defending_player)
-        .unwrap_or_else(|| crate::game::combat::resolve_defending_player(state, source.id))
+        .and_then(|context| context.combat_status.defending_player)
+        .or_else(|| crate::game::combat::resolve_defending_player(state, source.id))
 }
 
 fn source_enchanted_player(source: &SourceContext<'_>) -> Option<PlayerId> {

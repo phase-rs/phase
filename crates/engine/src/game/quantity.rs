@@ -146,14 +146,20 @@ fn source_controller_for_context(state: &GameState, ctx: &QuantityContext) -> Op
     source_lki_for_context(state, ctx).map(|lki| lki.controller)
 }
 
+// CR 508.5a: A captured `defending_player: None` on the trigger source means
+// "this source is not itself the attacker" (Equipment/Aura), NOT "no defender" —
+// fall through to `resolve_defending_player`, which reads the attacking creature
+// from the triggering event. Collapsing the captured `None` into a returned
+// `None` would break "defending player controls" quantities on an attachment
+// source, the same way it broke the tap target (issue #6678).
 fn source_defending_player_for_context(
     state: &GameState,
     ctx: &QuantityContext,
 ) -> Option<PlayerId> {
-    match ctx.trigger_source.as_ref() {
-        Some(source) => source.combat_status.defending_player,
-        None => crate::game::combat::resolve_defending_player(state, ctx.source),
-    }
+    ctx.trigger_source
+        .as_ref()
+        .and_then(|source| source.combat_status.defending_player)
+        .or_else(|| crate::game::combat::resolve_defending_player(state, ctx.source))
 }
 
 fn source_enchanted_player_for_context(

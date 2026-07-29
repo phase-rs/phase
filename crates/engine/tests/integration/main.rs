@@ -571,6 +571,7 @@ mod issue_6092_ability_block_reason;
 mod issue_6102_ragavan_exile_cast;
 mod issue_629_fractured_sanity_cycling;
 mod issue_654_stridehangar_automaton;
+mod issue_6678_captain_america_shield_tap_defender;
 mod issue_680_shalai_and_hallar_forgotten_ancient;
 mod issue_680_shalai_upkeep_move;
 mod issue_688_mind_into_matter;
