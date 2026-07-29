@@ -155,7 +155,8 @@ expression: "&ir"
               "ExtractManaSpendTrigger"
             ]
           },
-          "die_results": []
+          "die_results": [],
+          "root_transforms": []
         }
       }
     },
@@ -332,7 +333,8 @@ expression: "&ir"
                 "shell": {
                   "sub_link": null
                 },
-                "die_results": []
+                "die_results": [],
+                "root_transforms": []
               }
             },
             {
@@ -410,10 +412,12 @@ expression: "&ir"
                 "shell": {
                   "sub_link": null
                 },
-                "die_results": []
+                "die_results": [],
+                "root_transforms": []
               }
             }
-          ]
+          ],
+          "root_transforms": []
         }
       }
     }
