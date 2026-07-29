@@ -298,8 +298,13 @@ impl ParseContext {
 
     /// Push a diagnostic (replaces oracle_warnings::push_diagnostic).
     pub fn push_diagnostic(&mut self, d: OracleDiagnostic) {
-        if matches!(d, OracleDiagnostic::TargetFallback { .. })
-            && self.diagnostics.iter().any(|existing| existing == &d)
+        // Both variants can be pushed from a combinator that a speculative `alt`
+        // re-enters on a discarded alternative, so an identical entry is noise
+        // rather than signal.
+        if matches!(
+            d,
+            OracleDiagnostic::TargetFallback { .. } | OracleDiagnostic::IgnoredRemainder { .. }
+        ) && self.diagnostics.iter().any(|existing| existing == &d)
         {
             return;
         }

@@ -24,7 +24,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 
 /// Culling Scales, verbatim (reminder text included — it is stripped by the parser).
@@ -135,14 +135,12 @@ fn culling_scales_offers_only_the_lowest_mana_value_nonland_permanent() {
         .with_mana_cost(ManaCost::generic(6))
         .id();
 
-    let mut runner = scenario.build();
     // A Land must be excluded by the `Non(Land)` leg regardless of its mana value.
-    let land = runner.state().battlefield.iter().copied().find(|id| {
-        runner.state().objects[id]
-            .card_types
-            .core_types
-            .contains(&engine::types::card_type::CoreType::Land)
-    });
+    // It is given MV 0 — BELOW the tie — so the exclusion can only come from the
+    // type conjunction, never from losing the mana-value comparison.
+    let land = scenario.add_basic_land(P0, ManaColor::Green);
+
+    let mut runner = scenario.build();
 
     advance_to_trigger_target_selection(&mut runner);
     assert!(
@@ -173,10 +171,9 @@ fn culling_scales_offers_only_the_lowest_mana_value_nonland_permanent() {
         !legal.contains(&dear),
         "MV 6 is not the lowest — reverting the parser fix makes this legal again"
     );
-    if let Some(land) = land {
-        assert!(
-            !legal.contains(&land),
-            "a Land is excluded by the Non(Land) leg of the noun phrase"
-        );
-    }
+    assert!(
+        !legal.contains(&land),
+        "a Land at MV 0 is below the tie yet must still be excluded by the \
+         Non(Land) leg of the noun phrase; legal={legal:?}"
+    );
 }

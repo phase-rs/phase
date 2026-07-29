@@ -2915,8 +2915,13 @@ pub fn parse_type_phrase_with_ctx<'a>(
         &properties,
     ) {
         if let Some((head, consumed)) = parse_bare_superlative_property_suffix(&lower[pos..]) {
-            pending_bare_superlative = Some(head);
-            pos += consumed;
+            // CR 109.2a: refuse BEFORE consuming when a non-battlefield zone clause
+            // still lies ahead. Consuming first and refusing at materialization
+            // would drop the restriction while leaving the card looking supported.
+            if !nonbattlefield_zone_clause_lies_ahead(&lower[pos + consumed..]) {
+                pending_bare_superlative = Some(head);
+                pos += consumed;
+            }
         }
     }
 
@@ -3569,11 +3574,19 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // prop. Reversed, the prop nests inside its own population and
     // `resolve_filter_threshold` recurses without bound.
     if let Some((function, property)) = pending_bare_superlative.take() {
-        if phrase_denotes_battlefield_permanents(
-            left_card_suffix,
-            &[&base_type_filters, &relative_core_type_filters],
-            &properties,
-        ) {
+        // CR 109.2: the population must be the SAME set as the candidate filter. A
+        // trailing "that's an artifact" relative clause closes the noun phrase
+        // AFTER the detection pass and lands in `relative_core_type_filters`, which
+        // the population snapshot below does not carry — so ranking would use a
+        // wider set than the candidates. Refuse rather than rank over the wrong
+        // population. (Zero corpus attestation today; this keeps it that way.)
+        if relative_core_type_filters.is_empty()
+            && phrase_denotes_battlefield_permanents(
+                left_card_suffix,
+                &[&base_type_filters, &relative_core_type_filters],
+                &properties,
+            )
+        {
             let population = TargetFilter::Typed(TypedFilter {
                 type_filters: base_type_filters.clone(),
                 controller: controller.clone(),
@@ -3588,7 +3601,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
             // would silently be the wrong set.
             ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                 text: lower.trim().into(),
-                parser: "bare_superlative_property_suffix_non_battlefield_population".into(),
+                parser: "bare_superlative_property_suffix_unmodelled_population".into(),
                 line_index: 0,
             });
         }
@@ -4990,6 +5003,32 @@ fn parse_bare_superlative_property_suffix(
         .parse(rest)
         .ok()?;
     Some((head, text.len() - rest.len()))
+}
+
+/// CR 109.2a look-ahead: does a NON-BATTLEFIELD zone clause still lie ahead in
+/// this noun phrase?
+///
+/// The zone passes run after the bare-superlative detection pass, so at detection
+/// the accumulators cannot yet show a graveyard/exile scope. Without this
+/// look-ahead the detection pass would CONSUME the superlative and the
+/// materialization guard would then refuse to emit it — leaving a filter that
+/// looks supported with its ranked restriction silently gone, which is the exact
+/// defect this whole change exists to remove.
+///
+/// Implemented by trying the authoritative `parse_zone_suffix` at each word
+/// boundary of the remaining phrase (the shared word-boundary scan primitive), so
+/// there is no bespoke zone vocabulary here.
+fn nonbattlefield_zone_clause_lies_ahead(rest: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(rest, |candidate| match parse_zone_suffix(candidate) {
+        Some((props, _, _)) if props.iter().any(filter_prop_names_non_battlefield_zone) => {
+            Ok((candidate, ()))
+        }
+        _ => Err(nom::Err::Error(OracleError::new(
+            candidate,
+            nom::error::ErrorKind::Fail,
+        ))),
+    })
+    .is_some()
 }
 
 /// CR 109.2 vs CR 109.2a — STRUCTURAL carve-out, never positional.
@@ -17281,5 +17320,73 @@ mod tests {
                 assert_eq!(p, want_prop, "failed for {text:?}");
             }
         }
+    }
+
+    /// CR 109.2a — the look-ahead that stops the superlative being CONSUMED when a
+    /// non-battlefield zone clause still lies ahead. Refusing only later, after
+    /// consumption, would leave a filter that looks supported with its ranked
+    /// restriction silently gone — the exact defect this change removes.
+    ///
+    /// Tested at the guard rather than through `parse_target`, because the zone
+    /// passes that would populate an `InZone` prop run later in the enclosing
+    /// phrase parser; asserting on the guard is what makes this non-vacuous.
+    #[test]
+    fn nonbattlefield_zone_lookahead_gates_superlative_consumption() {
+        for ahead in [
+            " in your graveyard",
+            " in exile",
+            " in your hand",
+            " in a graveyard to your hand",
+        ] {
+            assert!(
+                nonbattlefield_zone_clause_lies_ahead(ahead),
+                "{ahead:?} must be recognized as a non-battlefield zone clause ahead"
+            );
+        }
+        // Battlefield is the CR 109.2 default, so it must NOT block consumption —
+        // the positive twin that keeps the guard from refusing everything.
+        for ahead in [
+            "",
+            " on the battlefield",
+            " you control",
+            " that's attacking",
+        ] {
+            assert!(
+                !nonbattlefield_zone_clause_lies_ahead(ahead),
+                "{ahead:?} must not block the CR 109.2 battlefield default"
+            );
+        }
+    }
+
+    /// CR 109.2 — the ranked population must be the SAME set as the candidates. A
+    /// trailing "that's an artifact" relative clause closes the noun phrase after
+    /// the detection pass and is not carried by the population snapshot, so
+    /// materialization must refuse rather than rank over a wider set.
+    #[test]
+    fn trailing_relative_type_clause_refuses_superlative_materialization() {
+        let (filter, _) =
+            parse_target("target permanent with the greatest mana value that's an artifact");
+        let tf = typed_leg(&filter).expect("typed");
+        // Reach-guard: the relative clause really was parsed onto the candidates.
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Artifact),
+            "reach-guard: the \"that's an artifact\" clause must reach the candidate \
+             filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            !tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { .. }
+                    },
+                    ..
+                }
+            )),
+            "the population snapshot omits the relative clause, so no superlative \
+             may be emitted; got {:?}",
+            tf.properties
+        );
     }
 }
