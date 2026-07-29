@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 993
 expression: "&ir"
 ---
 {
@@ -84,64 +83,131 @@ expression: "&ir"
         "fragment": "Whenever a player casts a spell with mana value equal to the number of charge counters on ~, counter that spell."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "SpellCast",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Counter",
-              "target": {
-                "type": "TriggeringSource"
+        "Trigger": {
+          "Parsed": {
+            "condition": "SpellCast",
+            "partial_def": {
+              "mode": "SpellCast",
+              "execute": null,
+              "valid_card": {
+                "type": "Typed",
+                "type_filters": [
+                  "Card"
+                ],
+                "controller": null,
+                "properties": [
+                  {
+                    "type": "Cmc",
+                    "comparator": "EQ",
+                    "value": {
+                      "type": "Ref",
+                      "qty": {
+                        "type": "CountersOn",
+                        "scope": {
+                          "type": "Source"
+                        },
+                        "counter_type": "charge"
+                      }
+                    }
+                  }
+                ]
+              },
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
+            },
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 18,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "counter that spell"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Counter",
+                        "target": {
+                          "type": "TriggeringSource"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
               }
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "Typed",
-            "type_filters": [
-              "Card"
-            ],
-            "controller": null,
-            "properties": [
-              {
-                "type": "Cmc",
-                "comparator": "EQ",
-                "value": {
-                  "type": "Ref",
-                  "qty": {
-                    "type": "CountersOn",
-                    "scope": {
-                      "type": "Source"
-                    },
-                    "counter_type": "charge"
-                  }
-                }
-              }
-            ]
-          },
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "Whenever a player casts a spell with mana value equal to the number of charge counters on ~, counter that spell.",
-          "constraint": null,
-          "condition": null,
-          "batched": false
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "Player"
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "counter that spell.",
+              "relative_player_scope": null
+            },
+            "source_text": "Whenever a player casts a spell with mana value equal to the number of charge counters on ~, counter that spell.",
+            "die_results": []
+          }
         }
       }
     }

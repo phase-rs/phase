@@ -14,6 +14,7 @@ pub mod commitment;
 pub mod control;
 pub mod cost_reduction;
 pub mod devotion;
+pub mod discard_matters;
 pub mod draw_matters;
 pub mod enchantments;
 pub mod energy;
@@ -40,6 +41,7 @@ pub use blink::BlinkFeature;
 pub use control::ControlFeature;
 pub use cost_reduction::CostReductionFeature;
 pub use devotion::DevotionFeature;
+pub use discard_matters::DiscardMattersFeature;
 pub use draw_matters::DrawMattersFeature;
 pub use enchantments::EnchantmentsFeature;
 pub use energy::EnergyFeature;
@@ -98,6 +100,9 @@ pub struct DeckFeatures {
     pub graveyard_types: GraveyardTypesFeature,
     /// CR 121.1: "whenever you draw" payoff density (draw sources + engines).
     pub draw_matters: DrawMattersFeature,
+    /// CR 701.9: "whenever you discard" payoff density (self-discard outlets +
+    /// engines). Disjoint from `hand_disruption`, which scores OPPONENT discard.
+    pub discard_matters: DiscardMattersFeature,
     /// Declaration-derived: the deck's declared bracket tier. Unlike the
     /// other fields here, this is not structurally detected from card text —
     /// it is a per-deck declaration set at deck-analysis time from deck
@@ -147,6 +152,7 @@ impl DeckFeatures {
             poison: poison::detect(deck),
             graveyard_types: graveyard_types::detect(deck),
             draw_matters: draw_matters::detect(deck),
+            discard_matters: discard_matters::detect(deck),
             bracket_tier: tier,
         }
     }

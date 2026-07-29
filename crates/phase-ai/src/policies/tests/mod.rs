@@ -5,6 +5,7 @@ pub mod artifact_synergy;
 pub mod blink_payoff;
 pub mod cost_reduction;
 pub mod devotion;
+pub mod discard_payoff;
 pub mod draw_payoff;
 pub mod effect_classify_snapshot;
 pub mod enchantments_payoff;

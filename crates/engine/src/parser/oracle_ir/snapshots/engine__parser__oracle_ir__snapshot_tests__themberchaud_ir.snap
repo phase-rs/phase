@@ -22,76 +22,134 @@ expression: "&ir"
         "fragment": "When ~ enters, he deals X damage to each other creature without flying and each player, where X is the number of Mountains you control."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "ChangesZone",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "DamageAll",
-              "amount": {
-                "type": "Ref",
-                "qty": {
-                  "type": "ObjectCount",
-                  "filter": {
-                    "type": "Typed",
-                    "type_filters": [
-                      {
-                        "Subtype": "Mountain"
+        "Trigger": {
+          "Parsed": {
+            "condition": "ChangesZone",
+            "partial_def": {
+              "mode": "ChangesZone",
+              "execute": null,
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": "Battlefield",
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
+            },
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 119,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "he deals X damage to each other creature without flying and each player, where X is the number of Mountains you control"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
                       }
-                    ],
-                    "controller": "You",
-                    "properties": []
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "DamageAll",
+                        "amount": {
+                          "type": "Ref",
+                          "qty": {
+                            "type": "Variable",
+                            "name": "X"
+                          }
+                        },
+                        "target": {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Creature"
+                          ],
+                          "controller": null,
+                          "properties": [
+                            {
+                              "type": "Another"
+                            },
+                            {
+                              "type": "WithoutKeyword",
+                              "value": "Flying"
+                            }
+                          ]
+                        },
+                        "player_filter": {
+                          "type": "All"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": "the number of Mountains you control",
+                    "unless_pay": null
                   }
-                }
-              },
-              "target": {
-                "type": "Typed",
-                "type_filters": [
-                  "Creature"
                 ],
-                "controller": null,
-                "properties": [
-                  {
-                    "type": "Another"
-                  },
-                  {
-                    "type": "WithoutKeyword",
-                    "value": "Flying"
-                  }
-                ]
-              },
-              "player_filter": {
-                "type": "All"
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
               }
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "origin": null,
-          "destination": "Battlefield",
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "When ~ enters, he deals X damage to each other creature without flying and each player, where X is the number of Mountains you control.",
-          "constraint": null,
-          "condition": null,
-          "batched": false
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "SelfRef"
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "he deals x damage to each other creature without flying and each player, where x is the number of mountains you control.",
+              "relative_player_scope": null
+            },
+            "source_text": "When ~ enters, he deals X damage to each other creature without flying and each player, where X is the number of Mountains you control.",
+            "die_results": []
+          }
         }
       }
     },

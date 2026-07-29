@@ -98,68 +98,237 @@ expression: "&ir"
         "fragment": "At the beginning of your upkeep, add {C} for each artifact you control. This mana can't be spent to cast nonartifact spells. Until end of turn, you don't lose this mana as steps and phases end."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "Phase",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Mana",
-              "produced": {
-                "type": "Colorless",
-                "count": {
-                  "type": "Ref",
-                  "qty": {
-                    "type": "ObjectCount",
-                    "filter": {
-                      "type": "Typed",
-                      "type_filters": [
-                        "Artifact"
-                      ],
-                      "controller": "You",
-                      "properties": []
-                    }
-                  }
-                }
-              },
-              "restrictions": [
-                {
-                  "SpellTypeOrAbilityActivation": {
-                    "spell_type": "Artifact",
-                    "ability": "Any"
-                  }
-                }
+        "Trigger": {
+          "Parsed": {
+            "condition": "Phase",
+            "partial_def": {
+              "mode": "Phase",
+              "execute": null,
+              "valid_card": null,
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
               ],
-              "expiry": "EndOfTurn"
+              "phase": "Upkeep",
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": {
+                "type": "OnlyDuringYourTurn"
+              },
+              "condition": null,
+              "batched": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false,
-            "is_mana_ability": true
-          },
-          "valid_card": null,
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": "Upkeep",
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "At the beginning of your upkeep, add {C} for each artifact you control. This mana can't be spent to cast nonartifact spells. Until end of turn, you don't lose this mana as steps and phases end.",
-          "constraint": {
-            "type": "OnlyDuringYourTurn"
-          },
-          "condition": null,
-          "batched": false
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 37,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "add {C} for each artifact you control"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Mana",
+                        "produced": {
+                          "type": "Colorless",
+                          "count": {
+                            "type": "Ref",
+                            "qty": {
+                              "type": "ObjectCount",
+                              "filter": {
+                                "type": "Typed",
+                                "type_filters": [
+                                  "Artifact"
+                                ],
+                                "controller": "You",
+                                "properties": []
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 1,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 2
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 39,
+                        "end_byte": 90,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 1
+                      },
+                      "fragment": "This mana can't be spent to cast nonartifact spells"
+                    },
+                    "disposition": {
+                      "Continue": {
+                        "continuation": {
+                          "ManaRestriction": {
+                            "restrictions": [
+                              {
+                                "SpellTypeOrAbilityActivation": {
+                                  "spell_type": "Artifact",
+                                  "ability": "Any"
+                                }
+                              }
+                            ],
+                            "grants": []
+                          }
+                        }
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Unimplemented",
+                        "name": "can't",
+                        "description": "can't be spent to cast nonartifact spells"
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 2,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 3
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 92,
+                        "end_byte": 159,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 2
+                      },
+                      "fragment": "Until end of turn, you don't lose this mana as steps and phases end"
+                    },
+                    "disposition": {
+                      "ModifyPrior": {
+                        "modifier": {
+                          "ManaRetention": "EndOfTurn"
+                        }
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Unimplemented",
+                        "name": "mana_retention_placeholder",
+                        "description": null
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
+              }
+            },
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "Any"
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "add {c} for each artifact you control. this mana can't be spent to cast nonartifact spells. until end of turn, you don't lose this mana as steps and phases end.",
+              "relative_player_scope": null
+            },
+            "source_text": "At the beginning of your upkeep, add {C} for each artifact you control. This mana can't be spent to cast nonartifact spells. Until end of turn, you don't lose this mana as steps and phases end.",
+            "die_results": []
+          }
         }
       }
     }

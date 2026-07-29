@@ -541,6 +541,10 @@ pub struct PolicyPenalties {
     /// reducer — the discount should be deployed first.
     #[serde(default = "default_cost_reduction_defer_penalty")]
     pub cost_reduction_defer_penalty: f64,
+    /// CR 701.9: card-equivalent value of discarding into one active "whenever
+    /// you discard" engine (preference band, per engine).
+    #[serde(default = "default_discard_payoff_bonus")]
+    pub discard_payoff_bonus: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -618,6 +622,7 @@ impl Default for PolicyPenalties {
             draw_payoff_bonus: default_draw_payoff_bonus(),
             cost_reduction_deploy_bonus: default_cost_reduction_deploy_bonus(),
             cost_reduction_defer_penalty: default_cost_reduction_defer_penalty(),
+            discard_payoff_bonus: default_discard_payoff_bonus(),
         }
     }
 }
@@ -751,6 +756,9 @@ fn default_cost_reduction_deploy_bonus() -> f64 {
 }
 fn default_cost_reduction_defer_penalty() -> f64 {
     -0.25
+}
+fn default_discard_payoff_bonus() -> f64 {
+    0.6
 }
 fn default_sacrifice_token_cost() -> f64 {
     0.5
@@ -908,6 +916,10 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
         "cost_reduction_defer_penalty",
         "CR 601.2f sequencing nudge for casting past a cheaper unplayed reducer — \
          awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "discard_payoff_bonus",
+        "CR 701.9 per-engine discard-payoff weight — awaiting a paired-seed ai-gate calibration.",
     ),
     (
         "poison_clock_pressure",

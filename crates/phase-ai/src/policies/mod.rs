@@ -18,6 +18,7 @@ mod cost_reduction;
 mod crew_timing;
 mod cycling_discipline;
 mod devotion;
+mod discard_payoff;
 mod downside_awareness;
 mod draw_payoff;
 pub(crate) mod effect_classify;

@@ -156,6 +156,9 @@ pub enum PolicyId {
     CostReduction,
     /// CR 121.1: reward drawing into an on-battlefield "whenever you draw" engine.
     DrawPayoff,
+    /// CR 701.9: reward discarding into an on-battlefield "whenever you discard"
+    /// engine — disjoint from `HandDisruption`, which scores OPPONENT discard.
+    DiscardPayoff,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -414,6 +417,7 @@ impl Default for PolicyRegistry {
             Box::new(super::self_bounce_target::SelfBounceTargetPolicy),
             Box::new(super::cost_reduction::CostReductionPolicy),
             Box::new(super::draw_payoff::DrawPayoffPolicy),
+            Box::new(super::discard_payoff::DiscardPayoffPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {
