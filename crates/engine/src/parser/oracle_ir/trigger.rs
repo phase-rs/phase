@@ -207,6 +207,23 @@ impl VoteIr {
             self.in_trigger,
         )
     }
+
+    /// Compatibility lowering for callers outside the native spell router.
+    pub(crate) fn into_ability(self, kind: AbilityKind) -> AbilityDefinition {
+        let vote = AbilityDefinition::new(kind, self.vote);
+        match self.pre_vote_choose {
+            Some(choice_type) => AbilityDefinition::new(
+                kind,
+                Effect::Choose {
+                    choice_type,
+                    persist: true,
+                    selection: TargetSelectionMode::Random,
+                },
+            )
+            .sub_ability(vote),
+            None => vote,
+        }
+    }
 }
 
 /// CR 700.3: Typed pile-separation trigger body.
