@@ -902,10 +902,22 @@ pub enum Keyword {
     /// RUNTIME: synthesized as-enters replacement by
     /// `database/synthesis.rs::synthesize_devour` — a `ReplacementEvent::Moved`
     /// replacement on `SelfRef` whose execute chain is a ranged `Effect::Sacrifice`
-    /// over the controller's creatures + a per-sacrifice `PutCounter(+1/+1)`
-    /// sub-ability. CR 702.82a: Devour N — as it enters, you may sacrifice any
-    /// number of creatures; it enters with N +1/+1 counters per sacrifice.
-    Devour(u32),
+    /// over the controller's permanents matching `quality` + a per-sacrifice
+    /// `PutCounter(+1/+1)` sub-ability.
+    ///
+    /// CR 702.82a: "Devour N" — as it enters, you may sacrifice any number of
+    /// creatures; it enters with N +1/+1 counters per sacrifice. This is the
+    /// default and corresponds to `quality: TypeFilter::Creature`.
+    ///
+    /// CR 702.82c: "Devour [quality] N" — the quality-qualified variant sacrifices
+    /// [quality] permanents instead (e.g. Land for Famished Worldsire, Artifact for
+    /// Caprichrome, Subtype("Food") for Feasting Hobbit). Per CR 702.82c the counter
+    /// math (N +1/+1 counters per permanent sacrificed, CR 122.1a) is identical to
+    /// the plain form and independent of `quality` — only the sacrifice pool changes.
+    Devour {
+        n: u32,
+        quality: TypeFilter,
+    },
 
     /// CR 702.164: Toxic N — when this creature deals combat damage to a player,
     /// that player gets N poison counters.
@@ -1332,7 +1344,7 @@ impl Keyword {
             | Keyword::Demonstrate
             | Keyword::Bloodthirst(_)
             | Keyword::Amplify(_)
-            | Keyword::Devour(_)
+            | Keyword::Devour { .. }
             | Keyword::Teamwork(_)
             | Keyword::Backup(_)
             | Keyword::Squad(_)
@@ -1504,7 +1516,7 @@ impl Keyword {
             Keyword::Craft { .. } => KeywordKind::Craft,
             Keyword::Harmonize(_) => KeywordKind::Harmonize,
             Keyword::Warp(_) => KeywordKind::Warp,
-            Keyword::Devour(_) => KeywordKind::Devour,
+            Keyword::Devour { .. } => KeywordKind::Devour,
             Keyword::Offspring(_) => KeywordKind::Offspring,
             Keyword::Splice { .. } => KeywordKind::Splice,
             Keyword::Bargain => KeywordKind::Bargain,
@@ -2469,7 +2481,16 @@ impl FromStr for Keyword {
                 "bloodthirst" => return Ok(Keyword::Bloodthirst(parse_bloodthirst_value(p))),
                 "amplify" => return Ok(Keyword::Amplify(p.parse().unwrap_or(1))),
                 "graft" => return Ok(Keyword::Graft(p.parse().unwrap_or(1))),
-                "devour" => return Ok(Keyword::Devour(p.parse().unwrap_or(1))),
+                // CR 702.82a: the colon-form `FromStr` path carries only the count;
+                // the quality qualifier (CR 702.82c) is captured upstream by the
+                // dedicated `parse_devour_keyword_line` combinator, so this fallback
+                // builds the CR 702.82a creature default.
+                "devour" => {
+                    return Ok(Keyword::Devour {
+                        n: p.parse().unwrap_or(1),
+                        quality: TypeFilter::Creature,
+                    })
+                }
                 // CR 702.164
                 "toxic" => return Ok(Keyword::Toxic(p.parse().unwrap_or(1))),
                 // CR 702.171a
@@ -3402,7 +3423,28 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Bloodthirst" => Ok(Keyword::Bloodthirst(bloodthirst(data)?)),
         "Amplify" => Ok(Keyword::Amplify(uint(data))),
         "Graft" => Ok(Keyword::Graft(uint(data))),
-        "Devour" => Ok(Keyword::Devour(uint(data))),
+        "Devour" => {
+            // Struct variant: {"Devour": {"n": N, "quality": <TypeFilter>}}.
+            // A bare number {"Devour": N} is also accepted for back-compat with
+            // card-data serialized before the CR 702.82c quality axis existed; it
+            // deserializes to the CR 702.82a creature default. Mirrors the Crew arm.
+            if let Some(obj) = data.as_object() {
+                let n = obj.get("n").map(uint).unwrap_or(1);
+                let quality = obj
+                    .get("quality")
+                    .cloned()
+                    .map(serde_json::from_value::<TypeFilter>)
+                    .transpose()
+                    .map_err(|e| e.to_string())?
+                    .unwrap_or(TypeFilter::Creature);
+                Ok(Keyword::Devour { n, quality })
+            } else {
+                Ok(Keyword::Devour {
+                    n: uint(data),
+                    quality: TypeFilter::Creature,
+                })
+            }
+        }
         // CR 702.164 / CR 702.171a / CR 702.46 / CR 702.165
         "Toxic" => Ok(Keyword::Toxic(uint(data))),
         "Saddle" => Ok(Keyword::Saddle(uint(data))),
@@ -3564,6 +3606,46 @@ mod tests {
             CostBearingKeywordKind::Foretell.with_cost(cost.clone()),
             Keyword::Foretell(cost)
         );
+    }
+
+    /// Back-compat: card-data.json serialized before the CR 702.82c quality axis
+    /// encoded Devour as a bare number `{"Devour": 3}`. The custom Deserialize
+    /// bare-number fallback must still load such states, defaulting to the CR
+    /// 702.82a creature quality — otherwise every pre-existing saved game / cached
+    /// card-data blob would drop the keyword on reload.
+    #[test]
+    fn devour_old_form_bare_number_json_still_loads() {
+        let old: Keyword = serde_json::from_str(r#"{"Devour": 3}"#).unwrap();
+        assert_eq!(
+            old,
+            Keyword::Devour {
+                n: 3,
+                quality: TypeFilter::Creature,
+            }
+        );
+    }
+
+    /// The new struct form round-trips through serde, and a non-creature quality
+    /// (CR 702.82c) survives serialize→deserialize.
+    #[test]
+    fn devour_struct_form_round_trips_quality() {
+        for quality in [
+            TypeFilter::Creature,
+            TypeFilter::Land,
+            TypeFilter::Artifact,
+            TypeFilter::Subtype("Food".to_string()),
+        ] {
+            let kw = Keyword::Devour {
+                n: 3,
+                quality: quality.clone(),
+            };
+            let json = serde_json::to_string(&kw).unwrap();
+            let back: Keyword = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                back, kw,
+                "Devour quality must round-trip: {quality:?} via {json}"
+            );
+        }
     }
 
     #[test]

@@ -5,14 +5,15 @@ use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
 use engine::game::engine::apply_as_current;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    ChoiceType, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    ChoiceType, Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{
-    StackEntry, StackEntryKind, TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
+    StackEntry, StackEntryKind, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
+    WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::log::{LogCategory, LogSegment};
@@ -36,6 +37,8 @@ fn scenario_prefers_opponent_target_over_self() {
             legal_targets: vec![TargetRef::Player(P0), TargetRef::Player(P1)],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         }],
         mode_labels: Vec::new(),
         target_constraints: Vec::new(),
@@ -72,6 +75,8 @@ fn scenario_skips_optional_target_with_no_legal_choices() {
             legal_targets: Vec::new(),
             optional: true,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         }],
         mode_labels: Vec::new(),
         target_constraints: Vec::new(),
@@ -165,8 +170,18 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
     assert!(attacks.iter().any(|(id, _)| *id == attacker_b));
 }
 
+/// Pins the `prefer_land_drop` **fast path**, not the evaluator.
+///
+/// With exactly one playable land, `prefer_land_drop` short-circuits before the
+/// search ever runs (it terminates on `let only_land = land_actions.next()?;`
+/// followed by a second-`next()` guard), so this test **cannot detect an
+/// evaluator regression** — it passed throughout the period when the evaluator
+/// scored its own land drop as a strict loss. Evaluator coverage lives in
+/// `tests/ai_quality.rs::mana_screwed_ai_ranks_land_drop_above_passing`, which uses
+/// **two or more** playable lands so the shortcut declines and the scored path
+/// is reached. Any replacement for this test must do the same.
 #[test]
-fn scenario_mcts_plays_available_land_deterministically() {
+fn scenario_single_playable_land_uses_deterministic_shortcut() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let land_id = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
@@ -773,7 +788,7 @@ fn scenario_very_hard_wasm_passes_on_redundant_removal() {
             source_id: ObjectId(300),
             controller: P0,
             kind: StackEntryKind::Spell {
-                ability: Some(ResolvedAbility::new(
+                ability: Some(Box::new(ResolvedAbility::new(
                     Effect::DealDamage {
                         amount: QuantityExpr::Fixed { value: 3 },
                         target: TargetFilter::Any,
@@ -783,7 +798,7 @@ fn scenario_very_hard_wasm_passes_on_redundant_removal() {
                     vec![TargetRef::Object(target)],
                     ObjectId(300),
                     P0,
-                )),
+                ))),
                 card_id: CardId(300),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,

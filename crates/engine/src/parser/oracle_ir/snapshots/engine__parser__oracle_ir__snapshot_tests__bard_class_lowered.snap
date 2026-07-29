@@ -1,0 +1,253 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 1334
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "SetClassLevel",
+        "level": 2
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": {
+          "type": "Cost",
+          "shards": [
+            "Red",
+            "Green"
+          ],
+          "generic": 0
+        }
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{R}{G}: Level 2",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        },
+        {
+          "type": "ClassLevelIs",
+          "data": {
+            "level": 1
+          }
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "SetClassLevel",
+        "level": 3
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": {
+          "type": "Cost",
+          "shards": [
+            "Red",
+            "Green"
+          ],
+          "generic": 3
+        }
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{3}{R}{G}: Level 3",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        },
+        {
+          "type": "ClassLevelIs",
+          "data": {
+            "level": 2
+          }
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "SpellCast",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ExileTop",
+          "player": {
+            "type": "Controller"
+          },
+          "count": {
+            "type": "Fixed",
+            "value": 2
+          },
+          "position": {
+            "type": "Top"
+          }
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "CastFromZone",
+            "target": {
+              "type": "ParentTarget"
+            },
+            "without_paying_mana_cost": false,
+            "mode": "Play",
+            "duration": "UntilEndOfTurn"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": "UntilEndOfTurn",
+          "description": null,
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false,
+          "sub_link": "SequentialSibling"
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "Typed",
+        "type_filters": [
+          "Card"
+        ],
+        "controller": null,
+        "properties": [
+          {
+            "type": "HasSupertype",
+            "value": "Legendary"
+          }
+        ]
+      },
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": {
+        "type": "Controller"
+      },
+      "valid_source": null,
+      "description": "Whenever you cast a legendary spell, exile the top two cards of your library. You may play them this turn.",
+      "constraint": null,
+      "condition": {
+        "type": "ClassLevelGE",
+        "level": 3
+      },
+      "batched": false
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "ModifyCost": {
+          "mode": "Reduce",
+          "amount": {
+            "type": "Cost",
+            "shards": [
+              "Red",
+              "Green"
+            ],
+            "generic": 0
+          },
+          "spell_filter": {
+            "type": "Typed",
+            "type_filters": [
+              "Card"
+            ],
+            "controller": null,
+            "properties": [
+              {
+                "type": "HasSupertype",
+                "value": "Legendary"
+              }
+            ]
+          }
+        }
+      },
+      "affected": {
+        "type": "Typed",
+        "type_filters": [
+          "Card"
+        ],
+        "controller": "You",
+        "properties": []
+      },
+      "modifications": [],
+      "condition": {
+        "type": "ClassLevelGE",
+        "level": 2
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "Legendary spells you cast cost {R}{G} less to cast. This effect reduces only the amount of colored mana you pay."
+    }
+  ],
+  "replacements": [
+    {
+      "event": "Moved",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "PutCounter",
+          "counter_type": "P1P1",
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "target": {
+            "type": "SelfRef"
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "mode": {
+        "type": "Mandatory"
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "description": "Legendary creatures you control enter with an additional +1/+1 counter on them.",
+      "condition": null,
+      "destination_zone": "Battlefield"
+    }
+  ],
+  "extractedKeywords": []
+}

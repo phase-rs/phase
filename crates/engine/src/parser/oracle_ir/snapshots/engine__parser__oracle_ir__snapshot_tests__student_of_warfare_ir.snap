@@ -1,6 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 312
+assertion_line: 365
 expression: "&ir"
 ---
 {
@@ -52,39 +52,43 @@ expression: "&ir"
         "fragment": "LEVEL 2-6"
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "Continuous",
-          "affected": {
-            "type": "SelfRef"
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [
+              {
+                "type": "SetPower",
+                "value": 3
+              },
+              {
+                "type": "SetToughness",
+                "value": 3
+              },
+              {
+                "type": "AddKeyword",
+                "keyword": "FirstStrike"
+              }
+            ],
+            "condition": {
+              "type": "HasCounters",
+              "counters": {
+                "type": "OfType",
+                "data": "level"
+              },
+              "minimum": 2,
+              "maximum": 6
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "LEVEL 2-6 / 3/3 / First strike"
           },
-          "modifications": [
-            {
-              "type": "SetPower",
-              "value": 3
-            },
-            {
-              "type": "SetToughness",
-              "value": 3
-            },
-            {
-              "type": "AddKeyword",
-              "keyword": "FirstStrike"
-            }
-          ],
-          "condition": {
-            "type": "HasCounters",
-            "counters": {
-              "type": "OfType",
-              "data": "level"
-            },
-            "minimum": 2,
-            "maximum": 6
-          },
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "LEVEL 2-6 / 3/3 / First strike"
+          "source_text": "LEVEL 2-6 / 3/3 / First strike",
+          "body_ir": null
         }
       }
     },
@@ -106,38 +110,42 @@ expression: "&ir"
         "fragment": "LEVEL 7+"
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "Continuous",
-          "affected": {
-            "type": "SelfRef"
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [
+              {
+                "type": "SetPower",
+                "value": 4
+              },
+              {
+                "type": "SetToughness",
+                "value": 4
+              },
+              {
+                "type": "AddKeyword",
+                "keyword": "DoubleStrike"
+              }
+            ],
+            "condition": {
+              "type": "HasCounters",
+              "counters": {
+                "type": "OfType",
+                "data": "level"
+              },
+              "minimum": 7
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "LEVEL 7+ / 4/4 / Double strike"
           },
-          "modifications": [
-            {
-              "type": "SetPower",
-              "value": 4
-            },
-            {
-              "type": "SetToughness",
-              "value": 4
-            },
-            {
-              "type": "AddKeyword",
-              "keyword": "DoubleStrike"
-            }
-          ],
-          "condition": {
-            "type": "HasCounters",
-            "counters": {
-              "type": "OfType",
-              "data": "level"
-            },
-            "minimum": 7
-          },
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "LEVEL 7+ / 4/4 / Double strike"
+          "source_text": "LEVEL 7+ / 4/4 / Double strike",
+          "body_ir": null
         }
       }
     }

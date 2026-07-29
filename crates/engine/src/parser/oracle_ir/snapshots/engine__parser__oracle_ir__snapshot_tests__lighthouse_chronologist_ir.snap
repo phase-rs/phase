@@ -1,0 +1,229 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 3,
+      "source": {
+        "id": {
+          "item": 3,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 76,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Level up {U} ({U}: Put a level counter on this. Level up only as a sorcery.)"
+      },
+      "node": {
+        "Keyword": {
+          "LevelUp": {
+            "type": "Cost",
+            "shards": [
+              "Blue"
+            ],
+            "generic": 0
+          }
+        }
+      }
+    },
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 77,
+          "end_byte": 86,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "LEVEL 4-6"
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [
+              {
+                "type": "SetPower",
+                "value": 2
+              },
+              {
+                "type": "SetToughness",
+                "value": 4
+              }
+            ],
+            "condition": {
+              "type": "HasCounters",
+              "counters": {
+                "type": "OfType",
+                "data": "level"
+              },
+              "minimum": 4,
+              "maximum": 6
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "LEVEL 4-6 / 2/4"
+          },
+          "source_text": "LEVEL 4-6 / 2/4",
+          "body_ir": null
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 3,
+          "last_line": 3,
+          "start_byte": 91,
+          "end_byte": 99,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "LEVEL 7+"
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [
+              {
+                "type": "SetPower",
+                "value": 3
+              },
+              {
+                "type": "SetToughness",
+                "value": 5
+              }
+            ],
+            "condition": {
+              "type": "HasCounters",
+              "counters": {
+                "type": "OfType",
+                "data": "level"
+              },
+              "minimum": 7
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "LEVEL 7+ / 3/5"
+          },
+          "source_text": "LEVEL 7+ / 3/5",
+          "body_ir": null
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 5,
+          "last_line": 5,
+          "start_byte": 104,
+          "end_byte": 196,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "At the beginning of each end step, if it's not your turn, take an extra turn after this one."
+      },
+      "node": {
+        "Trigger": {
+          "Assembled": {
+            "definition": {
+              "mode": "Phase",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "ExtraTurn",
+                  "target": {
+                    "type": "Controller"
+                  }
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "valid_card": null,
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": "End",
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": "At the beginning of each end step, if it's not your turn, take an extra turn after this one.",
+              "constraint": null,
+              "condition": {
+                "type": "And",
+                "conditions": [
+                  {
+                    "type": "Not",
+                    "condition": {
+                      "type": "DuringPlayersTurn",
+                      "player": {
+                        "type": "Controller"
+                      }
+                    }
+                  },
+                  {
+                    "type": "HasCounters",
+                    "counters": {
+                      "type": "OfType",
+                      "data": "level"
+                    },
+                    "minimum": 7
+                  }
+                ]
+              },
+              "batched": false
+            },
+            "source_text": "At the beginning of each end step, if it's not your turn, take an extra turn after this one."
+          }
+        }
+      }
+    }
+  ],
+  "source_text": "Level up {U} ({U}: Put a level counter on this. Level up only as a sorcery.)\nLEVEL 4-6\n2/4\nLEVEL 7+\n3/5\nAt the beginning of each end step, if it's not your turn, take an extra turn after this one.",
+  "card_name": "Lighthouse Chronologist"
+}

@@ -243,6 +243,50 @@ pub fn prune_until_next_end_step_effects(state: &mut GameState, active_player: P
     }
 }
 
+/// CR 500.4 + CR 503.1: "As a step or phase begins, if there are effects that
+/// last until that step or phase, those effects expire." Removes transient
+/// continuous effects whose `Duration::UntilNextStepOf { step: Phase::Upkeep, .. }`
+/// deadline is the upkeep step now beginning. Called from
+/// `turns.rs::auto_advance` at the Upkeep phase (after its skip check, per
+/// CR 614.10a).
+///
+/// Exact mirror of `prune_until_next_end_step_effects` one step axis over, and
+/// it exists for the same reason: the parser's step-deadline production
+/// (`oracle_nom::duration::parse_until_next_step`) emits this duration for the
+/// "until \[the beginning of\] your next upkeep" phrase — printed by 9 cards,
+/// among them Xenic Poltergeist, Erhnam Djinn, Gabriel Angelfire, Elkin Bottle
+/// and Grinning Totem — so the effect must be pruned by its scheduled step
+/// instead of outliving it. Both `PlayerScope` arms the grammar can produce are
+/// handled here, so no emitted shape is left unenforced.
+pub fn prune_until_next_upkeep_effects(state: &mut GameState, active_player: PlayerId) {
+    let before = state.transient_continuous_effects.len();
+    state.transient_continuous_effects.retain(|e| {
+        // CR 503.1: "your next upkeep" — CONTROLLER-scoped, so it expires only
+        // at that controller's own upkeep step.
+        let controller_scoped = matches!(
+            e.duration,
+            Duration::UntilNextStepOf {
+                step: Phase::Upkeep,
+                player: PlayerScope::Controller
+            }
+        ) && e.controller == active_player;
+        // CR 611.2a: definite-article "the next upkeep" states a step without
+        // naming whose it is, so the deadline is turn-AGNOSTIC — it expires at
+        // the FIRST upkeep step to occur, ungated by `active_player`.
+        let turn_agnostic = matches!(
+            e.duration,
+            Duration::UntilNextStepOf {
+                step: Phase::Upkeep,
+                player: PlayerScope::AnyTurn
+            }
+        );
+        !(controller_scoped || turn_agnostic)
+    });
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty.mark_full();
+    }
+}
+
 /// CR 514.2: Remove durational casting permissions whose
 /// `Duration::UntilEndOfTurn` expires at cleanup. Called from the cleanup step
 /// alongside `prune_end_of_turn_effects`.
@@ -285,9 +329,11 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
                     },
                 ..
             } => true,
-            // UntilHostLeavesPlay / ForAsLongAs / UntilNextStepOf { step: Untap }:
-            // these are pruned by their own systems (zone-exit cleanup, condition
-            // re-evaluation, untap step). Retain here — they are not end-of-turn.
+            // UntilHostLeavesPlay / ForAsLongAs / UntilNextStepOf { step: Untap }
+            // / UntilNextStepOf { step: Upkeep }: these are pruned by their own
+            // systems (zone-exit cleanup, condition re-evaluation, untap step,
+            // and `prune_upkeep_step_casting_permissions` at the Upkeep phase).
+            // Retain here — they are not end-of-turn.
             CastingPermission::PlayFromExile { .. } => true,
             // CR 702.88a: Rebound's upkeep recast offer carries
             // `duration: Some(UntilEndOfTurn)` so the granted "cast this
@@ -525,6 +571,76 @@ pub fn prune_end_step_casting_permissions(state: &mut GameState, active_player: 
     }
 }
 
+/// CR 500.4 + CR 503.1: Remove durational casting permissions granted to
+/// `active_player` whose `Duration::UntilNextStepOf { step: Upkeep, player: Controller }`
+/// expires as that player's upkeep step begins. Called from
+/// `turns.rs::auto_advance` at the Upkeep phase, next to
+/// `prune_until_next_upkeep_effects`.
+///
+/// Exact mirror of `prune_end_step_casting_permissions` one step axis over,
+/// including its `exiled_by_ability_controller`-before-`granted_to` keying. It
+/// is the *casting-permission* half of the upkeep deadline: Elkin Bottle and
+/// Grinning Totem lower "Until the beginning of your next upkeep, you may play
+/// that card" to `CastingPermission::PlayFromExile { duration: … Upkeep … }`, not
+/// to a transient continuous effect, so without this the play permission would
+/// never expire — `prune_end_of_turn_casting_permissions`'s catch-all
+/// deliberately retains every non-end-step durational shape for its own system
+/// to handle, and before this function the upkeep shape had no such system.
+pub fn prune_upkeep_step_casting_permissions(state: &mut GameState, active_player: PlayerId) {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
+        obj.casting_permissions.retain(|p| match p {
+            CastingPermission::PlayFromExile {
+                duration:
+                    Duration::UntilNextStepOf {
+                        step: Phase::Upkeep,
+                        player: PlayerScope::Controller,
+                    },
+                granted_to,
+                exiled_by_ability_controller,
+                ..
+            } => exiled_by_ability_controller.unwrap_or(*granted_to) != active_player,
+            // CR 503.1: durational `ExileWithAltCost` mirrors `PlayFromExile`,
+            // exactly as it does for the end-step deadline.
+            CastingPermission::ExileWithAltCost {
+                duration:
+                    Some(Duration::UntilNextStepOf {
+                        step: Phase::Upkeep,
+                        player: PlayerScope::Controller,
+                    }),
+                granted_to: Some(g),
+                ..
+            } => *g != active_player,
+            // CR 611.2a: the turn-AGNOSTIC stated duration names no player, so
+            // it expires at the first upkeep step and is not keyed on
+            // `active_player` at all.
+            CastingPermission::PlayFromExile {
+                duration:
+                    Duration::UntilNextStepOf {
+                        step: Phase::Upkeep,
+                        player: PlayerScope::AnyTurn,
+                    },
+                ..
+            } => false,
+            CastingPermission::ExileWithAltCost {
+                duration:
+                    Some(Duration::UntilNextStepOf {
+                        step: Phase::Upkeep,
+                        player: PlayerScope::AnyTurn,
+                    }),
+                ..
+            } => false,
+            CastingPermission::PlayFromExile { .. }
+            | CastingPermission::AdventureCreature
+            | CastingPermission::ExileWithAltCost { .. }
+            | CastingPermission::ExileWithAltAbilityCost { .. }
+            | CastingPermission::ExileWithEnergyCost
+            | CastingPermission::WarpExile { .. }
+            | CastingPermission::Plotted { .. }
+            | CastingPermission::Foretold { .. } => true,
+        });
+    }
+}
+
 /// Remove transient `UntilNextTurnOf { Controller }` effects whose controller's
 /// turn is starting. Called at the start of the active player's turn (untap step)
 /// per CR 514.2.
@@ -578,9 +694,26 @@ pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: Playe
 /// CR 502.3: Prune "until controller's next untap step" transient effects
 /// for permanents controlled by the active player. Called during the untap step
 /// AFTER enforcing the CantUntap restriction (so the permanent skips exactly one untap).
+///
+/// CR 611.2a: the turn-AGNOSTIC `PlayerScope::AnyTurn` form ("the next untap
+/// step") states a step without naming whose it is, so it expires at the FIRST
+/// untap step to occur and is dropped without consulting the affected object's
+/// controller. Handling it here keeps every
+/// `(step, player)` pair `oracle_nom::duration::parse_until_next_step` can emit
+/// enforced, mirroring the two-scope handling in
+/// `prune_until_next_end_step_effects` / `prune_until_next_upkeep_effects`.
 pub fn prune_controller_untap_step_effects(state: &mut GameState, active_player: PlayerId) {
     let before = state.transient_continuous_effects.len();
     state.transient_continuous_effects.retain(|e| {
+        if matches!(
+            e.duration,
+            Duration::UntilNextStepOf {
+                step: Phase::Untap,
+                player: PlayerScope::AnyTurn
+            }
+        ) {
+            return false;
+        }
         if !matches!(
             e.duration,
             Duration::UntilNextStepOf {
@@ -2252,6 +2385,7 @@ pub fn evaluate_layers(state: &mut GameState) {
 
     // Step 5: Clear dirty flag. A full evaluation satisfies any pending request
     // (Clean / EnteredObjects / Full).
+    crate::game::effects::attach::refresh_protection_start_attachment_snapshots(state);
     state.layers_dirty = LayersDirty::Clean;
 }
 
@@ -2393,6 +2527,8 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::ControlledByEachPlayer { .. }
@@ -2727,6 +2863,8 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
@@ -2991,6 +3129,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -4603,6 +4742,17 @@ fn expand_granted_triggered_abilities(
 /// consults it too, so a display projection can never claim an effect is live
 /// after the layer engine has stopped applying it.
 pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinuousEffect) -> bool {
+    // CR 400.7: a recipient that has changed zones is a new object, so a
+    // continuous effect tied to its prior incarnation cannot keep applying.
+    if let Some(recipient) = tce.affected_recipient {
+        if !state
+            .objects
+            .get(&recipient.object_id)
+            .is_some_and(|object| ObjectIncarnationRef::from_object(object) == recipient)
+        {
+            return false;
+        }
+    }
     // UntilHostLeavesPlay: skip if source is no longer on the battlefield
     if tce.duration == Duration::UntilHostLeavesPlay
         && !state
@@ -6104,6 +6254,13 @@ fn apply_continuous_effect_filtered(
         };
 
         match &effect.modification {
+            // CR 707.2c + CR 613.1a: `CopyChosen` is a parse-time marker for
+            // Metamorphic Alteration's "enchanted creature is a copy of the
+            // chosen creature" static. The copy is materialized exactly once —
+            // as a latched `CopyValues` TCE installed at the
+            // `Effect::ChoosePermanent` answer (values fixed per CR 707.2c) —
+            // so applying anything here would double-install. Explicit no-op.
+            ContinuousModification::CopyChosen => {}
             ContinuousModification::CopyValues {
                 values,
                 display_source,
@@ -6659,6 +6816,24 @@ fn apply_continuous_effect_filtered(
                     obj.static_definitions.push(*definition.clone());
                 }
             }
+            // CR 614.1a + CR 614.6 + CR 613.1f: Grant an object-hosted replacement
+            // to the recipient. Mirror of `GrantStaticAbility` — push the cloned
+            // `ReplacementDefinition` onto `obj.replacement_definitions` so the
+            // granted replacement fires as a genuine replacement effect (its
+            // `valid_card: SelfRef` binds to this recipient object). Re-derived
+            // each layer pass (`obj.replacement_definitions` was reset to base at
+            // the start of the pass); structural-equality dedup keeps repeated
+            // grants (multiple sources, or a single static parsed twice)
+            // idempotent, matching the GrantTrigger / GrantStaticAbility invariant.
+            ContinuousModification::GrantReplacement { replacement } => {
+                if !obj
+                    .replacement_definitions
+                    .iter_all()
+                    .any(|rd| rd == replacement.as_ref())
+                {
+                    obj.replacement_definitions.push(*replacement.clone());
+                }
+            }
             ContinuousModification::AddStaticMode { mode } => {
                 // CR 509.1b + CR 105.4 + CR 609.6 (issue #327): When the
                 // granted static mode carries an `IsChosenColor` filter prop,
@@ -6977,6 +7152,7 @@ pub(crate) fn compute_current_copiable_values(
             // the overridden loyalty value.
             ContinuousModification::SetStartingLoyalty { value } => {
                 values.loyalty = Some(*value);
+                values.printed_loyalty = Some(crate::types::card::PrintedLoyalty::Fixed(*value));
             }
             // CR 707.9a: A copy effect that grants/retains an ability ("…
             // and it has this ability") makes that ability part of the
@@ -13776,11 +13952,13 @@ mod tests {
                     condition: StaticCondition::SourceIsTapped,
                 },
                 affected: TargetFilter::SelfRef,
+                affected_recipient: None,
                 modifications: vec![ContinuousModification::AddKeyword {
                     keyword: Keyword::Flying,
                 }],
                 condition: None,
                 duration_subject: None,
+                end_permission: None,
                 source_name: String::new(),
             });
         let mut effects = vec![];
@@ -13808,11 +13986,13 @@ mod tests {
                     condition: StaticCondition::SourceIsTapped,
                 },
                 affected: TargetFilter::SelfRef,
+                affected_recipient: None,
                 modifications: vec![ContinuousModification::AddKeyword {
                     keyword: Keyword::Flying,
                 }],
                 condition: None,
                 duration_subject: None,
+                end_permission: None,
                 source_name: String::new(),
             });
         let mut effects = vec![];
@@ -15328,6 +15508,206 @@ mod tests {
         assert!(
             state.transient_continuous_effects.is_empty(),
             "armed effect expires at the cleanup of the controller's next turn"
+        );
+    }
+
+    /// CR 500.4 + CR 503.1: "until your next upkeep" (Xenic Poltergeist, Erhnam
+    /// Djinn, Gabriel Angelfire) expires one step LATER than "until your next
+    /// turn" — it must survive the controller's untap step and be pruned only
+    /// when that controller's upkeep step begins. This is the whole reason the
+    /// upkeep deadline needs its own authority rather than reusing
+    /// `UntilNextTurnOf`, and it pins the step boundary a runtime test cannot
+    /// observe (no priority window exists inside the untap step, CR 502.4).
+    #[test]
+    fn until_next_upkeep_effect_survives_untap_and_expires_at_controllers_upkeep() {
+        let mut state = setup();
+        state.add_transient_continuous_effect(
+            ObjectId(0),
+            PlayerId(0),
+            Duration::UntilNextStepOf {
+                step: Phase::Upkeep,
+                player: PlayerScope::Controller,
+            },
+            TargetFilter::SelfRef,
+            vec![],
+            None,
+        );
+
+        prune_until_next_turn_effects(&mut state, PlayerId(0));
+        prune_controller_untap_step_effects(&mut state, PlayerId(0));
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "an upkeep deadline must survive its controller's untap step"
+        );
+
+        prune_until_next_upkeep_effects(&mut state, PlayerId(1));
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "a Controller-scoped upkeep deadline must not expire at an opponent's upkeep"
+        );
+
+        prune_until_next_upkeep_effects(&mut state, PlayerId(0));
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "the effect must expire as its controller's upkeep step begins"
+        );
+    }
+
+    /// CR 500.4 + CR 503.1: Elkin Bottle / Grinning Totem lower "Until the
+    /// beginning of your next upkeep, you may play that card" to a durational
+    /// `CastingPermission::PlayFromExile`, NOT to a transient continuous effect,
+    /// so the upkeep deadline needs the casting-permission prune as well as the
+    /// continuous-effect one. Without it the play permission never expires:
+    /// `prune_end_of_turn_casting_permissions` deliberately retains every
+    /// non-end-step durational shape for its own system to handle.
+    #[test]
+    fn until_next_upkeep_play_permission_expires_at_the_grantees_upkeep() {
+        let mut state = setup();
+        let exiled = make_exiled_card(&mut state, PlayerId(0));
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                duration: Duration::UntilNextStepOf {
+                    step: Phase::Upkeep,
+                    player: PlayerScope::Controller,
+                },
+                granted_to: PlayerId(0),
+                frequency: crate::types::statics::CastFrequency::Unlimited,
+                source_id: None,
+                invalidation: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            });
+
+        // Neither the grantee's untap step nor an OPPONENT's upkeep reaches it.
+        prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
+        prune_upkeep_step_casting_permissions(&mut state, PlayerId(1));
+        assert_eq!(
+            state.objects[&exiled].casting_permissions.len(),
+            1,
+            "an upkeep-scoped permission must survive the untap step and an \
+             opponent's upkeep"
+        );
+
+        prune_upkeep_step_casting_permissions(&mut state, PlayerId(0));
+        assert!(
+            state.objects[&exiled].casting_permissions.is_empty(),
+            "the permission must expire as its grantee's upkeep step begins"
+        );
+    }
+
+    /// CR 611.2a + CR 500.4: the turn-AGNOSTIC upkeep deadline ("the next
+    /// upkeep") states a step without naming whose it is, so it expires at the
+    /// FIRST upkeep step to occur, whoever's turn it is. Mirrors the `AnyTurn` arm of `prune_until_next_end_step_effects`;
+    /// without it the grammar could emit a shape nothing prunes.
+    #[test]
+    fn until_next_upkeep_turn_agnostic_expires_at_any_players_upkeep() {
+        let mut state = setup();
+        state.add_transient_continuous_effect(
+            ObjectId(0),
+            PlayerId(0),
+            Duration::UntilNextStepOf {
+                step: Phase::Upkeep,
+                player: PlayerScope::AnyTurn,
+            },
+            TargetFilter::SelfRef,
+            vec![],
+            None,
+        );
+
+        prune_until_next_upkeep_effects(&mut state, PlayerId(1));
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "a turn-agnostic upkeep deadline expires at the first upkeep step, \
+             not only its controller's"
+        );
+    }
+
+    /// CR 502.3 + CR 109.4: Orcish Farmer's "until its controller's next untap
+    /// step" binds the deadline to the AFFECTED object's controller, not to the
+    /// resolving ability's controller. The parser emits
+    /// `PlayerScope::Controller` for that phrase precisely because
+    /// `prune_controller_untap_step_effects` already reads it that way — this
+    /// test pins that contract, so a future change to either side breaks here
+    /// rather than silently making the land change permanent.
+    #[test]
+    fn until_object_controllers_next_untap_step_keys_on_the_affected_object() {
+        let mut state = setup();
+        // The affected land belongs to P1; the ability resolving is P0's.
+        let land = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            ObjectId(0),
+            PlayerId(0),
+            Duration::UntilNextStepOf {
+                step: Phase::Untap,
+                player: PlayerScope::Controller,
+            },
+            TargetFilter::SpecificObject { id: land },
+            vec![],
+            None,
+        );
+
+        prune_controller_untap_step_effects(&mut state, PlayerId(0));
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "the ability controller's untap step is not the affected land's \
+             controller's untap step"
+        );
+
+        prune_controller_untap_step_effects(&mut state, PlayerId(1));
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "the effect must expire at the affected land's controller's untap step"
+        );
+    }
+
+    /// CR 611.2a + CR 502.3: turn-agnostic sibling of the test above — an
+    /// `AnyTurn` untap deadline is not keyed on any controller, so it expires at
+    /// the first untap step even though the affected object belongs to the
+    /// non-active player.
+    #[test]
+    fn until_next_untap_step_turn_agnostic_expires_at_any_players_untap_step() {
+        let mut state = setup();
+        let land = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            ObjectId(0),
+            PlayerId(0),
+            Duration::UntilNextStepOf {
+                step: Phase::Untap,
+                player: PlayerScope::AnyTurn,
+            },
+            TargetFilter::SpecificObject { id: land },
+            vec![],
+            None,
+        );
+
+        prune_controller_untap_step_effects(&mut state, PlayerId(0));
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "a turn-agnostic untap deadline expires at the first untap step"
         );
     }
 
@@ -17234,6 +17614,7 @@ mod tests {
                 placement: None,
                 exile_links: ExileLinkSpec::default(),
                 replacement_applied: Default::default(),
+                face_down_in_exile: false,
             },
             &mut events,
         );
@@ -17299,6 +17680,7 @@ mod tests {
                 placement: None,
                 exile_links: ExileLinkSpec::default(),
                 replacement_applied: Default::default(),
+                face_down_in_exile: false,
             },
             &mut events,
         );
@@ -17765,6 +18147,7 @@ mod tests {
             power: Some(3),
             toughness: Some(3),
             loyalty: None,
+            printed_loyalty: None,
             keywords: vec![],
             abilities: Default::default(),
             trigger_definitions: Default::default(),

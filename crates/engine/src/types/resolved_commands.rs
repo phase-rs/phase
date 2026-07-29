@@ -7,15 +7,22 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::game::combat::{AttackTarget, CombatParticipation};
+use crate::game::game_object::AttachTarget;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
-use super::ability::TriggerDefinitionRef;
+use super::ability::{ContinuousModification, TriggerDefinitionRef};
+use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
-use super::game_state::{SpellCastRecord, ZoneChangeRecord};
+use super::game_state::{
+    DelayedTrigger, SpellCastRecord, StackEntry, StackEntryKind, StackPaidSnapshot,
+    TransientContinuousEffect, ZoneChangeRecord,
+};
 use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
+use super::proposed_event::{CopyTokenSpec, TokenSpec};
 use super::resolution::{FrameKind, ResolutionFrame, ResolutionStackError};
 use super::zones::Zone;
 
@@ -142,6 +149,546 @@ pub struct ResolvedObjectCounterCommand {
     pub expected_old: u32,
     pub edit: ResolvedObjectCounterEdit,
     pub cause: RulesExecutionNodeRef,
+}
+
+/// One exact CR 701.27a transform of a double-faced permanent.
+///
+/// CR 613.7g: a permanent that transforms receives a NEW timestamp, which
+/// orders it against continuous effects in the layer system. Replay installs
+/// the exact recorded timestamp instead of re-drawing one from
+/// `GameState::next_timestamp` — mirroring the zone-change family's
+/// `entry_timestamp` — so a retained-prefix replay cannot silently reorder
+/// layer application. The face payloads are not recorded: swapping the stashed
+/// `back_face` with the displayed face is a structural operation over data the
+/// object already carries, not a re-selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedObjectTransformCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_old_transformed: bool,
+    pub resulting_transformed: bool,
+    pub resulting_timestamp: u64,
+    /// CR 701.27f: the post-transform count used to ignore stale self-transform
+    /// instructions from abilities already on the stack.
+    pub resulting_transformation_count: u32,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved transform.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedObjectTransformReplayInvariantError {
+    #[error("transform command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("transform occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("transform precondition mismatch: expected transformed {expected}, found {found}")]
+    TransformedPreconditionMismatch { expected: bool, found: bool },
+    #[error("transform command object {0:?} has no back face to swap")]
+    MissingBackFace(ObjectId),
+}
+
+/// One exact CR 701.3 attachment-graph edit.
+///
+/// The three production authorities — `attach_to`, `attach_to_player`, and
+/// `unattach` — perform the same graph mutation parameterized by the resulting
+/// host, so they share one command instead of three sibling variants:
+/// `Some(Object)` (CR 301.5 / CR 303.4f), `Some(Player)` (CR 303.4), and `None`
+/// (CR 701.3d unattach) are leaf values of the `Option<AttachTarget>` the object
+/// already stores.
+///
+/// CR 613.7e + CR 701.3c: attaching to a DIFFERENT host draws a new timestamp,
+/// which orders the attachment against continuous effects in the layer system; a
+/// same-host re-attach (CR 701.3b) and an unattach draw none. `resulting_timestamp`
+/// is therefore `Some` exactly when the authority drew one, and replay installs
+/// that value — mirroring the transform and zone-change families — instead of
+/// re-drawing from `GameState::next_timestamp` and silently reordering layers.
+///
+/// The host-side `attachments` list is not recorded: removing the attachment from
+/// its old host and pushing it onto the new one is a structural consequence of the
+/// recorded host transition, not a re-selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedAttachmentCommand {
+    pub attachment: ObjectIncarnationRef,
+    pub expected_old_host: Option<AttachTarget>,
+    pub resulting_host: Option<AttachTarget>,
+    pub resulting_timestamp: Option<u64>,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved attachment edit.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedAttachmentReplayInvariantError {
+    #[error("attachment command references an unknown object {0:?}")]
+    UnknownAttachment(ObjectId),
+    #[error("attachment occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleAttachment {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("attachment host precondition mismatch: expected {expected:?}, found {found:?}")]
+    HostPreconditionMismatch {
+        expected: Option<AttachTarget>,
+        found: Option<AttachTarget>,
+    },
+    #[error("attachment command references an unknown host object {0:?}")]
+    UnknownHost(ObjectId),
+}
+
+/// One exact CR 603.7 delayed-triggered-ability installation.
+///
+/// CR 603.7a: the ability is created during the resolution of a spell or
+/// ability, as the result of a replacement effect, or from a static ability that
+/// let a player take an action — never re-derived from the board. The whole
+/// `DelayedTrigger` is therefore recorded verbatim: its condition, its already
+/// bound `ResolvedAbility` (targets included, per CR 603.7c), its CR 603.7d/e
+/// controller, and its source. Replay installs those values; it never re-runs
+/// target selection or re-reads the source object.
+///
+/// `expected_installed_count` is the length of `GameState::delayed_triggers`
+/// immediately before the push. Installed triggers are consumed by
+/// `check_delayed_triggers` (CR 603.7b, one firing) and pruned at cleanup, so
+/// the live length at install time is a genuine function of everything the
+/// replayed prefix did. Verifying it fails a replay closed the moment journal
+/// order stops matching execution order. (It is a storage-position check only:
+/// the rules order in which simultaneously firing triggers reach the stack is
+/// chosen by their controller under CR 603.3b, not by this index.)
+///
+/// No allocator value is drawn: unlike a continuous effect (CR 613.7b) a
+/// delayed triggered ability takes no timestamp, because it does not
+/// participate in the CR 613 layer system until it actually triggers and goes
+/// on the stack as an ordinary triggered ability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedDelayedTriggerCommand {
+    pub trigger: DelayedTrigger,
+    pub expected_installed_count: usize,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved delayed-trigger install.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedDelayedTriggerReplayInvariantError {
+    #[error("delayed-trigger install precondition mismatch: expected {expected} already installed, found {found}")]
+    InstalledCountPreconditionMismatch { expected: usize, found: usize },
+}
+
+/// One exact CR 611.2a transient continuous-effect installation.
+///
+/// A continuous effect generated by the resolution of a spell or ability lasts
+/// as long as that spell or ability stated (CR 611.2a) and, per CR 611.2c, the
+/// set of objects it affects is fixed when it begins. Both of those decisions
+/// are already baked into the `TransientContinuousEffect` the authority built,
+/// so the effect is recorded whole rather than as a recipe to re-evaluate.
+///
+/// Two allocator draws live inside that value and MUST be installed rather than
+/// re-drawn:
+/// - `effect.timestamp`, taken from `GameState::next_timestamp` per CR 613.7b
+///   ("a continuous effect generated by the resolution of a spell or ability
+///   receives a timestamp at the time it's created"). Re-drawing it at replay
+///   would reorder the effect against every other effect in its CR 613 layer.
+/// - `effect.id`, taken from `GameState::next_continuous_effect_id`, which is
+///   the handle later duration/recipient binding addresses the effect by.
+///
+/// All allocator draws are carried as post-draw high-water marks
+/// (`resulting_next_continuous_effect_id`,
+/// `resulting_next_end_effect_group_id`, and `resulting_next_timestamp`) so
+/// replay advances the allocators past the installed values exactly the way the
+/// token-birth family advances `next_object_id`, rather than leaving a
+/// replayed state that would hand the same identity or timestamp out twice.
+///
+/// `expected_installed_count` mirrors the delayed-trigger command: the live
+/// length of `GameState::transient_continuous_effects` before the push, which
+/// duration expiry continuously shortens.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedContinuousEffectCommand {
+    pub effect: TransientContinuousEffect,
+    pub expected_installed_count: usize,
+    pub resulting_next_continuous_effect_id: u64,
+    /// CR 116.2c: post-draw high-water for the optional termination group
+    /// carried by `effect`. Defaults to `0` for journals written before
+    /// pay-to-end permissions existed; those commands cannot carry a group.
+    #[serde(default)]
+    pub resulting_next_end_effect_group_id: u64,
+    pub resulting_next_timestamp: u64,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved continuous-effect install.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedContinuousEffectReplayInvariantError {
+    #[error("continuous-effect install precondition mismatch: expected {expected} already installed, found {found}")]
+    InstalledCountPreconditionMismatch { expected: usize, found: usize },
+    /// Engine invariant (not a CR rule): `id` is the handle every later lookup
+    /// addresses an effect by — recipient binding, duration binding, expiry — so
+    /// two live effects sharing one id would be indistinguishable to all of them.
+    #[error("continuous-effect install would duplicate the live effect id {0}")]
+    DuplicateEffectId(u64),
+    #[error("continuous-effect id {id} is not below its recorded high-water {high_water}")]
+    IdAboveHighWater { id: u64, high_water: u64 },
+    #[error(
+        "continuous-effect termination group {group} is not below its recorded high-water {high_water}"
+    )]
+    EndEffectGroupAboveHighWater { group: u64, high_water: u64 },
+    #[error(
+        "continuous-effect timestamp {timestamp} is not below its recorded high-water {high_water}"
+    )]
+    TimestampAboveHighWater { timestamp: u64, high_water: u64 },
+}
+/// One exact effect-driven combat-membership edit (CR 506.3 / CR 506.4).
+///
+/// The five production authorities — `enter_attacking`,
+/// `place_attacking_alongside`, `place_blocking`, `mark_attacker_blocked`, and
+/// `remove_object_from_combat` — all edit the one membership structure
+/// (`CombatState.attackers` plus the two blocker maps), so they share a single
+/// parameterized command rather than five sibling variants.
+///
+/// The parameterization axis stays inside one CR section, as the categorical
+/// boundary rule requires: CR 506.3a-g govern putting a permanent onto the
+/// battlefield "attacking or blocking" in one breath, CR 506.4 governs removal,
+/// and the declaration-side rules delegate back to it — CR 509.1g ends with
+/// "See rule 506.4." CR 508.4 and CR 509.1g/h are the entry points; CR 506 is
+/// the section that actually defines membership.
+///
+/// Turn-based declaration (CR 508.1 / CR 509.1) is deliberately NOT part of this
+/// family: it does not use the stack and validates before mutating.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedCombatMembershipCommand {
+    pub object: ObjectIncarnationRef,
+    pub edit: ResolvedCombatMembershipEdit,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Which membership edit one [`ResolvedCombatMembershipCommand`] settled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedCombatMembershipEdit {
+    /// CR 508.4: the object became an attacking creature.
+    ///
+    /// CR 508.4 assigns the defender to a CHOICE ("its controller chooses which
+    /// defending player, planeswalker a defending player controls, or battle a
+    /// defending player protects it's attacking"). The resolve-time authority
+    /// derives it from ambient state — `state.current_trigger_event`, the
+    /// source's own attacker entry, and a controller-scan of the live attacker
+    /// list. None of that is reconstructible at replay time, so both halves of
+    /// the chosen pair are RECORDED and installed verbatim. Re-deriving would
+    /// silently seat the creature against a different defender.
+    Attack {
+        resulting_defending_player: PlayerId,
+        resulting_attack_target: AttackTarget,
+    },
+    /// CR 509.1g + CR 506.3e: the object became a blocking creature for the
+    /// recorded attacker, which becomes blocked per CR 509.1h.
+    ///
+    /// `expected_attacker_blocked` pins the attacker's sticky blocked bit as it
+    /// stood before this block, so a replay installing a second blocker onto an
+    /// already-blocked attacker is distinguishable from the first one.
+    Block {
+        resulting_attacker: ObjectId,
+        expected_attacker_blocked: bool,
+    },
+    /// CR 509.1h: the object became a blocked creature purely by effect, with no
+    /// blocking creature assigned. Recorded only on a false-to-true transition,
+    /// so the applier can require the bit is still clear.
+    MarkBlocked,
+    /// CR 506.4: the object stopped being an attacking, blocking, and/or blocked
+    /// creature. Records the exact roles it held so the applier can verify it is
+    /// pruning the same edges, then re-runs the structural prune — which is a
+    /// consequence of the recorded participation, not a re-selection.
+    Remove {
+        expected_participation: CombatParticipation,
+    },
+}
+
+/// Typed failure while applying one already-resolved combat-membership edit.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedCombatMembershipReplayInvariantError {
+    #[error("combat-membership command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("combat-membership occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("combat-membership command applies to a state with no combat")]
+    NoCombat,
+    #[error("combat-membership command would attack twice with {0:?}")]
+    AlreadyAttacking(ObjectId),
+    #[error("combat-membership command references a non-attacking creature {0:?}")]
+    NotAttacking(ObjectId),
+    #[error(
+        "combat-membership blocked precondition mismatch for {attacker:?}: expected {expected}, found {found}"
+    )]
+    BlockedPreconditionMismatch {
+        attacker: ObjectId,
+        expected: bool,
+        found: bool,
+    },
+    #[error("combat-membership command would repeat the block of {attacker:?} by {blocker:?}")]
+    DuplicateBlock {
+        attacker: ObjectId,
+        blocker: ObjectId,
+    },
+    #[error(
+        "combat-membership participation mismatch for {object:?}: expected {expected:?}, found {found:?}"
+    )]
+    ParticipationMismatch {
+        object: ObjectId,
+        expected: Box<CombatParticipation>,
+        found: Box<CombatParticipation>,
+    },
+}
+
+/// One exact CR 110.2a + CR 603.6a "under your control" battlefield-entry
+/// controller override.
+///
+/// The override retags the live object AND the two turn-record snapshots the
+/// entry created, so a replay that installed only the object's controller would
+/// leave "entered under whose control" look-back queries answering with the
+/// pre-override controller.
+///
+/// The record positions are RECORDED rather than re-found at replay time,
+/// mirroring `ResolvedZoneChangeCommand::turn_zone_change_index`: the resolve-time
+/// authority knows exactly which snapshot it retagged, and re-running a
+/// last-match scan against a replayed board could land on a different entry when
+/// the same object entered twice in one turn. They are `Option` because the
+/// override also runs for entries whose snapshots are absent (CR 603.6a
+/// leaves-the-battlefield reconstruction, and the elimination path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedControllerOverrideCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_old_base_controller: Option<PlayerId>,
+    pub expected_old_controller: PlayerId,
+    pub resulting_controller: PlayerId,
+    pub zone_change_index: Option<usize>,
+    pub battlefield_entry_index: Option<usize>,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved controller override.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedControllerOverrideReplayInvariantError {
+    #[error("controller-override command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("controller-override occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("controller-override base-controller precondition mismatch: expected {expected:?}, found {found:?}")]
+    BaseControllerPreconditionMismatch {
+        expected: Option<PlayerId>,
+        found: Option<PlayerId>,
+    },
+    #[error("controller-override controller precondition mismatch: expected {expected:?}, found {found:?}")]
+    ControllerPreconditionMismatch { expected: PlayerId, found: PlayerId },
+    #[error("controller-override references a missing zone-change record at {0}")]
+    MissingZoneChangeRecord(usize),
+    #[error("controller-override references a missing battlefield-entry record at {0}")]
+    MissingBattlefieldEntryRecord(usize),
+}
+
+/// One exact CR 603.6a battlefield-entry provenance stamp.
+///
+/// The entering permanent records which ability put it there so anti-recursion
+/// intervening-ifs ("if it wasn't put onto the battlefield with this ability")
+/// can exclude the permanents that very ability placed. A replay that dropped the
+/// stamp would let those abilities re-trigger off their own output.
+///
+/// `resulting_source` is not an `Option`: the delivery tail stamps only
+/// ability-driven entries, and `reset_for_battlefield_entry` has already cleared
+/// the field, so a recorded stamp always installs a concrete source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedEntryProvenanceCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_old_source: Option<ObjectId>,
+    pub resulting_source: ObjectId,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved entry-provenance stamp.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedEntryProvenanceReplayInvariantError {
+    #[error("entry-provenance command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("entry-provenance occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("entry-provenance precondition mismatch: expected {expected:?}, found {found:?}")]
+    SourcePreconditionMismatch {
+        expected: Option<ObjectId>,
+        found: Option<ObjectId>,
+    },
+}
+
+/// One exact CR 704.5d / CR 704.5e cease-to-exist removal.
+///
+/// Ceasing to exist is NOT a zone change (CR 400.7) — no event is emitted and no
+/// "whenever exiled" trigger fires — so it cannot ride the zone-change family. It
+/// is the only production path that deletes an object outright, and a replay that
+/// omitted it would leave a token alive in a zone the rules already swept it from.
+///
+/// No characteristics are recorded: replay removes the object the retained prefix
+/// already reconstructed rather than rebuilding a deleted one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedObjectCeaseCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_zone: Zone,
+    pub owner: PlayerId,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved cease-to-exist removal.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedObjectCeaseReplayInvariantError {
+    #[error("cease command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("cease occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("cease zone mismatch: expected {expected:?}, found {found:?}")]
+    ZoneMismatch { expected: Zone, found: Zone },
+    #[error("cease owner mismatch: expected {expected:?}, found {found:?}")]
+    OwnerMismatch { expected: PlayerId, found: PlayerId },
+}
+
+/// One exact CR 800.4 player departure.
+///
+/// The departure itself is two writes — the player's `is_eliminated` flag and
+/// their append to `eliminated_players` — that always move together, so they are
+/// one command rather than two. Everything the CR 800.4 sweep does afterwards
+/// (exiling owned objects, reverting control effects, clearing the stack)
+/// already journals through its own family; this command carries the departure,
+/// and the surrounding `PlayerLeave` node carries the causal grouping.
+///
+/// There is no `expected_old` field: "was still in the game" is the precondition,
+/// and a stored copy could only ever hold one value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPlayerLeaveCommand {
+    pub player: PlayerId,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved player departure.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedPlayerLeaveReplayInvariantError {
+    #[error("player-leave command references an unknown player {0:?}")]
+    UnknownPlayer(PlayerId),
+    #[error("player-leave command re-eliminates player {0:?}, who had already left")]
+    AlreadyEliminated(PlayerId),
+}
+
+/// How one copy token's CR 707.9 "except ..." exceptions relate to its birth.
+///
+/// The two production copy seams complete the body at different moments, and a
+/// replay has to know which one it is looking at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedCopyBodyModifications {
+    /// CR 707.2: no copy exceptions — the copiable values are the whole body.
+    NoExceptions,
+    /// CR 707.9: exceptions folded into the copiable values BEFORE the token
+    /// entered (the liminal seam), so replay reapplies them from this record.
+    ///
+    /// `all_creature_types` is recorded rather than re-read because
+    /// `remove_subtype_set` consults the live list, which changeling and other
+    /// type-changing effects mutate (CR 205.3 + CR 702.73a).
+    Folded {
+        modifications: Vec<ContinuousModification>,
+        all_creature_types: Vec<String>,
+    },
+    /// Exceptions applied AFTER the birth by `apply_token_modifications`
+    /// (`game/effects/token_copy.rs`) — a pausable, state-level seam that has no
+    /// resolved family of its own yet. The birth is still journaled, but replay
+    /// REFUSES rather than installing a body that is missing them.
+    ///
+    /// Delete this variant when that seam gets its own family; the refusal in
+    /// `apply_resolved_token_creation` disappears with it.
+    DeferredToUnjournaledSeam {
+        modifications: Vec<ContinuousModification>,
+    },
+}
+
+/// How the entering object's body was built for one journaled token birth.
+///
+/// CR 111.1 is the journaled axis for BOTH variants — an object came into
+/// existence and its id and timestamp were drawn. CR 707.2 governs only how a
+/// copy body was derived upstream of this seam, so it parameterizes the body
+/// rather than forking the family.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedTokenBody {
+    /// CR 111.1: an ordinary token minted from a `TokenSpec`.
+    Spec {
+        /// The effect's token spec — the existing replacement-visible payload
+        /// type rather than a hand-rolled field list.
+        spec: Box<TokenSpec>,
+        /// `token_presets::find_exact_token_ref` READS game state to resolve
+        /// this, so it is a re-derivation rather than a spec field.
+        token_image_ref: Option<TokenImageRef>,
+    },
+    /// CR 707.2: a token that entered the battlefield as a copy of an object.
+    /// The copy's own art pointer and printed ref already live on `copy`.
+    Copy {
+        copy: Box<CopyTokenSpec>,
+        modifications: ResolvedCopyBodyModifications,
+    },
+}
+
+/// One exact CR 111.1 token creation, ordinary or copy.
+///
+/// This is the first family whose replay MATERIALIZES an object rather than
+/// verifying and installing into one that already exists, so its precondition is
+/// inverted: the applier requires the id to be ABSENT.
+///
+/// Two allocator draws are recorded because both would otherwise be re-drawn:
+/// the `ObjectId` (from `next_object_id`) and the CR 613.7d entry timestamp.
+///
+/// SCOPE: token births only. Meld is NOT here — `finish_meld_entry` reuses the
+/// existing component object's id and moves it through the ordinary zone
+/// pipeline, so it materializes nothing and belongs with transform/frame
+/// semantics instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedTokenCreationCommand {
+    pub object: ObjectIncarnationRef,
+    pub owner: PlayerId,
+    pub entry_timestamp: u64,
+    /// CR 302.6: the turn the token entered, which backs "has been under its
+    /// controller's control continuously since their most recent turn began"
+    /// (summoning sickness). Recorded rather than re-read from
+    /// `GameState::turn_number` so the command is self-contained: a replay that
+    /// observed a different live turn would stamp the wrong entered-turn and let
+    /// a replayed creature attack when it should not.
+    pub entry_turn: u32,
+    pub body: ResolvedTokenBody,
+    /// CR 614.1: the post-replacement tapped state the token actually entered
+    /// with, not the spec's pre-replacement request.
+    pub resulting_tapped: bool,
+    /// The `next_object_id` high-water after this token's id was drawn, so a
+    /// replay resuming from a shorter prefix cannot hand the same id out twice.
+    pub resulting_next_object_id: u64,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved token creation.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedTokenCreationReplayInvariantError {
+    #[error("token-creation command would overwrite live object {0:?}")]
+    ObjectAlreadyExists(ObjectId),
+    #[error("token-creation command references an unknown owner {0:?}")]
+    UnknownOwner(PlayerId),
+    #[error("token-creation id {id:?} is not below its recorded high-water {high_water}")]
+    IdAboveHighWater { id: ObjectId, high_water: u64 },
+    /// CR 707.9: the birth was journaled, but its copy exceptions were applied
+    /// after the fact by `apply_token_modifications`, which has no resolved
+    /// family yet. Refusing keeps the hole visible instead of installing a body
+    /// that is silently missing them.
+    #[error(
+        "copy-token {object:?} has {count} post-birth copy modification(s) owned by the \
+         unjournaled `apply_token_modifications` seam; replay cannot reproduce them"
+    )]
+    UnreplayableCopyModifications { object: ObjectId, count: usize },
 }
 
 /// The audience that received one exact revealed-card fact.
@@ -377,6 +924,301 @@ pub struct ResolvedTriggerCollectionCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// Which rule put one object onto the stack.
+///
+/// This is a provenance discriminator, not an operand-set discriminator. Both
+/// arms record the same fields (see [`ResolvedStackPushCommand`]); a copy stack
+/// entry is structurally indistinguishable from an original, so the citing rule
+/// is not recoverable from the entry alone and has to be carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedStackPushOrigin {
+    /// CR 405.1 + CR 601.2a: an object was put onto the stack — a cast spell, or
+    /// an activated or triggered ability going on without a card.
+    Put,
+    /// CR 707.10: a *copy* of a spell or ability was put onto the stack. The
+    /// copy is not cast and not activated.
+    Copy,
+}
+
+/// One exact object landing on the stack.
+///
+/// CR 405.2: the stack keeps the order objects were added in, and each new
+/// object goes on top of everything already there. `resulting_position` is the
+/// index this entry occupies after its push, which for a top-of-stack append is
+/// also the live stack depth the applier must find before installing. It is
+/// RECORDED rather than re-derived at replay time for the same reason
+/// `ResolvedControllerOverrideCommand` records its snapshot indices: the
+/// resolve-time authority knows exactly where the entry landed, and trusting a
+/// replayed board's own depth would install at whatever position that board
+/// happens to have reached.
+///
+/// `resulting_position` is therefore a STORAGE-POSITION CANARY, and its
+/// `StackDepthMismatch` is a feature. It fails a replay closed the moment
+/// journal order stops matching execution order. That moment is currently
+/// reachable, because **stack POPS are not journaled yet**: CR 608.1
+/// resolve-pop, CR 603.3c/d abort-pop, CR 701.6a counter-removal, and
+/// CR 601.2a cast-abort each remove an entry with no corresponding record. As
+/// soon as any of those runs, the replayed depth diverges from every later
+/// recorded position and this precondition refuses rather than installing an
+/// entry at a position the recording never described.
+///
+/// **The stack family is consequently NOT end-to-end replayable until the pop
+/// units land.** That is a known, scheduled gap, not a defect, and the
+/// precondition must not be weakened to paper over it — a canary that has been
+/// silenced cannot warn. Until then this family is exact for prefixes that
+/// contain no pop, which is what its tests replay.
+///
+/// This is ONE parameterized command rather than a CR 405.1 sibling and a
+/// CR 707.10 sibling because the two authorities' divergence is entirely
+/// upstream of this record. Both stamp their source-referential values *into*
+/// `entry` before pushing — `push_to_stack` stamps the CR 701.27f generation
+/// only when unset, additionally stamps the CR 400.7 incarnation, and binds the
+/// CR 509.1c force-block source; `push_copy_to_stack` stamps the generation
+/// unconditionally and deliberately leaves the force-block binding alone. Every
+/// one of those differences is already resolved into a field value by the time
+/// the entry is recorded, so the two arms record identical operand sets and the
+/// only real difference is which rule to cite. `origin` carries that.
+///
+/// Nothing here is re-derived on replay: the applier installs the recorded
+/// entry verbatim, so the stamped generation, incarnation, and force-block
+/// referent survive exactly rather than being recomputed from a live rescan.
+///
+/// SCOPE: the push itself, which for a cast spell is only the first half of the
+/// cast. `announce_spell_on_stack` pushes at CR 601.2a with `ability: None` and
+/// `actual_mana_spent: 0`; the finalized ability and mana are retagged onto that
+/// same entry later at CR 601.2i (`casting_costs.rs`). So a recorded `Put` for a
+/// spell is the *announcement* snapshot, not the finalized spell.
+///
+/// That CR 601.2i retag is NOT a lone special case. It is one of roughly ten
+/// production sites that mutate an entry IN PLACE after it is on the stack,
+/// spread across cast finalization, triggers, copy retargeting, planechase, and
+/// the engine's own entry fix-ups. In-place mutation is a third mutation class
+/// alongside pushes and pops, and it is invisible to any census keyed on
+/// container verbs (`push_back` / `pop_back` / `retain`) because it reaches the
+/// element through `iter_mut()`. Whoever journals it is building a class, not
+/// patching a card, and none of it is journaled today.
+///
+/// `stack_paid_facts` is written immediately after that retag, so it moves
+/// atomically with cast FINALIZATION rather than with this push, and belongs to
+/// the same future unit. `stack_trigger_event_batches` likewise belongs to the
+/// trigger authorities. Neither side table has a writer inside either stack
+/// authority, which is why neither is part of this record.
+///
+/// An activated or triggered ability has no CR 601.2i phase: its entry is
+/// complete when it is pushed, so for those kinds the record IS the finished
+/// entry.
+///
+/// There is no allocator receipt because neither authority allocates: both are
+/// handed an already-built entry, and the CR 400.7 incarnation is read from the
+/// source rather than drawn. A recorded high-water here would have nothing
+/// behind it to validate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedStackPushCommand {
+    /// Boxed because `StackEntryKind` embeds a whole `ResolvedAbility`, which
+    /// would otherwise widen every `ResolvedRulesCommand` in the journal.
+    pub entry: Box<StackEntry>,
+    pub origin: ResolvedStackPushOrigin,
+    /// Zero-based index the entry occupies after the push (CR 405.2).
+    pub resulting_position: usize,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved stack push.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedStackPushReplayInvariantError {
+    #[error("stack-push command targets depth {expected}, found {found}")]
+    StackDepthMismatch { expected: usize, found: usize },
+    #[error("stack-push command would duplicate stack entry {0:?}")]
+    DuplicateStackEntry(ObjectId),
+    #[error("stack-push command references an unknown controller {0:?}")]
+    UnknownController(PlayerId),
+}
+
+/// One exact CR 601.2i cast finalization, retagging an announced stack entry.
+///
+/// CR 601.2a puts the spell on the stack at announcement, but the entry that
+/// lands there is a stub: `ability: None` and `actual_mana_spent: 0`, because
+/// neither is known until costs are chosen and paid. CR 601.2i is where "the
+/// spell becomes cast" — the point the finalized ability and the mana actually
+/// spent are written back onto that same entry, together with the paid-facts
+/// snapshot the rest of the engine reads for X, kicker, and convoke questions.
+///
+/// The two mutations are ONE command rather than two families because they
+/// settle together: nothing observes the retagged entry without also observing
+/// the snapshot, and a replay that installed one without the other would leave a
+/// finalized spell whose paid facts are missing (or vice versa).
+///
+/// `entry_position` is recorded rather than re-found. The authority locates its
+/// entry with `rfind`, a LAST-match scan, so a replay that re-derived the target
+/// could retag a different entry than the original execution did — the same
+/// hazard `ResolvedZoneChangeCommand::turn_zone_change_index` and the
+/// battlefield-entry retags already record positions to avoid.
+///
+/// `expected_old_paid_facts` is an `Option` rather than an absence assertion.
+/// The authority is re-entered from the top by its resume callers (Phyrexian
+/// shard choices, paused mana abilities, prepaid casts), so "no snapshot is
+/// present yet" is not a property this record can assert without proving no
+/// resume path re-reaches the insert. Recording the prior value instead makes
+/// the precondition exact under either reading and fails closed on a replay
+/// whose predecessor disagrees.
+///
+/// SCOPE: the CR 601.2i retag of an already-announced entry. The CR 601.2a push
+/// that created the entry is a separate family and a separate seam — it does not
+/// move atomically with this retag, which is precisely why the announcement
+/// snapshot and the finalized entry are two records rather than one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedStackEntryFinalizeCommand {
+    /// The stack entry's own id. This family keys on the ENTRY rather than on
+    /// an `ObjectIncarnationRef` because the retag targets a stack entry, not an
+    /// object record — the same reason `ResolvedStackPushCommand` identifies its
+    /// subject by `entry.id`.
+    pub object: ObjectId,
+    /// Zero-based index of the retagged entry (CR 405.2), recorded so replay
+    /// never repeats the authority's `rfind`.
+    pub entry_position: usize,
+    /// Boxed because `StackEntryKind` embeds a whole `ResolvedAbility`, which
+    /// would otherwise widen every `ResolvedRulesCommand` in the journal.
+    pub expected_old_kind: Box<StackEntryKind>,
+    pub resulting_kind: Box<StackEntryKind>,
+    pub expected_old_paid_facts: Option<Box<StackPaidSnapshot>>,
+    pub resulting_paid_facts: Box<StackPaidSnapshot>,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved CR 601.2i finalization.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedStackEntryFinalizeReplayInvariantError {
+    #[error("stack-entry finalize targets position {position}, but the stack holds {depth}")]
+    PositionOutOfRange { position: usize, depth: usize },
+    #[error("stack-entry finalize targets {expected:?} at position {position}, found {found:?}")]
+    EntryIdentityMismatch {
+        position: usize,
+        expected: ObjectId,
+        found: ObjectId,
+    },
+    #[error("stack-entry finalize expected a different pre-finalize entry at position {0}")]
+    EntryKindMismatch(usize),
+    #[error("stack-entry finalize expected different pre-existing paid facts for {0:?}")]
+    PaidFactsMismatch(ObjectId),
+}
+
+/// One exact CR 603.3d removal of an uncommitted triggered ability.
+///
+/// The "push first, choose second" invariant puts a triggered ability on the
+/// stack BEFORE its choices are gathered, so the entry is live while a
+/// `WaitingFor` fills its slots. CR 603.3d: if no legal choices can be made for
+/// it, "the ability is simply removed from the stack."
+///
+/// TWO OUTCOMES, both mutating, which is why `removed` is an `Option` rather
+/// than a plain entry. `stack::pop_uncommitted_pending_trigger_entry` consumes
+/// `pending_trigger_entry` UNCONDITIONALLY and only then decides whether to pop:
+///
+/// * guard holds — the cursor is consumed AND the entry leaves the stack with
+///   both per-entry side tables.
+/// * guard fails — the cursor is consumed and NOTHING else, because the cursor
+///   outlived its entry (another path already removed it).
+///
+/// A command that modelled only the first would leave a replay of the second
+/// holding `pending_trigger_entry == Some(id)` while the real execution cleared
+/// it — a divergence needing no forged journal, only an honest replay.
+///
+/// The removed side-table VALUES are deliberately not recorded. Contrast
+/// [`ResolvedStackEntryFinalizeCommand`], which records `expected_old_paid_facts`
+/// because it INSTALLS a value and must verify the predecessor it overwrites.
+/// This command only removes rows keyed on the recorded entry's own id — nothing
+/// is installed and nothing is re-derived, so there is no invariant a recorded
+/// value would pin, and carrying `Vec<GameEvent>` batches would widen every
+/// journal entry for nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedUncommittedTriggerRemovalCommand {
+    /// The cursor value consumed by the `.take()`. Always present, because the
+    /// take is unconditional.
+    pub consumed_entry_id: ObjectId,
+    /// The entry actually removed, recorded verbatim so replay verifies the
+    /// whole object rather than trusting the id. `None` when the guard declined
+    /// to pop.
+    pub removed: Option<Box<StackEntry>>,
+    /// Stack depth AFTER the operation (CR 405.2).
+    pub resulting_depth: usize,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved CR 603.3d removal.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedUncommittedTriggerRemovalReplayInvariantError {
+    #[error("uncommitted-trigger removal expected pending cursor {expected:?}, found {found:?}")]
+    CursorMismatch {
+        expected: ObjectId,
+        found: Option<ObjectId>,
+    },
+    #[error("uncommitted-trigger removal targets depth {expected}, found {found}")]
+    DepthMismatch { expected: usize, found: usize },
+    #[error("uncommitted-trigger removal expected a different entry on top of the stack")]
+    RemovedEntryMismatch,
+    #[error(
+        "uncommitted-trigger removal recorded no pop, but {0:?} is on top and would have been popped"
+    )]
+    UnexpectedRemovableEntry(ObjectId),
+}
+
+/// One exact CR 405.2 removal of a single object from the stack.
+///
+/// Recorded by `stack::remove_stack_entry_at`, the single authority behind every
+/// one-entry stack removal: the CR 405.5 resolution pop, the drain loops
+/// (batched resolution, inert no-op batches, CR 724.1b stack exile), the
+/// CR 701.6a counter, and the CR 601.2a/601.2i cast rollbacks.
+///
+/// PARAMETERIZED BY `index` RATHER THAN SPLIT INTO POP/REMOVE-AT SIBLINGS. A
+/// top-of-stack pop is exactly the removal at `index == resulting_depth`, so a
+/// separate pop command would be this one with a field the caller could derive.
+/// Adding that sibling is what the enum's existing `StackPush` /
+/// `StackEntryFinalize` / `UncommittedTriggerRemoval` cluster makes tempting and
+/// is precisely the debt to avoid.
+///
+/// A drain of N entries records N of these rather than one bulk removal, so a
+/// replay reproduces the removal ORDER and not merely the final depth.
+///
+/// NOT unified with [`ResolvedUncommittedTriggerRemovalCommand`], despite both
+/// removing a stack entry. That axis would have to span CR 603.3d
+/// trigger-construction and CR 405.5 resolution — different rule sections the
+/// engine resolves separately — and the operand sets genuinely differ: the
+/// CR 603.3d removal consumes a cursor and may legitimately remove NOTHING, an
+/// outcome that has no analogue here. Unifying them would buy one enum variant
+/// at the cost of an applier that checks preconditions belonging to whichever
+/// family it was not handed.
+///
+/// The removed side-table VALUES are deliberately not recorded, for the same
+/// reason the CR 603.3d removal omits them: this command installs nothing. It
+/// drops rows keyed on the recorded entry's own id, so no recorded value would
+/// pin an invariant, and carrying `Vec<GameEvent>` batches would widen every
+/// journal entry on the hottest path in the engine for nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedStackRemovalCommand {
+    /// The removed entry, recorded verbatim so replay verifies the whole object
+    /// rather than trusting the id.
+    pub entry: Box<StackEntry>,
+    /// CR 405.2: the index the entry occupied. Recorded rather than re-found,
+    /// because the production sites locate it by a `position`/`rposition` scan
+    /// whose predicate can match a DIFFERENT entry on a stack that has since
+    /// diverged — `counter.rs` in particular scans on `id OR source_id`, which
+    /// matches every ability sharing a source permanent.
+    pub index: usize,
+    /// Stack depth AFTER the removal (CR 405.2).
+    pub resulting_depth: usize,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved CR 405.2 stack removal.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedStackRemovalReplayInvariantError {
+    #[error("stack removal expected depth {expected} before removal, found {found}")]
+    DepthMismatch { expected: usize, found: usize },
+    #[error("stack removal targets index {index}, but the stack holds only {depth} entries")]
+    IndexOutOfRange { index: usize, depth: usize },
+    #[error("stack removal expected a different entry at the recorded index")]
+    RemovedEntryMismatch,
+}
+
 /// Semantic command payload currently carried by a resolved-rules journal entry.
 ///
 /// Additional command families are intentionally added by their owning P2
@@ -388,12 +1230,26 @@ pub enum ResolvedRulesCommand {
     PlayerEdit(ResolvedPlayerEditCommand),
     ObjectStatus(ResolvedObjectStatusCommand),
     ObjectCounter(ResolvedObjectCounterCommand),
+    ObjectTransform(ResolvedObjectTransformCommand),
+    Attachment(ResolvedAttachmentCommand),
+    DelayedTriggerInstall(Box<ResolvedDelayedTriggerCommand>),
+    ContinuousEffectInstall(Box<ResolvedContinuousEffectCommand>),
+    CombatMembership(ResolvedCombatMembershipCommand),
+    ControllerOverride(ResolvedControllerOverrideCommand),
+    EntryProvenance(ResolvedEntryProvenanceCommand),
+    ObjectCease(ResolvedObjectCeaseCommand),
+    PlayerLeave(ResolvedPlayerLeaveCommand),
+    TokenCreation(Box<ResolvedTokenCreationCommand>),
     Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
     ZoneChange(Box<ResolvedZoneChangeCommand>),
     FrameTransition(Box<ResolvedFrameTransitionCommand>),
     TriggerCollection(ResolvedTriggerCollectionCommand),
+    StackPush(Box<ResolvedStackPushCommand>),
+    StackEntryFinalize(Box<ResolvedStackEntryFinalizeCommand>),
+    UncommittedTriggerRemoval(Box<ResolvedUncommittedTriggerRemovalCommand>),
+    StackRemoval(Box<ResolvedStackRemovalCommand>),
 }
 
 /// An append-only trigger collection command has no replay-time precondition.
@@ -1063,6 +1919,42 @@ impl ResolvedRulesJournal {
         Ok(identity)
     }
 
+    /// CR 800.4: Begin the distinct execution node for one player leaving the
+    /// game.
+    ///
+    /// A leave is not a proposal: every mutation the CR 800.4 sweep performs —
+    /// the owned-object exiles, the control-effect reversions, the stack
+    /// removals — is caused by the leave itself, not by whatever rules work
+    /// happened to be in flight when the state-based action fired. Giving the
+    /// leave its own node keeps those commands attributed to it, so a replay can
+    /// identify the sweep as one causal unit.
+    pub fn begin_player_leave(
+        &mut self,
+    ) -> Result<RulesExecutionNodeRef, ResolvedRulesJournalError> {
+        self.ensure_command_capacity()?;
+        self.ensure_node_capacity()?;
+        let command = self.allocate_command();
+        let ordinal = self.allocate_node();
+        let identity = RulesExecutionNodeRef::PlayerLeave(command);
+        self.entries.push(ResolvedCommandJournalEntry {
+            ordinal: command,
+            node: identity,
+            command: None,
+        });
+        self.nodes.push(SettlementNode {
+            ordinal,
+            identity,
+            kind: RulesExecutionNodeKind::PlayerLeave,
+            caused_by: None,
+            depends_on: Vec::new(),
+            bundle_parent: None,
+            produced_pips: Vec::new(),
+            spent_pips: Vec::new(),
+            journal_ordinals: vec![command],
+        });
+        Ok(identity)
+    }
+
     pub fn begin_activated_mana(
         &mut self,
         source: ObjectIncarnationRef,
@@ -1279,6 +2171,107 @@ impl ResolvedRulesJournal {
         )
     }
 
+    /// Records one exact CR 701.27a transform under its causal node.
+    pub fn record_object_transform(
+        &mut self,
+        command: ResolvedObjectTransformCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::ObjectTransform(command),
+        )
+    }
+
+    /// Records one exact CR 701.3 attachment-graph edit under its causal node.
+    pub fn record_attachment(
+        &mut self,
+        command: ResolvedAttachmentCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::Attachment(command))
+    }
+
+    /// Records one exact CR 603.7 delayed-trigger install under its causal node.
+    pub fn record_delayed_trigger_install(
+        &mut self,
+        command: ResolvedDelayedTriggerCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::DelayedTriggerInstall(Box::new(command)),
+        )
+    }
+
+    /// Records one exact CR 611.2a continuous-effect install under its causal node.
+    pub fn record_continuous_effect_install(
+        &mut self,
+        command: ResolvedContinuousEffectCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::ContinuousEffectInstall(Box::new(command)),
+        )
+    }
+    /// Records one exact CR 506.3 / CR 506.4 combat-membership edit under its
+    /// causal node.
+    pub fn record_combat_membership(
+        &mut self,
+        command: ResolvedCombatMembershipCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::CombatMembership(command),
+        )
+    }
+
+    /// Records one exact CR 110.2a controller override under its causal node.
+    pub fn record_controller_override(
+        &mut self,
+        command: ResolvedControllerOverrideCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::ControllerOverride(command),
+        )
+    }
+
+    /// Records one exact CR 603.6a entry-provenance stamp under its causal node.
+    pub fn record_entry_provenance(
+        &mut self,
+        command: ResolvedEntryProvenanceCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::EntryProvenance(command),
+        )
+    }
+
+    /// Records one exact CR 704.5d cease-to-exist removal under its causal node.
+    pub fn record_object_cease(
+        &mut self,
+        command: ResolvedObjectCeaseCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::ObjectCease(command))
+    }
+
+    /// Records one exact CR 800.4 player departure under its causal node.
+    pub fn record_player_leave(
+        &mut self,
+        command: ResolvedPlayerLeaveCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::PlayerLeave(command))
+    }
+
+    /// Records one exact CR 111.1 token creation under its causal node.
+    pub fn record_token_creation(
+        &mut self,
+        command: ResolvedTokenCreationCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::TokenCreation(Box::new(command)),
+        )
+    }
+
     /// Records one exact bounded resolution-frame transition under its causal node.
     pub fn record_frame_transition(
         &mut self,
@@ -1290,6 +2283,17 @@ impl ResolvedRulesJournal {
         )
     }
 
+    /// Records one exact object landing on the stack under its causal node.
+    pub fn record_stack_push(
+        &mut self,
+        command: ResolvedStackPushCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::StackPush(Box::new(command)),
+        )
+    }
+
     /// Records one exact trigger/LKI collection append under its causal node.
     pub fn record_trigger_collection(
         &mut self,
@@ -1298,6 +2302,39 @@ impl ResolvedRulesJournal {
         self.append_command(
             command.cause,
             ResolvedRulesCommand::TriggerCollection(command),
+        )
+    }
+
+    /// Records one exact CR 601.2i cast finalization under its causal node.
+    pub fn record_stack_entry_finalize(
+        &mut self,
+        command: ResolvedStackEntryFinalizeCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::StackEntryFinalize(Box::new(command)),
+        )
+    }
+
+    /// Records one exact CR 603.3d uncommitted-trigger removal under its cause.
+    pub fn record_uncommitted_trigger_removal(
+        &mut self,
+        command: ResolvedUncommittedTriggerRemovalCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::UncommittedTriggerRemoval(Box::new(command)),
+        )
+    }
+
+    /// Records one exact CR 405.2 top-of-stack removal under its cause.
+    pub fn record_stack_removal(
+        &mut self,
+        command: ResolvedStackRemovalCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::StackRemoval(Box::new(command)),
         )
     }
 
@@ -1499,12 +2536,26 @@ impl ResolvedRulesJournal {
                 ResolvedRulesCommand::PlayerEdit(_)
                 | ResolvedRulesCommand::ObjectStatus(_)
                 | ResolvedRulesCommand::ObjectCounter(_)
+                | ResolvedRulesCommand::ObjectTransform(_)
+                | ResolvedRulesCommand::Attachment(_)
+                | ResolvedRulesCommand::DelayedTriggerInstall(_)
+                | ResolvedRulesCommand::ContinuousEffectInstall(_)
+                | ResolvedRulesCommand::CombatMembership(_)
+                | ResolvedRulesCommand::ControllerOverride(_)
+                | ResolvedRulesCommand::EntryProvenance(_)
+                | ResolvedRulesCommand::ObjectCease(_)
+                | ResolvedRulesCommand::PlayerLeave(_)
+                | ResolvedRulesCommand::TokenCreation(_)
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
                 | ResolvedRulesCommand::LibraryShuffle(_)
                 | ResolvedRulesCommand::ZoneChange(_)
                 | ResolvedRulesCommand::FrameTransition(_)
-                | ResolvedRulesCommand::TriggerCollection(_) => {}
+                | ResolvedRulesCommand::TriggerCollection(_)
+                | ResolvedRulesCommand::StackPush(_)
+                | ResolvedRulesCommand::StackEntryFinalize(_)
+                | ResolvedRulesCommand::UncommittedTriggerRemoval(_)
+                | ResolvedRulesCommand::StackRemoval(_) => {}
             }
         }
         for node in &self.nodes {
@@ -1744,6 +2795,174 @@ impl ResolvedRulesJournal {
                     ));
                 }
             }
+            ResolvedRulesCommand::ObjectTransform(command) => {
+                // CR 701.27a: a transform turns the permanent to its OTHER face,
+                // so a recorded transform that leaves `transformed` unchanged is
+                // not a transform that ever happened.
+                if entry.node != command.cause
+                    || command.expected_old_transformed == command.resulting_transformed
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "transform command does not change the displayed face, or has an \
+                         unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::Attachment(command) => {
+                // CR 701.3b: re-attaching to the host it is already attached to
+                // does nothing, so a recorded edit that leaves the host unchanged
+                // is not an edit that ever happened.
+                // CR 613.7e + CR 701.3c/d: a move to a new host draws a timestamp
+                // and an unattach does not, so the drawn value is present on
+                // exactly the commands that installed a host.
+                if entry.node != command.cause
+                    || command.expected_old_host == command.resulting_host
+                    || command.resulting_timestamp.is_some() != command.resulting_host.is_some()
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "attachment command does not change the host, mismatches its timestamp \
+                         draw, or has an unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::DelayedTriggerInstall(command) => {
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "delayed-trigger install command has an unrelated cause".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::ContinuousEffectInstall(command) => {
+                // CR 613.7b: the effect's timestamp was drawn when it was
+                // created, so it — the effect id drawn alongside it, and any CR
+                // 116.2c termination-group identity — must lie strictly below
+                // the high-water the draw left behind, or the receipt describes
+                // an allocation that never happened.
+                let end_group_above_high_water = command
+                    .effect
+                    .end_permission
+                    .as_ref()
+                    .is_some_and(|permission| {
+                        permission.group.0 >= command.resulting_next_end_effect_group_id
+                    });
+                if entry.node != command.cause
+                    || command.effect.id >= command.resulting_next_continuous_effect_id
+                    || command.effect.timestamp >= command.resulting_next_timestamp
+                    || end_group_above_high_water
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "continuous-effect install command has an impossible allocator receipt, \
+                         or an unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::CombatMembership(command) => {
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "combat-membership command has an unrelated cause".to_string(),
+                    ));
+                }
+                // CR 400.7: combat membership is per-incarnation, so a re-entered
+                // object must never satisfy a command recorded for its predecessor.
+                if command.object.incarnation == LEGACY_INCARNATION {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "combat-membership command cannot use a legacy object identity".to_string(),
+                    ));
+                }
+                match &command.edit {
+                    // CR 509.1a: a creature is chosen to block an attacking
+                    // creature, which is never itself.
+                    ResolvedCombatMembershipEdit::Block {
+                        resulting_attacker, ..
+                    } if *resulting_attacker == command.object.object_id => {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership command blocks its own blocker".to_string(),
+                        ));
+                    }
+                    // CR 506.4: removing an object that held no combat role
+                    // pruned nothing, so it is not a removal that ever happened.
+                    ResolvedCombatMembershipEdit::Remove {
+                        expected_participation,
+                    } if expected_participation.is_empty() => {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership removal prunes no combat role".to_string(),
+                        ));
+                    }
+                    ResolvedCombatMembershipEdit::Attack { .. }
+                    | ResolvedCombatMembershipEdit::Block { .. }
+                    | ResolvedCombatMembershipEdit::MarkBlocked
+                    | ResolvedCombatMembershipEdit::Remove { .. } => {}
+                }
+            }
+            ResolvedRulesCommand::ControllerOverride(command) => {
+                // CR 110.2a: an override that leaves both the derived and the
+                // pinned controller exactly as they were retagged nothing, so it
+                // is not an override that ever happened.
+                if entry.node != command.cause
+                    || (command.expected_old_base_controller == Some(command.resulting_controller)
+                        && command.expected_old_controller == command.resulting_controller)
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "controller-override command changes no controller, or has an unrelated \
+                         cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::EntryProvenance(command) => {
+                // CR 603.6a: a stamp that names the source the object was already
+                // stamped with recorded nothing.
+                if entry.node != command.cause
+                    || command.expected_old_source == Some(command.resulting_source)
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "entry-provenance command re-stamps the same source, or has an unrelated \
+                         cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::ObjectCease(command) => {
+                // CR 704.5d/e: only a token or a copy of a card ceases to exist,
+                // and never from the battlefield or the stack.
+                if entry.node != command.cause
+                    || matches!(command.expected_zone, Zone::Battlefield | Zone::Stack)
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "cease command names a zone objects never cease from, or has an \
+                         unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::PlayerLeave(command) => {
+                // CR 800.4: a departure is caused by the leave node opened for
+                // it, never by an unrelated proposal that happened to be live.
+                if entry.node != command.cause
+                    || !matches!(command.cause, RulesExecutionNodeRef::PlayerLeave(_))
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "player-leave command is not attributed to a player-leave node".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::TokenCreation(command) => {
+                // CR 111.1: the token's id must be below the high-water its own
+                // draw established, or the record cannot describe an allocation
+                // that actually happened.
+                if entry.node != command.cause
+                    || command.object.object_id.0 >= command.resulting_next_object_id
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "token-creation command has an impossible id high-water, or an \
+                         unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
             ResolvedRulesCommand::FrameTransition(command) => {
                 if entry.node != command.cause {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
@@ -1755,6 +2974,70 @@ impl ResolvedRulesJournal {
                 if entry.node != command.cause {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "trigger-collection command has an unrelated cause".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::StackPush(command) => {
+                // Cause-only, like the frame-transition and trigger-collection
+                // arms. There is no allocator receipt to cross-check: neither
+                // stack authority draws an id or a timestamp, so this record
+                // holds no high-water that could be forged past. Its remaining
+                // preconditions (CR 405.2 depth, duplicate entry id, live
+                // controller) are all state-dependent and are enforced by
+                // `stack::apply_resolved_stack_push` where the state exists.
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "stack-push command has an unrelated cause".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::StackEntryFinalize(command) => {
+                // Cause-only. There is no allocator receipt to cross-check:
+                // CR 601.2i retags an entry that CR 601.2a already created, so
+                // this authority draws no id and no timestamp and holds no
+                // high-water a forged journal could jump. Its remaining
+                // preconditions (CR 405.2 position, entry identity, the
+                // pre-finalize kind, and the prior paid facts) are all
+                // state-dependent and are enforced by
+                // `stack::apply_resolved_stack_entry_finalize`, where
+                // the state exists to check them against.
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "stack-entry finalize command has an unrelated cause".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::UncommittedTriggerRemoval(command) => {
+                // Cause-only, plus the one invariant checkable without state: a
+                // recorded pop must name the entry it removed. Everything else
+                // (the live cursor, the CR 405.2 depth, the exact entry on top)
+                // is state-dependent and is enforced by
+                // `stack::apply_resolved_uncommitted_trigger_removal`. There is
+                // no allocator receipt — a removal draws nothing.
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "uncommitted-trigger removal command has an unrelated cause".to_string(),
+                    ));
+                }
+                if let Some(removed) = command.removed.as_ref() {
+                    if removed.id != command.consumed_entry_id {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "uncommitted-trigger removal popped an entry other than its cursor"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            ResolvedRulesCommand::StackRemoval(command) => {
+                // Cause-only. A pop draws no id and no timestamp, so there is no
+                // allocator receipt to cross-check. Both of its preconditions
+                // (the CR 405.2 depth and the exact entry on top) are
+                // state-dependent and are enforced by
+                // `stack::apply_resolved_stack_removal`, where the state exists to
+                // check them against.
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "stack pop command has an unrelated cause".to_string(),
                     ));
                 }
             }

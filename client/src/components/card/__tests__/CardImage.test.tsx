@@ -169,8 +169,33 @@ describe("CardImage art fallback (issue #6156)", () => {
     const img = document.querySelector("img");
     expect(img).not.toBeNull();
     expect(img!.getAttribute("src")).toBe(CARD_BACK_URL);
+    // The card back has no size variants, so it must never carry a ladder that
+    // could resolve to a nonexistent asset.
+    expect(img!.getAttribute("srcset")).toBeNull();
     expect(screen.queryByRole("img", { name: "Grizzly Bears" })).toBeNull();
     expect(screen.queryByText("Grizzly Bears")).toBeNull();
+  });
+
+  it("serves a Scryfall card image at both widths, lazily", () => {
+    // `srcSet`, `sizes` and `loading` must arrive together: `sizes="auto"` is
+    // valid only with `loading="lazy"`, and without it the browser silently
+    // falls back to selecting the 488px asset for every card.
+    mockUseCardImage.mockReturnValue({
+      src: "https://cards.scryfall.io/normal/front/w/r/war-room.jpg?1783905318",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<CardImage cardName="War Room" />);
+
+    const img = document.querySelector("img");
+    expect(img!.getAttribute("srcset")).toBe(
+      "https://cards.scryfall.io/small/front/w/r/war-room.jpg?1783905318 146w, "
+      + "https://cards.scryfall.io/normal/front/w/r/war-room.jpg?1783905318 488w",
+    );
+    expect(img!.getAttribute("sizes")).toBe("auto, 200px");
+    expect(img!.getAttribute("loading")).toBe("lazy");
   });
 
   it("re-tries the image when the art source changes after a load failure", () => {

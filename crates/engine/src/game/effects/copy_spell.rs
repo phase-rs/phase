@@ -138,30 +138,12 @@ pub fn resolve(
     // CR 707.10 / CR 707.10b: spell copies source themselves; ability copies
     // have the same source as the original ability.
     let copy_source_id = stack_entry_source_id_for_copy(&copy_kind, copy_id);
-    let mut copy_entry = StackEntry {
+    let copy_entry = StackEntry {
         id: copy_id,
         source_id: copy_source_id,
         controller: copy_controller,
         kind: copy_kind,
     };
-
-    // CR 707.10 + CR 701.27f: copying an activated or triggered ability puts
-    // a new ability onto the stack. A self-transform instruction in that copy
-    // compares against the source at copy-creation time, not the original
-    // ability's earlier stack-entry time.
-    if matches!(
-        copy_entry.kind,
-        StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
-    ) {
-        let source_transformation_count = state
-            .objects
-            .get(&copy_source_id)
-            .filter(|object| object.back_face.is_some())
-            .map(|object| object.transformation_count);
-        if let Some(copied_ability) = copy_entry.ability_mut() {
-            copied_ability.set_source_transformation_count_recursive(source_transformation_count);
-        }
-    }
 
     // CR 707.10: Capture the copied spell's card id before the entry is moved
     // onto the stack. Only spell copies emit `SpellCopied` — copying an
@@ -174,8 +156,9 @@ pub fn resolve(
         | StackEntryKind::KeywordAction { .. } => None,
     };
 
-    state.stack.push_back(copy_entry);
-    events.push(GameEvent::StackPushed { object_id: copy_id });
+    // CR 707.10: the copy-onto-stack authority stamps the CR 701.27f
+    // copy-creation generation and emits `StackPushed`.
+    crate::game::stack::push_copy_to_stack(state, copy_entry, events);
 
     // CR 707.10d: Zada — each copy is put on the stack targeting the current
     // iteration member; no controller choice to change targets.
@@ -736,7 +719,7 @@ fn stack_entry_from_exiled_spell_object(
         controller,
         kind: StackEntryKind::Spell {
             card_id,
-            ability: Some(resolved),
+            ability: Some(Box::new(resolved)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -916,7 +899,7 @@ mod tests {
             controller: owner,
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: variant,
                 actual_mana_spent: 0,
             },
@@ -1013,6 +996,7 @@ mod tests {
                 static_abilities: vec![],
                 duration: None,
                 target: None,
+                end_cost: None,
             },
             vec![],
             ObjectId(10),
@@ -2258,7 +2242,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: source_creature,
-                ability: draw_resolved,
+                ability: Box::new(draw_resolved),
             },
         });
 
@@ -2342,7 +2326,7 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::ActivatedAbility {
                     source_id,
-                    ability: build_resolved_from_def(&definition, source_id, PlayerId(0)),
+                    ability: Box::new(build_resolved_from_def(&definition, source_id, PlayerId(0))),
                 },
             },
             &mut events,
@@ -2411,7 +2395,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: basalt,
-                ability: untap_basalt,
+                ability: Box::new(untap_basalt),
             },
         });
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
@@ -2483,7 +2467,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: source_creature,
-                ability: draw_resolved,
+                ability: Box::new(draw_resolved),
             },
         });
 
@@ -2548,7 +2532,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: gogo_id,
-                ability: gogo_ability,
+                ability: Box::new(gogo_ability),
             },
         });
 
@@ -2574,7 +2558,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: other_id,
-                ability: copy_gogo,
+                ability: Box::new(copy_gogo),
             },
         });
 
@@ -2891,7 +2875,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: gogo_id,
-                ability: gogo_copy,
+                ability: Box::new(gogo_copy),
             },
         });
 
@@ -3433,6 +3417,7 @@ mod tests {
                 static_abilities: vec![],
                 duration: None,
                 target: None,
+                end_cost: None,
             },
             vec![],
             ObjectId(10),
@@ -3484,7 +3469,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(original),
+                ability: Some(Box::new(original)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },

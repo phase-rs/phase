@@ -46,6 +46,14 @@ jobs:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -64,6 +72,14 @@ jobs:
             BASE="origin/main"
           fi
           ./scripts/check-parser-combinators.sh "$BASE"
+
+      - name: PreLowered ratchet (Plan 05b burn-down)
+        # Ceiling check on `OracleNodeIr::PreLowered*` occurrences per parser
+        # file. Counts may only decrease, and a parser file carrying PreLowered
+        # with no ledger entry fails, so a new producer cannot be added in a
+        # third file and escape the burn-down. Ledger:
+        # scripts/prelowered-ratchet.txt
+        run: ./scripts/check-prelowered-ratchet.sh
 
       - name: Skill doc gate (oracle-parser SKILL.md)
         # Asserts .claude/skills/oracle-parser/SKILL.md still matches the
@@ -140,6 +156,14 @@ jobs:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -166,6 +190,14 @@ jobs:
         with:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
+
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
       - name: Set cache keys
         id: cache-keys

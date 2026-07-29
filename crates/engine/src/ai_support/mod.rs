@@ -1,4 +1,5 @@
 mod candidates;
+mod combat_withdrawal;
 mod context;
 mod copy;
 pub mod filter;
@@ -14,7 +15,7 @@ use crate::game::mana_abilities;
 use crate::game::mana_payment;
 use crate::game::mana_sources;
 use crate::game::triggers;
-use crate::types::ability::{AbilityKind, CounterCostSelection, TriggerDefinition};
+use crate::types::ability::{AbilityKind, CounterCostSelection, TargetRef, TriggerDefinition};
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -32,6 +33,9 @@ pub(crate) use candidates::power_threshold_witness;
 pub use candidates::{
     candidate_actions, candidate_actions_broad, candidate_actions_exact,
     candidate_actions_with_probe, ActionMetadata, CandidateAction, TacticalClass,
+};
+pub use combat_withdrawal::{
+    combat_withdrawal_fact_for_current_target, CombatWithdrawalFact, CombatWithdrawalTargetRole,
 };
 pub use context::{build_decision_context, AiDecisionContext};
 pub use copy::{
@@ -282,7 +286,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 *player,
                 pending_cast.object_id,
                 cost,
-                pending_cast.ability.context.ability_tag,
+                pending_cast.activation_ability_index,
             )
         }),
         (
@@ -1010,14 +1014,176 @@ fn grouped_mana_requires_priority(state: &GameState, player: PlayerId) -> bool {
 /// Extracted so the auto-pass gate and the CR 732.5 loop-shortcut firewall
 /// classifier consume the SAME primitive and cannot drift.
 fn flat_actions_have_meaningful_priority(state: &GameState, actions: &[GameAction]) -> bool {
-    actions.iter().any(|action| match action {
-        GameAction::PassPriority => false,
+    actions
+        .iter()
+        .any(|action| match classify_flat_priority_action(action) {
+            FlatPriorityActionClass::Pass => false,
+            FlatPriorityActionClass::ActivateAbility {
+                source_id,
+                ability_index,
+            } => activate_ability_is_meaningful_priority(state, source_id, ability_index),
+            FlatPriorityActionClass::CastSpell
+            | FlatPriorityActionClass::EndContinuousEffect
+            | FlatPriorityActionClass::Other => true,
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlatPriorityActionClass {
+    Pass,
+    CastSpell,
+    ActivateAbility {
+        source_id: ObjectId,
+        ability_index: usize,
+    },
+    EndContinuousEffect,
+    Other,
+}
+
+/// Exhaustive classifier shared by both flat priority predicates.
+///
+/// Keeping the full [`GameAction`] census here makes a newly added action fail
+/// compilation until its loop-firewall and auto-pass semantics are reviewed.
+fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass {
+    match action {
+        GameAction::PassPriority => FlatPriorityActionClass::Pass,
+        GameAction::CastSpell { .. } => FlatPriorityActionClass::CastSpell,
         GameAction::ActivateAbility {
             source_id,
             ability_index,
-        } => activate_ability_is_meaningful_priority(state, *source_id, *ability_index),
-        _ => true,
-    })
+        } => FlatPriorityActionClass::ActivateAbility {
+            source_id: *source_id,
+            ability_index: *ability_index,
+        },
+        // CR 116.2c + CR 732.4 + CR 104.4b: paying to end an effect is
+        // optional, so it is meaningful to the loop firewall even though the
+        // own-upkeep/draw classifier below deliberately auto-passes it.
+        GameAction::EndContinuousEffect { .. } => FlatPriorityActionClass::EndContinuousEffect,
+        GameAction::ChooseMeldPair { .. }
+        | GameAction::ChooseEntryAttackTarget { .. }
+        | GameAction::PlayLand { .. }
+        | GameAction::Foretell { .. }
+        | GameAction::DeclareAttackers { .. }
+        | GameAction::DeclareBlockers { .. }
+        | GameAction::ChooseUntap { .. }
+        | GameAction::ChooseExert { .. }
+        | GameAction::ChooseEnlist { .. }
+        | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseZoneOpponentChooser { .. }
+        | GameAction::ChoosePileOpponent { .. }
+        | GameAction::ChooseAnnouncingOpponent { .. }
+        | GameAction::ChooseGiftRecipient { .. }
+        | GameAction::ChooseAssistPlayer { .. }
+        | GameAction::CommitAssistPayment { .. }
+        | GameAction::MulliganDecision { .. }
+        | GameAction::ReorderHand { .. }
+        | GameAction::TapLandForMana { .. }
+        | GameAction::UntapLandForMana { .. }
+        | GameAction::SpendPoolMana { .. }
+        | GameAction::UnspendPoolMana { .. }
+        | GameAction::SelectCards { .. }
+        | GameAction::ChooseRemoveCounterCostDistribution { .. }
+        | GameAction::SelectCoinFlips { .. }
+        | GameAction::ChooseOutsideGameCards { .. }
+        | GameAction::SelectTargets { .. }
+        | GameAction::ChooseTarget { .. }
+        | GameAction::ChooseReplacement { .. }
+        | GameAction::OrderTriggers { .. }
+        | GameAction::CancelCast
+        | GameAction::Equip { .. }
+        | GameAction::CrewVehicle { .. }
+        | GameAction::ActivateStation { .. }
+        | GameAction::SaddleMount { .. }
+        | GameAction::Transform { .. }
+        | GameAction::PlayFaceDown { .. }
+        | GameAction::TurnFaceUp { .. }
+        | GameAction::SubmitSideboard { .. }
+        | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseOption { .. }
+        | GameAction::SubmitVoteCandidate { .. }
+        | GameAction::SubmitSpellbookDraft { .. }
+        | GameAction::SubmitPilePartition { .. }
+        | GameAction::ChoosePile { .. }
+        | GameAction::ChooseBranch { .. }
+        | GameAction::SubmitLifeRedistribution { .. }
+        | GameAction::ChooseDamageSource { .. }
+        | GameAction::SelectModes { .. }
+        | GameAction::DecideOptionalCost { .. }
+        | GameAction::ChooseAdventureFace { .. }
+        | GameAction::ChooseModalFace { .. }
+        | GameAction::ChooseAlternativeCast { .. }
+        | GameAction::ChooseCastingVariant { .. }
+        | GameAction::KeepAllCopyTargets
+        | GameAction::ChoosePermanentTypeSlot { .. }
+        | GameAction::ActivateNinjutsu { .. }
+        | GameAction::CastSpellAsSneak { .. }
+        | GameAction::CastSpellAsWebSlinging { .. }
+        | GameAction::CastSpellForFree { .. }
+        | GameAction::CastSpellAsMiracle { .. }
+        | GameAction::CastSpellAsMadness { .. }
+        | GameAction::DecideOptionalEffect { .. }
+        | GameAction::RespondToSpliceOffer { .. }
+        | GameAction::DecideOptionalEffectAndRemember { .. }
+        | GameAction::PayUnlessCost { .. }
+        | GameAction::ChooseUnlessCostBranch { .. }
+        | GameAction::ChooseActivationCostBranch { .. }
+        | GameAction::PayCombatTax { .. }
+        | GameAction::ChooseRingBearer { .. }
+        | GameAction::ChoosePair { .. }
+        | GameAction::ChooseDungeon { .. }
+        | GameAction::ChooseDungeonRoom { .. }
+        | GameAction::UnlockRoomDoor { .. }
+        | GameAction::RollPlanarDie
+        | GameAction::ChooseRoomDoor { .. }
+        | GameAction::TapForConvoke { .. }
+        | GameAction::HarmonizeTap { .. }
+        | GameAction::DeclareCompanion { .. }
+        | GameAction::CompanionToHand
+        | GameAction::DiscoverChoice { .. }
+        | GameAction::GraveyardPaidCastChoice { .. }
+        | GameAction::CascadeChoice { .. }
+        | GameAction::RippleChoice { .. }
+        | GameAction::FreeCastWindowChoice { .. }
+        | GameAction::ChooseTopOrBottom { .. }
+        | GameAction::ChooseMutateMergeSide { .. }
+        | GameAction::CipherEncode { .. }
+        | GameAction::ChooseLegend { .. }
+        | GameAction::ChooseBattleProtector { .. }
+        | GameAction::SetAutoPass { .. }
+        | GameAction::CancelAutoPass
+        | GameAction::SetPhaseStops { .. }
+        | GameAction::SetPriorityPassingMode { .. }
+        | GameAction::SetPriorityYield { .. }
+        | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetTriggerOrderTemplate { .. }
+        | GameAction::AssignCombatDamage { .. }
+        | GameAction::AssignBlockerDamage { .. }
+        | GameAction::DistributeAmong { .. }
+        | GameAction::ChooseCounterMoveDistribution { .. }
+        | GameAction::ChooseCountersToRemove { .. }
+        | GameAction::SubmitPayAmount { .. }
+        | GameAction::RetargetSpell { .. }
+        | GameAction::LearnDecision { .. }
+        | GameAction::SelectCategoryPermanents { .. }
+        | GameAction::ChooseKeptCreatures { .. }
+        | GameAction::ChooseKeptPermanents { .. }
+        | GameAction::ChooseX { .. }
+        | GameAction::SubmitPhyrexianChoices { .. }
+        | GameAction::ChooseManaColor { .. }
+        | GameAction::PayManaAbilityMana { .. }
+        | GameAction::CastPreparedCopy { .. }
+        | GameAction::ChooseSpecializeColor { .. }
+        | GameAction::CastParadigmCopy { .. }
+        | GameAction::PassParadigmOffer
+        | GameAction::Debug(_)
+        | GameAction::GrantDebugPermission { .. }
+        | GameAction::RevokeDebugPermission { .. }
+        | GameAction::Concede { .. }
+        | GameAction::DeclareShortcut { .. }
+        | GameAction::RespondToShortcut { .. }
+        | GameAction::DeclineShortcut
+        | GameAction::PrecastCopyShortcut { .. } => FlatPriorityActionClass::Other,
+    }
 }
 
 /// G2 upkeep/draw gate: like [`flat_actions_have_meaningful_priority`] but a
@@ -1037,15 +1203,18 @@ fn flat_actions_have_meaningful_noncast_priority(
     state: &GameState,
     actions: &[GameAction],
 ) -> bool {
-    actions.iter().any(|action| match action {
-        GameAction::PassPriority => false,
-        GameAction::CastSpell { .. } => false,
-        GameAction::ActivateAbility {
-            source_id,
-            ability_index,
-        } => activate_ability_is_meaningful_priority(state, *source_id, *ability_index),
-        _ => true,
-    })
+    actions
+        .iter()
+        .any(|action| match classify_flat_priority_action(action) {
+            FlatPriorityActionClass::Pass
+            | FlatPriorityActionClass::CastSpell
+            | FlatPriorityActionClass::EndContinuousEffect => false,
+            FlatPriorityActionClass::ActivateAbility {
+                source_id,
+                ability_index,
+            } => activate_ability_is_meaningful_priority(state, source_id, ability_index),
+            FlatPriorityActionClass::Other => true,
+        })
 }
 
 /// Issue #544: sacrifice-for-mana abilities (KCI, Phyrexian Altar, etc.) are
@@ -1563,6 +1732,19 @@ pub fn legal_actions(state: &GameState) -> Vec<GameAction> {
     legal_actions_with_costs(state).0
 }
 
+/// Engine-authored, stable-order projection of the live CR 116.2c
+/// pay-to-end offers in a legal-action snapshot.
+///
+/// Presentation layers render this list unchanged instead of reclassifying
+/// [`GameAction`] variants client-side.
+pub fn end_continuous_effect_offers(actions: &[GameAction]) -> Vec<GameAction> {
+    actions
+        .iter()
+        .filter(|action| matches!(action, GameAction::EndContinuousEffect { .. }))
+        .cloned()
+        .collect()
+}
+
 /// Returns legal actions plus effective mana costs for castable spells.
 ///
 /// The spell costs map contains the post-reduction effective cost for each
@@ -1584,8 +1766,23 @@ pub type LegalActionsFull = (
     HashMap<ObjectId, Vec<GameAction>>,
 );
 
+/// Return only the engine-computed targets for the current target-selection slot.
+///
+/// Unlike broad candidate enumeration, this accessor never falls back to a
+/// slot-wide target list or a fresh legality scan. Tactical policies that need
+/// to compare sibling targets must use this exact prompt-local authority.
+pub fn current_target_selection_targets(state: &GameState) -> Option<&[TargetRef]> {
+    match &state.waiting_for {
+        WaitingFor::TargetSelection { selection, .. }
+        | WaitingFor::TriggerTargetSelection { selection, .. } => {
+            Some(selection.current_legal_targets.as_slice())
+        }
+        _ => None,
+    }
+}
+
 fn target_selection_actions_without_simulation(state: &GameState) -> Option<Vec<GameAction>> {
-    let (target_slots, current_slot, current_legal_targets) = match &state.waiting_for {
+    let (target_slots, current_slot) = match &state.waiting_for {
         WaitingFor::TargetSelection {
             target_slots,
             selection,
@@ -1595,13 +1792,11 @@ fn target_selection_actions_without_simulation(state: &GameState) -> Option<Vec<
             target_slots,
             selection,
             ..
-        } => (
-            target_slots,
-            selection.current_slot,
-            selection.current_legal_targets.as_slice(),
-        ),
+        } => (target_slots, selection.current_slot),
         _ => return None,
     };
+
+    let current_legal_targets = current_target_selection_targets(state)?;
 
     let mut actions: Vec<GameAction> = current_legal_targets
         .iter()
@@ -1895,17 +2090,20 @@ fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::game_state::TargetEffectDetail;
     use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::{
-        candidate_actions, cheap_reject_candidate, legal_actions, legal_actions_for_viewer,
-        legal_actions_full, stuck_decision_diagnostic, validated_candidate_actions,
+        candidate_actions, cheap_reject_candidate, end_continuous_effect_offers, legal_actions,
+        legal_actions_for_viewer, legal_actions_full, stuck_decision_diagnostic,
+        validated_candidate_actions,
     };
     use crate::game::engine::apply_as_current;
     use crate::game::mana_sources;
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::EffectKind;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification,
         ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction, QuantityExpr,
@@ -1915,13 +2113,13 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
-        CastingVariant, ConvokeMode, DistributionUnit, GameState, MulliganDecisionEntry,
-        MulliganDecisionPhase, PendingCast, PendingMulliganAction, PriorityPassingMode, StackEntry,
-        StackEntryKind, WaitingFor,
+        CastingVariant, ConvokeMode, DistributionUnit, EndEffectGroupId, GameState,
+        MulliganDecisionEntry, MulliganDecisionPhase, PendingCast, PendingMulliganAction,
+        PriorityPassingMode, StackEntry, StackEntryKind, WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
-    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::phase::{Phase, PhaseStop, PhaseStopScope};
     use crate::types::player::PlayerId;
     use crate::types::triggers::TriggerMode;
@@ -1935,6 +2133,39 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    #[test]
+    fn end_continuous_effect_offer_projection_preserves_engine_order_and_payload() {
+        let first = GameAction::EndContinuousEffect {
+            group: EndEffectGroupId(8),
+            source_name: "Calming Licid".to_string(),
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            },
+        };
+        let second = GameAction::EndContinuousEffect {
+            group: EndEffectGroupId(13),
+            source_name: "Convulsing Licid".to_string(),
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            },
+        };
+        let actions = vec![
+            GameAction::PassPriority,
+            first.clone(),
+            GameAction::CancelCast,
+            second.clone(),
+        ];
+
+        assert_eq!(
+            end_continuous_effect_offers(&actions),
+            vec![first, second],
+            "the engine projection must preserve the legal-action order and exact \
+             dispatch/display payload"
+        );
     }
 
     fn setup_opponent_priority(phase: Phase) -> GameState {
@@ -4809,6 +5040,7 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             };
             obj.static_definitions = vec![def].into();
         }
@@ -4931,6 +5163,7 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             };
             obj.static_definitions = vec![def].into();
         }
@@ -5253,6 +5486,8 @@ mod tests {
                 legal_targets: vec![target.clone()],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -5304,6 +5539,8 @@ mod tests {
                 legal_targets: targets.clone(),
                 optional: true,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -5407,6 +5644,8 @@ mod tests {
                 legal_targets: vec![target],
                 optional: true,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {

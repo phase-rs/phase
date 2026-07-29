@@ -4,8 +4,11 @@
 //! mulligan an opening hand. This policy is the deck-agnostic baseline — it
 //! checks land count, color availability, and early castability.
 //!
+//! The minimum kept-hand size is NOT this policy's concern — it belongs to
+//! `card_floor::MulliganCardFloor`, the single process-level authority, whose
+//! `ForceKeep` outranks every verdict below.
+//!
 //! Outcomes are translated into structured `MulliganScore` verdicts:
-//! - Always-keep short hands (≤ 4 cards post-mulligan) → `Score { +5.0 }`.
 //! - Post-2-mulligan lenient accept (has land + has spell) → `Score { +2.0 }`.
 //! - Post-2-mulligan lenient reject (missing land or spell) →
 //!   `ForceMulligan`.
@@ -22,7 +25,9 @@ use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 
-use super::{MulliganPolicy, MulliganScore, TurnOrder};
+use super::{
+    has_spell_face, is_land_source, modal_back_face, MulliganPolicy, MulliganScore, TurnOrder,
+};
 
 pub struct KeepablesByLandCount;
 
@@ -42,36 +47,15 @@ impl MulliganPolicy for KeepablesByLandCount {
     ) -> MulliganScore {
         let hand_size = hand.len();
 
-        // Defensive short-hand keep. Under the London Mulligan (CR 103.5) the
-        // engine always presents a 7-card hand at `WaitingFor::MulliganDecision`
-        // (bottoming happens *after* the keep decision), so this branch is
-        // unreachable from production paths today. It stays as a guard against
-        // direct `evaluate()` invocations (tests, hypothetical non-London
-        // mulligan flows) so no caller can observe an unkeepable tiny hand.
-        if hand_size <= 4 {
-            return MulliganScore::Score {
-                delta: 5.0,
-                reason: PolicyReason::new("hand_short_force_keep")
-                    .with_fact("hand_size", hand_size as i64)
-                    .with_fact("mulligans_taken", mulligans_taken as i64),
-            };
-        }
-
         // After 2+ mulligans, be much more lenient — keep any hand with at
         // least 1 land + 1 spell.
         if mulligans_taken >= 2 {
-            let has_land = hand.iter().any(|&oid| {
-                state
-                    .objects
-                    .get(&oid)
-                    .is_some_and(|o| o.card_types.core_types.contains(&CoreType::Land))
-            });
-            let has_spell = hand.iter().any(|&oid| {
-                state
-                    .objects
-                    .get(&oid)
-                    .is_some_and(|o| !o.card_types.core_types.contains(&CoreType::Land))
-            });
+            let has_land = hand
+                .iter()
+                .any(|&oid| state.objects.get(&oid).is_some_and(is_land_source));
+            let has_spell = hand
+                .iter()
+                .any(|&oid| state.objects.get(&oid).is_some_and(has_spell_face));
             if has_land && has_spell {
                 return MulliganScore::Score {
                     delta: 2.0,
@@ -90,6 +74,8 @@ impl MulliganPolicy for KeepablesByLandCount {
         }
 
         let mut land_count: i64 = 0;
+        let mut land_only_count: i64 = 0;
+        let mut spell_count: i64 = 0;
         let mut available_colors: Vec<ManaType> = Vec::new();
         let mut has_two_or_more_color_source = false;
 
@@ -97,27 +83,27 @@ impl MulliganPolicy for KeepablesByLandCount {
             let Some(obj) = state.objects.get(&oid) else {
                 continue;
             };
-            if obj.card_types.core_types.contains(&CoreType::Land) {
+            if is_land_source(obj) {
                 land_count += 1;
-                for subtype in &obj.card_types.subtypes {
-                    if let Some(mana_type) =
-                        engine::game::mana_payment::land_subtype_to_mana_type(subtype)
-                    {
-                        if !available_colors.contains(&mana_type) {
-                            available_colors.push(mana_type);
-                        }
+                let produced_colors = land_produced_color_types(obj);
+                for mana_type in &produced_colors {
+                    if !available_colors.contains(mana_type) {
+                        available_colors.push(*mana_type);
                     }
                 }
-                if land_could_produce_two_or_more_colors(obj) {
+                if produced_colors.len() >= 2 {
                     has_two_or_more_color_source = true;
                 }
             }
+            if has_spell_face(obj) {
+                spell_count += 1;
+            } else {
+                land_only_count += 1;
+            }
         }
 
-        let spell_count: i64 = hand_size as i64 - land_count;
-
         let land_ok = if hand_size >= 6 {
-            (2..=5).contains(&land_count)
+            land_count >= 2 && land_only_count <= 5
         } else {
             land_count >= 1 && spell_count >= 1
         };
@@ -144,18 +130,21 @@ impl MulliganPolicy for KeepablesByLandCount {
                 let Some(obj) = state.objects.get(&oid) else {
                     return false;
                 };
-                if obj.card_types.core_types.contains(&CoreType::Land) {
-                    return false;
-                }
-                let mv = obj.mana_cost.mana_value();
-                if mv > (land_count as u32 + 1) {
-                    return false;
-                }
-                spell_colors_available(
+                spell_face_is_early_castable(
+                    &obj.card_types.core_types,
                     &obj.mana_cost,
+                    land_count,
                     &available_colors,
                     has_two_or_more_color_source,
-                )
+                ) || modal_back_face(obj).is_some_and(|face| {
+                    spell_face_is_early_castable(
+                        &face.card_types.core_types,
+                        &face.mana_cost,
+                        land_count,
+                        &available_colors,
+                        has_two_or_more_color_source,
+                    )
+                })
             })
             .count();
 
@@ -254,16 +243,48 @@ fn spell_colors_available(
     true
 }
 
-fn land_could_produce_two_or_more_colors(obj: &engine::game::game_object::GameObject) -> bool {
-    // Shared with draft fixing-land evaluation via the parts-based core.
-    crate::mana_colors::land_produced_color_types(&obj.card_types.subtypes, &obj.abilities).len()
-        >= 2
+fn land_produced_color_types(obj: &engine::game::game_object::GameObject) -> Vec<ManaType> {
+    let mut colors = Vec::new();
+    if obj.card_types.core_types.contains(&CoreType::Land) {
+        colors.extend(crate::mana_colors::land_produced_color_types(
+            &obj.card_types.subtypes,
+            &obj.abilities,
+        ));
+    }
+    if let Some(face) = modal_back_face(obj) {
+        if face.card_types.core_types.contains(&CoreType::Land) {
+            for color in crate::mana_colors::land_produced_color_types(
+                &face.card_types.subtypes,
+                &face.abilities,
+            ) {
+                if !colors.contains(&color) {
+                    colors.push(color);
+                }
+            }
+        }
+    }
+    colors
+}
+
+fn spell_face_is_early_castable(
+    core_types: &[CoreType],
+    mana_cost: &ManaCost,
+    land_count: i64,
+    available_colors: &[ManaType],
+    has_two_or_more_color_source: bool,
+) -> bool {
+    if core_types.contains(&CoreType::Land) || mana_cost.mana_value() > (land_count as u32 + 1) {
+        return false;
+    }
+    spell_colors_available(mana_cost, available_colors, has_two_or_more_color_source)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::game::printed_cards::snapshot_object_face;
     use engine::game::zones::create_object;
+    use engine::types::card::LayoutKind;
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::game_state::GameState;
     use engine::types::identifiers::CardId;
@@ -323,18 +344,6 @@ mod tests {
         }
     }
 
-    fn spell_expensive(name: &str) -> HandCard {
-        HandCard {
-            name: name.to_string(),
-            core_types: vec![CoreType::Creature],
-            subtypes: Vec::new(),
-            mana_cost: ManaCost::Cost {
-                shards: Vec::new(),
-                generic: 6,
-            },
-        }
-    }
-
     fn plan() -> PlanSnapshot {
         PlanSnapshot::default()
     }
@@ -343,31 +352,23 @@ mod tests {
         DeckFeatures::default()
     }
 
-    #[test]
-    fn short_hand_is_kept() {
-        // 4-card hand — always keep regardless of contents.
-        let state = setup_game(vec![
-            spell_expensive("A"),
-            spell_expensive("B"),
-            spell_expensive("C"),
-            spell_expensive("D"),
-        ]);
-        let hand: Vec<_> = state.players[0].hand.iter().copied().collect();
-        let score = KeepablesByLandCount.evaluate(
-            &hand,
-            &state,
-            &features(),
-            &plan(),
-            TurnOrder::OnPlay,
-            3,
-        );
-        match score {
-            MulliganScore::Score { delta, reason } => {
-                assert!(delta > 0.0);
-                assert_eq!(reason.kind, "hand_short_force_keep");
-            }
-            _ => panic!("expected Score"),
-        }
+    fn add_modal_back_face(
+        state: &mut GameState,
+        object_id: ObjectId,
+        core_types: Vec<CoreType>,
+        subtypes: Vec<&str>,
+        mana_cost: ManaCost,
+    ) {
+        let object = state.objects.get_mut(&object_id).expect("hand card");
+        let mut back_face = snapshot_object_face(object);
+        back_face.card_types = CardType {
+            supertypes: Vec::new(),
+            core_types,
+            subtypes: subtypes.into_iter().map(String::from).collect(),
+        };
+        back_face.mana_cost = mana_cost;
+        back_face.layout_kind = Some(LayoutKind::Modal);
+        object.back_face = Some(back_face);
     }
 
     #[test]
@@ -398,6 +399,128 @@ mod tests {
             }
             _ => panic!("expected Score"),
         }
+    }
+
+    #[test]
+    fn spell_front_mdfc_land_back_counts_as_source_and_spell() {
+        // One front spell / back Mountain MDFC plus an Island supplies two
+        // viable land plays and a Red spell. The back face supplies the only
+        // red source, so both face metadata and spell-face accounting matter.
+        let mut state = setup_game(vec![
+            spell_cheap("Modal Bolt", ManaCostShard::Red),
+            land("Island", "Island"),
+            spell_cheap("Bolt 1", ManaCostShard::Red),
+            spell_cheap("Bolt 2", ManaCostShard::Red),
+            spell_cheap("Bolt 3", ManaCostShard::Red),
+            spell_cheap("Bolt 4", ManaCostShard::Red),
+            spell_cheap("Bolt 5", ManaCostShard::Red),
+        ]);
+        let modal = state.players[0].hand[0];
+        add_modal_back_face(
+            &mut state,
+            modal,
+            vec![CoreType::Land],
+            vec!["Mountain"],
+            ManaCost::NoCost,
+        );
+        let hand: Vec<_> = state.players[0].hand.iter().copied().collect();
+
+        let score = KeepablesByLandCount.evaluate(
+            &hand,
+            &state,
+            &features(),
+            &plan(),
+            TurnOrder::OnPlay,
+            0,
+        );
+
+        match score {
+            MulliganScore::Score { reason, .. } => {
+                assert_eq!(reason.kind, "hand_has_land_range");
+                assert!(reason.facts.contains(&("land_count", 2)));
+                assert!(reason.facts.contains(&("castable_early", 6)));
+            }
+            _ => panic!("expected MDFC hand to keep"),
+        }
+    }
+
+    #[test]
+    fn modal_spell_faces_prevent_flexible_hands_from_looking_flooded() {
+        // These five MDFCs are spells as well as viable land sources. Treating
+        // them as land-only would falsely reject the seven-card hand as flooded.
+        let mut state = setup_game(vec![
+            land("Island 1", "Island"),
+            land("Island 2", "Island"),
+            spell_cheap("Modal 1", ManaCostShard::Red),
+            spell_cheap("Modal 2", ManaCostShard::Red),
+            spell_cheap("Modal 3", ManaCostShard::Red),
+            spell_cheap("Modal 4", ManaCostShard::Red),
+            spell_cheap("Modal 5", ManaCostShard::Red),
+        ]);
+        let modal_ids: Vec<_> = state.players[0].hand.iter().copied().skip(2).collect();
+        for modal in modal_ids {
+            add_modal_back_face(
+                &mut state,
+                modal,
+                vec![CoreType::Land],
+                vec!["Mountain"],
+                ManaCost::NoCost,
+            );
+        }
+        let hand: Vec<_> = state.players[0].hand.iter().copied().collect();
+
+        let score = KeepablesByLandCount.evaluate(
+            &hand,
+            &state,
+            &features(),
+            &plan(),
+            TurnOrder::OnPlay,
+            0,
+        );
+
+        assert!(matches!(
+            score,
+            MulliganScore::Score { ref reason, .. } if reason.kind == "hand_has_land_range"
+        ));
+    }
+
+    #[test]
+    fn lenient_mulligan_accepts_land_front_mdfc_spell_back() {
+        // Face orientation is not a policy concern: a front-land MDFC with a
+        // spell back face satisfies the post-mulligan land-and-spell floor.
+        let mut state = setup_game(vec![
+            land("Modal Land", "Island"),
+            land("Island 1", "Island"),
+            land("Island 2", "Island"),
+            land("Island 3", "Island"),
+            land("Island 4", "Island"),
+        ]);
+        let modal = state.players[0].hand[0];
+        add_modal_back_face(
+            &mut state,
+            modal,
+            vec![CoreType::Instant],
+            Vec::new(),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            },
+        );
+        let hand: Vec<_> = state.players[0].hand.iter().copied().collect();
+
+        let score = KeepablesByLandCount.evaluate(
+            &hand,
+            &state,
+            &features(),
+            &plan(),
+            TurnOrder::OnPlay,
+            2,
+        );
+
+        assert!(matches!(
+            score,
+            MulliganScore::Score { ref reason, .. } if reason.kind == "hand_lenient_after_mulligans"
+        ));
     }
 
     #[test]
@@ -477,8 +600,8 @@ mod tests {
 
     #[test]
     fn lenient_after_two_mulligans() {
-        // 5-card hand (mulligan_count=2 still checked because hand_size>4)
-        // with 1 land + 4 spells — lenient accept.
+        // 5-card hand at mulligans_taken == 2 → the lenient branch; hand size is
+        // no longer consulted. 1 land + 4 spells — lenient accept.
         let state = setup_game(vec![
             land("Mountain", "Mountain"),
             spell_cheap("Bolt 1", ManaCostShard::Red),
@@ -495,8 +618,8 @@ mod tests {
             TurnOrder::OnPlay,
             2,
         );
-        // hand_size 5 → falls through to mulligans_taken>=2 arm? No — short-hand
-        // arm requires hand_size <= 4. 5 goes to the lenient branch.
+        // mulligans_taken == 2 → the lenient branch, which accepts any hand
+        // carrying at least one land and one spell regardless of size.
         match score {
             MulliganScore::Score { reason, .. } => {
                 assert_eq!(reason.kind, "hand_lenient_after_mulligans");

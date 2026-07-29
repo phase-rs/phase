@@ -390,6 +390,7 @@ fn generic_effect_static_mods(
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             let mods = &static_abilities.first()?.modifications;
             Some((mods, duration, target))

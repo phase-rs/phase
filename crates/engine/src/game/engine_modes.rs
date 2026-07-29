@@ -346,13 +346,7 @@ pub(super) fn resolve_random_modal_trigger(
         // CR 603.3c: No legal mode — drop the trigger. The interactive branches
         // already removed the in-flight stack entry before this point, so just
         // clear the cursor here.
-        if let Some(entry_id) = state.pending_trigger_entry.take() {
-            if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                state.stack.pop_back();
-                state.stack_paid_facts.remove(&entry_id);
-                state.stack_trigger_event_batches.remove(&entry_id);
-            }
-        }
+        super::stack::pop_uncommitted_pending_trigger_entry(state);
         state.pending_trigger = None;
         return Ok(None);
     };
@@ -436,7 +430,7 @@ fn handle_triggered_mode_choice(
     };
     let target_constraints = target_constraints_from_modal(&modal);
 
-    trigger.ability = resolved;
+    trigger.ability = Box::new(resolved);
     trigger.target_constraints = target_constraints.clone();
     trigger.modal = None;
     trigger.mode_abilities.clear();
@@ -475,6 +469,21 @@ fn handle_triggered_mode_choice(
             // here — the resulting stack entry carries `trigger_event` for the
             // resolution-time re-establishment in `stack::resolve_top`.
             triggers::restore_trigger_event_context(state, mode_context_snapshot);
+            // `Box::clone` allocates first and clones into the allocation
+            // (`Box::new_uninit_in` + `CloneToUninit`), which *lets* the
+            // optimizer build the 5,264 B `ResolvedAbility` in place. It does
+            // not guarantee it: std's generic path is
+            // `ptr::write(dst, src.clone())`, and std's own comment there
+            // (`library/core/src/clone/uninit.rs`, `CopySpec::clone_one`) calls
+            // in-place construction something it *hopes* the optimizer figures
+            // out. At `opt-level = 0` — the regime every stack measurement
+            // behind this change was taken in — it does not, and a temporary is
+            // materialized here. `(*trigger.ability).clone()` gives the
+            // optimizer no such opening: it builds the temporary
+            // unconditionally and then moves it into a fresh box. So
+            // `Box::clone` is never worse and is strictly better once
+            // optimized, which is why the mechanical `(*b).clone()` rewrite was
+            // reverted at this call site.
             let mut resolved = trigger.ability.clone();
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             // CR 113.2c + CR 603.2 + CR 603.3b: `finalize_trigger_target_selection`

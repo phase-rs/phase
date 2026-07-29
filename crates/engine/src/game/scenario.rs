@@ -644,6 +644,43 @@ impl GameScenario {
         builder
     }
 
+    /// Add a nonland, noncreature permanent (e.g. an enchantment) to the
+    /// battlefield with abilities parsed from Oracle text. Mirrors
+    /// `add_land_from_oracle`; needed for permanents whose own triggered/
+    /// static abilities (not a cast) are under test — e.g. a Hideaway
+    /// enchantment's beginning-of-combat trigger.
+    pub fn add_enchantment_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = self.state.next_timestamp();
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        // CR 302.6 note: summoning sickness only gates creatures, but the
+        // builder models a pre-existing permanent (entered on a prior turn),
+        // matching `add_land_from_oracle`'s override.
+        obj.summoning_sick = false;
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
     /// Add a creature to hand with abilities parsed from Oracle text.
     pub fn add_creature_to_hand_from_oracle(
         &mut self,
@@ -989,10 +1026,18 @@ impl<'a> CardBuilder<'a> {
 
     pub fn as_enchantment(&mut self) -> &mut Self {
         let obj = self.obj();
-        obj.card_types
-            .core_types
-            .retain(|t| *t != CoreType::Creature);
-        obj.card_types.core_types.push(CoreType::Enchantment);
+        // Permanent enchantment spells staged from `add_spell_to_hand` keep the
+        // Instant/Sorcery seed until stripped here — same shape as
+        // `as_creature` / `as_planeswalker_with_loyalty`.
+        obj.card_types.core_types.retain(|t| {
+            !matches!(
+                t,
+                CoreType::Creature | CoreType::Instant | CoreType::Sorcery
+            )
+        });
+        if !obj.card_types.core_types.contains(&CoreType::Enchantment) {
+            obj.card_types.core_types.push(CoreType::Enchantment);
+        }
         self.sync_base_card_types();
         self
     }
@@ -1407,6 +1452,35 @@ impl GameRunner {
         )
     }
 
+    /// CR 702.103b: put `attachment` onto `host` in its BESTOWED AURA FORM —
+    /// the shape a real bestow cast produces.
+    ///
+    /// > 702.103b ... As a spell cast bestowed is put onto the stack, it becomes
+    /// > an Aura enchantment and gains enchant creature.
+    ///
+    /// Routes through `casting::apply_bestow_aura_form`, the engine's single
+    /// authority for that form, so a fixture cannot drift from production: it
+    /// removes the `Creature` core type, adds the `Aura` subtype, and grants
+    /// `enchant creature`.
+    ///
+    /// Hand-setting `attached_to` on a printed creature instead produces a state
+    /// production never creates, and CR 704.5p sentence 1
+    /// (`sba::check_illegal_attachment_unattach`) correctly sweeps it away on the
+    /// next state-based-action check — so a bestow fixture that skips this helper
+    /// silently loses its attachment.
+    pub fn attach_as_bestowed_aura(&mut self, attachment: ObjectId, host: ObjectId) {
+        if let Some(obj) = self.state.objects.get_mut(&attachment) {
+            super::casting::apply_bestow_aura_form(obj);
+            obj.attached_to = Some(crate::game::game_object::AttachTarget::Object(host));
+        }
+        if let Some(host_obj) = self.state.objects.get_mut(&host) {
+            if !host_obj.attachments.contains(&attachment) {
+                host_obj.attachments.push(attachment);
+            }
+        }
+        self.state.layers_dirty.mark_full();
+    }
+
     /// Declare blockers (CR 509.1). Must be called when the engine is at
     /// `WaitingFor::DeclareBlockers`. Each entry is `(blocker, attacker)` —
     /// the blocking creature and the attacker it blocks (CR 509.1a).
@@ -1672,6 +1746,7 @@ impl GameRunner {
             WaitingFor::ModeChoice { .. } => "ModeChoice",
             WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
             WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+            WaitingFor::ChooseGiftRecipient { .. } => "ChooseGiftRecipient",
             WaitingFor::CostTypeChoice { .. } => "CostTypeChoice",
             WaitingFor::SpliceOffer { .. } => "SpliceOffer",
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
@@ -2185,12 +2260,14 @@ impl<'a> SpellCast<'a> {
             &mut events,
         )?;
 
-        // Intent the driver matches as it walks slots: object targets are
-        // consumed one per slot (most slots are object slots), while player
-        // targets are reusable across slots (one player may be targeted by
-        // several modes — see `pick_slot_target`).
+        // Intent the driver matches as it walks slots. Object targets are
+        // always consumed one per slot. Player declarations are consumed only
+        // by a multi-target run so `.target_players(&[a, b])` can express two
+        // distinct targets while a single declaration remains reusable across
+        // independent modal slots.
         let mut remaining_objects: Vec<ObjectId> = target_objects;
         let declared_players: Vec<PlayerId> = target_players;
+        let mut remaining_multi_target_players = declared_players.clone();
         let mut remaining_cost_objects: Vec<ObjectId> = cost_objects;
 
         // CR 601.2a: the spell leaves hand only at stack commit. Captured when
@@ -2308,6 +2385,18 @@ impl<'a> SpellCast<'a> {
                     let pay = matches!(optional, OptionalPolicy::Accept);
                     act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
                 }
+                // CR 702.174a: after promising Gift with ≥2 opponents, pick a recipient.
+                // Sole-opponent games auto-latch and never raise this prompt.
+                WaitingFor::ChooseGiftRecipient { candidates, .. } => {
+                    let opponent = candidates.first().copied().unwrap_or_else(|| {
+                        panic!("ChooseGiftRecipient raised with empty candidates")
+                    });
+                    act_collect(
+                        runner,
+                        GameAction::ChooseGiftRecipient { opponent },
+                        &mut events,
+                    )?;
+                }
                 // CR 601.2f / CR 118.3: additional non-mana costs that require
                 // selecting objects, such as sacrificing a creature.
                 WaitingFor::PayCost {
@@ -2388,6 +2477,7 @@ impl<'a> SpellCast<'a> {
                 }
                 // CR 601.2c: declare one target per slot, in written order.
                 WaitingFor::TargetSelection {
+                    pending_cast,
                     target_slots,
                     selection,
                     ..
@@ -2396,6 +2486,11 @@ impl<'a> SpellCast<'a> {
                     let choice = pick_slot_target(
                         slot,
                         &mut remaining_objects,
+                        pending_cast
+                            .ability
+                            .multi_target
+                            .as_ref()
+                            .map(|_| &mut remaining_multi_target_players),
                         &declared_players,
                         selection.current_slot,
                     );
@@ -2577,15 +2672,17 @@ impl<'a> CastCommit<'a> {
 /// matching CR 601.2c (targets declared one per slot, in written order).
 ///
 /// Object intent is *consumed* (each declared object satisfies at most one
-/// slot, so distinct exile/destroy targets never alias). Player intent is
-/// *reusable* — the same player is routinely targeted by several modes of one
-/// modal spell (e.g. Kozilek's Command mode 1 scries *and* draws for the same
-/// target player), so a declared player may satisfy multiple player slots.
+/// slot, so distinct exile/destroy targets never alias). A multi-target run
+/// consumes player declarations in order when available; otherwise, player
+/// intent is reusable, letting the same declared player satisfy independent
+/// modal slots (e.g. Kozilek's Command mode 1 scries *and* draws for the same
+/// target player).
 /// Falls back to `None` for optional slots; panics for an unsatisfiable
 /// required slot.
 fn pick_slot_target(
     slot: &crate::types::game_state::TargetSelectionSlot,
     remaining_objects: &mut Vec<ObjectId>,
+    remaining_multi_target_players: Option<&mut Vec<PlayerId>>,
     declared_players: &[PlayerId],
     slot_index: usize,
 ) -> Option<TargetRef> {
@@ -2594,6 +2691,14 @@ fn pick_slot_target(
         .position(|&o| slot.legal_targets.contains(&TargetRef::Object(o)))
     {
         return Some(TargetRef::Object(remaining_objects.remove(pos)));
+    }
+    if let Some(remaining_players) = remaining_multi_target_players {
+        if let Some(pos) = remaining_players
+            .iter()
+            .position(|&player| slot.legal_targets.contains(&TargetRef::Player(player)))
+        {
+            return Some(TargetRef::Player(remaining_players.remove(pos)));
+        }
     }
     if let Some(&player) = declared_players
         .iter()
@@ -2631,6 +2736,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
         WaitingFor::SearchChoice { .. } => "SearchChoice",
         WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+        WaitingFor::ChooseGiftRecipient { .. } => "ChooseGiftRecipient",
         WaitingFor::CastOffer { .. } => "CastOffer",
         WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
         WaitingFor::AlternativeCastChoice { .. } => "AlternativeCastChoice",
@@ -2912,6 +3018,7 @@ impl<'a> AbilityActivation<'a> {
                     let choice = pick_slot_target(
                         slot,
                         &mut remaining_objects,
+                        None,
                         &declared_players,
                         selection.current_slot,
                     );
@@ -3136,6 +3243,7 @@ fn drive_resolution(
                 let choice = pick_slot_target(
                     slot,
                     &mut remaining_objects,
+                    None,
                     declared_players,
                     selection.current_slot,
                 );
@@ -3157,6 +3265,7 @@ fn drive_resolution(
                 let choice = pick_slot_target(
                     slot,
                     &mut remaining_objects,
+                    None,
                     declared_players,
                     selection.current_slot,
                 );
@@ -3249,6 +3358,17 @@ fn drive_resolution(
                 let pay = matches!(policy.optional, OptionalPolicy::Accept);
                 act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
             }
+            WaitingFor::ChooseGiftRecipient { candidates, .. } => {
+                let opponent = candidates
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| panic!("ChooseGiftRecipient raised with empty candidates"));
+                act_collect(
+                    runner,
+                    GameAction::ChooseGiftRecipient { opponent },
+                    &mut events,
+                )?;
+            }
             WaitingFor::ReplacementChoice { .. } => {
                 let Some(index) = policy.replacement_choice else {
                     break;
@@ -3320,6 +3440,9 @@ fn drive_resolution(
                 )?;
             }
             WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                // No pick declared → halt so the caller can assert the offered
+                // options and the prompt boundary via `final_waiting_for()`
+                // (mirrors SpellbookDraft / NamedChoice / ReplacementChoice).
                 let Some(target) = policy.copy_target else {
                     break;
                 };

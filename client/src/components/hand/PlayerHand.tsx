@@ -1015,7 +1015,7 @@ const HandCard = memo(function HandCard({
             from the card wrapper, so container-type can't collapse it); lets the
             pips scale in cqi with --hand-card-w instead of a fixed px size. */}
         <div className="pointer-events-none absolute inset-0 @container">
-          <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" className="absolute right-[4%] top-[2%]" />
+          <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" />
         </div>
       </motion.div>
     </motion.div>
@@ -1151,7 +1151,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
       {/* @container overlay sized to the card so the pips scale in cqi with
           --hand-card-w (see the hand-card render above). */}
       <div className="pointer-events-none absolute inset-0 @container">
-        <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" className="absolute right-[4%] top-[2%]" />
+        <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" />
       </div>
     </motion.div>
   );

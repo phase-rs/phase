@@ -797,10 +797,8 @@ fn validate_exact_keep_on_top_selection(
 
 /// CR 701.22a / CR 701.25a: Scry and surveil put the kept cards on top of the
 /// library "in any order", so a legal keep-on-top selection is any duplicate-free
-/// subset of the looked-at cards (order is the player's free choice). Because the
-/// multiplayer server bypasses its candidate-enumeration legality gate for these
-/// freeform states (see `WaitingFor::accepts_freeform_card_selection`), `apply()`
-/// is the real validation boundary: a foreign id or a duplicate would corrupt the
+/// subset of the looked-at cards (order is the player's free choice). `apply()` is
+/// the validation boundary: a foreign id or a duplicate would corrupt the
 /// library `retain`+`insert` (relocating or duplicating a card), so reject both
 /// here. Mirrors the order-agnostic subset semantics of `selection_mismatch`.
 fn validate_keep_on_top_selection(
@@ -1278,11 +1276,40 @@ pub(super) fn handle_resolution_choice(
                 // allow-raw-zone: scry reorder never leaves the library (CR 701.22a).
                 player_state.library.push_back(card_id);
             }
+            // CR 701.22a + CR 701.22d: a scry event occurs only after the
+            // controller has completed its top/bottom choices. Keep both the
+            // clamped look count and an explicit `Some(0)` bottom count on the
+            // event that observers preserve into their eventual trigger.
+            let resumed_events_start = events.len();
+            events.push(GameEvent::PlayerPerformedAction {
+                player_id: player,
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(all_cards.len() as u32),
+                scry_bottom_count: Some(bottom_cards.len() as u32),
+            });
             // CR 401.5 + CR 611.3a: Scry reorders the library top directly (not
             // through the zone-move seam), so a continuous `TopOfLibraryMatches`
             // static must be re-evaluated — self-gated so it's a no-op otherwise.
             crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            // CR 603.2 + CR 603.3b: the resumed continuation can perform further
+            // observable game actions (e.g. a SECOND "scry N" in the same
+            // resolution — "whenever you scry" fires once per scry event) and
+            // pause again on another prompt before this action settles to
+            // Priority. `run_post_action_pipeline` only scans an action's events
+            // at a Priority settlement, so without parking here the resumed
+            // slice's events (the second scry's `PlayerPerformedAction`, which
+            // carries that scry's own effective look count) are dropped and its
+            // trigger is silently lost. Park the resumed slice into
+            // `deferred_triggers` (B2, mirroring
+            // `batch_or_drain_observer_triggers`); the queue drains with each
+            // trigger's own preserved event once resolution truly settles.
+            let waiting_for = finish_with_continuation(state, player, events);
+            crate::game::triggers::park_observer_triggers_if_paused(
+                state,
+                events,
+                resumed_events_start,
+            );
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (
             WaitingFor::ArrangePlanarDeckTopChoice {
@@ -2462,9 +2489,28 @@ pub(super) fn handle_resolution_choice(
                     // CR 119.4: pay N life via the life-loss-as-cost authority
                     // (replacement pipeline + CantLoseLife) — NOT inline life
                     // subtraction.
+                    let resume_at_resolution_depth = state.resolution_stack.len();
                     match crate::game::life_costs::pay_life_as_cost(state, player, amount, events) {
                         crate::game::life_costs::PayLifeCostResult::Paid { .. } => {}
-                        _ => {
+                        crate::game::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution {
+                            ..
+                        }
+                        | crate::game::life_costs::PayLifeCostResult::DeferredReplacementChoice {
+                            ..
+                        } => {
+                            state.pending_deferred_life_cost_resume = Some(
+                                crate::types::game_state::DeferredLifeCostResume::PayAmount {
+                                    player,
+                                    total: accumulated.saturating_add(amount),
+                                    resume_at_resolution_depth,
+                                },
+                            );
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
+                        crate::game::life_costs::PayLifeCostResult::InsufficientLife
+                        | crate::game::life_costs::PayLifeCostResult::Prohibited => {
                             return Err(EngineError::InvalidAction(format!(
                                 "Player {player:?} cannot pay {amount} life"
                             )))
@@ -2476,24 +2522,7 @@ pub(super) fn handle_resolution_choice(
             // read `QuantityRef::EventContextAmount` (e.g. "deals that much
             // damage"). `last_effect_count` is the documented fallback slot.
             let total = accumulated.saturating_add(amount);
-            state.last_effect_count = Some(total as i32);
-            let pending_starts_with_pay_amount = state
-                .active_ability_continuation()
-                .is_some_and(|cont| starts_with_pay_amount_prompt(&cont.chain));
-            if !pending_starts_with_pay_amount {
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame.pending.chain.set_chosen_x_recursive(total);
-                }
-            }
-            let mut waiting_for = finish_with_continuation(state, player, events);
-            if let WaitingFor::PayAmountChoice {
-                accumulated: next_accumulated,
-                ..
-            } = &mut waiting_for
-            {
-                *next_accumulated = total;
-                state.waiting_for = waiting_for.clone();
-            }
+            let waiting_for = finish_pay_amount_choice(state, player, total, events);
             ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (
@@ -3866,9 +3895,42 @@ pub(super) fn handle_resolution_choice(
             if continuation_consumes_tracked_set {
                 effects::publish_fresh_tracked_set(state, chosen.clone());
             }
+            // CR 608.2c + CR 608.2d: A counter-kind choice first selects the
+            // object whose counters define the legal kinds. Preserve that
+            // object's exact public snapshot on the continuation so later
+            // "each other ..." text can exclude it without conflating it with
+            // the spell's source or a separately declared downstream target.
+            let counter_kind_choice = state
+                .active_ability_continuation()
+                .filter(|cont| {
+                    matches!(
+                        cont.chain.effect,
+                        crate::types::ability::Effect::ChooseCounterKind { .. }
+                    )
+                })
+                .and_then(|_| chosen.first())
+                .and_then(|id| {
+                    state.objects.get(id).map(|object| {
+                        crate::types::ability::CostPaidObjectSnapshot {
+                            object_id: *id,
+                            lki: object.snapshot_for_mana_spent(),
+                        }
+                    })
+                });
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 let cont = &mut frame.pending;
-                cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                if let Some(snapshot) = counter_kind_choice {
+                    if let crate::types::ability::Effect::ChooseCounterKind { target } =
+                        &mut cont.chain.effect
+                    {
+                        *target = crate::types::ability::TargetFilter::SpecificObject {
+                            id: snapshot.object_id,
+                        };
+                    }
+                    cont.chain.set_effect_context_object_recursive(snapshot);
+                } else {
+                    cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                }
                 // CR 607.2a + CR 608.2g: A `FreeCastFromZones` continuation
                 // over "the other cards exiled this way" (Plargg and Nassari)
                 // must confine its offer to THIS resolution's exile batch. The
@@ -3902,6 +3964,7 @@ pub(super) fn handle_resolution_choice(
                 let is_partition = !matches!(
                     cont.chain.effect,
                     crate::types::ability::Effect::PutCounter { .. }
+                        | crate::types::ability::Effect::ChooseCounterKind { .. }
                 );
                 if is_partition {
                     if let Some(ref mut next_sub) = cont.chain.sub_ability {
@@ -5570,7 +5633,7 @@ pub(super) fn handle_resolution_choice(
             // single GameState slot cleared after every drain.
             if matches!(
                 choice_type,
-                ChoiceType::Player | ChoiceType::Opponent { .. }
+                ChoiceType::Player { .. } | ChoiceType::Opponent { .. }
             ) {
                 if let Ok(pid) = choice.parse::<u8>() {
                     if let Some(frame) = state.active_ability_continuation_frame_mut() {
@@ -5612,7 +5675,7 @@ pub(super) fn handle_resolution_choice(
                     let ability = pending.ability.clone();
                     let cost = pending.cost.clone();
                     state.waiting_for = match casting_costs::finish_pending_cast_cost_or_pay(
-                        state, player, *pending, ability, cost, events,
+                        state, player, *pending, *ability, cost, events,
                     ) {
                         Ok(waiting_for) => waiting_for,
                         Err(err) => {
@@ -6879,6 +6942,36 @@ fn finish_with_continuation(
     state.waiting_for.clone()
 }
 
+/// CR 118.12 + CR 119.4 + CR 616.1: Complete the outer pay-amount action only
+/// after any interactive post-replacement child of the life payment has
+/// settled. Shared by the direct submit path and the deferred-life resumer.
+pub(crate) fn finish_pay_amount_choice(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    total: u32,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    state.last_effect_count = Some(total as i32);
+    let pending_starts_with_pay_amount = state
+        .active_ability_continuation()
+        .is_some_and(|cont| starts_with_pay_amount_prompt(&cont.chain));
+    if !pending_starts_with_pay_amount {
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame.pending.chain.set_chosen_x_recursive(total);
+        }
+    }
+    let mut waiting_for = finish_with_continuation(state, player, events);
+    if let WaitingFor::PayAmountChoice {
+        accumulated: next_accumulated,
+        ..
+    } = &mut waiting_for
+    {
+        *next_accumulated = total;
+        state.waiting_for = waiting_for.clone();
+    }
+    waiting_for
+}
+
 /// CR 701.25a / CR 616.1: Run the post-loop cleanup a rest-pile batch deferred
 /// when it paused mid-pile. Called by
 /// `zone_pipeline::drain_pending_batch_deliveries` the moment the batch tail
@@ -6913,6 +7006,22 @@ pub(crate) fn run_batch_completion(
             enters_under,
             events,
         ),
+        BatchCompletion::ExileFaceDownPileDeliveryComplete {
+            player,
+            source_id,
+            members,
+            required_member_count,
+        } => effects::exile_face_down_pile::complete_exile_face_down_pile_delivery(
+            state,
+            player,
+            source_id,
+            members,
+            required_member_count,
+            events,
+        ),
+        BatchCompletion::ExileFaceDownPileReturnComplete { source_id } => {
+            effects::exile_face_down_pile::complete_exile_face_down_pile_return(source_id, events)
+        }
         BatchCompletion::CastFromZoneExileDeliveryComplete {
             ability,
             in_place_ids,

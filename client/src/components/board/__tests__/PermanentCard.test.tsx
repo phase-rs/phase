@@ -14,6 +14,7 @@ import {
   buildPriorityWaitingFor,
   buildTargetSelectionProgress,
   buildTargetSelectionWaitingFor,
+  buildTriggerTargetSelectionWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
 import { AttachmentFan } from "../AttachmentFan.tsx";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
@@ -207,6 +208,45 @@ describe("PermanentCard", () => {
     expect(screen.queryByText("Copy")).not.toBeInTheDocument();
   });
 
+  it("renders the engine-authored temporary can't-be-blocked badge with its public source", () => {
+    const gameState = makeState();
+    gameState.derived = { temporary_cant_be_blocked: { 1: 2 } };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    const badge = screen.getByLabelText("Can't be blocked");
+    fireEvent.pointerEnter(badge.closest(".group")!);
+
+    expect(screen.getByRole("tooltip")).toBeVisible();
+    expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "Can't be blocked (from Test Equipment)",
+    );
+  });
+
+  it("renders the engine-authored temporary can't-be-blocked badge on a face-down recipient without source attribution", () => {
+    const gameState = makeState();
+    gameState.objects[1].face_down = true;
+    gameState.derived = { temporary_cant_be_blocked: { 1: null } };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.getByLabelText("Can't be blocked")).toBeInTheDocument();
+    expect(screen.queryByText(/\(from/)).not.toBeInTheDocument();
+  });
+
+  it("does not render a temporary can't-be-blocked badge without an engine marker", () => {
+    const gameState = makeState();
+    gameState.derived = {};
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.getByLabelText("Test Creature")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Can't be blocked")).not.toBeInTheDocument();
+  });
+
   it("never badges a face-down permanent as a copy (CR 708.2)", () => {
     // A face-down permanent has only the characteristics its face-down rules
     // grant, so surfacing "Copy" would leak what it really is. The engine omits
@@ -278,7 +318,7 @@ describe("PermanentCard", () => {
     expect(attachmentLayer.style.zIndex).toBe("5");
     expect(nestedAttachmentLayer.style.zIndex).toBe("5");
 
-    fireEvent.mouseEnter(host);
+    fireEvent.pointerEnter(host, { pointerType: "mouse" });
 
     expect(host.style.zIndex).toBe("80");
     expect(attachmentLayer.style.zIndex).toBe("5");
@@ -290,7 +330,7 @@ describe("PermanentCard", () => {
     const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
     const nestedAttachment = container.querySelector('[data-object-id="3"]') as HTMLElement;
 
-    fireEvent.mouseEnter(nestedAttachment);
+    fireEvent.pointerEnter(nestedAttachment, { pointerType: "mouse" });
 
     expect(host.style.zIndex).toBe("80");
   });
@@ -339,7 +379,7 @@ describe("PermanentCard", () => {
     });
     expect(container.querySelector('[data-object-id="4"]')).toBeNull();
 
-    fireEvent.mouseEnter(container.querySelector('[data-object-id="1"]') as HTMLElement);
+    fireEvent.pointerEnter(container.querySelector('[data-object-id="1"]') as HTMLElement, { pointerType: "mouse" });
     expect(container.querySelector('[data-object-id="4"]')).toBeNull();
 
     act(() => {
@@ -491,6 +531,60 @@ describe("PermanentCard", () => {
     expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
   });
 
+  it("opens the full attachment chooser when a host has a targetable attachment", () => {
+    // Regression: Rampaging Yao Guai can target Darksteel Plate while it is
+    // attached beside Skullclamp on Bastion Protector. The targetable Plate
+    // expands into only a narrow overlapping board peek, so clicking the host
+    // must expose the fan's full-size cards and let the engine-authorized
+    // target dispatch unambiguously.
+    const darksteelPlate = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      attachments: [],
+      name: "Darksteel Plate",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    const gameState = makeState();
+    gameState.objects[1] = { ...gameState.objects[1], name: "Bastion Protector", attachments: [2, 4] };
+    gameState.objects[2] = { ...gameState.objects[2], name: "Skullclamp" };
+    gameState.objects[4] = darksteelPlate;
+    gameState.battlefield = [1, 2, 3, 4];
+    const waitingFor = buildTriggerTargetSelectionWaitingFor({
+      data: {
+        player: 0,
+        target_slots: [],
+        selection: buildTargetSelectionProgress({ current_legal_targets: [{ Object: 4 }] }),
+      },
+    });
+    gameState.waiting_for = waitingFor;
+    useGameStore.setState({ gameState, waitingFor });
+    useUiStore.setState({ attachmentFanHostId: null });
+
+    const { container } = renderPermanent(new Set([4]));
+    render(<AttachmentFan />);
+
+    fireEvent.click(container.querySelector('[data-object-id="1"]') as HTMLElement);
+
+    const fan = document.querySelector("[data-attachment-fan]");
+    expect(fan).not.toBeNull();
+    const darksteelCard = fan?.querySelector('[aria-label="Darksteel Plate"]') as HTMLElement;
+    expect(darksteelCard).not.toBeNull();
+
+    fireEvent.click(darksteelCard);
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: { Object: 4 } },
+    });
+  });
+
   it("auto-expands collapsed attachments when one is activatable (re-equip)", () => {
     // Regression: an attached Equipment whose Equip ability is activatable must
     // be reachable so it can be moved to another creature. Collapsed behind the
@@ -602,7 +696,7 @@ describe("PermanentCard", () => {
     expect(queryByLabelText("Exiled Two")).toBeNull();
     expect(container.textContent).toContain("+1");
 
-    fireEvent.mouseEnter(container.querySelector('[data-object-id="1"]') as HTMLElement);
+    fireEvent.pointerEnter(container.querySelector('[data-object-id="1"]') as HTMLElement, { pointerType: "mouse" });
 
     expect(queryByLabelText("Exiled Two")).not.toBeNull();
   });
@@ -612,15 +706,94 @@ describe("PermanentCard", () => {
     const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
     const attachment = container.querySelector('[data-object-id="2"]') as HTMLElement;
 
-    fireEvent.mouseEnter(host);
+    fireEvent.pointerEnter(host, { pointerType: "mouse" });
     expect(useUiStore.getState().inspectedObjectId).toBe(1);
 
-    fireEvent.mouseEnter(attachment);
+    fireEvent.pointerEnter(attachment, { pointerType: "mouse" });
     expect(useUiStore.getState().inspectedObjectId).toBe(2);
 
-    fireEvent.mouseLeave(attachment, { relatedTarget: host });
+    fireEvent.pointerLeave(attachment, { pointerType: "mouse", relatedTarget: host });
     expect(useUiStore.getState().inspectedObjectId).toBe(1);
     expect(useUiStore.getState().hoveredObjectId).toBe(1);
+  });
+
+  // A remote-desktop session does not enumerate the local mouse as a HID, so the
+  // guest browser reports no hover-capable input — while still delivering honest
+  // `pointerenter` events with `pointerType: "mouse"`. Gating on the capability
+  // query killed battlefield hover outright on those hosts; gating on the event's
+  // own pointerType is what makes this environment work.
+  it("previews on a host whose hover capability queries all report false", () => {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+    Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 0 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1920 });
+
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.pointerEnter(host, { pointerType: "mouse" });
+
+    expect(useUiStore.getState().inspectedObjectId).toBe(1);
+    // The card-lift/z-index hover state is a second, independent symptom: it
+    // rides on hoverObject, which only this inline gate calls.
+    expect(useUiStore.getState().hoveredObjectId).toBe(1);
+    expect(host.style.zIndex).toBe("80");
+
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+  });
+
+  it("clears the hover lift when the pointer leaves for a non-card element", () => {
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.pointerEnter(host, { pointerType: "mouse" });
+    expect(useUiStore.getState().hoveredObjectId).toBe(1);
+
+    fireEvent.pointerLeave(host, { pointerType: "mouse", relatedTarget: document.body });
+
+    expect(useUiStore.getState().hoveredObjectId).toBeNull();
+  });
+
+  it("ignores a touch-synthesized pointer enter", () => {
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.pointerEnter(host, { pointerType: "touch" });
+
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
+    expect(useUiStore.getState().hoveredObjectId).toBeNull();
+  });
+
+  it("still cancels the long-press timer through the merged pointer-leave handler", () => {
+    // useLongPress owns an onPointerLeave of its own and the hover handler wins
+    // the key collision, so it must delegate — otherwise the timer survives the
+    // leave and opens a sticky preview over whatever the pointer moved on to.
+    vi.useFakeTimers();
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.pointerDown(host, {
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: "touch",
+    });
+    fireEvent.pointerLeave(host, { pointerId: 1, pointerType: "touch", relatedTarget: document.body });
+    act(() => vi.advanceTimersByTime(500));
+
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
+    expect(useUiStore.getState().previewSticky).toBe(false);
+    vi.useRealTimers();
   });
 
   it("targets the attached permanent itself when the attachment is clicked", () => {
@@ -1409,5 +1582,39 @@ describe("PermanentCard", () => {
     ).toBeInTheDocument();
     // Departed source is dropped — no fromSource span renders.
     expect(screen.queryByText(/\(from/)).not.toBeInTheDocument();
+  });
+
+  // CR 201.5: the engine ships `~` as the self-reference token, so the blocked-ability
+  // tooltip must bind it to the host object's name (mirrors CardPreview, the other
+  // `blocked_abilities` consumer). Description is abridged from the reported Kilo board dump
+  // (object 110) and asserted against this fixture's own name: the engine text continues "Its
+  // controller may search their library for a basic land card, put it onto the battlefield,
+  // then shuffle." — elided because that tail carries no `~` and so moves neither assertion.
+  it("substitutes ~ with the source name in the blocked-ability tooltip", () => {
+    const gameState = makeState();
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      abilities: [
+        {
+          kind: "Activated",
+          cost: { type: "Tap" },
+          description: "{T}, Sacrifice ~: Destroy target land.",
+          effect: { type: "Destroy" },
+        },
+      ] satisfies GameObject["abilities"],
+      blocked_abilities: [
+        { ability_index: 0, sources: [1], type: "CantBeActivated" },
+      ],
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    // Reach-guard: the row rendered, so the negative below is not vacuous. `GameplayTooltip`
+    // portals to document.body, hence the body-scoped negative.
+    expect(
+      screen.getByText(/\{T\}, Sacrifice Test Creature: Destroy target land\./),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("~");
   });
 });

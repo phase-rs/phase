@@ -804,7 +804,7 @@ fn kang_prohibits_power_up_during_extra_turn_only() {
     // Kang granted P0 an extra turn and added a power-up-scoped, pre-armed
     // prohibition.
     assert!(
-        runner.state().extra_turns.contains(&P0),
+        runner.state().extra_turns.iter().any(|et| et.player == P0),
         "Kang must grant its controller an extra turn"
     );
     let prohibition_is_prearmed = runner.state().restrictions.iter().any(|r| {

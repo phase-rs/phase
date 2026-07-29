@@ -79,13 +79,25 @@ fn scheming_symmetry_rejects_choosing_the_same_player_twice() {
 
     // Second slot: choosing the ALREADY-CHOSEN player P1 must be rejected
     // (CR 601.2c + CR 115.3), while the state stays on the same target slot.
+    let WaitingFor::TargetSelection {
+        target_slots,
+        selection,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the second target slot, got {}",
+            runner.waiting_for_kind()
+        );
+    };
+    assert_eq!(
+        selection.current_slot, 1,
+        "the duplicate-target check must run against the second target slot"
+    );
+    let slot1 = &target_slots[selection.current_slot];
     assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::TargetSelection { .. }
-        ),
-        "a second target slot must be surfaced, got {}",
-        runner.waiting_for_kind()
+        slot1.legal_targets.contains(&TargetRef::Player(P2)),
+        "P2 must be a legal alternative in the second target slot, slot = {slot1:?}"
     );
     let reselect_same = runner.act(GameAction::ChooseTarget {
         target: Some(TargetRef::Player(P1)),

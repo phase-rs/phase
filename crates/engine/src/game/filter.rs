@@ -76,6 +76,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -311,6 +312,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -757,6 +759,22 @@ impl<'a> FilterContext<'a> {
         }
     }
 
+    /// CR 608.2c: Full ability context with an explicit object chosen by an
+    /// earlier instruction as the recipient-relative authority for "other."
+    pub fn from_ability_with_recipient(
+        ability: &'a ResolvedAbility,
+        recipient_id: ObjectId,
+    ) -> Self {
+        Self {
+            source_id: ability.source_id,
+            source_controller: Some(ability.controller),
+            ability: Some(ability),
+            trigger_source: ability.trigger_source.as_ref(),
+            recipient_id: Some(recipient_id),
+            scoped_iteration_player: None,
+        }
+    }
+
     /// CR 109.4: Full ability context with an explicit controller override.
     /// Use when the filter controller differs from `ability.controller`
     /// (e.g., "creature that player controls" mass-move dispatched to a target
@@ -961,6 +979,22 @@ pub(crate) fn controller_ref_player(
         ControllerRef::ActivePlayer => Some(state.active_player),
     }
 }
+/// Whether `filter` references the resolution-local `last_zone_changed_ids`
+/// ledger population (bare or nested inside compound filters).
+pub(crate) fn filter_contains_last_zone_changed(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::LastZoneChanged => true,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_contains_last_zone_changed)
+        }
+        TargetFilter::Not { filter } => filter_contains_last_zone_changed(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            filter_contains_last_zone_changed(filter)
+        }
+        _ => false,
+    }
+}
+
 /// Check if an object matches a typed TargetFilter against the given context.
 ///
 /// This is the unified entry point for filter evaluation. Build a
@@ -1235,35 +1269,258 @@ pub fn matches_target_filter_including_phased_out(
 /// face and yields `false`. Use the object-based `matches_target_filter` family
 /// instead whenever an `ObjectId` exists.
 pub(crate) fn matches_target_filter_against_face(face: &CardFace, filter: &TargetFilter) -> bool {
+    matches_target_filter_against_face_scoped(face, filter, FaceControllerScope::Reject)
+}
+
+/// CR 109.5: how a bare-`CardFace` match treats a filter's controller axis.
+///
+/// A face has no controller, so a controller-scoped filter is normally
+/// unanswerable. Some callers do know the answer out of band — deck analysis
+/// asks only about the analyzing player's own list, and a cost modifier's
+/// "spells YOU cast" scope is carried on `StaticDefinition.affected` and settled
+/// before the spell filter is consulted (see
+/// [`crate::types::ability::cost_modifier_caster_scope`]). This names which of
+/// those two situations the caller is in instead of leaving it implicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceControllerScope {
+    /// The controller is genuinely unknown: any controller-scoped filter fails.
+    Reject,
+    /// The face is known to be the querying player's own card, so
+    /// `ControllerRef::You` is satisfied and `ControllerRef::Opponent` is not.
+    /// Any other `ControllerRef` remains unanswerable and fails.
+    AssumeOwn,
+}
+
+/// CR 205: Evaluate a `TargetFilter`'s STATIC characteristics against a bare
+/// `CardFace`, resolving the controller axis per `scope`.
+///
+/// `pub` so deck-time analysis outside this crate (`phase-ai`'s
+/// `features::cost_reduction`) can match a static's `spell_filter` against a
+/// bare face through this authority rather than re-deriving CR 205 semantics.
+pub fn matches_target_filter_against_face_scoped(
+    face: &CardFace,
+    filter: &TargetFilter,
+    scope: FaceControllerScope,
+) -> bool {
+    // Only a DEFINITE match admits the face. `None` (unknown) collapses to
+    // `false` here and nowhere earlier — collapsing it inside the recursion is
+    // what let an outer `Not` invert "unanswerable" into "matches".
+    target_filter_face_state(face, filter, scope) == Some(true)
+}
+
+/// Three-state evaluation of a `TargetFilter` against a bare `CardFace`.
+///
+/// `Some(true)`/`Some(false)` = definitely matches / definitely does not.
+/// `None` = the filter's answer depends on a live object that does not exist
+/// here, so there IS no answer.
+///
+/// The distinction is load-bearing under negation. Collapsing unknown to `false`
+/// before recursing means `Not(<unknown>)` reads as `true`, so a face would be
+/// admitted by a filter whose only predicate needs a live object. Threading the
+/// third state through `Typed`/`Or`/`And`/`Not` and collapsing once, at the
+/// boolean boundary, keeps the fail-closed contract intact at every depth.
+fn target_filter_face_state(
+    face: &CardFace,
+    filter: &TargetFilter,
+    scope: FaceControllerScope,
+) -> Option<bool> {
     match filter {
-        TargetFilter::Any => true,
-        TargetFilter::None => false,
+        TargetFilter::Any => Some(true),
+        TargetFilter::None => Some(false),
         TargetFilter::Typed(typed) => {
-            typed.controller.is_none()
-                && typed
+            let mut terms = vec![controller_ref_face_state(typed.controller.as_ref(), scope)];
+            terms.extend(
+                typed
                     .type_filters
                     .iter()
-                    .all(|type_filter| matches_type_filter_against_face(face, type_filter))
-                && typed.properties.iter().all(|property| match property {
-                    FilterProp::HasSupertype { value } => face.card_type.supertypes.contains(value),
-                    _ => false,
-                })
+                    // CR 205: the printed type line is always readable from a face.
+                    .map(|tf| Some(matches_type_filter_against_face(face, tf))),
+            );
+            terms.extend(
+                typed
+                    .properties
+                    .iter()
+                    .map(|property| context_free_prop_matches_face(face, property)),
+            );
+            kleene_and(terms)
         }
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|inner| matches_target_filter_against_face(face, inner)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|inner| matches_target_filter_against_face(face, inner)),
-        TargetFilter::Not { filter } => !matches_target_filter_against_face(face, filter),
-        _ => false,
+        TargetFilter::Or { filters } => kleene_or(
+            filters
+                .iter()
+                .map(|inner| target_filter_face_state(face, inner, scope)),
+        ),
+        TargetFilter::And { filters } => kleene_and(
+            filters
+                .iter()
+                .map(|inner| target_filter_face_state(face, inner, scope)),
+        ),
+        // Negating an unknown stays unknown — never `true`.
+        TargetFilter::Not { filter } => {
+            target_filter_face_state(face, filter, scope).map(|matched| !matched)
+        }
+        // Every remaining variant (`SelfRef`, player-scoped forms, event/LKI
+        // references) needs a live object or resolution context, so a bare face
+        // yields no answer rather than a definite `false` — otherwise an outer
+        // `Not` would turn "cannot tell" into "matches".
+        _ => None,
     }
+}
+
+/// Three-valued AND: any definite `false` wins; otherwise unknown poisons.
+fn kleene_and(terms: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
+    let mut saw_unknown = false;
+    for term in terms {
+        match term {
+            Some(false) => return Some(false),
+            Some(true) => {}
+            None => saw_unknown = true,
+        }
+    }
+    (!saw_unknown).then_some(true)
+}
+
+/// Three-valued OR: any definite `true` wins; otherwise unknown poisons.
+fn kleene_or(terms: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
+    let mut saw_unknown = false;
+    for term in terms {
+        match term {
+            Some(true) => return Some(true),
+            Some(false) => {}
+            None => saw_unknown = true,
+        }
+    }
+    (!saw_unknown).then_some(false)
+}
+
+/// CR 109.5: how a filter's controller scope reads against a bare face.
+///
+/// Unscoped is a definite match. Under `AssumeOwn` the caller has told us the
+/// face is the querying player's own card, so `You` is definitely satisfied and
+/// `Opponent` is definitely not. Everything else — a controller scope with no
+/// declared answer, or any scope at all under `Reject` — is genuinely unknown,
+/// NOT false, so that a surrounding `Not` cannot invert it into a match.
+fn controller_ref_face_state(
+    controller: Option<&ControllerRef>,
+    scope: FaceControllerScope,
+) -> Option<bool> {
+    match (controller, scope) {
+        (None, _) => Some(true),
+        (Some(ControllerRef::You), FaceControllerScope::AssumeOwn) => Some(true),
+        (Some(ControllerRef::Opponent), FaceControllerScope::AssumeOwn) => Some(false),
+        _ => None,
+    }
+}
+
+/// CR 205 + CR 202: Evaluate one `FilterProp` against a bare `CardFace`.
+///
+/// `Some(true)` / `Some(false)` = the property has a context-free reading and
+/// this is it. `None` = the property needs a live object (battlefield state,
+/// counters, combat, zone, a value chosen earlier in a resolution) and therefore
+/// has NO answer for a face — callers must fail closed rather than guess.
+///
+/// Kept as an explicit allowlist, not a wildcard `_ => true`: a newly added
+/// `FilterProp` lands in the `None` arm and fails closed until someone decides
+/// whether it is context-free, which is the safe direction.
+pub fn context_free_prop_matches_face(face: &CardFace, prop: &FilterProp) -> Option<bool> {
+    match prop {
+        // CR 205.4a: printed supertype line.
+        FilterProp::HasSupertype { value } => Some(face.card_type.supertypes.contains(value)),
+        FilterProp::NotSupertype { value } => Some(!face.card_type.supertypes.contains(value)),
+        // CR 202.3: mana value is printed on the face. Only a fixed comparison
+        // is context-free — a dynamic quantity needs game state.
+        FilterProp::Cmc {
+            comparator,
+            value: QuantityExpr::Fixed { value },
+        } => Some(comparator.evaluate(
+            i32::try_from(face.mana_cost.mana_value()).unwrap_or(i32::MAX),
+            *value,
+        )),
+        // A dynamic mana-value comparison needs game state to resolve.
+        FilterProp::Cmc { .. } => None,
+        // CR 105.2 + CR 202.2: printed color, via the face's own color authority.
+        FilterProp::HasColor { color } => Some(face_colors(face).contains(color)),
+        FilterProp::NotColor { color } => Some(!face_colors(face).contains(color)),
+        FilterProp::ColorCount { comparator, count } => Some(comparator.evaluate(
+            i32::try_from(face_colors(face).len()).unwrap_or(i32::MAX),
+            i32::from(*count),
+        )),
+        // CR 702: printed keyword line. The keyword authorities in
+        // `game/keywords.rs` all take a `GameObject`; this function's entire
+        // contract is that NO object exists (a bare `CardFace` outside the
+        // game), so there is no zone, no grant and no `off_zone_characteristics`
+        // to consult — the printed line IS the complete truth here. A caller
+        // holding an `ObjectId` must use the object-based `matches_target_filter`
+        // family instead, as the module doc says.
+        // allow-raw-authority: bare CardFace has no object, so no keyword grant can exist to miss
+        FilterProp::WithKeyword { value } => Some(face.keywords.contains(value)),
+        // allow-raw-authority: bare CardFace has no object, so no keyword grant can exist to miss
+        FilterProp::WithoutKeyword { value } => Some(!face.keywords.contains(value)),
+        // CR 111.1 + CR 108.2: a bare face is a card definition, never a token.
+        FilterProp::Token => Some(false),
+        FilterProp::NonToken | FilterProp::RepresentedByCard => Some(true),
+        // Recursive combinators inherit their operands' answerability. Negation
+        // of an unknown stays unknown.
+        FilterProp::Not { prop } => context_free_prop_matches_face(face, prop).map(|m| !m),
+        // Three-valued (Kleene) OR — ordinary Boolean semantics over the
+        // `Option<bool>` answer, not a rules behavior, so no CR governs it.
+        // A definite `true` in ANY branch makes the disjunction true even when a
+        // sibling branch is unknowable from a face, so this must NOT
+        // short-circuit on the first `None`: the caller admits only `Some(true)`,
+        // and collapsing `[true, unknown]` to unknown would reject a spell filter
+        // that definitely matches. `None` is returned only when nothing is true
+        // AND something is unknown.
+        FilterProp::AnyOf { props } => {
+            let mut saw_unknown = false;
+            for inner in props {
+                match context_free_prop_matches_face(face, inner) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => saw_unknown = true,
+                }
+            }
+            (!saw_unknown).then_some(false)
+        }
+        // Everything else reads live state and has no face-level answer.
+        _ => None,
+    }
+}
+
+/// CR 105.2 + CR 202.2: the colors of a bare face — an explicit color-defining
+/// override when present (CR 604.3), otherwise the printed mana cost.
+fn face_colors(face: &CardFace) -> Vec<ManaColor> {
+    if let Some(colors) = &face.color_override {
+        return colors.clone();
+    }
+    [
+        ManaColor::White,
+        ManaColor::Blue,
+        ManaColor::Black,
+        ManaColor::Red,
+        ManaColor::Green,
+    ]
+    .into_iter()
+    .filter(|color| match &face.mana_cost {
+        ManaCost::Cost { shards, .. } => shards.iter().any(|shard| shard.contributes_to(*color)),
+        // CR 202.1: no printed mana cost, so no color from one. The `Self*`
+        // forms are cost REFERENCES resolved against a live object (CR 202.3b),
+        // not a printed cost, so a bare face has no colors to read from them.
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => false,
+    })
+    .collect()
 }
 
 /// CR 205: Evaluate a single `TypeFilter` against a bare `CardFace`'s printed
 /// card type line (core types, subtypes, supertypes). Context-free counterpart
 /// to the object-based type checks in `filter_inner_for_object`.
-pub(crate) fn matches_type_filter_against_face(face: &CardFace, filter: &TypeFilter) -> bool {
+///
+/// `pub` because deck-time analysis outside this crate (`phase-ai`'s
+/// `features::cost_reduction`) classifies bare `CardFace`s against a static's
+/// `spell_filter` before any `GameObject` exists, and must use this authority
+/// for the type axis rather than re-deriving CR 205 type semantics.
+pub fn matches_type_filter_against_face(face: &CardFace, filter: &TypeFilter) -> bool {
     match filter {
         TypeFilter::Creature => face.card_type.core_types.contains(&CoreType::Creature),
         TypeFilter::Land => face.card_type.core_types.contains(&CoreType::Land),
@@ -2150,6 +2407,7 @@ fn filter_inner_for_object(
             .is_some_and(|attached| attached == object_id),
         TargetFilter::LastCreated => state.last_created_token_ids.contains(&object_id),
         TargetFilter::LastRevealed => state.last_revealed_ids.contains(&object_id),
+        TargetFilter::LastZoneChanged => state.last_zone_changed_ids.contains(&object_id),
         // CR 608.2k: "the sacrificed/exiled/discarded <noun>" — the specific
         // untargeted object previously referred to by this ability. Resolve
         // through the documented `cost_paid_object → effect_context_object`
@@ -2668,6 +2926,7 @@ fn zone_change_filter_inner(
         ),
         TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -2980,6 +3239,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -3296,6 +3556,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -12580,6 +12841,304 @@ mod tests {
         assert_eq!(
             *prop, back,
             "ControllerMatches must round-trip through serde"
+        );
+    }
+
+    // ─── three-valued OR in `context_free_prop_matches_face` ─────────────────
+    //
+    // Review #6743: `try_fold` short-circuited on the first `None`, so a
+    // definite `Some(true)` alternative was collapsed to unknown and the typed
+    // caller (which admits only `Some(true)`) rejected a filter that matches.
+
+    /// A face with a printed white mana cost, so color props are answerable.
+    fn tri_state_face() -> CardFace {
+        CardFace {
+            name: "Tri State Probe".to_string(),
+            card_type: crate::types::card_type::CardType {
+                supertypes: Vec::new(),
+                core_types: vec![CoreType::Instant],
+                subtypes: Vec::new(),
+            },
+            mana_cost: crate::types::mana::ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::White],
+                generic: 1,
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Context-free and TRUE for `tri_state_face`.
+    fn known_true() -> FilterProp {
+        FilterProp::HasColor {
+            color: crate::types::mana::ManaColor::White,
+        }
+    }
+
+    /// Context-free and FALSE for `tri_state_face`.
+    fn known_false() -> FilterProp {
+        FilterProp::HasColor {
+            color: crate::types::mana::ManaColor::Red,
+        }
+    }
+
+    /// Live-state-only: unanswerable from a bare face.
+    fn unknown() -> FilterProp {
+        FilterProp::Tapped
+    }
+
+    #[test]
+    fn any_of_true_then_unknown_is_true() {
+        let prop = FilterProp::AnyOf {
+            props: vec![known_true(), unknown()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            Some(true),
+            "a definite match must survive a later unknowable alternative"
+        );
+    }
+
+    #[test]
+    fn any_of_unknown_then_true_is_true() {
+        // Order-sensitive twin: the old `try_fold` stopped at the leading `None`.
+        let prop = FilterProp::AnyOf {
+            props: vec![unknown(), known_true()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            Some(true),
+            "a leading unknown must not mask a definite later match"
+        );
+    }
+
+    #[test]
+    fn any_of_all_unknown_is_unknown() {
+        let prop = FilterProp::AnyOf {
+            props: vec![unknown(), unknown()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            None,
+            "nothing true and something unknown ⇒ unknown"
+        );
+    }
+
+    #[test]
+    fn any_of_false_plus_unknown_is_unknown() {
+        let prop = FilterProp::AnyOf {
+            props: vec![known_false(), unknown()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            None,
+            "a definite false does not resolve the unknown alternative"
+        );
+    }
+
+    #[test]
+    fn any_of_all_false_is_false() {
+        let prop = FilterProp::AnyOf {
+            props: vec![known_false(), known_false()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            Some(false),
+            "every alternative definitely false ⇒ definitely false"
+        );
+    }
+
+    #[test]
+    fn any_of_true_plus_false_is_true() {
+        let prop = FilterProp::AnyOf {
+            props: vec![known_false(), known_true()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn tri_state_or_reaches_the_typed_filter_caller() {
+        // End-to-end through the production entry point: the typed caller admits
+        // only `Some(true)`, so the tri-state fix is what makes this match.
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Instant],
+            properties: vec![FilterProp::AnyOf {
+                props: vec![known_true(), unknown()],
+            }],
+            ..Default::default()
+        });
+        assert!(
+            matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "a definitely-matching alternative must admit the face"
+        );
+    }
+
+    #[test]
+    fn negation_of_unknown_stays_unknown() {
+        let prop = FilterProp::Not {
+            prop: Box::new(unknown()),
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            None,
+            "negating an unknowable property cannot invent an answer"
+        );
+    }
+
+    // ─── unknown must survive outer negation (fail-closed at every depth) ────
+    //
+    // Review #6743: the recursion collapsed unknown to `false` inside `Typed`,
+    // so an outer `Not` inverted "cannot tell" into "matches" and admitted the
+    // wrong card class. These drive the production entry point.
+
+    fn typed_with(props: Vec<FilterProp>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Instant],
+            properties: props,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn not_around_live_only_property_does_not_admit_a_face() {
+        // `Tapped` needs a battlefield object; `Not(Tapped)` must NOT be a match.
+        let filter = TargetFilter::Not {
+            filter: Box::new(typed_with(vec![unknown()])),
+        };
+        assert!(
+            !matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "negating an unanswerable property must not admit the face"
+        );
+    }
+
+    #[test]
+    fn not_around_unknown_controller_scope_does_not_admit_a_face() {
+        // Under `Reject` the controller is unknown, so `Not(controller-scoped)`
+        // is unknown too — not a match.
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![crate::types::ability::TypeFilter::Instant],
+                controller: Some(ControllerRef::You),
+                ..Default::default()
+            })),
+        };
+        assert!(
+            !matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::Reject
+            ),
+            "negating an unanswerable controller scope must not admit the face"
+        );
+    }
+
+    #[test]
+    fn not_around_a_definite_false_still_admits() {
+        // The fix must not over-correct: a DEFINITELY false inner filter still
+        // negates to a match.
+        let filter = TargetFilter::Not {
+            filter: Box::new(typed_with(vec![known_false()])),
+        };
+        assert!(
+            matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "negating a definite non-match must still admit the face"
+        );
+    }
+
+    #[test]
+    fn not_around_a_definite_true_rejects() {
+        let filter = TargetFilter::Not {
+            filter: Box::new(typed_with(vec![known_true()])),
+        };
+        assert!(!matches_target_filter_against_face_scoped(
+            &tri_state_face(),
+            &filter,
+            FaceControllerScope::AssumeOwn
+        ));
+    }
+
+    #[test]
+    fn not_around_an_unanswerable_filter_variant_does_not_admit() {
+        // `SelfRef` needs a resolution context; unknown, so `Not` is unknown.
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::SelfRef),
+        };
+        assert!(
+            !matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "an unanswerable filter variant must stay unknown under negation"
+        );
+    }
+
+    #[test]
+    fn opponent_scope_under_assume_own_is_definitely_false_not_unknown() {
+        // `AssumeOwn` states the face is the querying player's own card, so
+        // "controlled by an opponent" is definitely FALSE — and its negation is
+        // therefore a definite match.
+        let opponent = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Instant],
+            controller: Some(ControllerRef::Opponent),
+            ..Default::default()
+        });
+        assert!(!matches_target_filter_against_face_scoped(
+            &tri_state_face(),
+            &opponent,
+            FaceControllerScope::AssumeOwn
+        ));
+        assert!(
+            matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &TargetFilter::Not {
+                    filter: Box::new(opponent)
+                },
+                FaceControllerScope::AssumeOwn
+            ),
+            "own-face knowledge makes the opponent scope definitely false, so \
+             its negation is a definite match"
+        );
+    }
+
+    #[test]
+    fn and_with_an_unknown_branch_does_not_admit() {
+        let filter = TargetFilter::And {
+            filters: vec![typed_with(vec![known_true()]), typed_with(vec![unknown()])],
+        };
+        assert!(!matches_target_filter_against_face_scoped(
+            &tri_state_face(),
+            &filter,
+            FaceControllerScope::AssumeOwn
+        ));
+    }
+
+    #[test]
+    fn or_with_a_definite_true_admits_despite_an_unknown_branch() {
+        let filter = TargetFilter::Or {
+            filters: vec![typed_with(vec![unknown()]), typed_with(vec![known_true()])],
+        };
+        assert!(
+            matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "a definitely-matching alternative admits even beside an unknown"
         );
     }
 }

@@ -434,6 +434,20 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
+  /**
+   * Engine-owned deadlock-safe escape for AI softlock recovery (#6393).
+   * Null when `fallback_action` has no legal completion.
+   */
+  async getAiFallbackAction(): Promise<GameAction | null> {
+    this.assertInitialized();
+    try {
+      if (this.engine) return await this.engine.getAiFallbackAction();
+      return await this.fallback!.getAiFallbackAction();
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
 /** Load an EXISTING pool's per-game card data, or dispose it when the game's
    * universe is unbounded (e.g. Momir). Fanning the full ~93MB corpus onto
    * every pool worker costs ~380MB of WASM linear memory per worker — measured
@@ -584,9 +598,20 @@ export class WasmAdapter implements EngineAdapter {
     throw new Error("resolveAll requires worker-based engine");
   }
 
+  private async requireCardDbForRestore(): Promise<void> {
+    await this.ensureCardDb();
+    // Soft-failed ensureCardDb leaves cardDbLoaded false and skips
+    // rehydrate_game_from_card_db — restored CardName NamedChoices then have
+    // empty legal actions and softlock the AI (#6393). Refuse DB-less restore
+    // / P2P host resume the same way warmCardDatabase surfaces load failure.
+    if (!this.cardDbLoaded) {
+      throw new Error("Card database failed to load");
+    }
+  }
+
   async restoreState(state: PersistedGameState): Promise<void> {
     this.assertInitialized();
-    await this.ensureCardDb();
+    await this.requireCardDbForRestore();
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
     else await this.fallback!.restoreState(json);
@@ -647,21 +672,12 @@ export class WasmAdapter implements EngineAdapter {
    */
   async resumeMultiplayerHostState(state: PersistedGameState): Promise<void> {
     this.assertInitialized();
+    // Same CARD_DB requirement as restoreState — resume rehydrates abilities
+    // only when the DB is loaded (engine-wasm resume_multiplayer_host_state).
+    await this.requireCardDbForRestore();
     const json = JSON.stringify(state);
-    if (this.engine) {
-      // Ensure the card database is loaded before the engine rehydrates
-      // ability definitions on restore. Same sequential-queue guarantee
-      // as `restoreState`.
-      if (!this.cardDbLoaded) {
-        await this.engine.loadCardDbFromUrl().then(
-          () => { this.cardDbLoaded = true; },
-          () => { /* card DB is best-effort */ },
-        );
-      }
-      await this.engine.resumeMultiplayerHostState(json);
-    } else {
-      this.fallback!.resumeMultiplayerHostState(json);
-    }
+    if (this.engine) await this.engine.resumeMultiplayerHostState(json);
+    else await this.fallback!.resumeMultiplayerHostState(json);
   }
 
   /**
@@ -709,10 +725,7 @@ export class WasmAdapter implements EngineAdapter {
    */
   async warmCardDatabase(): Promise<void> {
     await this.initialize();
-    await this.ensureCardDb();
-    if (!this.cardDbLoaded) {
-      throw new Error("Card database failed to load");
-    }
+    await this.requireCardDbForRestore();
   }
 
   /**
@@ -846,9 +859,10 @@ interface MainThreadFallback {
   getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult>;
   getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
   getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null>;
+  getAiFallbackAction(): Promise<GameAction | null>;
   exportState(): Promise<string>;
   restoreState(stateJson: string): Promise<void>;
-  resumeMultiplayerHostState(stateJson: string): void;
+  resumeMultiplayerHostState(stateJson: string): Promise<void>;
   setMultiplayerMode(enabled: boolean): void;
   applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown>;
   projectSeatView(stateJson: string): Promise<unknown>;
@@ -961,14 +975,19 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         return (r ?? null) as GameAction | null;
       }),
 
+    getAiFallbackAction: () =>
+      enqueue(() => {
+        const r = wasm.get_ai_fallback_action();
+        return (r ?? null) as GameAction | null;
+      }),
+
     exportState: () => enqueue(() => wasm.export_game_state_json()),
 
     restoreState: (stateJson: string) =>
       enqueue(() => wasm.restore_game_state(stateJson)),
 
-    resumeMultiplayerHostState: (stateJson: string) => {
-      enqueue(() => wasm.resume_multiplayer_host_state(stateJson));
-    },
+    resumeMultiplayerHostState: (stateJson: string) =>
+      enqueue(() => wasm.resume_multiplayer_host_state(stateJson)),
 
     setMultiplayerMode: (enabled: boolean) => {
       enqueue(() => wasm.set_multiplayer_mode(enabled));

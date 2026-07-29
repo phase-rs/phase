@@ -30,6 +30,7 @@ use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
+use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_keyword::parse_granted_keyword_fragment;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_special::normalize_self_refs_for_static;
@@ -61,8 +62,12 @@ pub fn max_spacecraft_threshold(lines: &[&str]) -> Option<u32> {
 /// Return shape of [`parse_spacecraft_threshold_lines`]: source-line-tagged
 /// statics, triggers, and activated abilities, plus the set of consumed line
 /// indices (so the main oracle dispatcher can skip them).
+///
+/// The statics are [`StaticIr`] so this preprocessor owns its own provenance:
+/// the recognizer input is the post-`|` threshold body, never the printed
+/// `N+ | …` line the span anchors to.
 type SpacecraftThresholdParse = (
-    Vec<(usize, StaticDefinition)>,
+    Vec<(usize, StaticIr)>,
     Vec<(usize, TriggerDefinition)>,
     Vec<(usize, AbilityDefinition)>,
     Vec<usize>,
@@ -159,7 +164,7 @@ struct ThresholdParser<'a> {
 }
 
 struct ThresholdOutput<'a> {
-    statics: &'a mut Vec<(usize, StaticDefinition)>,
+    statics: &'a mut Vec<(usize, StaticIr)>,
     triggers: &'a mut Vec<(usize, TriggerDefinition)>,
     abilities: &'a mut Vec<(usize, AbilityDefinition)>,
 }
@@ -177,11 +182,14 @@ impl ThresholdParser<'_> {
         if let Some(keyword_mods) = parse_keyword_only_body(body) {
             output.statics.push((
                 line_idx,
-                StaticDefinition::continuous()
-                    .affected(TargetFilter::SelfRef)
-                    .condition(self.static_cond.clone())
-                    .modifications(keyword_mods)
-                    .description(description.to_string()),
+                StaticIr::from_definition(
+                    body,
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::SelfRef)
+                        .condition(self.static_cond.clone())
+                        .modifications(keyword_mods)
+                        .description(description.to_string()),
+                ),
             ));
             return true;
         }
@@ -247,13 +255,17 @@ impl ThresholdParser<'_> {
         if !multi.is_empty() {
             for mut sd in multi {
                 sd.condition = Some(self.static_cond.clone());
-                output.statics.push((line_idx, sd));
+                output
+                    .statics
+                    .push((line_idx, StaticIr::from_definition(&static_text, sd)));
             }
             return true;
         }
         if let Some(mut sd) = parse_static_line(&static_text) {
             sd.condition = Some(self.static_cond.clone());
-            output.statics.push((line_idx, sd));
+            output
+                .statics
+                .push((line_idx, StaticIr::from_definition(&static_text, sd)));
             return true;
         }
 
@@ -342,7 +354,7 @@ mod tests {
         let (statics, triggers, abilities, consumed) =
             parse_spacecraft_threshold_lines(lines, name, base_trigger_index);
         (
-            statics.into_iter().map(|(_, s)| s).collect(),
+            statics.into_iter().map(|(_, s)| s.definition).collect(),
             triggers.into_iter().map(|(_, t)| t).collect(),
             abilities.into_iter().map(|(_, a)| a).collect(),
             consumed,

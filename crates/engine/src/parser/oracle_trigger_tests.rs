@@ -12,8 +12,9 @@ use crate::types::ability::{
     CountScope, DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition,
     DiscardSelfScope, Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
     ManaSpendPermission, ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality, TapStateChange,
-    TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
+    SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -545,6 +546,28 @@ fn intervening_if_source_attacked_this_turn_populates_condition() {
     );
     assert_eq!(taigam.condition, expected);
     assert!(taigam.execute.is_some());
+}
+
+#[test]
+fn tolsimir_midnights_light_preserves_combat_source_and_event_attacker_axes() {
+    let trigger = parse_trigger_line(
+        "Whenever a Wolf you control attacks, if Tolsimir, Midnight's Light attacked this combat, \
+         target creature an opponent controls blocks that Wolf this combat if able.",
+        "Tolsimir, Midnight's Light",
+    );
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::SourceAttackedThisCombat),
+        "the intervening-if is combat-scoped and source-incarnation-bound"
+    );
+    assert!(matches!(
+        trigger.execute.as_deref().map(|ability| &*ability.effect),
+        Some(Effect::ForceBlock {
+            attacker: Some(crate::types::ability::ForceBlockAttackerRef::EventSource),
+            duration: Duration::UntilEndOfCombat,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -1659,6 +1682,7 @@ fn trigger_life_of_the_party_etb_goads_created_tokens() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(*target, Some(TargetFilter::LastCreated));
             assert_eq!(*duration, Some(Duration::Permanent));
@@ -2975,6 +2999,7 @@ fn trigger_combat_damage_look_then_exile_face_down_grants_impulse_play() {
             Effect::ExileTop {
                 player: TargetFilter::TriggeringPlayer,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: true,
             }
         ),
@@ -3266,6 +3291,7 @@ fn opponent_attacks_that_player_library_binds_to_triggering_player() {
             Effect::ExileTop {
                 player: TargetFilter::TriggeringPlayer,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -3327,6 +3353,7 @@ fn trigger_maralen_etb_exile_top_two_of_target_opponents_library() {
         Effect::ExileTop {
             player,
             count,
+            position: crate::types::ability::LibraryPosition::Top,
             face_down,
         } => {
             assert_eq!(
@@ -3344,6 +3371,49 @@ fn trigger_maralen_etb_exile_top_two_of_target_opponents_library() {
         }
         other => panic!("Expected ExileTop, got {other:?}"),
     }
+}
+
+/// CR 701.22a + CR 603.2: A completed-scry condition is parsed from its
+/// keyword, controller, threshold, library edge/owner, and scry-action axes;
+/// its typed bottom-count provenance reaches the following effect body.
+#[test]
+fn completed_scry_bottom_trigger_preserves_threshold_and_effect_provenance() {
+    let def = parse_trigger_line(
+        "When you choose to put two or more cards on the bottom of your library while scrying, exile that many cards from the bottom of your library.",
+        "Completed Scry Test",
+    );
+    assert_eq!(def.mode, TriggerMode::Scry);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert_eq!(def.scry_bottom_count, Some((Comparator::GE, 2)));
+    let execute = def
+        .execute
+        .as_ref()
+        .expect("completed-scry trigger must have an effect body");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::TriggeringScryBottomCount,
+            },
+            position: crate::types::ability::LibraryPosition::Bottom,
+            face_down: false,
+        }
+    ));
+}
+
+#[test]
+fn completed_scry_bottom_trigger_preserves_exact_threshold() {
+    let def = parse_trigger_line(
+        "When you choose to put exactly two cards on the bottom of your library while scrying, draw a card.",
+        "Completed Scry Exact Test",
+    );
+    assert_eq!(def.mode, TriggerMode::Scry);
+    assert_eq!(def.scry_bottom_count, Some((Comparator::EQ, 2)));
+    assert!(
+        def.execute.is_some(),
+        "reach guard: the completed-scry condition must leave its effect body for the normal trigger pipeline"
+    );
 }
 
 /// Issue #1499 — Arabella, Abandoned Doll: "Whenever Arabella attacks, it
@@ -5365,7 +5435,11 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
             transform_sub.condition,
         );
     match &*transform_sub.effect {
-        Effect::Transform { target } => {
+        Effect::Transform {
+            target,
+            scope: EffectScope::Single,
+            ..
+        } => {
             // The parser today emits `ParentTarget` here — "transform it"
             // refers back to the Untap target (the trigger source).
             assert_eq!(
@@ -5374,7 +5448,7 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
                 "Transform.target must be ParentTarget — 'transform it' inherits the Untap target",
             );
         }
-        other => panic!("nested sub_ability effect must be Transform, got {other:?}"),
+        other => panic!("nested sub_ability effect must be a single Transform, got {other:?}"),
     }
     // The Transform clause is the inner-most sub_ability and inherits the
     // default `ContinuationStep` link — the chain shape is
@@ -7023,6 +7097,7 @@ fn trigger_evelyn_exiles_each_library_with_collection_counter_and_permission() {
         Effect::ExileTop {
             player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 1 },
+            position: crate::types::ability::LibraryPosition::Top,
             face_down: false,
         }
     ));
@@ -8255,6 +8330,46 @@ fn trigger_you_play_a_card_draw() {
 fn trigger_you_plays_a_card_does_not_match_play_card() {
     let def = parse_trigger_line("Whenever you plays a card, draw a card.", "Malformed");
     assert_ne!(def.mode, TriggerMode::PlayCard);
+}
+
+// CR 601.1a + CR 701.18b: "play a land or cast a spell" is the same event pair
+// as "play a card" (a player plays a card by playing it as a land OR casting it
+// as a spell), so the explicitly-spelled-out form routes to the unified
+// `PlayCard` mode. Regression for The Endstone / Flubs / Infernal Sovereign.
+#[test]
+fn trigger_you_play_a_land_or_cast_a_spell_is_play_card() {
+    let def = parse_trigger_line(
+        "Whenever you play a land or cast a spell, draw a card.",
+        "The Endstone",
+    );
+    assert_eq!(def.mode, TriggerMode::PlayCard);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    // No origin restriction → fires on any land play or spell cast.
+    assert_eq!(def.spell_cast_origin, OriginConstraint::Any);
+    assert!(def.valid_card.is_none());
+}
+
+// CR 601.1a + CR 601.2a + #6387: Shadow of the Goblin — the "from anywhere
+// other than your hand" origin clause modifies BOTH the land-play and
+// spell-cast halves of "play a land or cast a spell". Before the fix the
+// land-play arm shadowed this line and dropped both the cast half and the
+// origin, so it dealt damage on every land played from hand. It must parse as
+// `PlayCard` with `NotEquals(Hand)` so the shared origin gate excludes plays
+// and casts from the hand.
+#[test]
+fn trigger_shadow_of_the_goblin_play_or_cast_from_non_hand() {
+    let def = parse_trigger_line(
+        "Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
+        "Shadow of the Goblin",
+    );
+    assert_eq!(def.mode, TriggerMode::PlayCard);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert_eq!(
+        def.spell_cast_origin,
+        OriginConstraint::NotEquals(Zone::Hand)
+    );
+    // No card-type narrowing — any land/spell from a non-hand zone qualifies.
+    assert!(def.valid_card.is_none());
 }
 
 #[test]
@@ -13968,6 +14083,70 @@ fn trigger_necropotence_you_discard_exile_from_graveyard() {
     }
 }
 
+/// CR 701.23a + CR 608.2k: a search result is the parent target of its
+/// delivery continuation, even inside an ETB whose event source would
+/// otherwise lift `ParentTarget` to `TriggeringSource`. That protection ends
+/// at an independent sibling: a later "that creature" still denotes the
+/// entering creature.
+#[test]
+fn event_source_lift_skips_search_delivery_but_resumes_at_independent_sibling() {
+    let sponsor = parse_trigger_line(
+        "When this creature enters, each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, puts those cards onto the battlefield tapped, then shuffles.",
+        "Scholarship Sponsor",
+    );
+    let sponsor_search = sponsor
+        .execute
+        .as_deref()
+        .expect("Scholarship Sponsor ETB must have an execute chain");
+    assert!(matches!(
+        sponsor_search.effect.as_ref(),
+        Effect::SearchLibrary { .. }
+    ));
+    let sponsor_delivery = sponsor_search
+        .sub_ability
+        .as_deref()
+        .expect("Scholarship Sponsor search must retain its delivery");
+    assert!(
+        matches!(
+            sponsor_delivery.effect.as_ref(),
+            Effect::ChangeZone {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "the search-result delivery must remain ParentTarget"
+    );
+
+    let synthetic = parse_trigger_line(
+        "When this creature enters, search your library for a basic land card, put it onto the battlefield, then shuffle. Then exile that creature.",
+        "Search Boundary Fixture",
+    );
+    let mut node = synthetic.execute.as_deref();
+    let mut saw_search = false;
+    let mut independent_exile_target = None;
+    while let Some(ability) = node {
+        match ability.effect.as_ref() {
+            Effect::SearchLibrary { .. } => saw_search = true,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } => independent_exile_target = Some(target.clone()),
+            _ => {}
+        }
+        node = ability.sub_ability.as_deref();
+    }
+    assert!(
+        saw_search,
+        "the synthetic trigger must retain its search root"
+    );
+    assert_eq!(
+        independent_exile_target,
+        Some(TargetFilter::TriggeringSource),
+        "the independent post-search sibling must still bind to the entering creature"
+    );
+}
+
 /// CR 701.9a + CR 603.2c: type qualifier on the discarded card must be
 /// preserved so a "discards a land card" trigger fires only on land
 /// discards (Aclazotz, Deepest Betrayal class).
@@ -17621,6 +17800,50 @@ fn trigger_enchanted_player_attacked() {
     assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
     // CR 508.3b: only fires when the player themselves is attacked.
     assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player),);
+    assert!(def.execute.is_some());
+}
+
+#[test]
+fn trigger_one_or_more_of_your_opponents_are_attacked() {
+    // Issue #6643 (Party Dude, level 3): CR 508.3b + CR 102.3 — fires when any
+    // creature attacks a player who is an opponent of the controller.
+    let def = parse_trigger_line(
+        "Whenever one or more of your opponents are attacked, up to one target attacking creature gets +X/+X until end of turn, where X is the number of cards in your hand.",
+        "Party Dude",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_target, Some(TargetFilter::Opponent));
+    // CR 508.3b: only fires when the opponent player themselves is attacked,
+    // not when a planeswalker they control or battle they protect is.
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    // CR 603.2c: the aggregate "one or more ... are attacked" phrasing is a
+    // single trigger event even if it contains multiple occurrences (e.g. two
+    // distinct opponents attacked in the same declaration), so it must be
+    // batched — otherwise the ordinary per-defending-player split would fire
+    // this once per attacked opponent.
+    assert!(
+        def.batched,
+        "aggregate 'one or more ... are attacked' must be batched (CR 603.2c)"
+    );
+    assert!(def.execute.is_some());
+}
+
+#[test]
+fn trigger_one_of_your_opponents_is_attacked() {
+    // Singular counterpart of the same CR 508.3b class: CR 603.2c's "trigger
+    // repeatedly if one event contains multiple occurrences" clause applies
+    // here instead, so this form is intentionally NOT batched.
+    let def = parse_trigger_line(
+        "Whenever one of your opponents is attacked, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_target, Some(TargetFilter::Opponent));
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert!(
+        !def.batched,
+        "singular 'one of your opponents is attacked' must not be batched"
+    );
     assert!(def.execute.is_some());
 }
 
@@ -25069,5 +25292,290 @@ fn ketramose_exile_trigger_gated_on_source_zones_and_own_turn() {
         Some(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn),
         "must be gated to the controller's own turn, got {:?}",
         trigger.constraint
+    );
+}
+
+/// CR 303.4b + CR 301.5a + CR 603.2 (issue: Sigil of Sleep freeze):
+/// An article-less damage-source subject — the Aura/Equipment self-referential
+/// determiners "enchanted creature" / "equipped creature" — must still be
+/// recognized as a "deals damage to a player" trigger so a later "that player"
+/// anaphor binds to the DAMAGED (triggering) player. Before the fix,
+/// `parse_damage_source_subject` required a leading article, so these subjects
+/// failed the strict `is_damage_done_trigger_pattern` check and fell through to
+/// the `condition_introduces_target_player` branch, yielding the wrong
+/// `TargetPlayer` scope (which surfaces a spurious companion Player target slot
+/// at runtime). Building-block test: assert the single-authority scope resolver
+/// itself, so every card in the class is covered — not just one.
+#[test]
+fn relative_player_scope_binds_article_less_damage_source_to_triggering_player() {
+    for cond in [
+        "enchanted creature deals damage to a player",
+        "equipped creature deals combat damage to a player",
+    ] {
+        assert!(
+            is_damage_done_trigger_pattern(cond),
+            "article-less subject must be a DamageDone pattern: {cond:?}",
+        );
+        assert_eq!(
+            relative_player_scope_for_condition(cond),
+            Some(ControllerRef::TriggeringPlayer),
+            "\"that player\" in {cond:?} must bind to the damaged (triggering) player",
+        );
+    }
+}
+
+/// CR 120.3 + CR 603.7c: Sigil of Sleep's bounce must target a creature the
+/// DAMAGED player controls (`ControllerRef::TriggeringPlayer`), not a
+/// separately-chosen `TargetPlayer`. The `TargetPlayer` mis-scoping made the
+/// runtime surface a phantom Player target slot, freezing the game (the reported
+/// bug). Uses the card's verbatim Oracle text.
+#[test]
+fn parse_sigil_of_sleep_bounce_targets_triggering_player_controlled_creature() {
+    let def = parse_trigger_line(
+        "Whenever enchanted creature deals damage to a player, return target creature that player controls to its owner's hand.",
+        "Sigil of Sleep",
+    );
+
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    match &*execute.effect {
+        Effect::Bounce { target, .. } => match target {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::TriggeringPlayer),
+                    "bounce target must be controlled by the damaged (triggering) player, got {:?}",
+                    tf.controller,
+                );
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "bounce target must be a creature, got {:?}",
+                    tf.type_filters,
+                );
+            }
+            other => panic!("bounce target must be a Typed creature filter, got {other:?}"),
+        },
+        other => panic!("Sigil of Sleep effect must be Bounce, got {other:?}"),
+    }
+}
+
+// -----------------------------------------------------------------------
+// Mutable Pupa — perpetual keyword-mirror ETB trigger (issue #6321).
+// Digital-only Alchemy (no CR entry for "perpetually"); CR 702.1c + CR 608.2c govern the
+// per-branch resolution order the `SiblingCondition::ReplicatedOrBranch` marker
+// restores. Oracle text verified verbatim against data/card-data.json.
+// -----------------------------------------------------------------------
+
+// The antecedent on its own — the SAME production entry point the real pipeline
+// uses (`parse_trigger_line`), but with a SINGLE-sentence body (no "The same is
+// true for …" tail), so no keyword replication runs. This isolates the
+// antecedent build: the trigger body reaches `parse_effect_chain_ir`'s chunk
+// loop with `in_trigger == true`, where `strip_suffix_conditional`'s
+// trigger-gated `ZoneChangeObjectMatchesFilter` branch peels the trailing "if
+// that creature has flying" gate BEFORE `parse_effect_clause` sees the chunk;
+// the short bare-keyword form then lands `try_parse_perpetual_grant_keywords`
+// (`ApplyPerpetual { GrantKeywords[Flying] }`) and the peeled gate is reattached
+// at the chunk level. The root node must carry BOTH — proving the antecedent
+// builds correctly through the real suffix-strip path without depending on the
+// replication machinery.
+#[test]
+fn mutable_pupa_antecedent_clause_grants_and_gates_the_same_keyword() {
+    let def = parse_trigger_line(
+        "Whenever another creature you control enters, this creature perpetually gains flying if that creature has flying.",
+        "Mutable Pupa",
+    );
+    let root = def
+        .execute
+        .as_deref()
+        .expect("trigger has an ability chain");
+    // Single-sentence antecedent: exactly one node, no replicated siblings.
+    assert!(
+        root.sub_ability.is_none(),
+        "single-sentence antecedent must not build a sibling chain",
+    );
+    match &*root.effect {
+        Effect::ApplyPerpetual {
+            modification: PerpetualModification::GrantKeywords { keywords },
+            ..
+        } => assert_eq!(
+            keywords,
+            &vec![Keyword::Flying],
+            "antecedent must grant exactly Flying"
+        ),
+        other => panic!("expected ApplyPerpetual GrantKeywords, got {other:?}"),
+    }
+    assert_eq!(
+        root.condition,
+        Some(AbilityCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: crate::types::zones::Zone::Battlefield,
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::WithKeyword {
+                    value: Keyword::Flying
+                }],
+                ..Default::default()
+            }),
+        }),
+        "antecedent must be gated on the entering object having Flying",
+    );
+}
+
+// The whole two-sentence trigger builds EXACTLY 12 independent keyword-mirror
+// nodes. Each node grants ONLY its own keyword and is gated on THAT SAME keyword
+// (the positional correspondence is the "list collapse" regression guard: a
+// bug that reused keyword[0] for every gate would fail the per-node condition
+// assertion). Nodes 1..11 are `SequentialSibling` + `ReplicatedOrBranch`; the
+// root is the unmarked `ContinuationStep` antecedent.
+#[test]
+fn mutable_pupa_full_trigger_builds_twelve_independent_keyword_mirrors() {
+    let def = parse_trigger_line(
+        "Whenever another creature you control enters, this creature perpetually gains flying if that creature has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance.",
+        "Mutable Pupa",
+    );
+    let root = def
+        .execute
+        .as_deref()
+        .expect("trigger has an ability chain");
+    let mut nodes: Vec<&AbilityDefinition> = Vec::new();
+    let mut cur = Some(root);
+    while let Some(n) = cur {
+        nodes.push(n);
+        cur = n.sub_ability.as_deref();
+    }
+    let expected = [
+        Keyword::Flying,
+        Keyword::FirstStrike,
+        Keyword::DoubleStrike,
+        Keyword::Deathtouch,
+        Keyword::Haste,
+        Keyword::Hexproof,
+        Keyword::Indestructible,
+        Keyword::Lifelink,
+        Keyword::Menace,
+        Keyword::Reach,
+        Keyword::Trample,
+        Keyword::Vigilance,
+    ];
+    assert_eq!(
+        nodes.len(),
+        expected.len(),
+        "expected exactly 12 keyword-mirror nodes, got {}",
+        nodes.len()
+    );
+    for (i, (node, kw)) in nodes.iter().zip(expected.iter()).enumerate() {
+        match &*node.effect {
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::GrantKeywords { keywords },
+                ..
+            } => assert_eq!(
+                keywords,
+                &vec![kw.clone()],
+                "node {i} must grant only {kw:?}"
+            ),
+            other => panic!("node {i}: expected ApplyPerpetual GrantKeywords, got {other:?}"),
+        }
+        assert_eq!(
+            node.condition,
+            Some(AbilityCondition::ZoneChangeObjectMatchesFilter {
+                origin: None,
+                destination: crate::types::zones::Zone::Battlefield,
+                filter: TargetFilter::Typed(TypedFilter {
+                    properties: vec![FilterProp::WithKeyword { value: kw.clone() }],
+                    ..Default::default()
+                }),
+            }),
+            "node {i} must be gated on {kw:?} (not keyword[0])",
+        );
+        if i == 0 {
+            assert_eq!(
+                node.sub_link,
+                SubAbilityLink::ContinuationStep,
+                "root antecedent is a continuation step",
+            );
+            assert_eq!(
+                node.sibling_condition,
+                SiblingCondition::Dependent,
+                "root antecedent keeps the default sibling condition",
+            );
+        } else {
+            assert_eq!(
+                node.sub_link,
+                SubAbilityLink::SequentialSibling,
+                "node {i} must be a sequential sibling",
+            );
+            assert_eq!(
+                node.sibling_condition,
+                SiblingCondition::ReplicatedOrBranch,
+                "node {i} must be an independent OR-branch",
+            );
+        }
+    }
+}
+
+// Non-regression: Odric's "the same is true for" antecedent is a static
+// keyword grant (`GenericEffect`, replicated in-place into `static_abilities`),
+// NOT a perpetual grant — the new shape-based `ReplicateKind` selection must
+// keep routing it through `StaticGrant`, so no node becomes `ApplyPerpetual` and
+// no `SequentialSibling` sibling chain is built.
+#[test]
+fn odric_same_is_true_stays_generic_effect_not_perpetual_chain() {
+    let def = parse_trigger_line(
+        "At the beginning of each combat, creatures you control gain first strike until end of turn if a creature you control has first strike. The same is true for flying, deathtouch, double strike, haste, hexproof, indestructible, lifelink, menace, reach, skulk, trample, and vigilance.",
+        "Odric, Lunarch Marshal",
+    );
+    let root = def
+        .execute
+        .as_deref()
+        .expect("trigger has an ability chain");
+    assert!(
+        matches!(&*root.effect, Effect::GenericEffect { .. }),
+        "Odric's antecedent must stay a GenericEffect keyword grant, got {:?}",
+        root.effect,
+    );
+    let mut cur = Some(root);
+    while let Some(n) = cur {
+        assert!(
+            !matches!(&*n.effect, Effect::ApplyPerpetual { .. }),
+            "Odric must never route through the perpetual keyword-grant path",
+        );
+        assert_eq!(
+            n.sibling_condition,
+            SiblingCondition::Dependent,
+            "Odric nodes must not be stamped ReplicatedOrBranch",
+        );
+        cur = n.sub_ability.as_deref();
+    }
+}
+
+// Field-level non-regression: an ordinary DEPENDENT continuation (Thieving
+// Skydiver's "If that artifact is an Equipment, attach it") must keep the
+// default `SiblingCondition::Dependent` — the `ReplicatedOrBranch` marker is
+// stamped ONLY by the two replication helpers, never by sentence-boundary
+// sibling stamping. The `node_count >= 2` reach guard proves the multi-node
+// continuation chain actually built (so the all-`Dependent` assertion is not
+// vacuous on a single node).
+#[test]
+fn thieving_skydiver_dependent_continuation_is_never_replicated_or_branch() {
+    let def = parse_trigger_line(
+        "When this creature enters, if it was kicked, gain control of target artifact with mana value X or less. If that artifact is an Equipment, attach it to this creature.",
+        "Thieving Skydiver",
+    );
+    let root = def
+        .execute
+        .as_deref()
+        .expect("trigger has an ability chain");
+    let mut cur = Some(root);
+    let mut node_count = 0usize;
+    while let Some(n) = cur {
+        node_count += 1;
+        assert_eq!(
+            n.sibling_condition,
+            SiblingCondition::Dependent,
+            "no Thieving Skydiver node may be stamped ReplicatedOrBranch",
+        );
+        cur = n.sub_ability.as_deref();
+    }
+    assert!(
+        node_count >= 2,
+        "reach guard: Thieving Skydiver must build a multi-node chain (GainControl + Attach continuation), got {node_count}",
     );
 }

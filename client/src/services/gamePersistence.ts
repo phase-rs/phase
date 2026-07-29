@@ -6,6 +6,7 @@ import type {
   GameState,
   MatchConfig,
   PersistedGameState,
+  PlayerId,
 } from "../adapter/types";
 import type { SeatState } from "../multiplayer/seatTypes";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
@@ -19,6 +20,22 @@ export interface AiSeatMeta {
   difficulty: string;
   deckId?: string | null;
   deckName?: string | null;
+}
+
+/**
+ * Credentials to reconnect a suspended native-engine solo (AI) game.
+ *
+ * Native games are server-authoritative: the game state lives in the local
+ * phase-server's `games.db`, never in IndexedDB. The player token is issued
+ * once at game creation and is the reconnect security boundary — it lives only
+ * client-side, so it must be persisted here for the game to be resumable.
+ * Presence of this field is what marks an `ActiveGameMeta` as a native resume
+ * (which has no local `saveGame` snapshot to validate against).
+ */
+export interface NativeSoloSession {
+  gameCode: string;
+  playerId: PlayerId;
+  playerToken: string;
 }
 
 export interface ActiveGameMeta {
@@ -37,6 +54,11 @@ export interface ActiveGameMeta {
   formatConfig?: FormatConfig;
   /** Bare 5-char room code for P2P guest resume. */
   p2pRoomCode?: string;
+  /** Present for native-engine solo (AI) games hosted by the local
+   *  phase-server. Its presence marks this pointer as a native resume; on
+   *  resume the client reconnects to the server session rather than loading a
+   *  local snapshot. Absent for in-browser (WASM) AI games. */
+  nativeSession?: NativeSoloSession;
 }
 
 /**

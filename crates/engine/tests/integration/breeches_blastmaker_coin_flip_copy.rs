@@ -321,7 +321,7 @@ fn setup_breeches_runtime(seed: u64) -> (GameState, ObjectId, ObjectId) {
             source_id: breeches,
             controller: PlayerId(0),
             condition: None,
-            ability,
+            ability: Box::new(ability),
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,
@@ -622,7 +622,7 @@ fn nonmatching_reflexive_coin_flip_trigger_is_discarded_not_left_pending() {
     };
     state.delayed_triggers.push(DelayedTrigger {
         condition,
-        ability: build_resolved_from_def(&won_inner, source, PlayerId(0)),
+        ability: Box::new(build_resolved_from_def(&won_inner, source, PlayerId(0))),
         controller: PlayerId(0),
         source_id: source,
         one_shot: true,

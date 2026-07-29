@@ -72,7 +72,7 @@ async function discordGet(path) {
   }
 }
 
-async function getArchivedThreads(path) {
+async function getArchivedThreads(path, cutoff) {
   const threads = [];
   let before;
 
@@ -83,7 +83,15 @@ async function getArchivedThreads(path) {
     }
 
     const body = await discordGet(`${path}?${params}`);
-    threads.push(...body.threads);
+    const recentThreads = body.threads.filter((thread) => {
+      const archiveTimestamp = thread.thread_metadata?.archive_timestamp;
+      return archiveTimestamp && new Date(archiveTimestamp) >= cutoff;
+    });
+    threads.push(...recentThreads);
+
+    if (recentThreads.length !== body.threads.length) {
+      break;
+    }
 
     if (!body.has_more || body.threads.length === 0) {
       break;
@@ -175,6 +183,9 @@ function mergeMessages(existingMessages, newMessages) {
 async function main() {
   await loadDotEnv(".env");
 
+  const sinceDays = 14;
+  const cutoff = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000);
+
   const { DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, DISCORD_CHANNEL_ID } = process.env;
   if (!DISCORD_BOT_TOKEN || !DISCORD_GUILD_ID || !DISCORD_CHANNEL_ID) {
     throw new Error(
@@ -189,12 +200,14 @@ async function main() {
 
   const publicArchived = await getArchivedThreads(
     `/channels/${DISCORD_CHANNEL_ID}/threads/archived/public`,
+    cutoff,
   );
 
   let privateArchived = [];
   try {
     privateArchived = await getArchivedThreads(
       `/channels/${DISCORD_CHANNEL_ID}/threads/archived/private`,
+      cutoff,
     );
   } catch (error) {
     console.error(`Skipping private archived threads: ${error.message}`);
@@ -205,23 +218,30 @@ async function main() {
     threadsById.set(thread.id, thread);
   }
 
-  const threads = [...threadsById.values()].map((thread) => ({
-    id: thread.id,
-    name: thread.name,
-    parent_id: thread.parent_id,
-    type: thread.type,
-    archived: thread.thread_metadata?.archived ?? false,
-    locked: thread.thread_metadata?.locked ?? false,
-    archive_timestamp: thread.thread_metadata?.archive_timestamp ?? null,
-    owner_id: thread.owner_id ?? null,
-    message_count: thread.message_count ?? null,
-    total_message_sent: thread.total_message_sent ?? null,
-  }));
+  const threads = [...threadsById.values()]
+    .filter((thread) => {
+      const archiveTimestamp = thread.thread_metadata?.archive_timestamp;
+      return archiveTimestamp && new Date(archiveTimestamp) >= cutoff;
+    })
+    .map((thread) => ({
+      id: thread.id,
+      name: thread.name,
+      parent_id: thread.parent_id,
+      type: thread.type,
+      archived: thread.thread_metadata?.archived ?? false,
+      locked: thread.thread_metadata?.locked ?? false,
+      archive_timestamp: thread.thread_metadata?.archive_timestamp ?? null,
+      owner_id: thread.owner_id ?? null,
+      message_count: thread.message_count ?? null,
+      total_message_sent: thread.total_message_sent ?? null,
+    }));
 
   await fs.mkdir("tmp", { recursive: true });
   await fs.writeFile(THREADS_OUTPUT, `${JSON.stringify(threads, null, 2)}\n`);
 
-  console.log(`Wrote ${threads.length} threads to ${THREADS_OUTPUT}`);
+  console.log(
+    `Wrote ${threads.length} threads since ${cutoff.toISOString()} to ${THREADS_OUTPUT}`,
+  );
 
   const existingThreadMessages = await readJsonIfExists(THREAD_MESSAGES_OUTPUT);
   const existingByThreadId = new Map(

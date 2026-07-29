@@ -9,6 +9,7 @@ pub mod definitions;
 pub mod events;
 pub mod format;
 pub mod game_state;
+mod game_state_size;
 pub mod identifiers;
 pub mod interaction;
 pub mod keywords;
@@ -91,10 +92,14 @@ pub use resolved_commands::{
     ResolvedObjectStatusReplayInvariantError, ResolvedOncePerTurnPermission, ResolvedPlayerEdit,
     ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
     ResolvedRngReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
-    ResolvedRulesJournalError, ResolvedTriggerCollection, ResolvedTriggerCollectionCommand,
-    ResolvedTriggerCollectionReplayInvariantError, ResolvedTriggerLedgerEdit,
-    RulesExecutionNodeKind, RulesExecutionNodeRef, SettlementNode, SettlementNodeOrdinal,
-    SpentManaUnit,
+    ResolvedRulesJournalError, ResolvedStackEntryFinalizeCommand,
+    ResolvedStackEntryFinalizeReplayInvariantError, ResolvedStackPushCommand,
+    ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError, ResolvedStackRemovalCommand,
+    ResolvedStackRemovalReplayInvariantError, ResolvedTriggerCollection,
+    ResolvedTriggerCollectionCommand, ResolvedTriggerCollectionReplayInvariantError,
+    ResolvedTriggerLedgerEdit, ResolvedUncommittedTriggerRemovalCommand,
+    ResolvedUncommittedTriggerRemovalReplayInvariantError, RulesExecutionNodeKind,
+    RulesExecutionNodeRef, SettlementNode, SettlementNodeOrdinal, SpentManaUnit,
 };
 pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};

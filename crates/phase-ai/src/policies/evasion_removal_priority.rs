@@ -58,8 +58,12 @@ impl EvasionRemovalPriorityPolicy {
         let target_quality_bonus = removal_target_quality_score(target_value);
         let evasion_bonus = evasion_score(ctx, target, *target_id);
         let velocity_bonus = velocity_score(ctx, target, *target_id);
+        // #6582: threat value alone rewards the biggest body, so a damage spell
+        // gets pointed at a creature it can't kill. Fold in whether the pending
+        // damage is actually lethal (CR 704.5g) so a clean kill outranks a whiff.
+        let lethality_bonus = super::removal_lethality::lethality_bonus(ctx, *target_id, target);
 
-        target_quality_bonus + evasion_bonus + velocity_bonus
+        target_quality_bonus + evasion_bonus + velocity_bonus + lethality_bonus
     }
 }
 
@@ -211,13 +215,13 @@ mod tests {
     use engine::game::scenario::{GameScenario, P0};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, EffectKind, PtValue, ResolvedAbility, TargetFilter,
-        TargetRef, TypedFilter,
+        AbilityDefinition, AbilityKind, Effect, EffectKind, PtValue, QuantityExpr, ResolvedAbility,
+        TargetFilter, TargetRef, TypedFilter,
     };
     use engine::types::format::FormatConfig;
     use engine::types::game_state::{
-        CastPaymentMode, CopyTargetSlot, GameState, PendingCast, TargetSelectionProgress,
-        TargetSelectionSlot, WaitingFor,
+        CastPaymentMode, CopyTargetSlot, GameState, PendingCast, TargetEffectDetail,
+        TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
@@ -230,6 +234,7 @@ mod tests {
 
     const BEAST_WITHIN_ORACLE: &str =
         "Destroy target permanent. Its controller creates a 3/3 green Beast creature token.";
+    const LIGHTNING_BOLT_ORACLE: &str = "Lightning Bolt deals 3 damage to any target.";
 
     fn add_creature(
         state: &mut GameState,
@@ -462,6 +467,112 @@ mod tests {
         );
     }
 
+    /// #6582 end-to-end: a real 3-damage burn spell must be aimed at the body it
+    /// can actually kill, not at the biggest threat on the board. This drives the
+    /// PRODUCTION path — a cast that reaches `TargetSelection`, the registered
+    /// `EvasionRemovalPriorityPolicy` verdict, and the full `score_candidates`
+    /// ranking — so the lethality term is proven to survive registry wiring, not
+    /// just to compute the right number in isolation.
+    #[test]
+    fn burn_prefers_the_killable_body_over_the_bigger_unkillable_threat() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        // The killable body is deliberately the LOWER threat, so threat value
+        // alone (the pre-#6582 ranking) would pick the 7/7 the Bolt can't kill.
+        let killable = scenario
+            .add_creature(PlayerId(1), "Scrappy Skirmisher", 2, 2)
+            .id();
+        let unkillable = scenario
+            .add_creature(PlayerId(1), "Looming Colossus", 7, 7)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+        );
+
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&bolt].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: bolt,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the real Lightning Bolt fixture should reach target selection");
+
+        let (pending_cast, target_slots) = match &runner.state().waiting_for {
+            WaitingFor::TargetSelection {
+                pending_cast,
+                target_slots,
+                ..
+            } => (pending_cast, target_slots),
+            other => panic!("expected Lightning Bolt target selection, got {other:?}"),
+        };
+        let effects = crate::policies::context::collect_ability_effects(&pending_cast.ability);
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    damage_source: None,
+                    ..
+                }
+            )),
+            "reach guard: Lightning Bolt must parse as 3 default-sourced damage"
+        );
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::Unimplemented { .. })),
+            "the regression fixture must not silently drop an unsupported clause"
+        );
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(killable)));
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(unkillable)));
+
+        let state = runner.state();
+        let decision = build_decision_context(state);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(42);
+
+        let killable_delta = registry_delta(state, &decision, killable, &config);
+        let unkillable_delta = registry_delta(state, &decision, unkillable, &config);
+        assert!(
+            killable_delta > unkillable_delta,
+            "the registered removal policy must prefer the body the Bolt kills: \
+             killable 2/2={killable_delta}, unkillable 7/7={unkillable_delta}"
+        );
+
+        let scores = crate::search::score_candidates(state, P0, &config);
+        assert!(
+            full_score_for_target(&scores, killable) > full_score_for_target(&scores, unkillable),
+            "the complete Very Hard scorer must carry the lethality preference through to the \
+             final target ranking"
+        );
+
+        // The #6582 misplay itself: whatever else Very Hard does with a Bolt
+        // ("any target" keeps the opponent's face on the table), it must not
+        // burn it on a 7/7 that survives.
+        let mut rng = SmallRng::seed_from_u64(42);
+        assert_ne!(
+            crate::choose_action(state, P0, &config, &mut rng),
+            Some(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(unkillable)),
+            }),
+            "Very Hard must not spend a 3-damage burn spell on a 7/7 it cannot kill"
+        );
+    }
+
     #[test]
     fn activated_removal_weights_controller_threat_but_beneficial_activation_is_neutral() {
         let destroy = Effect::Destroy {
@@ -495,11 +606,11 @@ mod tests {
             add_creature(&mut state, PlayerId(2), &format!("Goblin {index}"), 1, 1);
         }
         let trigger_source = ObjectId(999);
-        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+        state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
             source_id: trigger_source,
             controller: P0,
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Destroy {
                     target: TargetFilter::Any,
                     cant_regenerate: false,
@@ -507,7 +618,7 @@ mod tests {
                 Vec::new(),
                 trigger_source,
                 P0,
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -518,12 +629,14 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
         let config = AiConfig::default();
         let slot = TargetSelectionSlot {
             legal_targets: vec![TargetRef::Object(low), TargetRef::Object(high)],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         };
         let trigger = AiDecisionContext {
             waiting_for: WaitingFor::TriggerTargetSelection {
@@ -597,6 +710,8 @@ mod tests {
                     ],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
@@ -663,6 +778,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(flyer)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -729,6 +846,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(ground_opp)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),

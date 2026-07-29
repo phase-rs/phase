@@ -41,6 +41,39 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         ResolvedRulesCommand::ObjectCounter(command) => {
             engine::game::effects::counters::apply_resolved_counter_edit(state, command).unwrap();
         }
+        ResolvedRulesCommand::ObjectTransform(command) => {
+            engine::game::transform::apply_resolved_transform(state, command).unwrap();
+        }
+        ResolvedRulesCommand::Attachment(command) => {
+            engine::game::effects::attach::apply_resolved_attachment(state, command).unwrap();
+        }
+        ResolvedRulesCommand::DelayedTriggerInstall(command) => {
+            engine::game::triggers::apply_resolved_delayed_trigger(state, command.as_ref())
+                .unwrap();
+        }
+        ResolvedRulesCommand::ContinuousEffectInstall(command) => {
+            state
+                .apply_resolved_continuous_effect(command.as_ref())
+                .unwrap();
+        }
+        ResolvedRulesCommand::CombatMembership(command) => {
+            engine::game::combat::apply_resolved_combat_membership(state, command).unwrap();
+        }
+        ResolvedRulesCommand::ControllerOverride(command) => {
+            engine::game::zones::apply_resolved_controller_override(state, command).unwrap();
+        }
+        ResolvedRulesCommand::EntryProvenance(command) => {
+            engine::game::zones::apply_resolved_entry_provenance(state, command).unwrap();
+        }
+        ResolvedRulesCommand::ObjectCease(command) => {
+            engine::game::zones::apply_resolved_object_cease(state, command).unwrap();
+        }
+        ResolvedRulesCommand::PlayerLeave(command) => {
+            engine::game::elimination::apply_resolved_player_leave(state, command).unwrap();
+        }
+        ResolvedRulesCommand::TokenCreation(command) => {
+            engine::game::effects::token::apply_resolved_token_creation(state, command).unwrap();
+        }
         ResolvedRulesCommand::LedgerEdit(command) => {
             engine::game::ledger::apply_resolved_ledger_edit(state, command).unwrap();
         }
@@ -61,6 +94,23 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         }
         ResolvedRulesCommand::TriggerCollection(command) => {
             engine::game::triggers::apply_resolved_trigger_collection(state, command).unwrap();
+        }
+        ResolvedRulesCommand::StackPush(command) => {
+            engine::game::stack::apply_resolved_stack_push(state, command.as_ref()).unwrap();
+        }
+        ResolvedRulesCommand::StackEntryFinalize(command) => {
+            engine::game::stack::apply_resolved_stack_entry_finalize(state, command.as_ref())
+                .unwrap();
+        }
+        ResolvedRulesCommand::UncommittedTriggerRemoval(command) => {
+            engine::game::stack::apply_resolved_uncommitted_trigger_removal(
+                state,
+                command.as_ref(),
+            )
+            .unwrap();
+        }
+        ResolvedRulesCommand::StackRemoval(command) => {
+            engine::game::stack::apply_resolved_stack_removal(state, command.as_ref()).unwrap();
         }
     }
 }

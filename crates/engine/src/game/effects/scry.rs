@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
-use crate::types::events::{GameEvent, PlayerActionKind};
+use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::ProposedEvent;
@@ -162,7 +162,7 @@ pub(crate) fn apply_scry_after_replacement_with_source(
 fn apply_scry_after_replacement_without_draw(
     state: &mut GameState,
     event: ProposedEvent,
-    events: &mut Vec<GameEvent>,
+    _events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     let (player_id, count) = match event {
         ProposedEvent::Scry {
@@ -181,17 +181,15 @@ fn apply_scry_after_replacement_without_draw(
 
     let count = (count as usize).min(player.library.len());
     if count == 0 {
+        // No `PlayerPerformedAction::Scry` event is emitted below in this
+        // case, so "whenever you scry" does not fire and no look count is
+        // carried — a zero-card look is not a scry event to observe.
         return ReplacementResult::Execute(ProposedEvent::Scry {
             player_id,
             count: 0,
             applied: HashSet::new(),
         });
     }
-
-    events.push(GameEvent::PlayerPerformedAction {
-        player_id,
-        action: PlayerActionKind::Scry,
-    });
 
     let cards: Vec<_> = player
         .library
@@ -236,6 +234,9 @@ mod tests {
 
     #[test]
     fn test_scry_2_sets_waiting_for_scry_choice() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
         let mut state = GameState::new_two_player(42);
         for i in 0..5 {
             create_object(
@@ -257,13 +258,16 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events.iter().any(|event| matches!(
-            event,
-            GameEvent::PlayerPerformedAction {
-                player_id,
-                action: PlayerActionKind::Scry,
-            } if *player_id == PlayerId(0)
-        )));
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: crate::types::events::PlayerActionKind::Scry,
+                    ..
+                }
+            )),
+            "scry observers fire only after the choice completes"
+        );
 
         match &state.waiting_for {
             WaitingFor::ScryChoice { player, cards } => {
@@ -273,6 +277,71 @@ mod tests {
             }
             other => panic!("Expected ScryChoice, got {:?}", other),
         }
+
+        let waiting = state.waiting_for.clone();
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: top_2.clone(),
+            },
+            &mut events,
+        )
+        .expect("keeping both looked-at cards must use the production choice handler");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(2),
+                scry_bottom_count: Some(0),
+                ..
+            }
+        )));
+    }
+
+    /// CR 701.22a: Completion records the actual number moved to the bottom,
+    /// independently from the number initially looked at.
+    #[test]
+    fn test_scry_choice_records_positive_bottom_count() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        for i in 0..2 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+        }
+        let top_card = state.players[0].library[0];
+        let ability = make_scry_ability(2);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let waiting = state.waiting_for.clone();
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: vec![top_card],
+            },
+            &mut events,
+        )
+        .expect("keeping one card must complete the production scry choice");
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(2),
+                scry_bottom_count: Some(1),
+                ..
+            }
+        )));
     }
 
     #[test]

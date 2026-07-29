@@ -42,7 +42,7 @@ fn mk_ctx(
             source_id: ObjectId(source_id),
             controller: PlayerId(0),
             condition: None,
-            ability,
+            ability: Box::new(ability),
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,

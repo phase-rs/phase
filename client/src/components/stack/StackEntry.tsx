@@ -256,7 +256,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
           card's width instead of a fixed px size. */}
       {isSpell && displayManaCost && (
         <div className="pointer-events-none absolute inset-0 @container">
-          <ManaCostPips cost={displayManaCost} size="fluid" className="absolute right-[5%] top-[2.5%]" />
+          <ManaCostPips cost={displayManaCost} size="fluid" />
         </div>
       )}
 

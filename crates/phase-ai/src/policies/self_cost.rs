@@ -10,28 +10,52 @@
 //!
 //! This module is the single authority that (1) recognizes those four cost
 //! shapes on the `AbilityCost` tree, (2) prices the self-inflicted cost, and
-//! (3) decides whether the ability's immediate payoff is trivial. It is
-//! deliberately conservative: anything whose payoff scales or is ambiguous —
-//! mana production, land search, large or power-derived damage, beneficial
-//! counters — is treated as non-trivial, so ramp, fixing, burn finishers, and
-//! counter payoffs are never suppressed. Off-ability synergy (an aristocrats
-//! board that turns each death into value, a lifegain/reanimator shell that
-//! wants the resource spent) stands the gate down entirely.
+//! (3) decides whether the ability's immediate payoff is trivial, and prices
+//! the payoffs it can price confidently (draws, out-of-pressure lifegain) for
+//! the net-value comparison — a draw **the AI itself takes**
+//! (`Draw{Controller}`) is priced at ZERO when the engine certifies that no card
+//! will arrive at all (a `CantDraw`/draw-limit static, the replacement pipeline,
+//! or an empty library), and at its nominal count otherwise. Two scope limits
+//! that this sentence must not be read past: it is a
+//! deliverable/not-deliverable gate, NOT a count-accurate one (see the
+//! disclosure on `effect_benefit_value`'s `Draw` arm for the two legs that still
+//! over-price a partially-delivered draw), and it reaches `Controller` draws
+//! ONLY — every other draw target falls to the `_ => None` arm and is
+//! `Unpriced`, so a payoff like "each player draws a card" is stood down rather
+//! than gated.
+//!
+//! It is deliberately conservative: anything whose
+//! payoff scales or is ambiguous — mana production, land search, large or
+//! power-derived damage, beneficial counters — is treated as non-trivial, so
+//! ramp, fixing, burn finishers, and counter payoffs are never suppressed.
+//! That conservatism is typed as [`BenefitAppraisal::Unpriced`], which covers
+//! both a non-trivial effect with no confident price and an unmodeled rider
+//! sitting beside a priced effect — in either case no directional conclusion
+//! about the trade is sound, so the comparison stands down. Off-ability
+//! synergy (an aristocrats board that turns each death into value, a
+//! lifegain/reanimator shell that wants the resource spent) stands the gate
+//! down entirely.
+//!
+//! Cost-vs-benefit for a self-cost activation is answered **here and only
+//! here**: `FreeOutletActivationPolicy` scores aristocrats death-trigger
+//! payoff presence for free outlets and holds no cost authority.
 //!
 //! Only the *scoring* half lives here; the thin `SelfCostValuePolicy` adapter
 //! (`self_cost_value.rs`) fetches the activated ability and turns these
 //! predicates into a `PolicyVerdict`.
 
 use engine::game::bracket_estimate::CommanderBracketTier;
+use engine::game::effects::counters::{preview_counter_addition, CounterAdditionPreview};
+use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::players;
 use engine::game::quantity::resolve_quantity;
 use engine::types::ability::{AbilityCost, AbilityDefinition, Effect, QuantityExpr, TargetFilter};
 use engine::types::card_type::CoreType;
-use engine::types::counter::CounterType;
+use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::GameState;
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -46,7 +70,7 @@ use super::effect_classify::lethal_to_creature;
 use super::self_protection_classify::{
     any_immediate_threat, is_self_protection_effect, self_protection_effect_payoff,
 };
-use super::strategy_helpers::{sacrifice_cost, targetable_threat_value};
+use super::strategy_helpers::{sacrifice_cost, targetable_threat_value, SINGLE_CARD_VALUE};
 
 /// A fixed face-damage payoff at or below this value is trivial — a 1- or
 /// 2-point ping for no board effect is not worth spending a real resource on.
@@ -84,6 +108,84 @@ pub(crate) fn self_cost_in_scope(cost: &AbilityCost) -> bool {
             costs.iter().any(self_cost_in_scope)
         }
         _ => false,
+    }
+}
+
+/// Replacement-aware fact for the narrow "remove N typed counters from this,
+/// then put exactly N of that type on this" activated-ability shape.
+///
+/// This is intentionally not a general counter-value model. It only protects a
+/// self-cost that claims to replenish its own exact counter payment, where a
+/// replacement preventing the add would turn the activation into a pure loss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelfCounterCostPreview {
+    Applied,
+    Prevented,
+    ChoiceRequired,
+    Transformed,
+    Unsupported,
+}
+
+pub(crate) fn self_counter_cost_preview(
+    state: &GameState,
+    actor: PlayerId,
+    source_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> Option<SelfCounterCostPreview> {
+    let (count, counter_type) = self_counter_removal_cost(ability.cost.as_ref()?)?;
+    let Effect::PutCounter {
+        counter_type: replenished_type,
+        count: QuantityExpr::Fixed { value },
+        target: TargetFilter::SelfRef,
+    } = &*ability.effect
+    else {
+        return None;
+    };
+    if ability.sub_ability.is_some()
+        || ability.else_ability.is_some()
+        || counter_type != replenished_type
+        || *value != i32::try_from(count).ok()?
+    {
+        return None;
+    }
+
+    let source = state.objects.get(&source_id)?;
+    if source.controller != actor {
+        return None;
+    }
+    match preview_counter_addition(
+        state,
+        actor,
+        ObjectIncarnationRef::from_object(source),
+        counter_type.clone(),
+        count,
+    )? {
+        CounterAdditionPreview::Applied { .. } => Some(SelfCounterCostPreview::Applied),
+        CounterAdditionPreview::Prevented => Some(SelfCounterCostPreview::Prevented),
+        CounterAdditionPreview::ChoiceRequired { .. } => {
+            Some(SelfCounterCostPreview::ChoiceRequired)
+        }
+        CounterAdditionPreview::Transformed { .. } => Some(SelfCounterCostPreview::Transformed),
+        CounterAdditionPreview::Unsupported => Some(SelfCounterCostPreview::Unsupported),
+    }
+}
+
+/// Extract the narrow self-counter payment this preview understands. Parser
+/// output may wrap one cost in `Composite`; multi-cost composites are outside
+/// this exact replenishment check because the preview does not value their
+/// additional payment components.
+fn self_counter_removal_cost(cost: &AbilityCost) -> Option<(u32, &CounterType)> {
+    match cost {
+        AbilityCost::RemoveCounter {
+            count,
+            counter_type: CounterMatch::OfType(counter_type),
+            target: None,
+            ..
+        } => Some((*count, counter_type)),
+        AbilityCost::Composite { costs } if costs.len() == 1 => {
+            self_counter_removal_cost(&costs[0])
+        }
+        _ => None,
     }
 }
 
@@ -144,6 +246,40 @@ pub(crate) fn real_self_cost(
 /// Cost of the permanent(s) the sacrifice would consume. A `SelfRef` sacrifice
 /// is priced against the ability's own source (never the cheapest permanent);
 /// any other filter takes the cheapest AI-controlled match.
+///
+/// **KNOWN MISPRICING on the `SelfRef` branch when the source is a land.**
+/// `sacrifice_cost` charges `sacrifice_land_penalty`, whose stated rationale is
+/// CR 305.2's one-land-per-turn rate limit on the replacement drop. CR 305.4
+/// (`docs/MagicCompRules.txt:1700`) refutes that for a fetchland: "Effects may
+/// also allow players to 'put' lands onto the battlefield. This isn't the same
+/// as 'playing a land' and doesn't count as a land played during the current
+/// turn." A fetchland puts its replacement onto the battlefield, so it consumes
+/// no land drop and is close to manabase-neutral — yet this path prices it as a
+/// full land lost, and the AI under-activates it.
+///
+/// Not corrected here, but the correction is **cheap and the parts already
+/// exist** — this is a scoping decision, not a research problem. The discount
+/// cannot be "a land sacrificing itself is cheap": a land that sacrifices itself
+/// for a non-land effect really does lose a source. The discriminator is whether
+/// the ability *replaces* the land, and `policies::fetch_land_patience` already
+/// carries both halves of that predicate:
+///
+/// - `cost_sacrifices_self` — matches `AbilityCost::Sacrifice(sac)` with
+///   `sac.target == TargetFilter::SelfRef`, recursing through `Composite`, which
+///   is exactly the shape this function short-circuits on;
+/// - `effects_are_tapped_land_fetch` — `Effect::SearchLibrary` with a
+///   land-referencing filter plus a `ChangeZone` to the battlefield. Relaxing
+///   its `EtbTapState::Tapped` requirement generalizes Evolving Wilds to true
+///   fetchlands (Flooded Strand), which is the case this docstring is about.
+///   `features::mana_ramp::{chain_searches_for_land, chain_puts_land_to_safe_zone,
+///   target_filter_references_land}` are the same building blocks.
+///
+/// Deferred because it is an **unmeasured AI behaviour change** across this
+/// function's call sites, `scripts/ai-gate.sh` is 2-player-only and cannot reach
+/// the Commander regime the reports come from, and
+/// `crates/engine/data/card-data.json` is not generated in this tree, so a
+/// printed fetchland's parsed representation was never observed end to end.
+/// Owned follow-up; see UNIT2-IMPL-R3 §5.
 fn sacrifice_leaf_cost(
     state: &GameState,
     ai_player: PlayerId,
@@ -171,22 +307,171 @@ fn sacrifice_leaf_cost(
     }
 }
 
-/// True when every effect the ability produces is trivial — no meaningful
-/// immediate advantage that would justify the self-cost.
-pub(crate) fn benefit_is_trivial(
+/// Outcome of pricing an in-scope self-cost ability's payoff chain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum BenefitAppraisal {
+    /// Every effect in the chain is trivial or unmodeled — no real payoff.
+    Trivial,
+    /// Every effect is explicitly classified, every non-trivial effect carries
+    /// a confident card-equivalent price, and `value` is their sum.
+    Priced { value: f64 },
+    /// The chain has a real payoff but no sound comparison basis: either a
+    /// classifier-non-trivial effect has no confident price (mana, land search,
+    /// dynamic damage, removal, counters, self-protection under threat, ...) or
+    /// an unmodeled rider sits beside a priced effect. Stand down.
+    Unpriced,
+}
+
+/// Three-valued classification of a single chain effect — the typed form of
+/// the old `effect_is_trivial` bool, splitting its `_ => true` catch-all out
+/// as its own answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EffectTriviality {
+    /// An explicit classifier arm judged it: no meaningful immediate advantage.
+    Trivial,
+    /// An explicit classifier arm judged it: a real payoff.
+    NonTrivial,
+    /// No classifier arm models this effect at all (the old catch-all).
+    Unmodeled,
+}
+
+impl EffectTriviality {
+    /// Map a classifier arm's existing `is_trivial` bool onto the typed form.
+    /// Every explicit arm keeps its exact judgement; only the catch-all becomes
+    /// [`EffectTriviality::Unmodeled`].
+    fn from_is_trivial(is_trivial: bool) -> Self {
+        if is_trivial {
+            Self::Trivial
+        } else {
+            Self::NonTrivial
+        }
+    }
+}
+
+/// Appraise the whole payoff chain: is there a real payoff, and can it be
+/// priced confidently enough to compare against the self-cost?
+///
+/// Complements the off-ability synergy check in [`synergy_justifies_self_cost`]
+/// — this one measures the ability's *intrinsic* payoff.
+pub(crate) fn appraise_benefit(
     state: &GameState,
     ai_player: PlayerId,
     source_id: ObjectId,
     ability: &AbilityDefinition,
-) -> bool {
-    collect_chain_effects(ability)
-        .iter()
-        .all(|effect| effect_is_trivial(state, ai_player, source_id, ability, effect))
+    penalties: &PolicyPenalties,
+) -> BenefitAppraisal {
+    let mut total = 0.0;
+    let mut any_nontrivial = false;
+    let mut any_unmodeled = false;
+    for effect in collect_chain_effects(ability) {
+        match effect_triviality(state, ai_player, source_id, ability, effect) {
+            EffectTriviality::Trivial => continue,
+            EffectTriviality::Unmodeled => any_unmodeled = true,
+            EffectTriviality::NonTrivial => {
+                any_nontrivial = true;
+                match effect_benefit_value(state, ai_player, source_id, effect, penalties) {
+                    Some(value) => total += value,
+                    None => return BenefitAppraisal::Unpriced,
+                }
+            }
+        }
+    }
+    if !any_nontrivial {
+        // All-trivial AND all-unmodeled chains land here — preserving the old
+        // `benefit_is_trivial() == true` behaviour byte for byte (the catch-all
+        // mapped to trivial), so the reject/marginal gate is not weakened.
+        return BenefitAppraisal::Trivial;
+    }
+    if any_unmodeled {
+        // An unmodeled rider beside a priced effect makes the sum neither a
+        // lower nor an upper bound — the measured rider population carries both
+        // signs (Token/Surveil benefits, Discard/LoseLife drawbacks), so no
+        // directional conclusion is sound. Decided here, during the walk,
+        // independent of what the net would have been.
+        return BenefitAppraisal::Unpriced;
+    }
+    BenefitAppraisal::Priced { value: total }
 }
 
-/// Whether a single effect carries no meaningful immediate advantage. Shared
-/// with the X-cast no-op gate (`x_cast_gate.rs`) for pricing the *non-X*
-/// residual effects of an {X}-cost payoff whose only affordable X is 0.
+/// Confident card-equivalent price of a single NON-TRIVIAL effect.
+/// `None` = real but not confidently priceable — this module's documented
+/// conservatism, typed as [`BenefitAppraisal::Unpriced`] by the caller.
+fn effect_benefit_value(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    effect: &Effect,
+    penalties: &PolicyPenalties,
+) -> Option<f64> {
+    match effect {
+        // CR 121.1: "A player draws a card by putting the top card of their
+        // library into their hand. ... It may also be done as part of a cost or
+        // effect of a spell or ability." One drawn card is exactly one unit of
+        // the registry's score contract (`registry.rs`: delta 1.0 == one card).
+        //
+        // CR 614.6 + CR 614.11: a draw the live pipeline REMOVES — mandatorily
+        // prevented, substituted away by a non-Draw chain (Notion Thief,
+        // Hullbreacher, Chains of Mephistopheles), or count-modified to zero —
+        // "never happens"; a `CantDraw` static, an exhausted `PerTurnDrawLimit`,
+        // or an empty library (CR 704.5b, where a mere zero is if anything an
+        // UNDER-penalty) likewise delivers no card. Such a draw buys exactly
+        // nothing, so it is priced 0.0 — priced, NOT `None`: `None` is
+        // `BenefitAppraisal::Unpriced`, which stands the whole comparison down
+        // and ALLOWS the activation, the opposite of what the engine has just
+        // certified. The zero is not a heuristic: `can_draw_at_least_one`
+        // delegates every leg to the authority the live pipeline itself uses
+        // (`proposed_draw_survives_replacement`), and an OPTIONAL replacement is
+        // never assumed to apply, so a deliverable draw is never under-priced.
+        //
+        // Deliberately binary, not count-aware. `can_draw_at_least_one` asks
+        // only whether ONE card arrives, so two legs still price the full
+        // nominal count of a draw the engine will only partially deliver:
+        //   1. Draw-limit headroom shorter than the count: with a
+        //      `PerTurnDrawLimit` headroom of 1 a `draw(3)` still prices 3.0
+        //      (CR 121.2 performs it as three individual draws, only one of
+        //      which is permitted).
+        //   2. LIBRARY shorter than the count — strictly the worse leg. The
+        //      preflight probes with count 1, so a 1-card library against a
+        //      `draw(3)` reports deliverable and prices 3.0; one card arrives
+        //      and the two failed draw attempts LOSE the game at the next SBA
+        //      check (CR 704.5b). `select_cards_to_draw` is explicit that a
+        //      partial draw (`count > library.len()`) yields only what is
+        //      available, so this is a certified loss the net comparison cannot
+        //      see — not merely an over-price.
+        // Both legs are PRE-EXISTING (this arm priced 3.0 before the
+        // deliverability gate existed) and are DISCLOSED, not fixed, here.
+        // Over-pricing is the conservative direction for this module's charter
+        // — it can let a marginal crack through, never forbid a paying one —
+        // but note that over-pricing a benefit is under-vetoing, so neither leg
+        // should be read as harmless. Pricing them correctly needs a new `pub`
+        // engine authority ("how many of N will actually arrive"), which is
+        // tracked as its own unit rather than built for one consumer here.
+        Effect::Draw {
+            count,
+            target: TargetFilter::Controller,
+        } => Some(if can_draw_at_least_one(state, ai_player) {
+            resolve_quantity(state, count, ai_player, source_id).max(0) as f64 * SINGLE_CARD_VALUE
+        } else {
+            0.0
+        }),
+        // Lifegain to the controller, life not a pressured resource: priced on
+        // the same per-point axis as paying life. Under life pressure the value
+        // is genuinely larger and hard to bound — stand down (`None`),
+        // preserving the pre-comparison behaviour exactly.
+        Effect::GainLife {
+            amount,
+            player: TargetFilter::Controller,
+        } if !ai_life_critical(state, ai_player) => Some(
+            resolve_quantity(state, amount, ai_player, source_id).max(0) as f64
+                * penalties.self_cost_pay_life_per_point,
+        ),
+        _ => None,
+    }
+}
+
+/// Bool view of [`effect_triviality`] for the X-cast no-op gate
+/// (`x_cast_gate.rs`): unmodeled and trivial both read as "trivial", exactly as
+/// the old catch-all did.
 pub(crate) fn effect_is_trivial(
     state: &GameState,
     ai_player: PlayerId,
@@ -194,29 +479,52 @@ pub(crate) fn effect_is_trivial(
     ability: &AbilityDefinition,
     effect: &Effect,
 ) -> bool {
+    !matches!(
+        effect_triviality(state, ai_player, source_id, ability, effect),
+        EffectTriviality::NonTrivial
+    )
+}
+
+/// Whether a single effect carries a meaningful immediate advantage, and
+/// whether this module models it at all. Shared with the X-cast no-op gate
+/// (`x_cast_gate.rs`, via [`effect_is_trivial`]) for pricing the *non-X*
+/// residual effects of an {X}-cost payoff whose only affordable X is 0.
+fn effect_triviality(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    ability: &AbilityDefinition,
+    effect: &Effect,
+) -> EffectTriviality {
     match effect {
         // Drawing a card is real card advantage.
-        Effect::Draw { count, .. } => resolve_quantity(state, count, ai_player, source_id) < 1,
+        Effect::Draw { count, .. } => EffectTriviality::from_is_trivial(
+            resolve_quantity(state, count, ai_player, source_id) < 1,
+        ),
         // Damage is non-trivial if it is dynamic (power-derived, e.g. Fling),
         // lethal to a player, kills a real creature, or exceeds the face-ping
         // ceiling.
-        Effect::DealDamage { amount, target, .. } => {
-            deal_damage_is_trivial(state, ai_player, source_id, amount, target)
-        }
+        Effect::DealDamage { amount, target, .. } => EffectTriviality::from_is_trivial(
+            deal_damage_is_trivial(state, ai_player, source_id, amount, target),
+        ),
         // Small lifegain is trivial unless the AI is under life pressure.
-        Effect::GainLife { amount, .. } => {
+        Effect::GainLife { amount, .. } => EffectTriviality::from_is_trivial(
             resolve_quantity(state, amount, ai_player, source_id) <= TRIVIAL_LIFEGAIN_CEILING
-                && !ai_life_critical(state, ai_player)
-        }
+                && !ai_life_critical(state, ai_player),
+        ),
         // Removal is non-trivial when a worthwhile opponent creature can be hit.
         Effect::Destroy { target, .. } | Effect::Bounce { target, .. } => {
-            removal_is_trivial(state, ai_player, source_id, target)
+            EffectTriviality::from_is_trivial(removal_is_trivial(
+                state, ai_player, source_id, target,
+            ))
         }
         Effect::ChangeZone {
             destination: Zone::Exile | Zone::Graveyard,
             target,
             ..
-        } => removal_is_trivial(state, ai_player, source_id, target),
+        } => EffectTriviality::from_is_trivial(removal_is_trivial(
+            state, ai_player, source_id, target,
+        )),
         // A beneficial counter (e.g. an indestructible keyword counter) is
         // non-trivial by default; a harmful counter is removal. The one trivial
         // case is a self-counter that fizzles because paying the cost removes
@@ -225,7 +533,14 @@ pub(crate) fn effect_is_trivial(
             counter_type,
             target,
             ..
-        } => put_counter_is_trivial(state, ai_player, source_id, ability, counter_type, target),
+        } => EffectTriviality::from_is_trivial(put_counter_is_trivial(
+            state,
+            ai_player,
+            source_id,
+            ability,
+            counter_type,
+            target,
+        )),
         // A mass counter mirrors the single-`PutCounter` classification: a
         // harmful mass counter (e.g. "-1/-1 counter on each creature") is real
         // board interaction and non-trivial whenever it wipes/shrinks a
@@ -236,29 +551,27 @@ pub(crate) fn effect_is_trivial(
             counter_type,
             target,
             ..
-        } => {
-            if counter_is_harmful(counter_type) {
-                removal_is_trivial(state, ai_player, source_id, target)
-            } else {
-                false
-            }
-        }
+        } => EffectTriviality::from_is_trivial(if counter_is_harmful(counter_type) {
+            removal_is_trivial(state, ai_player, source_id, target)
+        } else {
+            false
+        }),
         // Mana production is ramp — never trivial (Ashnod's/Phyrexian Altar).
-        Effect::Mana { .. } => false,
+        Effect::Mana { .. } => EffectTriviality::NonTrivial,
         // A library search for a land is ramp/fixing (sacrifice-a-land fetch
         // chains) — non-trivial.
-        Effect::SearchLibrary { filter, .. } => {
-            !(ability_searches_library_for_land(ability) || target_filter_references_land(filter))
-        }
+        Effect::SearchLibrary { filter, .. } => EffectTriviality::from_is_trivial(
+            !(ability_searches_library_for_land(ability) || target_filter_references_land(filter)),
+        ),
         // A self-protection grant is only worth a cost when a threat is live.
-        effect if is_self_protection_effect(effect) => {
+        effect if is_self_protection_effect(effect) => EffectTriviality::from_is_trivial(
             match self_protection_effect_payoff(state, ai_player, source_id, effect) {
                 Some(has_payoff) => !has_payoff,
                 None => !any_immediate_threat(state, ai_player),
-            }
-        }
-        // No modeled board impact → trivial.
-        _ => true,
+            },
+        ),
+        // No modeled board impact at all — the honest third answer.
+        _ => EffectTriviality::Unmodeled,
     }
 }
 
@@ -438,7 +751,7 @@ fn ai_life_critical(state: &GameState, ai_player: PlayerId) -> bool {
     let ai_life = state.players[ai_player.0 as usize].life;
     let opp_total_power: i32 = players::opponents(state, ai_player)
         .iter()
-        .map(|&opp| board_stats(state, opp).1)
+        .map(|&opp| board_stats(state, opp).power)
         .sum();
     ai_life <= 5 || ai_life <= opp_total_power
 }
@@ -453,7 +766,7 @@ fn pay_life_criticality_mult(state: &GameState, ai_player: PlayerId) -> f64 {
 
 /// Whether off-ability deck synergy justifies paying this self-cost even though
 /// the ability's own effect is trivial. Complements the intrinsic-payoff check
-/// in [`benefit_is_trivial`] — it covers value that lands elsewhere (aristocrats
+/// in [`appraise_benefit`] — it covers value that lands elsewhere (aristocrats
 /// death triggers, a lifegain/reanimator engine fed by the resource spent).
 pub(crate) fn synergy_justifies_self_cost(
     features: &DeckFeatures,
@@ -484,7 +797,7 @@ fn synergy_justifies_cost(
         // sacrificed, so "sacrifice a land" yields zero landfall value —
         // including it would reopen Zuran Orb in landfall decks. Genuine
         // sacrifice-a-land ramp is already non-trivial via the mana / land-search
-        // arms of `benefit_is_trivial`.
+        // classification arms `appraise_benefit` walks.
         AbilityCost::Sacrifice(_) => {
             count_death_triggers_on_board(
                 state,

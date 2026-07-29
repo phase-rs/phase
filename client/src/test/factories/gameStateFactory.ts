@@ -528,6 +528,7 @@ export const buildStackEntry = (
 export const legalActionsResultFactory = Factory.define<LegalActionsResult>(() => ({
   actions: [],
   autoPassRecommended: false,
+  endContinuousEffectOffers: [],
 }));
 
 export const buildLegalActionsResult = (

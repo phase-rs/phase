@@ -171,6 +171,7 @@ fn companion_restricted_mana_routes_only_to_the_matching_special_action() {
         source_types: &[],
         source_subtypes: &[],
         ability_tag: None,
+        mana_color_constraint: engine::types::mana::ActivationManaColorConstraint::Unrestricted,
     }));
     assert!(!restriction.allows(&PaymentContext::Effect));
 }
