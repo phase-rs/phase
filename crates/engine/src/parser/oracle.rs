@@ -6037,19 +6037,14 @@ pub(crate) fn parse_oracle_ir(
 
         // CR 706: Die roll table — "Roll a dN" followed by "min—max | effect" lines.
         // Consumes the header + all table lines and produces a single RollDie ability.
-        if let Some((def, next_i)) = try_parse_die_roll_table(
-            &lines,
-            i,
-            &line,
-            if is_spell {
-                AbilityKind::Spell
-            } else {
-                AbilityKind::Activated
-            },
-        ) {
-            emitter.ability_at(item_line, def);
-            i = next_i;
-            continue;
+        if !is_spell {
+            if let Some((def, next_i)) =
+                try_parse_die_roll_table(&lines, i, &line, AbilityKind::Activated)
+            {
+                emitter.ability_at(item_line, def);
+                i = next_i;
+                continue;
+            }
         }
 
         // CR 702.62a: Suspend N—{cost} — parse count and cost from Oracle text.
