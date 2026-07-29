@@ -26,6 +26,7 @@
 //! CR 613.4c: outside per-recipient layer contexts, "other" is source-relative.
 
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{PayCostKind, WaitingFor};
 use engine::types::phase::Phase;
@@ -65,15 +66,29 @@ fn bound_by_moonsilver_sacrifice_another_is_source_relative() {
         state.layers_dirty.mark_full();
     }
 
-    // Activate the Aura's "Sacrifice another permanent: Attach ..." ability.
-    // Sacrifice-cost payment is prompted BEFORE target selection, so the
-    // eligible sacrifice set is surfaced immediately.
+    // CR 602.2b + CR 601.2c: declare the attachment target before paying the
+    // "Sacrifice another permanent" cost.
     runner
         .act(GameAction::ActivateAbility {
             source_id: aura,
             ability_index: 0,
         })
         .expect("activating Bound by Moonsilver's sacrifice ability must succeed");
+
+    let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected attachment target selection before the sacrifice cost, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(host)));
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(host)],
+        })
+        .expect("selecting the Aura's attachment target must succeed");
 
     let choices = match &runner.state().waiting_for {
         WaitingFor::PayCost {

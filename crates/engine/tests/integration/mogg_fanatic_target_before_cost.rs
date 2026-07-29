@@ -187,7 +187,7 @@ fn targeted_activation_surfaces_tap_creatures_cost_after_target_selection() {
 }
 
 #[test]
-fn target_first_sacrifice_parked_at_mana_payment_cannot_be_cancelled() {
+fn target_first_mana_payment_precedes_sacrifice_and_can_be_cancelled() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let source = scenario
@@ -209,8 +209,8 @@ fn target_first_sacrifice_parked_at_mana_payment_cannot_be_cancelled() {
                         1,
                     )),
                     // CR 107.4e: Hybrid payment is a player decision, so this
-                    // forces the activation to remain at ManaPayment after the
-                    // preceding sacrifice has committed.
+                    // keeps the activation at ManaPayment before any later
+                    // non-mana cost is paid.
                     AbilityCost::Mana {
                         cost: ManaCost::Cost {
                             shards: vec![ManaCostShard::WhiteBlue],
@@ -234,33 +234,31 @@ fn target_first_sacrifice_parked_at_mana_payment_cannot_be_cancelled() {
 
     activate(&mut runner, source);
     choose_target(&mut runner, target);
-    sacrifice(&mut runner, fodder, target);
 
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ManaPayment { .. }
     ));
     assert!(
-        !runner.state().battlefield.contains(&fodder),
-        "the sacrifice cost remains paid while mana payment is pending"
+        runner.state().battlefield.contains(&fodder),
+        "the sacrifice cost is not paid before the mana-payment step"
     );
     assert!(runner.state().stack.is_empty());
     assert!(
         runner.state().deferred_triggers.is_empty(),
-        "the death trigger must remain local until the activation reaches the stack"
+        "no death trigger exists before the sacrifice cost is paid"
     );
 
-    let error = runner
+    runner
         .act(GameAction::CancelCast)
-        .expect_err("a committed activation cost must reject cancellation");
-    assert!(error.to_string().contains("after a cost is paid"));
+        .expect("an activation may be cancelled before any cost has been paid");
     assert!(matches!(
         runner.state().waiting_for,
-        WaitingFor::ManaPayment { .. }
+        WaitingFor::Priority { .. }
     ));
     assert!(
-        !runner.state().battlefield.contains(&fodder),
-        "rejecting cancellation must not restore the paid sacrifice"
+        runner.state().battlefield.contains(&fodder),
+        "cancelling before payment must preserve the sacrifice fodder"
     );
     assert!(runner.state().stack.is_empty());
     assert!(

@@ -7367,6 +7367,20 @@ fn x_cost_activation_defers_exact_target_count_until_x_is_announced() {
         .card_types
         .core_types
         .push(CoreType::Creature);
+    let other_target = create_object(
+        &mut state,
+        CardId(959),
+        PlayerId(1),
+        "Other Target Creature".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&other_target)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
     let mut ability = AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::Destroy {
@@ -7405,6 +7419,9 @@ fn x_cost_activation_defers_exact_target_count_until_x_is_announced() {
     assert!(target_slots[0]
         .legal_targets
         .contains(&TargetRef::Object(target)));
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(other_target)));
 }
 
 /// CR 602.2b + CR 601.2b/c/f: Target legality that depends on X is evaluated
@@ -7429,6 +7446,18 @@ fn x_cost_activation_defers_x_dependent_target_filter_until_x_is_announced() {
     );
     {
         let target_obj = state.objects.get_mut(&target).unwrap();
+        target_obj.card_types.core_types.push(CoreType::Creature);
+        target_obj.mana_cost = ManaCost::generic(2);
+    }
+    let other_target = create_object(
+        &mut state,
+        CardId(960),
+        PlayerId(1),
+        "Other Mana Value Two Creature".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let target_obj = state.objects.get_mut(&other_target).unwrap();
         target_obj.card_types.core_types.push(CoreType::Creature);
         target_obj.mana_cost = ManaCost::generic(2);
     }
@@ -7474,6 +7503,9 @@ fn x_cost_activation_defers_x_dependent_target_filter_until_x_is_announced() {
     assert!(target_slots[0]
         .legal_targets
         .contains(&TargetRef::Object(target)));
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(other_target)));
 }
 
 /// CR 602.2b + CR 601.2b/c/f: An unresolved X target count may defer target
@@ -34841,21 +34873,6 @@ mod remove_counter_cost {
         assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
 
         apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::PayCost {
-                kind: PayCostKind::RemoveCounter { .. },
-                ..
-            }
-        ));
-
-        apply_as_current(
-            &mut state,
-            GameAction::SelectCards {
-                cards: vec![counter_source],
-            },
-        )
-        .unwrap();
         match &state.waiting_for {
             WaitingFor::TargetSelection {
                 target_slots,
@@ -34872,6 +34889,38 @@ mod remove_counter_cost {
             }
             other => panic!("expected deferred modal target selection, got {other:?}"),
         }
+
+        let target_slots = match &state.waiting_for {
+            WaitingFor::TargetSelection { target_slots, .. } => target_slots,
+            _ => unreachable!("matched TargetSelection above"),
+        };
+        let selected_target = target_slots[0]
+            .legal_targets
+            .first()
+            .cloned()
+            .expect("modal target slot must have a legal creature");
+        apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![selected_target],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::RemoveCounter { .. },
+                ..
+            }
+        ));
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![counter_source],
+            },
+        )
+        .unwrap();
     }
 }
 

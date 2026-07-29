@@ -11715,6 +11715,31 @@ pub fn enter_payment_step(
         });
         if let Some((mut pending, cost, chosen_x)) = targeted_counter_resume {
             let concretized_cost = concretize_chosen_x_cost(&cost, chosen_x);
+            // CR 107.1b + CR 118.3: Choosing X=0 makes a targeted
+            // remove-X-counters component a zero cost. It neither requires an
+            // object choice nor requires that a matching counter exist.
+            if chosen_x == 0 {
+                pending.activation_cost =
+                    remove_first_activation_cost_matching(concretized_cost, |cost| {
+                        matches!(
+                            cost,
+                            AbilityCost::RemoveCounter {
+                                count: 0,
+                                target: Some(_),
+                                ..
+                            }
+                        )
+                    });
+                if let Some(waiting_for) = surface_next_unpaid_interactive_activation_cost(
+                    state,
+                    player,
+                    &mut pending,
+                    events,
+                )? {
+                    return Ok(waiting_for);
+                }
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            }
             let prompt_cost = targeted_remove_counter_choice_cost(&concretized_cost)
                 .unwrap_or_else(|| concretized_cost.clone());
             pending.activation_cost = Some(concretized_cost);
