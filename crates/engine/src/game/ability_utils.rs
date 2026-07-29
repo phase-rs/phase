@@ -2416,7 +2416,7 @@ fn collect_target_slots_inner(
         }
     }
 
-    if target_slot_construction_needs_chosen_x(ability) {
+    if target_slot_construction_needs_chosen_x_at_announcement(state, ability) {
         return Err(TargetSlotBuildError::RequiresChosenX);
     }
 
@@ -3072,6 +3072,22 @@ fn target_slot_construction_needs_chosen_x(ability: &ResolvedAbility) -> bool {
                         .as_ref()
                         .is_some_and(|expr| quantity_expr_has_unresolved_x(ability, expr))
             }))
+}
+
+/// CR 107.3m + CR 603.3b: A triggered ability's target filter can refer to the
+/// X paid for the spell that produced its source. That X is not `chosen_x` on
+/// the trigger, but it is already bound on the trigger source before targets
+/// are chosen; only defer target construction when neither authority exists.
+fn target_slot_construction_needs_chosen_x_at_announcement(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    target_slot_construction_needs_chosen_x(ability)
+        && ability
+            .trigger_source
+            .as_ref()
+            .and_then(|source| source.source_read(state).cost_x_paid())
+            .is_none()
 }
 
 fn target_filter_needs_chosen_x(ability: &ResolvedAbility, filter: &TargetFilter) -> bool {

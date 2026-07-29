@@ -16831,10 +16831,10 @@ pub(super) fn try_finalize_pending_activation_mana_leg(
     pending.activation_cost = remaining;
     pending.activation_ability_index = Some(ability_index);
     pending.activation_residual = ActivationResidual::ManaLeg;
-    let target_selection_settled = matches!(
+    let target_first_interactive_suffix = matches!(
         pending.activation_target_selection,
         ActivationTargetSelection::Settled
-    );
+    ) && pending.activation_cost.is_some();
     let pending_source_id = pending.object_id;
     state.pending_cast = Some(Box::new(pending));
     let waiting = casting_costs::maybe_pause_for_phyrexian_choice(
@@ -16850,11 +16850,11 @@ pub(super) fn try_finalize_pending_activation_mana_leg(
     if let Some(waiting) = waiting {
         return Ok(Some(waiting));
     }
-    if target_selection_settled {
+    if target_first_interactive_suffix {
         // CR 601.2g-h + CR 602.2b: A target-first activation has already
-        // declared its targets. An insufficient or choice-bearing mana leg
-        // therefore exposes ManaPayment rather than invalidating that target
-        // declaration.
+        // declared its targets but still has an unpaid interactive suffix. Its
+        // mana leg therefore exposes ManaPayment rather than invalidating that
+        // target declaration before the suffix can be paid.
         casting_costs::enter_payment_step(state, player, None, events).map(Some)
     } else {
         casting_costs::finalize_automatic_mana_payment(state, player, events).map(Some)
@@ -16886,10 +16886,10 @@ pub(super) fn finalize_pending_activation_mana_payment(
         activation_payment_context(state, pending.object_id, Some(ability_index));
     let activation_ctx = activation_context.as_payment_context();
     let source_id = pending.object_id;
-    let target_selection_settled = matches!(
+    let target_first_interactive_suffix = matches!(
         pending.activation_target_selection,
         ActivationTargetSelection::Settled
-    );
+    ) && pending.activation_cost.is_some();
     state.pending_cast = Some(Box::new(pending));
     if let Some(waiting) = casting_costs::maybe_pause_for_phyrexian_choice(
         state,
@@ -16903,10 +16903,10 @@ pub(super) fn finalize_pending_activation_mana_payment(
     ) {
         return Ok(waiting);
     }
-    if target_selection_settled {
+    if target_first_interactive_suffix {
         // CR 601.2g-h + CR 602.2b: Preserve the manual-payment boundary only
-        // after target declaration; bare activations remain illegal when their
-        // automatic mana payment is unaffordable.
+        // while target declaration still precedes an unpaid interactive suffix;
+        // otherwise an unaffordable activation is illegal immediately.
         casting_costs::enter_payment_step(state, player, None, events)
     } else {
         casting_costs::finalize_automatic_mana_payment(state, player, events)
