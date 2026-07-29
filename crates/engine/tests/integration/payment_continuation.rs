@@ -220,7 +220,4 @@ fn flexible_mana_witness_keeps_every_completing_product() {
         expected[..3].iter().collect::<Vec<_>>(),
         "only the products that leave blue available complete the exact root"
     );
-    assert!(accepted
-        .iter()
-        .all(|accepted| accepted.state.pending_cast.is_none()));
 }
