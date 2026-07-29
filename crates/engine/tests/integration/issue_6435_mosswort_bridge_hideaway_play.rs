@@ -227,7 +227,7 @@ fn mosswort_bridge_hideaway_free_casts_hidden_spell_when_total_power_ge_10() {
                 ..
             } if *granted_to == P0
                 && *exiled_by_ability_controller == Some(P0)
-                && *card_filter == None
+                && card_filter.is_none()
                 && *src == mosswort
         )),
         "Mosswort must also stamp PlayFromExile so the player can look/cast the face-down exiled spell"

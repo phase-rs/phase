@@ -246,7 +246,7 @@ fn windbrisk_heights_plays_correct_hidden_card_across_unrelated_tracked_set_acti
                     ..
                 } if *granted_to == P0
                     && *exiled_by_ability_controller == Some(P0)
-                    && *card_filter == None
+                    && card_filter.is_none()
             )
         });
     assert!(
