@@ -156,23 +156,98 @@ fn benevolent_offering_allows_choosing_the_same_opponent_twice() {
     );
 }
 
+const INTELLECTUAL_OFFERING: &str = "Choose an opponent. You and that player each draw three cards.\nChoose an \
+     opponent. Untap all nonland permanents you control and all nonland permanents that player controls.";
+
+fn hand_count(runner: &GameRunner, player: PlayerId) -> usize {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.owner == player && o.zone == engine::types::zones::Zone::Hand)
+        .count()
+}
+
+/// Runtime counterpart to `intellectual_offering_second_draw_binds_to_chosen_opponent`
+/// below: drives the real cast/resolution pipeline (not just the parsed AST)
+/// so the fix is proven all the way through `game/effects/draw.rs`'s
+/// `ChosenPlayer` resolution (`game/effects/mod.rs`'s `resolve_player_for_context_ref`),
+/// not just the parser. An AST-only assertion would stay green even if the
+/// resolver drew for the wrong player.
+#[test]
+fn intellectual_offering_draws_three_for_caster_and_chosen_opponent() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        [
+            floating_mana(ManaType::Colorless, 4),
+            floating_mana(ManaType::Blue, 1),
+        ]
+        .concat(),
+    );
+    // Seed both libraries well past the three cards each side draws.
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest", "Forest"]);
+    scenario.with_library_top(P1, &["Island", "Island", "Island", "Island", "Island"]);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Intellectual Offering", true, INTELLECTUAL_OFFERING)
+        .id();
+
+    let mut runner = scenario.build();
+    // The spell itself occupies P0's hand until it resolves off the stack;
+    // measure the draw delta from the post-cast baseline, not pre-cast.
+    let hand_before_p1 = hand_count(&runner, P1);
+
+    runner.cast(spell).resolve();
+    let hand_before_p0 = hand_count(&runner, P0);
+
+    // First "Choose an opponent." (fronting the twin three-card draw).
+    choose_opponent(&mut runner, P1);
+    // Second "Choose an opponent." — must offer P1 again, not exclude it.
+    choose_opponent(&mut runner, P1);
+
+    for _ in 0..8 {
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty()
+        {
+            break;
+        }
+        runner
+            .act(engine::types::actions::GameAction::PassPriority)
+            .ok();
+    }
+
+    assert_eq!(
+        hand_count(&runner, P0) - hand_before_p0,
+        3,
+        "the caster must draw three cards"
+    );
+    assert_eq!(
+        hand_count(&runner, P1) - hand_before_p1,
+        3,
+        "the chosen opponent must draw three cards — this is the runtime proof \
+         that ChosenPlayer{{index: 0}} (not the unrelated ScopedPlayer default) \
+         resolves the second Draw's recipient"
+    );
+}
+
 /// Intellectual Offering shares Benevolent Offering's "Choose an opponent.
 /// You and that player each <body>." shape, so it exercises the SAME
 /// `try_parse_compound_subject_each` fix: "that player" must rebind to the
 /// resolution-scoped chosen player (`ChosenPlayer { index }`), not the
 /// unrelated vote/fan-out `ScopedPlayer` axis. Locks in that the whole
 /// "Offering" cycle — not just Benevolent Offering — benefits.
+///
+/// AST-shape companion to `intellectual_offering_draws_three_for_caster_and_chosen_opponent`
+/// above; kept as a SHAPE test (see the `card-test` skill) because it pins
+/// the exact parser output distinct from the runtime draw-count proof.
 #[test]
 fn intellectual_offering_second_draw_binds_to_chosen_opponent() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Intellectual Offering",
-            true,
-            "Choose an opponent. You and that player each draw three cards.\nChoose an opponent. Untap all nonland permanents you control and all nonland permanents that player controls.",
-        )
+        .add_spell_to_hand_from_oracle(P0, "Intellectual Offering", true, INTELLECTUAL_OFFERING)
         .id();
     let runner = scenario.build();
     let ability = &runner.state().objects.get(&spell).unwrap().abilities[0];
