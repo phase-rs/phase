@@ -6,10 +6,15 @@ import { AdapterError, AdapterErrorCode } from "../types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 
 const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const resumeMultiplayerHostState = vi.hoisted(() => vi.fn());
 
 vi.mock("../../services/cardData", () => ({
   ensureWasmInit,
   ensureCardDatabase: vi.fn().mockResolvedValue(100),
+}));
+
+vi.mock("@wasm/engine", () => ({
+  resume_multiplayer_host_state: resumeMultiplayerHostState,
 }));
 
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
@@ -360,6 +365,19 @@ describe("WasmAdapter", () => {
       );
       expect(adapter.cardDbLoaded).toBe(false);
       expect(mockWorkerClient.resumeMultiplayerHostState).not.toHaveBeenCalled();
+    });
+
+    it("propagates a queued main-thread fallback resume failure", async () => {
+      mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+      resumeMultiplayerHostState.mockImplementationOnce(() => {
+        throw new Error("resume failed");
+      });
+      await adapter.initialize();
+
+      await expect(adapter.resumeMultiplayerHostState(buildGameState())).rejects.toThrow(
+        "resume failed",
+      );
+      expect(resumeMultiplayerHostState).toHaveBeenCalledOnce();
     });
   });
 

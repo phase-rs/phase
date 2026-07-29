@@ -677,7 +677,7 @@ export class WasmAdapter implements EngineAdapter {
     await this.requireCardDbForRestore();
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.resumeMultiplayerHostState(json);
-    else this.fallback!.resumeMultiplayerHostState(json);
+    else await this.fallback!.resumeMultiplayerHostState(json);
   }
 
   /**
@@ -862,7 +862,7 @@ interface MainThreadFallback {
   getAiFallbackAction(): Promise<GameAction | null>;
   exportState(): Promise<string>;
   restoreState(stateJson: string): Promise<void>;
-  resumeMultiplayerHostState(stateJson: string): void;
+  resumeMultiplayerHostState(stateJson: string): Promise<void>;
   setMultiplayerMode(enabled: boolean): void;
   applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown>;
   projectSeatView(stateJson: string): Promise<unknown>;
@@ -986,9 +986,8 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     restoreState: (stateJson: string) =>
       enqueue(() => wasm.restore_game_state(stateJson)),
 
-    resumeMultiplayerHostState: (stateJson: string) => {
-      enqueue(() => wasm.resume_multiplayer_host_state(stateJson));
-    },
+    resumeMultiplayerHostState: (stateJson: string) =>
+      enqueue(() => wasm.resume_multiplayer_host_state(stateJson)),
 
     setMultiplayerMode: (enabled: boolean) => {
       enqueue(() => wasm.set_multiplayer_mode(enabled));
