@@ -1185,6 +1185,7 @@ mod triple_triad_owned_plus_lesser_mv_impulse;
 mod triumphant_chomp;
 mod tromokratis;
 mod umbra_stalker_graveyard_chroma_4066;
+mod undying_malice_edict_sacrifice_5942;
 mod unless_pay_routes_through_authority;
 mod valakut_fireboar_switch_pt_on_attack;
 mod vanille_meld_optional_cost;
