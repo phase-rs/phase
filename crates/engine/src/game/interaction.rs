@@ -7338,7 +7338,7 @@ fn attachment_fans_for_slot(
     authoritative_state: &GameState,
     filtered_state: &GameState,
     slot: &ActiveInteractionSlot,
-) -> BTreeMap<ObjectId, InteractionAttachmentFan> {
+) -> BTreeMap<u64, InteractionAttachmentFan> {
     let semantic_owner = PlayerId(slot.semantic_owner);
     let model = human_response_model(&filtered_state.waiting_for, semantic_owner);
     let object_choices = match model {
@@ -7424,7 +7424,7 @@ fn attachment_fans_for_object_choices(
     interaction_id: &InteractionId,
     model: HumanResponseModel,
     object_choices: impl IntoIterator<Item = (ObjectId, InteractionChoiceId)>,
-) -> BTreeMap<ObjectId, InteractionAttachmentFan> {
+) -> BTreeMap<u64, InteractionAttachmentFan> {
     let mut fans: BTreeMap<
         (InteractionId, ObjectId),
         BTreeMap<ObjectId, Vec<InteractionChoiceId>>,
@@ -7463,14 +7463,19 @@ fn attachment_fans_for_object_choices(
                     };
                     attachment_fan_submission(&interaction_id, model, choice_id.clone()).map(
                         |submission| InteractionAttachmentFanChild {
-                            object_id,
+                            object_id: object_id.0,
                             submission,
                         },
                     )
                 })
                 .collect::<Vec<_>>();
-            (!children.is_empty())
-                .then_some((host_id, InteractionAttachmentFan { host_id, children }))
+            (!children.is_empty()).then_some((
+                host_id.0,
+                InteractionAttachmentFan {
+                    host_id: host_id.0,
+                    children,
+                },
+            ))
         })
         .collect()
 }

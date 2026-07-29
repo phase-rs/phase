@@ -423,11 +423,11 @@ fn attachment_fans_are_per_interaction_filtered_and_direct() {
     assert_eq!(view.attachment_fans.len(), 1);
     let fan = view
         .attachment_fans
-        .get(&host)
+        .get(&host.0)
         .expect("the engine keys the fan by its visible host object");
-    assert_eq!(fan.host_id, host);
+    assert_eq!(fan.host_id, host.0);
     assert_eq!(fan.children.len(), 1);
-    assert_eq!(fan.children[0].object_id, attachment);
+    assert_eq!(fan.children[0].object_id, attachment.0);
     let submission = fan.children[0].submission.clone();
     submit_interaction(runner.state_mut(), P0, submission).expect(
         "the engine-authored fan submission resolves through production interaction dispatch",

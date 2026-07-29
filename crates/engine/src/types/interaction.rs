@@ -10,8 +10,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::identifiers::ObjectId;
-
 pub const MAX_INTERACTION_LIST_LEN: usize = 10_000;
 
 macro_rules! opaque_string_id {
@@ -1096,7 +1094,7 @@ pub struct InteractionOpportunity {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
 pub struct InteractionAttachmentFanChild {
-    pub object_id: ObjectId,
+    pub object_id: u64,
     pub submission: InteractionSubmission,
 }
 
@@ -1108,7 +1106,7 @@ pub struct InteractionAttachmentFanChild {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
 pub struct InteractionAttachmentFan {
-    pub host_id: ObjectId,
+    pub host_id: u64,
     pub children: Vec<InteractionAttachmentFanChild>,
 }
 
@@ -1145,7 +1143,7 @@ pub struct ViewerInteraction {
     pub auto_pass_recommended: bool,
     pub opportunities: Vec<InteractionOpportunity>,
     #[serde(default)]
-    pub attachment_fans: BTreeMap<ObjectId, InteractionAttachmentFan>,
+    pub attachment_fans: BTreeMap<u64, InteractionAttachmentFan>,
     pub availability: InteractionAvailability,
 }
 
