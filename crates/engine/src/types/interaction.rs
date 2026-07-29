@@ -6,7 +6,11 @@
 //! wire graph. All display text is supplied by consumers from the semantic codes
 //! below; the engine never places localized UI prose in this contract.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+
+use super::identifiers::ObjectId;
 
 pub const MAX_INTERACTION_LIST_LEN: usize = 10_000;
 
@@ -1083,15 +1087,17 @@ pub struct InteractionOpportunity {
     pub progress: InteractionProgress,
 }
 
-/// Direct attachment choices grouped under one visible host. Distinct choice
-/// ids remain intact even when they describe the same attachment object.
+/// A direct, engine-authored interaction submission for one attachment.
+///
+/// The UI must echo this opaque response rather than deriving an action or a
+/// response envelope from the opportunity schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
 pub struct InteractionAttachmentFanChild {
-    pub object: InteractionObjectReference,
-    pub choice_ids: Vec<InteractionChoiceId>,
+    pub object_id: ObjectId,
+    pub submission: InteractionSubmission,
 }
 
 /// Viewer-scoped attachment affordance for a single interaction opportunity.
@@ -1102,8 +1108,7 @@ pub struct InteractionAttachmentFanChild {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
 pub struct InteractionAttachmentFan {
-    pub interaction_id: InteractionId,
-    pub host: InteractionObjectReference,
+    pub host_id: ObjectId,
     pub children: Vec<InteractionAttachmentFanChild>,
 }
 
@@ -1140,7 +1145,7 @@ pub struct ViewerInteraction {
     pub auto_pass_recommended: bool,
     pub opportunities: Vec<InteractionOpportunity>,
     #[serde(default)]
-    pub attachment_fans: Vec<InteractionAttachmentFan>,
+    pub attachment_fans: BTreeMap<ObjectId, InteractionAttachmentFan>,
     pub availability: InteractionAvailability,
 }
 

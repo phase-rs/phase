@@ -5,7 +5,6 @@ import type { GameAction, GameObject, GameState } from "../../../adapter/types.t
 import type {
   InteractionChoiceId,
   InteractionId,
-  InteractionObjectReference,
   ViewerInteraction,
 } from "../../../adapter/generated/interaction";
 import { dispatchAction, dispatchInteraction } from "../../../game/dispatch.ts";
@@ -169,14 +168,18 @@ function interactionForAttachedObject(objectId: number): ViewerInteraction {
       surfaces: [],
       progress: { selected: 0, minimum: 1, maximum: 1, aggregate: null, confirmable: false },
     }],
-    attachmentFans: [{
-      interactionId,
-      host: "1" as InteractionObjectReference,
+    attachmentFans: {
+      1: {
+      hostId: 1,
       children: [{
-        object: String(objectId) as InteractionObjectReference,
-        choiceIds: [choiceId],
+        objectId,
+        submission: {
+          interactionId,
+          response: { type: "choose", data: { choiceId } },
+        },
       }],
-    }],
+      },
+    },
     availability: { type: "inputRequired" },
   };
 }

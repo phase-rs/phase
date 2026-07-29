@@ -1,14 +1,9 @@
-import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
-import type {
-  InteractionChoiceId,
-  InteractionOpportunity,
-  InteractionResponse,
-} from "../../adapter/generated/interaction";
 import { dispatchInteraction } from "../../game/dispatch.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -46,17 +41,6 @@ function fanCardSizingStyle(cardCount: number): CSSProperties {
 }
 
 /**
- * Per-object selection state for one card in the fan, derived once by the
- * parent from the live prompt so each card knows exactly which engine action
- * (if any) its click should dispatch. Target > board-choice > activation is
- * the same precedence PermanentCard uses on the battlefield.
- */
-interface CardChoice {
-  choiceId: InteractionChoiceId | null;
-  isSelected: boolean;
-}
-
-/**
  * Centered spread of a host permanent plus every permanent attached to it
  * (Aura / Equipment / Fortification), fanned out at HAND size using the shared
  * compact `fanGeometry` profile — so it reads as a familiar held hand of large,
@@ -69,8 +53,9 @@ interface CardChoice {
  *
  * The fan NEVER invents a choice — each card lights up (cyan) and dispatches
  * only what the engine's live prompt actually offers for that object. Terminal
- * picks (a target, an immediate board-choice, an activation) close the fan;
- * a multi-select board-choice toggles and is finished via the Confirm button.
+ * One-step picks close the fan. Multi-step decisions stay in their dedicated
+ * engine-authored interaction surfaces instead of asking this display to build
+ * a response payload.
  * Direct clicking on the battlefield still works — this fan is an opt-in
  * convenience opened from the "⧉" badge, not a forced modal.
  */
@@ -82,16 +67,12 @@ export function AttachmentFan() {
 
   const objects = useGameStore((s) => s.gameState?.objects);
   const viewerInteraction = useGameStore((s) => s.viewerInteraction);
-  const [selectedChoiceIds, setSelectedChoiceIds] = useState<InteractionChoiceId[]>([]);
-
   const host = hostId != null ? objects?.[hostId] : undefined;
   const interactionFan = useMemo(
     () =>
       hostId == null
         ? null
-        : (viewerInteraction?.attachmentFans.find(
-            (fan) => Number(fan.host) === hostId,
-          ) ?? null),
+        : (viewerInteraction?.attachmentFans[hostId] ?? null),
     [hostId, viewerInteraction],
   );
 
@@ -103,25 +84,10 @@ export function AttachmentFan() {
     ? [
         host.id,
         ...(interactionFan
-          ? interactionFan.children.map((child) => Number(child.object))
+          ? interactionFan.children.map((child) => child.objectId)
           : host.attachments),
       ]
     : [];
-
-  const opportunity = useMemo(
-    () =>
-      interactionFan
-        ? (viewerInteraction?.opportunities.find(
-            (candidate) => candidate.interactionId === interactionFan.interactionId,
-          ) ?? null)
-        : null,
-    [interactionFan, viewerInteraction],
-  );
-  const requiresConfirmation =
-    opportunity?.response.type === "schema" &&
-    (opportunity.response.data.spec.type === "select" ||
-      opportunity.response.data.spec.type === "sequence") &&
-    opportunity.response.data.spec.data.confirm === "explicit";
 
   const close = useCallback(() => {
     setAttachmentFanHost(null);
@@ -140,39 +106,14 @@ export function AttachmentFan() {
     return () => window.removeEventListener("keydown", onKey);
   }, [hostId, close]);
 
-  const choiceFor = useCallback(
-    (id: ObjectId): CardChoice => {
-      const choiceIds = interactionFan?.children.find((child) => Number(child.object) === id)?.choiceIds ?? [];
-      const choiceId = choiceIds[0] ?? null;
-      return {
-        choiceId,
-        isSelected: choiceId !== null && selectedChoiceIds.includes(choiceId),
-      };
-    },
-    [interactionFan, selectedChoiceIds],
-  );
-
   const handlePick = useCallback(
-    (_id: ObjectId, choice: CardChoice) => {
-      if (!choice.choiceId || !opportunity || !viewerInteraction?.canSubmit) return;
-      if (requiresConfirmation) {
-        setSelectedChoiceIds((selected) =>
-          selected.includes(choice.choiceId!)
-            ? selected.filter((id) => id !== choice.choiceId)
-            : [...selected, choice.choiceId!],
-        );
-        return;
-      }
-      const response = responseForChoices(opportunity, [choice.choiceId]);
-      if (!response) return;
-      void dispatchInteraction({ interactionId: opportunity.interactionId, response }).then(close).catch(() => {});
+    (id: ObjectId) => {
+      const child = interactionFan?.children.find((candidate) => candidate.objectId === id);
+      if (!child || !viewerInteraction?.canSubmit) return;
+      void dispatchInteraction(child.submission).then(close).catch(() => {});
     },
-    [close, opportunity, requiresConfirmation, viewerInteraction?.canSubmit],
+    [close, interactionFan, viewerInteraction?.canSubmit],
   );
-
-  const confirmSelection = requiresConfirmation && opportunity
-    ? responseForChoices(opportunity, selectedChoiceIds)
-    : null;
 
   if (hostId == null || !host || cardIds.length === 0) return null;
 
@@ -203,70 +144,37 @@ export function AttachmentFan() {
           <FanCard
             key={id}
             objectId={id}
-            choice={choiceFor(id)}
             marginLeft={i === 0 ? 0 : fan.overlap}
             rotation={fan.rotation(i)}
             arcOffset={fan.arc(i)}
             zIndex={i}
+            selectable={interactionFan !== null && id !== host.id}
             onPick={handlePick}
           />
         ))}
       </div>
 
-      {confirmSelection && opportunity && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            void dispatchInteraction({
-              interactionId: opportunity.interactionId,
-              response: confirmSelection,
-            }).then(close).catch(() => {});
-          }}
-          disabled={selectedChoiceIds.length === 0 || !viewerInteraction?.canSubmit}
-          className="mt-8 rounded-full bg-cyan-500 px-5 py-2 text-sm font-bold text-cyan-950 shadow-[0_2px_10px_rgba(34,211,238,0.5)] transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-white disabled:shadow-none"
-        >
-          {t("permanent.fanConfirm", { count: selectedChoiceIds.length })}
-        </button>
-      )}
     </div>,
     document.body,
   );
 }
 
-function responseForChoices(
-  opportunity: InteractionOpportunity,
-  choiceIds: InteractionChoiceId[],
-): InteractionResponse | null {
-  if (opportunity.response.type === "exactChoices") {
-    return choiceIds.length === 1 ? { type: "choose", data: { choiceId: choiceIds[0] } } : null;
-  }
-  switch (opportunity.response.data.spec.type) {
-    case "select":
-      return { type: "select", data: { choiceIds } };
-    case "sequence":
-      return { type: "sequence", data: { choiceIds } };
-    default:
-      return null;
-  }
-}
-
 function FanCard({
   objectId,
-  choice,
   marginLeft,
   rotation,
   arcOffset,
   zIndex,
+  selectable,
   onPick,
 }: {
   objectId: ObjectId;
-  choice: CardChoice;
   marginLeft: string | number;
   rotation: number;
   arcOffset: number;
   zIndex: number;
-  onPick: (id: ObjectId, choice: CardChoice) => void;
+  selectable: boolean;
+  onPick: (id: ObjectId) => void;
 }) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -274,17 +182,9 @@ function FanCard({
 
   const lookup = cardImageLookup(obj);
   const isToken = obj.display_source === "Token";
-  const selectable = choice.choiceId !== null;
-
   // The whole fan speaks one "pick me" color — cyan — so a spread of a host and
-  // its attachments reads as a single chooser regardless of whether the engine
-  // is asking for a target, a board choice, or an activation. Selected (a
-  // toggled multi-select board choice) brightens and adds a check.
-  const ring = choice.isSelected
-    ? "ring-4 ring-cyan-300 shadow-[0_0_22px_7px_rgba(34,211,238,0.7),inset_0_0_18px_5px_rgba(34,211,238,0.35)]"
-    : selectable
-      ? "ring-2 ring-cyan-400 shadow-[0_0_16px_5px_rgba(34,211,238,0.55)]"
-      : "";
+  // its attachments reads as one direct engine-authorized chooser.
+  const ring = selectable ? "ring-2 ring-cyan-400 shadow-[0_0_16px_5px_rgba(34,211,238,0.55)]" : "";
 
   // Mirror the hand card's resting animation (arc + tilt) and hover lift so the
   // attachment fan feels identical to picking a card out of hand.
@@ -297,7 +197,7 @@ function FanCard({
       transition={{ duration: 0.2 }}
       onClick={(e) => {
         e.stopPropagation();
-        if (selectable) onPick(objectId, choice);
+        if (selectable) onPick(objectId);
       }}
       aria-label={obj.name}
       className={`relative leading-[0] select-none ${selectable ? "cursor-pointer" : "cursor-default"}`}
@@ -318,12 +218,7 @@ function FanCard({
           className="!w-[var(--fan-card-w)] !h-[var(--fan-card-h)]"
         />
       </div>
-      {choice.isSelected && (
-        <span className="pointer-events-none absolute left-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-cyan-400 text-sm font-black text-cyan-950 ring-2 ring-cyan-950/60 shadow">
-          ✓
-        </span>
-      )}
-      {selectable && !choice.isSelected && (
+      {selectable && (
         <span className="pointer-events-none absolute left-1 top-1 z-10 rounded bg-cyan-400 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-cyan-950 ring-1 ring-cyan-950/50 shadow">
           {t("permanent.fanPick")}
         </span>

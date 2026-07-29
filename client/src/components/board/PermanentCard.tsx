@@ -466,7 +466,7 @@ export const PermanentCard = memo(function PermanentCard({
   const viewerInteraction = useGameStore((s) => s.viewerInteraction);
   const interactionAttachmentFan = useMemo(
     () =>
-      viewerInteraction?.attachmentFans.find((fan) => Number(fan.host) === objectId) ?? null,
+      viewerInteraction?.attachmentFans[objectId] ?? null,
     [objectId, viewerInteraction],
   );
 

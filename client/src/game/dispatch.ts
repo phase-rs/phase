@@ -720,7 +720,11 @@ export async function dispatchInteraction(
   const { adapter, gameState, gameMode } = useGameStore.getState();
   if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) return;
   if (!adapter.submitInteraction) {
-    throw new AdapterError("WS_ERROR", "This game connection does not support interaction responses", false);
+    throw new AdapterError(
+      AdapterErrorCode.UNSUPPORTED,
+      "This game connection does not support interaction responses",
+      false,
+    );
   }
 
   const result = await adapter.submitInteraction(submission, actor);

@@ -43,11 +43,11 @@ use crate::types::interaction::{
     InteractionIntentCode, InteractionManaAbilityActivationScope, InteractionManaColor,
     InteractionManaComparator, InteractionManaRestriction, InteractionManaSpecialAction,
     InteractionManaSpellCostCriterion, InteractionManaZoneSpendPolarity, InteractionObjectProperty,
-    InteractionObjectReference, InteractionOpportunity, InteractionOpportunityResponse,
-    InteractionOutcomeCode, InteractionPresentationSurface, InteractionPreview,
-    InteractionPreviewRequest, InteractionPreviewStatus, InteractionProgress,
-    InteractionReasonCode, InteractionRelationConstraint, InteractionRelationSourceConstraint,
-    InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
+    InteractionOpportunity, InteractionOpportunityResponse, InteractionOutcomeCode,
+    InteractionPresentationSurface, InteractionPreview, InteractionPreviewRequest,
+    InteractionPreviewStatus, InteractionProgress, InteractionReasonCode,
+    InteractionRelationConstraint, InteractionRelationSourceConstraint, InteractionResponse,
+    InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
     InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPoint,
     InteractionShortcutPointKind, InteractionShortcutReply, InteractionShortcutResponseCode,
     InteractionSlotKind, InteractionSubmission, InteractionSummaryCode, InteractionWaitingForCode,
@@ -7182,7 +7182,7 @@ pub fn derive_viewer_interaction(
             can_submit: false,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
-            attachment_fans: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Terminal {
                 outcome: InteractionOutcomeCode::Terminal,
             },
@@ -7198,7 +7198,7 @@ pub fn derive_viewer_interaction(
             can_submit: false,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
-            attachment_fans: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Waiting,
         };
     }
@@ -7216,7 +7216,7 @@ pub fn derive_viewer_interaction(
             can_submit: true,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
-            attachment_fans: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::AuthorityUnbound,
             },
@@ -7232,7 +7232,7 @@ pub fn derive_viewer_interaction(
             can_submit: true,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
-            attachment_fans: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::InvalidAuthorityState,
             },
@@ -7259,14 +7259,14 @@ pub fn derive_viewer_interaction(
             can_submit: true,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
-            attachment_fans: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::PayloadTooLarge,
             },
         };
     }
     let mut opportunities = Vec::with_capacity(slots.len());
-    let mut attachment_fans = Vec::new();
+    let mut attachment_fans = BTreeMap::new();
     let mut first_progress = None;
     let mut first_fallback = None;
     let default_availability = InteractionAvailability::Stuck {
@@ -7338,9 +7338,10 @@ fn attachment_fans_for_slot(
     authoritative_state: &GameState,
     filtered_state: &GameState,
     slot: &ActiveInteractionSlot,
-) -> Vec<InteractionAttachmentFan> {
+) -> BTreeMap<ObjectId, InteractionAttachmentFan> {
     let semantic_owner = PlayerId(slot.semantic_owner);
-    let object_choices = match human_response_model(&filtered_state.waiting_for, semantic_owner) {
+    let model = human_response_model(&filtered_state.waiting_for, semantic_owner);
+    let object_choices = match model {
         HumanResponseModel::TargetSequence => {
             target_sequence_projection(&filtered_state.waiting_for)
                 .ok()
@@ -7397,16 +7398,33 @@ fn attachment_fans_for_slot(
                 })
                 .collect()
         }
-        _ => Vec::new(),
+        HumanResponseModel::Terminal
+        | HumanResponseModel::AssignAmounts
+        | HumanResponseModel::AmountAssignments
+        | HumanResponseModel::DamageAssignments
+        | HumanResponseModel::TriggerOrder
+        | HumanResponseModel::CoinFlipSequence
+        | HumanResponseModel::CategorySelection
+        | HumanResponseModel::CombatRelations(_)
+        | HumanResponseModel::ManaGroups(_)
+        | HumanResponseModel::ModeSequence
+        | HumanResponseModel::OutsideSelection
+        | HumanResponseModel::TextChoice
+        | HumanResponseModel::ShortcutReply
+        | HumanResponseModel::DirectChoices
+        | HumanResponseModel::SideboardPartition
+        | HumanResponseModel::NumberRange(_)
+        | HumanResponseModel::LoopShortcut => Vec::new(),
     };
-    attachment_fans_for_object_choices(filtered_state, &slot.interaction_id, object_choices)
+    attachment_fans_for_object_choices(filtered_state, &slot.interaction_id, model, object_choices)
 }
 
 fn attachment_fans_for_object_choices(
     filtered_state: &GameState,
     interaction_id: &InteractionId,
+    model: HumanResponseModel,
     object_choices: impl IntoIterator<Item = (ObjectId, InteractionChoiceId)>,
-) -> Vec<InteractionAttachmentFan> {
+) -> BTreeMap<ObjectId, InteractionAttachmentFan> {
     let mut fans: BTreeMap<
         (InteractionId, ObjectId),
         BTreeMap<ObjectId, Vec<InteractionChoiceId>>,
@@ -7436,20 +7454,49 @@ fn attachment_fans_for_object_choices(
     }
 
     fans.into_iter()
-        .map(
-            |((interaction_id, host), children)| InteractionAttachmentFan {
-                interaction_id,
-                host: InteractionObjectReference(host.0.to_string()),
-                children: children
-                    .into_iter()
-                    .map(|(object, choice_ids)| InteractionAttachmentFanChild {
-                        object: InteractionObjectReference(object.0.to_string()),
-                        choice_ids,
-                    })
-                    .collect(),
-            },
-        )
+        .filter_map(|((interaction_id, host_id), children)| {
+            let children = children
+                .into_iter()
+                .filter_map(|(object_id, choice_ids)| {
+                    let [choice_id] = choice_ids.as_slice() else {
+                        return None;
+                    };
+                    attachment_fan_submission(&interaction_id, model, choice_id.clone()).map(
+                        |submission| InteractionAttachmentFanChild {
+                            object_id,
+                            submission,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            (!children.is_empty())
+                .then_some((host_id, InteractionAttachmentFan { host_id, children }))
+        })
         .collect()
+}
+
+/// Only publish one-step attachment picks. Multi-choice objects and response
+/// families that require the UI to synthesize a payload stay in the normal
+/// interaction surface until the engine exposes a dedicated picker model.
+fn attachment_fan_submission(
+    interaction_id: &InteractionId,
+    model: HumanResponseModel,
+    choice_id: InteractionChoiceId,
+) -> Option<InteractionSubmission> {
+    let response = match model {
+        HumanResponseModel::ExactCandidates(_) => InteractionResponse::Choose { choice_id },
+        HumanResponseModel::Select => InteractionResponse::Select {
+            choice_ids: vec![choice_id],
+        },
+        HumanResponseModel::TargetSequence => InteractionResponse::Sequence {
+            choice_ids: vec![choice_id],
+        },
+        _ => return None,
+    };
+    Some(InteractionSubmission {
+        interaction_id: interaction_id.clone(),
+        response,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
