@@ -2456,12 +2456,13 @@ pub(super) fn handle_resolution_choice(
                     }
                 }
                 PayableResource::ManaGeneric { base_cost } => {
-                    // CR 107.1b + CR 118.1: concretize the chosen X into the
-                    // ORIGINAL cost — any colored/generic pips alongside the
-                    // X shard (e.g. Elenda and Azor's `{X}{W}{U}{B}`) survive
-                    // concretization and are paid here too. Paying a
-                    // synthetic all-generic `{N}` cost instead would silently
-                    // drop the colored requirements (#6410).
+                    // CR 107.3f + CR 118.1 + CR 118.12: concretize the chosen
+                    // X into the ORIGINAL cost — any colored/generic pips
+                    // alongside the X shard (e.g. Elenda and Azor's
+                    // `{X}{W}{U}{B}`) survive concretization and are paid
+                    // here too. Paying a synthetic all-generic `{N}` cost
+                    // instead would silently drop the colored requirements
+                    // (#6410).
                     let mut cost = base_cost.clone();
                     cost.concretize_x(amount);
                     if !casting::can_pay_effect_mana_cost_after_auto_tap(

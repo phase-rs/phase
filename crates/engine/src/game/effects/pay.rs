@@ -1638,12 +1638,16 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.mana.len(), 1);
     }
 
-    /// CR 107.3a + CR 601.2f + CR 601.2h: Elenda and Azor's attack trigger
-    /// pays `{X}{W}{U}{B}`, not a pure X cost (#6410 — the player attacked,
-    /// paid an amount, and drew that many cards WITHOUT ever being charged
-    /// {W}{U}{B}). The resolution-time X-payment prompt must concretize X
-    /// into the FULL original cost — colored pips included — not substitute a
-    /// synthetic all-generic cost that silently drops them.
+    /// CR 107.3f + CR 118.12: Elenda and Azor's attack trigger resolves
+    /// `Effect::PayCost` for `{X}{W}{U}{B}`, not a pure X cost — this is a
+    /// resolution-time cost on a triggered ability's effect text ("you may
+    /// pay ... If you do, ..."), not a spell/activated-ability cost
+    /// announced at cast/activation time (CR 601 doesn't apply here). #6410:
+    /// the player attacked, paid an amount, and drew that many cards
+    /// WITHOUT ever being charged {W}{U}{B}. The resolution-time X-payment
+    /// prompt must concretize X into the FULL original cost — colored pips
+    /// included — not substitute a synthetic all-generic cost that silently
+    /// drops them.
     #[test]
     fn pay_x_plus_colored_mana_requires_the_colored_pips() {
         use crate::game::effects::resolve_ability_chain;
