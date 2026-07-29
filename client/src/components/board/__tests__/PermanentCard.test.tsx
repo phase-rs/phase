@@ -673,13 +673,14 @@ describe("PermanentCard", () => {
     useUiStore.setState({ attachmentFanHostId: 1 });
     render(<AttachmentFan />);
 
-    fireEvent.click(screen.getByLabelText("Test Equipment"));
+    const fan = document.querySelector("[data-attachment-fan]") as HTMLElement;
+    fireEvent.click(fan.querySelector('[aria-label="Test Equipment"]') as HTMLElement);
     expect(dispatchInteraction).toHaveBeenCalledWith({
       interactionId: "attachment-interaction",
       response: { type: "choose", data: { choiceId: "attachment-2" } },
     });
 
-    fireEvent.click(screen.getByLabelText("Second Equipment"));
+    fireEvent.click(fan.querySelector('[aria-label="Second Equipment"]') as HTMLElement);
     expect(dispatchInteraction).toHaveBeenCalledWith({
       interactionId: "attachment-interaction",
       response: { type: "choose", data: { choiceId: "attachment-4" } },
