@@ -7,7 +7,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
-use nom::combinator::{all_consuming, map, map_res, opt, value};
+use nom::combinator::{all_consuming, eof, map, map_res, opt, peek, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -940,7 +940,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // extremum. Distinctive "the player with the " prefix; no ordering
         // hazard with sibling arms.
         parse_player_with_extremum_cards_in_hand,
-        // CR 118.9 / CR 601.3: bare "<type> on the battlefield" object count.
+        // Bare "<type> on the battlefield" object count.
         // Placed LAST (lowest priority) so every specific arm — notably
         // `parse_greatest_commander_mana_value_ref` for "the greatest mana value
         // of a commander you own on the battlefield" — wins first; this fallback
@@ -951,34 +951,65 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// CR 118.9 + CR 601.3: "<type> on the battlefield" → count of matching objects
-/// on the battlefield. The GE / "N or more" sibling of `parse_no_on_battlefield`
+/// "<type> on the battlefield" → count of matching objects on the battlefield.
+/// The GE / "N or more" sibling of `parse_no_on_battlefield`
 /// (`oracle_nom/condition.rs`, which emits the `== 0` form); reached after a
 /// parent combinator (`parse_there_are_conditions`) has consumed the "there are
 /// N or more " quantifier, leaving the bare noun phrase (Blasphemous Edict's
 /// "creatures on the battlefield").
 ///
-/// The full phrase is decoded by `parse_type_phrase`, so the " on the
-/// battlefield" locative is re-attached as `FilterProp::InZone { Battlefield }`
-/// exactly as the for-each battlefield-count fallback does
-/// (`oracle_quantity::parse_type_phrase_with_ctx`) — this arm therefore produces
-/// byte-identical `ObjectCount` filters for any for-each clause it now intercepts
-/// at the shared `parse_quantity_ref` seam. Guarded two ways so it stays strictly
-/// additive on that high-traffic surface: the phrase must END with the battlefield
-/// locative (rejecting "…on the battlefield or in the command zone", which its
-/// dedicated commander-mana-value arm claims), and the type phrase must fully
-/// consume and be non-`Any`.
+/// The phrase must be fully consumed here. Context-specific callers that own a
+/// clause boundary (such as cast-and-condition trigger parsing) split it before
+/// using this shared grammar. The competing zone-disjunction form remains
+/// rejected so its dedicated commander-mana-value arm can claim it.
 fn parse_type_count_on_battlefield(input: &str) -> OracleResult<'_, QuantityRef> {
+    parse_type_count_on_battlefield_with_boundary(input, BattlefieldCountBoundary::CompletePhrase)
+}
+
+/// The same count grammar when the enclosing caller owns a comma-delimited
+/// clause boundary. Keep this separate from `parse_quantity_ref`: generic
+/// condition extraction must not consume an effect tail as a quantity suffix.
+pub(crate) fn parse_type_count_on_battlefield_clause(input: &str) -> OracleResult<'_, QuantityRef> {
+    parse_type_count_on_battlefield_with_boundary(input, BattlefieldCountBoundary::Clause)
+}
+
+enum BattlefieldCountBoundary {
+    CompletePhrase,
+    Clause,
+}
+
+fn parse_type_count_on_battlefield_with_boundary(
+    input: &str,
+    boundary: BattlefieldCountBoundary,
+) -> OracleResult<'_, QuantityRef> {
     let (after_anchor, _) = take_until(" on the battlefield").parse(input)?;
-    let (after_anchor, _) = tag(" on the battlefield").parse(after_anchor)?;
-    if !after_anchor.trim().is_empty() {
-        return Err(oracle_err(input));
-    }
-    let (filter, type_rest) = parse_type_phrase(input);
+    let (rest, _) = tag(" on the battlefield").parse(after_anchor)?;
+    let (type_text, needs_battlefield_presence) = match boundary {
+        BattlefieldCountBoundary::CompletePhrase => {
+            if !rest.trim().is_empty() {
+                return Err(oracle_err(input));
+            }
+            (input, false)
+        }
+        BattlefieldCountBoundary::Clause => {
+            let (rest, _) = peek(alt((eof, tag(",")))).parse(rest)?;
+            if rest.is_empty() {
+                (input, false)
+            } else {
+                (&input[..input.len() - after_anchor.len()], true)
+            }
+        }
+    };
+    let (filter, type_rest) = parse_type_phrase(type_text);
     if matches!(filter, TargetFilter::Any) || !type_rest.trim().is_empty() {
         return Err(oracle_err(input));
     }
-    Ok(("", QuantityRef::ObjectCount { filter }))
+    let filter = if needs_battlefield_presence {
+        super::condition::inject_battlefield_presence(filter)
+    } else {
+        filter
+    };
+    Ok((rest, QuantityRef::ObjectCount { filter }))
 }
 
 /// CR 109.3 + CR 205.3m: Parse "the greatest/fewest/total number of
@@ -5496,6 +5527,48 @@ mod tests {
                 left: Box::new(pt_stat_quantity(left, scope)),
                 right: Box::new(pt_stat_quantity(right, scope)),
             }
+        );
+    }
+
+    #[test]
+    fn type_count_on_battlefield_accepts_eof_tail() {
+        let (rest, parsed) = parse_type_count_on_battlefield("other creatures on the battlefield")
+            .expect("EOF terminates the noun clause");
+        assert_eq!(rest, "");
+        assert!(matches!(parsed, QuantityRef::ObjectCount { .. }));
+    }
+
+    #[test]
+    fn type_count_on_battlefield_rejects_comma_tail() {
+        assert!(parse_type_count_on_battlefield(
+            "other creatures on the battlefield, then draw a card"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn type_count_on_battlefield_clause_preserves_comma_tail() {
+        let (rest, parsed) = parse_type_count_on_battlefield_clause(
+            "other creatures on the battlefield, then draw a card",
+        )
+        .expect("the caller owns the clause boundary");
+        assert_eq!(rest, ", then draw a card");
+        assert!(matches!(parsed, QuantityRef::ObjectCount { .. }));
+    }
+
+    #[test]
+    fn type_count_on_battlefield_rejects_command_zone_disjunction() {
+        assert!(parse_type_count_on_battlefield(
+            "creatures on the battlefield or in the command zone"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn type_count_on_battlefield_rejects_non_comma_textual_tail() {
+        assert!(
+            parse_type_count_on_battlefield("creatures on the battlefield then draw a card")
+                .is_err()
         );
     }
 

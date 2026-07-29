@@ -7903,6 +7903,26 @@ fn parse_entered_this_turn_under_opponent_control(
 /// continuous "as long as" gates), both of which re-read the condition against
 /// live game state at check time.
 fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    parse_there_are_conditions_with_quantity(input, nom_quantity::parse_quantity_ref)
+}
+
+/// Narrow fallback for a caller that owns the comma separating an
+/// intervening-if from its trigger effect. The caller first tries the complete
+/// generic condition grammar; this only handles the strict battlefield-count
+/// noun phrase followed by that clause boundary.
+pub(crate) fn parse_there_are_battlefield_count_clause(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    parse_there_are_conditions_with_quantity(
+        input,
+        nom_quantity::parse_type_count_on_battlefield_clause,
+    )
+}
+
+fn parse_there_are_conditions_with_quantity(
+    input: &str,
+    parse_quantity: for<'a> fn(&'a str) -> OracleResult<'a, QuantityRef>,
+) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("there are ").parse(input)?;
     let (rest, prefix) = opt(parse_strict_comparator_prefix).parse(rest)?;
     let (rest, n) = parse_number(rest)?;
@@ -7934,7 +7954,7 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
             ),
         ));
     }
-    let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest)?;
+    let (rest, qty) = parse_quantity(rest)?;
     Ok((
         rest,
         make_quantity_comparison(
@@ -15677,6 +15697,50 @@ mod tests {
                 other => panic!("expected typed creature filter, got {other:?}"),
             },
             other => panic!("expected ObjectCount == 0, got {other:?}"),
+        }
+    }
+
+    /// CR 603.4 + CR 109.2: Deathbringer Regent's threshold counts any
+    /// player's other creatures on the battlefield when given its complete
+    /// condition clause.
+    #[test]
+    fn deathbringer_regent_noun_clause_is_battlefield_scoped() {
+        let (rest, c) =
+            parse_inner_condition("there are five or more other creatures on the battlefield")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "expected creature filter, got {:?}",
+                        tf.type_filters
+                    );
+                    assert_eq!(tf.controller, None);
+                    assert!(
+                        tf.properties.contains(&FilterProp::Another),
+                        "expected Another prop, got {:?}",
+                        tf.properties
+                    );
+                    assert!(
+                        tf.properties.contains(&FilterProp::InZone {
+                            zone: Zone::Battlefield
+                        }),
+                        "expected battlefield-only count, got {:?}",
+                        tf.properties
+                    );
+                }
+                other => panic!("expected typed creature filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount GE 5, got {other:?}"),
         }
     }
 
