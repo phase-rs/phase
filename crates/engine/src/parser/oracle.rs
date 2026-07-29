@@ -75,7 +75,7 @@ use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_ir::static_ir::StaticIr;
-use super::oracle_ir::trigger::TriggerNodeIr;
+use super::oracle_ir::trigger::{TriggerIr, TriggerNodeIr};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     is_keyword_cost_line, is_kicker_family_line, parse_kicker_additional_cost_line,
@@ -4024,6 +4024,31 @@ impl<'a> DocEmitter<'a> {
     }
 }
 
+/// Attaches a following die-result table to every terminal die-roll trigger
+/// produced from one printed line. Compound triggers share that line's table.
+///
+/// CR 706.3b: A die result table belongs to the die roll it follows. Leave the
+/// scanner at `start_line` when no trigger owns a terminal die roll so ordinary
+/// dispatch can retain the following lines.
+fn attach_trigger_die_result_branches(
+    triggers: &mut [TriggerIr],
+    lines: &[&str],
+    start_line: usize,
+) -> usize {
+    if !triggers.iter().any(TriggerIr::has_terminal_roll_die) {
+        return start_line;
+    }
+
+    let (branches, next_line) = parse_die_result_branches_ir(lines, start_line, AbilityKind::Spell);
+    for trigger in triggers
+        .iter_mut()
+        .filter(|trigger| trigger.has_terminal_roll_die())
+    {
+        trigger.die_results = branches.clone();
+    }
+    next_line
+}
+
 /// Produce an `OracleDocIr` from Oracle text — the IR-production half of the
 /// parse/lower split (Phase 49, Plan 03).
 ///
@@ -5117,15 +5142,7 @@ pub(crate) fn parse_oracle_ir(
             // CR 706.3b: Preserve table rows as trigger IR until body lowering
             // attaches them before finalization.
             if has_roll_die_pattern(&lower) {
-                if let Some(last) = triggers
-                    .last_mut()
-                    .filter(|trigger| trigger.has_terminal_roll_die())
-                {
-                    let (branches, next_line) =
-                        parse_die_result_branches_ir(&lines, i, AbilityKind::Spell);
-                    last.die_results = branches;
-                    i = next_line;
-                }
+                i = attach_trigger_die_result_branches(&mut triggers, &lines, i);
             }
             for __item in triggers {
                 emitter.trigger_ir_at(item_line, TriggerNodeIr::Parsed(Box::new(__item)));
@@ -5180,15 +5197,7 @@ pub(crate) fn parse_oracle_ir(
                 }
                 i += 1;
                 if has_roll_die_pattern(&effect_lower) {
-                    if let Some(last) = triggers
-                        .last_mut()
-                        .filter(|trigger| trigger.has_terminal_roll_die())
-                    {
-                        let (branches, next_line) =
-                            parse_die_result_branches_ir(&lines, i, AbilityKind::Spell);
-                        last.die_results = branches;
-                        i = next_line;
-                    }
+                    i = attach_trigger_die_result_branches(&mut triggers, &lines, i);
                 }
                 for __item in triggers {
                     emitter.trigger_ir_at(item_line, TriggerNodeIr::Parsed(Box::new(__item)));
@@ -6539,15 +6548,7 @@ pub(crate) fn parse_oracle_ir(
                 i += 1;
                 // CR 706: Consume subsequent d20 table lines for triggered die rolls.
                 if has_roll_die_pattern(&effect_lower) {
-                    if let Some(last) = triggers
-                        .last_mut()
-                        .filter(|trigger| trigger.has_terminal_roll_die())
-                    {
-                        let (branches, next_line) =
-                            parse_die_result_branches_ir(&lines, i, AbilityKind::Spell);
-                        last.die_results = branches;
-                        i = next_line;
-                    }
+                    i = attach_trigger_die_result_branches(&mut triggers, &lines, i);
                 }
                 for __item in triggers {
                     emitter.trigger_ir_at(item_line, TriggerNodeIr::Parsed(Box::new(__item)));

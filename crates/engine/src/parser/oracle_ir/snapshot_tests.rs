@@ -88,6 +88,99 @@ fn direct_trigger_die_table_is_ir_native_and_lowers_as_one_ability() {
     );
 }
 
+/// CR 603.2 + CR 706.3b: Each trigger produced by a compound trigger line owns
+/// the following die-result table when its body ends in that line's die roll.
+#[test]
+fn compound_trigger_die_table_attaches_to_every_terminal_roll() {
+    let (ir, lowered) = parse_two_layer(
+        "Whenever this creature attacks and whenever this creature blocks, roll a d20.\n1—9 | Draw a card.\n10—20 | Create a Treasure token.",
+        "Compound Die Fixture",
+        &["Creature"],
+        &[],
+    );
+
+    assert_eq!(
+        ir.items.len(),
+        2,
+        "result rows must not become document items"
+    );
+    for item in &ir.items {
+        let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &item.node else {
+            panic!(
+                "expected native parsed compound triggers, got {:?}",
+                item.node
+            );
+        };
+        assert_eq!(trigger.die_results.len(), 2);
+    }
+
+    assert_eq!(lowered.triggers.len(), 2);
+    for trigger in &lowered.triggers {
+        assert!(matches!(
+            trigger.execute.as_deref().map(|execute| execute.effect.as_ref()),
+            Some(Effect::RollDie { results, .. }) if results.len() == 2
+        ));
+    }
+
+    let (shared_subject_ir, shared_subject_lowered) = parse_two_layer(
+        "Whenever this creature attacks, blocks, or becomes the target of a spell, roll a d20.\n1—9 | Draw a card.\n10—20 | Create a Treasure token.",
+        "Shared Subject Die Fixture",
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(shared_subject_ir.items.len(), 3);
+    assert_eq!(shared_subject_lowered.triggers.len(), 3);
+    for (item, trigger) in shared_subject_ir
+        .items
+        .iter()
+        .zip(&shared_subject_lowered.triggers)
+    {
+        let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(parsed)) = &item.node else {
+            panic!("expected a native parsed shared-subject trigger");
+        };
+        assert_eq!(parsed.die_results.len(), 2);
+        assert!(matches!(
+            trigger.execute.as_deref().map(|execute| execute.effect.as_ref()),
+            Some(Effect::RollDie { results, .. }) if results.len() == 2
+        ));
+    }
+}
+
+/// CR 118.12 + CR 603.12 + CR 706.3b: A reflexive payment owns its nested
+/// terminal die roll, so the parent trigger's result rows lower into that
+/// `When you do` sub-ability.
+#[test]
+fn reflexive_payment_trigger_retains_die_table_on_nested_roll() {
+    let (ir, lowered) = parse_two_layer(
+        "Whenever this creature attacks, you may pay {1}. When you do, roll a d20.\n1—9 | Draw a card.\n10—20 | Create a Treasure token.",
+        "Reflexive Die Fixture",
+        &["Creature"],
+        &[],
+    );
+
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &ir.items[0].node else {
+        panic!("expected a native parsed trigger");
+    };
+    assert!(trigger.has_terminal_roll_die());
+    assert_eq!(trigger.die_results.len(), 2);
+
+    let pay = lowered.triggers[0]
+        .execute
+        .as_deref()
+        .expect("trigger must have an execute ability");
+    let Effect::PayCost { .. } = pay.effect.as_ref() else {
+        panic!("expected reflexive payment root, got {:?}", pay.effect);
+    };
+    let reflexive_roll = pay
+        .sub_ability
+        .as_deref()
+        .expect("payment must retain its reflexive sub-ability");
+    assert!(matches!(
+        reflexive_roll.effect.as_ref(),
+        Effect::RollDie { results, .. } if results.len() == 2
+    ));
+}
+
 /// The ability-word trigger route is likewise native IR. Its existing fallback
 /// condition is applied only when trigger parsing did not already find one.
 #[test]

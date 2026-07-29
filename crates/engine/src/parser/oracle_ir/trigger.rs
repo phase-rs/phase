@@ -90,13 +90,18 @@ pub(crate) struct TriggerIr {
 impl TriggerIr {
     /// Whether the body ends in the typed die-roll node that owns a result table.
     pub(crate) fn has_terminal_roll_die(&self) -> bool {
-        let Some(TriggerBody::EffectChain(chain)) = &self.body else {
+        let chain = match &self.body {
+            Some(TriggerBody::EffectChain(chain)) => chain,
+            Some(TriggerBody::ReflexivePayment(reflexive)) => &reflexive.effect_chain,
+            Some(TriggerBody::Modal(_))
+            | Some(TriggerBody::Vote(_))
+            | Some(TriggerBody::Pile(_))
+            | None => return false,
+        };
+        let Some(clause) = chain.clauses.last() else {
             return false;
         };
-        chain
-            .clauses
-            .last()
-            .is_some_and(|clause| matches!(clause.parsed.effect, Effect::RollDie { .. }))
+        matches!(clause.parsed.effect, Effect::RollDie { .. })
     }
 }
 

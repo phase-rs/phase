@@ -1605,7 +1605,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         ))),
         Some(TriggerBody::ReflexivePayment(reflexive)) => {
             let mut reflexive_ability =
-                lower_trigger_effect_chain(&reflexive.effect_chain, modifiers, &[]);
+                lower_trigger_effect_chain(&reflexive.effect_chain, modifiers, &ir.die_results);
             reflexive_ability.condition = Some(AbilityCondition::WhenYouDo);
 
             let mut pay_ability = AbilityDefinition::new(
