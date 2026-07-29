@@ -507,7 +507,7 @@ mod tests {
         let pile = parse_separate_into_piles_ir(text, AbilityKind::Spell, &ParseContext::default())
             .expect("Make an Example body parses");
         let chain = pile.effect_chain(AbilityKind::Spell);
-        match &*chain.clauses[0].parsed.effect {
+        match &chain.clauses[0].parsed.effect {
             Effect::SeparateIntoPiles {
                 partition_subject,
                 chooser,
@@ -538,7 +538,7 @@ mod tests {
         let pile = parse_separate_into_piles_ir(text, AbilityKind::Spell, &ParseContext::default())
             .expect("Fact or Fiction body parses");
         let chain = pile.effect_chain(AbilityKind::Spell);
-        match &*chain.clauses[0].parsed.effect {
+        match &chain.clauses[0].parsed.effect {
             Effect::SeparateIntoPiles {
                 partition_subject,
                 chooser,
