@@ -2,7 +2,12 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameObject, GameState } from "../../../adapter/types.ts";
-import { dispatchAction } from "../../../game/dispatch.ts";
+import type {
+  InteractionChoiceId,
+  InteractionId,
+  ViewerInteraction,
+} from "../../../adapter/generated/interaction";
+import { dispatchAction, dispatchInteraction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
@@ -22,6 +27,7 @@ import { PermanentCard } from "../PermanentCard.tsx";
 
 vi.mock("../../../game/dispatch.ts", () => ({
   dispatchAction: vi.fn(),
+  dispatchInteraction: vi.fn(),
 }));
 
 vi.mock("../../card/CardImage.tsx", () => ({
@@ -139,6 +145,49 @@ function renderPermanent(
   );
 }
 
+function interactionForAttachedObjects(objectIds: number[]): ViewerInteraction {
+  const interactionId = "attachment-interaction" as InteractionId;
+  const choiceId = (objectId: number) => `attachment-${objectId}` as InteractionChoiceId;
+  return {
+    waitingForKind: { simultaneous: null, terminal: false, code: "choose" },
+    authorizedSubmitters: [0],
+    canSubmit: true,
+    autoPassRecommended: false,
+    opportunities: [{
+      interactionId,
+      response: {
+        type: "exactChoices",
+        data: {
+          choices: objectIds.map((objectId) => ({
+            id: choiceId(objectId),
+            status: { type: "available" },
+            surfaces: [],
+          })),
+        },
+      },
+      surfaces: [],
+      progress: { selected: 0, minimum: 1, maximum: 1, aggregate: null, confirmable: false },
+    }],
+    attachmentFans: {
+      1: {
+      hostId: 1,
+      children: objectIds.map((objectId) => ({
+        objectId,
+        submission: {
+          interactionId,
+          response: { type: "choose", data: { choiceId: choiceId(objectId) } },
+        },
+      })),
+      },
+    },
+    availability: { type: "inputRequired" },
+  };
+}
+
+function interactionForAttachedObject(objectId: number): ViewerInteraction {
+  return interactionForAttachedObjects([objectId]);
+}
+
 describe("PermanentCard", () => {
   beforeEach(() => {
     window.matchMedia = ((query: string) => ({
@@ -176,6 +225,7 @@ describe("PermanentCard", () => {
       tapRotation: "classic",
     });
     vi.mocked(dispatchAction).mockClear();
+    vi.mocked(dispatchInteraction).mockResolvedValue();
   });
 
   afterEach(() => {
@@ -521,11 +571,15 @@ describe("PermanentCard", () => {
     gameState.objects[1].attachments = [2, 4];
     gameState.objects[4] = secondEquipment;
     gameState.battlefield = [1, 2, 3, 4];
-    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: interactionForAttachedObject(4),
+    });
 
     // Attachment 4 is a valid target — both attachments must render even though
     // the host is neither hovered nor inspected.
-    const { container } = renderPermanent(new Set([4]));
+    const { container } = renderPermanent();
 
     expect(container.querySelector('[data-object-id="2"]')).not.toBeNull();
     expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
@@ -564,10 +618,14 @@ describe("PermanentCard", () => {
       },
     });
     gameState.waiting_for = waitingFor;
-    useGameStore.setState({ gameState, waitingFor });
+    useGameStore.setState({
+      gameState,
+      waitingFor,
+      viewerInteraction: interactionForAttachedObject(4),
+    });
     useUiStore.setState({ attachmentFanHostId: null });
 
-    const { container } = renderPermanent(new Set([4]));
+    const { container } = renderPermanent();
     render(<AttachmentFan />);
 
     fireEvent.click(container.querySelector('[data-object-id="1"]') as HTMLElement);
@@ -579,9 +637,53 @@ describe("PermanentCard", () => {
 
     fireEvent.click(darksteelCard);
 
-    expect(dispatchAction).toHaveBeenCalledWith({
-      type: "ChooseTarget",
-      data: { target: { Object: 4 } },
+    expect(dispatchInteraction).toHaveBeenCalledWith({
+      interactionId: "attachment-interaction",
+      response: {
+        type: "choose",
+        data: { choiceId: "attachment-4" },
+      },
+    });
+  });
+
+  it("submits each attachment's engine-authored response independently", () => {
+    const secondEquipment = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      attachments: [],
+      name: "Second Equipment",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    const gameState = makeState();
+    gameState.objects[1].attachments = [2, 4];
+    gameState.objects[4] = secondEquipment;
+    gameState.battlefield = [1, 2, 3, 4];
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: interactionForAttachedObjects([2, 4]),
+    });
+    useUiStore.setState({ attachmentFanHostId: 1 });
+    render(<AttachmentFan />);
+
+    const fan = document.querySelector("[data-attachment-fan]") as HTMLElement;
+    fireEvent.click(fan.querySelector('[aria-label="Test Equipment"]') as HTMLElement);
+    expect(dispatchInteraction).toHaveBeenCalledWith({
+      interactionId: "attachment-interaction",
+      response: { type: "choose", data: { choiceId: "attachment-2" } },
+    });
+
+    fireEvent.click(fan.querySelector('[aria-label="Second Equipment"]') as HTMLElement);
+    expect(dispatchInteraction).toHaveBeenCalledWith({
+      interactionId: "attachment-interaction",
+      response: { type: "choose", data: { choiceId: "attachment-4" } },
     });
   });
 
@@ -606,14 +708,13 @@ describe("PermanentCard", () => {
     gameState.objects[1].attachments = [2, 4];
     gameState.objects[4] = secondEquipment;
     gameState.battlefield = [1, 2, 3, 4];
-    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: interactionForAttachedObject(4),
+    });
 
-    const { container } = renderPermanent(
-      new Set(),
-      new Set(),
-      new Set(),
-      new Set([4]),
-    );
+    const { container } = renderPermanent();
 
     expect(container.querySelector('[data-object-id="2"]')).not.toBeNull();
     expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
@@ -640,15 +741,13 @@ describe("PermanentCard", () => {
     gameState.objects[1].attachments = [2, 4];
     gameState.objects[4] = secondEquipment;
     gameState.battlefield = [1, 2, 3, 4];
-    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: interactionForAttachedObject(4),
+    });
 
-    const { container } = renderPermanent(
-      new Set(),
-      new Set(),
-      new Set(),
-      new Set(),
-      new Set([4]),
-    );
+    const { container } = renderPermanent();
 
     expect(container.querySelector('[data-object-id="2"]')).not.toBeNull();
     expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();

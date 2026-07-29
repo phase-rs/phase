@@ -3,20 +3,12 @@ import { createPortal } from "react-dom";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import type { GameAction, ObjectId } from "../../adapter/types.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import type { ObjectId } from "../../adapter/types.ts";
+import { dispatchInteraction } from "../../game/dispatch.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { useAppNotificationStore } from "../../stores/appToastStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
-import {
-  boardChoiceMaxSelection,
-  buildBoardChoiceAction,
-  canConfirmBoardChoice,
-  getBoardChoiceView,
-  isBoardChoiceImmediate,
-} from "../../viewmodel/gameStateView.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { fanGeometry, spreadFactor } from "../card/fanGeometry.ts";
 
@@ -50,19 +42,6 @@ function fanCardSizingStyle(cardCount: number): CSSProperties {
 }
 
 /**
- * Per-object selection state for one card in the fan, derived once by the
- * parent from the live prompt so each card knows exactly which engine action
- * (if any) its click should dispatch. Target > board-choice > activation is
- * the same precedence PermanentCard uses on the battlefield.
- */
-interface CardChoice {
-  isTarget: boolean;
-  boardEligible: boolean;
-  isSelected: boolean;
-  activationActions: GameAction[];
-}
-
-/**
  * Centered spread of a host permanent plus every permanent attached to it
  * (Aura / Equipment / Fortification), fanned out at HAND size using the shared
  * compact `fanGeometry` profile — so it reads as a familiar held hand of large,
@@ -75,50 +54,42 @@ interface CardChoice {
  *
  * The fan NEVER invents a choice — each card lights up (cyan) and dispatches
  * only what the engine's live prompt actually offers for that object. Terminal
- * picks (a target, an immediate board-choice, an activation) close the fan;
- * a multi-select board-choice toggles and is finished via the Confirm button.
+ * One-step picks close the fan. Multi-step decisions stay in their dedicated
+ * engine-authored interaction surfaces instead of asking this display to build
+ * a response payload.
  * Direct clicking on the battlefield still works — this fan is an opt-in
  * convenience opened from the "⧉" badge, not a forced modal.
  */
 export function AttachmentFan() {
   const { t } = useTranslation("game");
-  const playerId = usePlayerId();
   const hostId = useUiStore((s) => s.attachmentFanHostId);
   const setAttachmentFanHost = useUiStore((s) => s.setAttachmentFanHost);
   const dismissPreview = useUiStore((s) => s.dismissPreview);
-  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const toggleSelectedCard = useUiStore((s) => s.toggleSelectedCard);
-  const selectedCardIds = useUiStore((s) => s.selectedCardIds);
+  const showNotification = useAppNotificationStore((s) => s.showNotification);
 
   const objects = useGameStore((s) => s.gameState?.objects);
-  const waitingFor = useGameStore((s) => s.waitingFor);
-  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
-
+  const viewerInteraction = useGameStore((s) => s.viewerInteraction);
   const host = hostId != null ? objects?.[hostId] : undefined;
+  const interactionFan = useMemo(
+    () =>
+      hostId == null
+        ? null
+        : (viewerInteraction?.attachmentFans[hostId] ?? null),
+    [hostId, viewerInteraction],
+  );
 
-  const cardIds = host ? [host.id, ...host.attachments] : [];
-
-  const boardChoice = useMemo(() => {
-    const choice = getBoardChoiceView(waitingFor, objects);
-    return choice && choice.player === playerId ? choice : null;
-  }, [waitingFor, objects, playerId]);
-
-  // Engine's live target legal-set for the current prompt, as a plain id set.
-  const targetIds = useMemo(() => {
-    const set = new Set<ObjectId>();
-    if (
-      (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
-      && waitingFor.data.player === playerId
-    ) {
-      for (const target of waitingFor.data.selection?.current_legal_targets ?? []) {
-        if ("Object" in target) set.add(target.Object);
-      }
-    }
-    if (waitingFor?.type === "EquipTarget" && waitingFor.data.player === playerId) {
-      for (const id of waitingFor.data.valid_targets) set.add(id);
-    }
-    return set;
-  }, [waitingFor, playerId]);
+  // During an interaction, the engine projection is the sole authority for
+  // which direct attachments belong in the fan. The fallback preserves the
+  // existing read-only badge outside an interaction, where no choice is being
+  // exposed and therefore no interaction capability exists to consume.
+  const cardIds = host
+    ? [
+        host.id,
+        ...(interactionFan
+          ? interactionFan.children.map((child) => child.objectId)
+          : host.attachments),
+      ]
+    : [];
 
   const close = useCallback(() => {
     setAttachmentFanHost(null);
@@ -137,59 +108,19 @@ export function AttachmentFan() {
     return () => window.removeEventListener("keydown", onKey);
   }, [hostId, close]);
 
-  const choiceFor = useCallback(
-    (id: ObjectId): CardChoice => ({
-      isTarget: targetIds.has(id),
-      boardEligible: boardChoice?.objectIds.includes(id) ?? false,
-      isSelected: selectedCardIds.includes(id),
-      activationActions: legalActionsByObject ? collectObjectActions(legalActionsByObject, id) : [],
-    }),
-    [targetIds, boardChoice, selectedCardIds, legalActionsByObject],
-  );
-
   const handlePick = useCallback(
-    (id: ObjectId, choice: CardChoice) => {
-      if (choice.isTarget) {
-        dispatchAction({ type: "ChooseTarget", data: { target: { Object: id } } });
-        close();
-        return;
-      }
-      if (choice.boardEligible && boardChoice) {
-        if (isBoardChoiceImmediate(boardChoice)) {
-          dispatchAction(buildBoardChoiceAction(boardChoice, [id]));
-          close();
-          return;
-        }
-        // Multi-select: toggle within the engine's max, then Confirm finishes.
-        const max = boardChoiceMaxSelection(boardChoice);
-        const selectedForChoice = selectedCardIds.filter((s) => boardChoice.objectIds.includes(s));
-        if (choice.isSelected || max == null || selectedForChoice.length < max) {
-          toggleSelectedCard(id);
-        }
-        return;
-      }
-      if (choice.activationActions.length > 0) {
-        if (choice.activationActions.length === 1) {
-          dispatchAction(choice.activationActions[0]);
-        } else {
-          setPendingAbilityChoice({ objectId: id, actions: choice.activationActions });
-        }
-        close();
-      }
+    (id: ObjectId) => {
+      const child = interactionFan?.children.find((candidate) => candidate.objectId === id);
+      if (!child || !viewerInteraction?.canSubmit) return;
+      void dispatchInteraction(child.submission).then(close).catch((error: unknown) => {
+        showNotification({
+          title: t("actionError.title", { action: t("permanent.fanPick") }),
+          description: error instanceof Error ? error.message : t("actionError.unknownEngineError"),
+        });
+      });
     },
-    [boardChoice, selectedCardIds, close, toggleSelectedCard, setPendingAbilityChoice],
+    [close, interactionFan, showNotification, t, viewerInteraction?.canSubmit],
   );
-
-  const confirmSelection = useMemo(() => {
-    if (!boardChoice || isBoardChoiceImmediate(boardChoice)) return null;
-    const selectedForChoice = selectedCardIds.filter((s) => boardChoice.objectIds.includes(s));
-    if (selectedForChoice.length === 0) return null;
-    return {
-      enabled: canConfirmBoardChoice(boardChoice, selectedForChoice, objects),
-      selected: selectedForChoice,
-      choice: boardChoice,
-    };
-  }, [boardChoice, selectedCardIds, objects]);
 
   if (hostId == null || !host || cardIds.length === 0) return null;
 
@@ -220,30 +151,16 @@ export function AttachmentFan() {
           <FanCard
             key={id}
             objectId={id}
-            choice={choiceFor(id)}
             marginLeft={i === 0 ? 0 : fan.overlap}
             rotation={fan.rotation(i)}
             arcOffset={fan.arc(i)}
             zIndex={i}
+            selectable={interactionFan !== null && id !== host.id}
             onPick={handlePick}
           />
         ))}
       </div>
 
-      {confirmSelection && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            dispatchAction(buildBoardChoiceAction(confirmSelection.choice, confirmSelection.selected));
-            close();
-          }}
-          disabled={!confirmSelection.enabled}
-          className="mt-8 rounded-full bg-cyan-500 px-5 py-2 text-sm font-bold text-cyan-950 shadow-[0_2px_10px_rgba(34,211,238,0.5)] transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300 disabled:shadow-none"
-        >
-          {t("permanent.fanConfirm", { count: confirmSelection.selected.length })}
-        </button>
-      )}
     </div>,
     document.body,
   );
@@ -251,20 +168,20 @@ export function AttachmentFan() {
 
 function FanCard({
   objectId,
-  choice,
   marginLeft,
   rotation,
   arcOffset,
   zIndex,
+  selectable,
   onPick,
 }: {
   objectId: ObjectId;
-  choice: CardChoice;
   marginLeft: string | number;
   rotation: number;
   arcOffset: number;
   zIndex: number;
-  onPick: (id: ObjectId, choice: CardChoice) => void;
+  selectable: boolean;
+  onPick: (id: ObjectId) => void;
 }) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -272,17 +189,9 @@ function FanCard({
 
   const lookup = cardImageLookup(obj);
   const isToken = obj.display_source === "Token";
-  const selectable = choice.isTarget || choice.boardEligible || choice.activationActions.length > 0;
-
   // The whole fan speaks one "pick me" color — cyan — so a spread of a host and
-  // its attachments reads as a single chooser regardless of whether the engine
-  // is asking for a target, a board choice, or an activation. Selected (a
-  // toggled multi-select board choice) brightens and adds a check.
-  const ring = choice.isSelected
-    ? "ring-4 ring-cyan-300 shadow-[0_0_22px_7px_rgba(34,211,238,0.7),inset_0_0_18px_5px_rgba(34,211,238,0.35)]"
-    : selectable
-      ? "ring-2 ring-cyan-400 shadow-[0_0_16px_5px_rgba(34,211,238,0.55)]"
-      : "";
+  // its attachments reads as one direct engine-authorized chooser.
+  const ring = selectable ? "ring-2 ring-cyan-400 shadow-[0_0_16px_5px_rgba(34,211,238,0.55)]" : "";
 
   // Mirror the hand card's resting animation (arc + tilt) and hover lift so the
   // attachment fan feels identical to picking a card out of hand.
@@ -295,7 +204,7 @@ function FanCard({
       transition={{ duration: 0.2 }}
       onClick={(e) => {
         e.stopPropagation();
-        if (selectable) onPick(objectId, choice);
+        if (selectable) onPick(objectId);
       }}
       aria-label={obj.name}
       className={`relative leading-[0] select-none ${selectable ? "cursor-pointer" : "cursor-default"}`}
@@ -316,12 +225,7 @@ function FanCard({
           className="!w-[var(--fan-card-w)] !h-[var(--fan-card-h)]"
         />
       </div>
-      {choice.isSelected && (
-        <span className="pointer-events-none absolute left-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-cyan-400 text-sm font-black text-cyan-950 ring-2 ring-cyan-950/60 shadow">
-          ✓
-        </span>
-      )}
-      {selectable && !choice.isSelected && (
+      {selectable && (
         <span className="pointer-events-none absolute left-1 top-1 z-10 rounded bg-cyan-400 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-cyan-950 ring-1 ring-cyan-950/50 shadow">
           {t("permanent.fanPick")}
         </span>
