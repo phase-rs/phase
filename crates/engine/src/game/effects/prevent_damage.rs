@@ -190,6 +190,17 @@ fn untargeted_damage_filter(
                 permanent_type: *permanent_type,
             })
         }
+        // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): a tracked-set
+        // recipient ("those permanents"/"those creatures" — Mutational
+        // Advantage's clause-derived population, Energy Arc's target-derived
+        // untapped creatures) is an OBJECT population, not a player. The
+        // generic `is_context_ref()` classification below (used broadly for
+        // "does this need a declared target slot") also happens to cover
+        // `TrackedSet`/`TrackedSetFiltered`, which would otherwise
+        // misroute it through `resolve_player_for_context_ref` here — object
+        // matching is `typed_recipient_valid_card_filter`'s job, so this
+        // arm must be checked BEFORE the generic `is_context_ref()` catch-all.
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => None,
         filter if filter.is_context_ref() => Some(player_damage_filter(
             super::resolve_player_for_context_ref(state, ability, filter),
         )),
@@ -211,6 +222,13 @@ fn typed_recipient_valid_card_filter(target: &TargetFilter) -> Option<TargetFilt
         // `valid_card` slot (that would drop the "you" leg — the HIGH-severity
         // leak this arm forecloses even if the caller's branch order changes).
         TargetFilter::ControllerAndControlledPermanents { .. } => None,
+        // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): a tracked-set
+        // recipient IS an object population — checked before the generic
+        // `is_context_ref()` exclusion below (which would otherwise reject
+        // it, mirroring `untargeted_damage_filter`'s matching carve-out).
+        filter @ (TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }) => {
+            Some(filter.clone())
+        }
         filter if filter.is_context_ref() => None,
         filter => Some(filter.clone()),
     }
@@ -252,6 +270,25 @@ pub fn resolve(
                 ))
             }
         };
+
+    // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): resolve any
+    // `TrackedSet` sentinel in the recipient/source filters to a CONCRETE
+    // tracked-set id now, at shield-creation time — before it is folded into
+    // a `ReplacementDefinition` that may persist and be rechecked at many
+    // later damage events this turn. Left unresolved, the raw
+    // `TrackedSetId(0)` sentinel would be re-resolved against
+    // `state.chain_tracked_set_id` at EACH future check
+    // (`filter::matches_target_filter`), which drifts to whatever unrelated
+    // chain most recently published a tracked set by then — a stale,
+    // silently-wrong rebinding (Energy Arc's "those creatures" shield must
+    // stay bound to the untapped creatures for the rest of the turn, not
+    // whatever some later spell's chain happens to publish). Mirrors
+    // `register_transient_effect`'s identical one-shot resolution
+    // (`game/effects/effect.rs`) for the analogous durable continuous-effect
+    // case. A no-op for every non-`TrackedSet` filter.
+    let target = crate::game::targeting::resolve_tracked_set_sentinel(state, target);
+    let effect_source_filter = effect_source_filter
+        .map(|filter| crate::game::targeting::resolve_tracked_set_sentinel(state, filter));
 
     // CR 609.7 + CR 609.7a: A source-scoped prevent ("prevent all damage target
     // instant or sorcery spell would deal this turn") carries its chosen source
@@ -1472,6 +1509,118 @@ mod tests {
         .unwrap();
         assert!(matches!(bear_result, deal_damage::DamageResult::Applied(2)));
         assert_eq!(state.objects.get(&bear).unwrap().damage_marked, 2);
+    }
+
+    /// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): A `TrackedSet(0)`
+    /// sentinel recipient must be resolved to a CONCRETE tracked-set id at
+    /// shield-creation time, not left as the raw sentinel. Proves the
+    /// staleness bug this resolves: without the fix, a persisting shield's
+    /// `valid_card: TrackedSet(0)` would be re-resolved against
+    /// `state.chain_tracked_set_id` at EVERY future damage check, drifting to
+    /// whatever unrelated chain most recently published a tracked set. Here,
+    /// AFTER the shield is created, an unrelated chain overwrites
+    /// `chain_tracked_set_id` to point at a completely different object
+    /// (simulating some other spell resolving later the same turn) — the
+    /// shield must still protect only the ORIGINAL untapped creature (Energy
+    /// Arc class), not the new unrelated set.
+    #[test]
+    fn tracked_set_recipient_resolves_to_concrete_id_immune_to_later_chain_overwrite() {
+        use crate::types::identifiers::TrackedSetId;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Energy Arc".to_string(),
+            Zone::Stack,
+        );
+        let untapped_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Untapped Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let unrelated_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Unrelated Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let damage_source = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The preceding Untap clause published the untapped creature as the
+        // chain's tracked set — the state `prevent_damage::resolve` sees.
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(5), vec![untapped_creature]);
+        state.chain_tracked_set_id = Some(TrackedSetId(5));
+
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                scope: PreventionScope::CombatDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // A LATER, unrelated chain publishes a fresh tracked set (e.g. some
+        // other spell's exile/mill effect resolving afterward this turn).
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(6), vec![unrelated_creature]);
+        state.chain_tracked_set_id = Some(TrackedSetId(6));
+
+        let ctx = deal_damage::DamageContext::from_source(&state, damage_source).unwrap();
+
+        // The original untapped creature must still be protected.
+        let protected_result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Object(untapped_creature),
+            3,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(protected_result, deal_damage::DamageResult::Applied(0)),
+            "the shield must stay bound to the originally-untapped creature"
+        );
+
+        // The later, unrelated creature must NOT be protected — the shield
+        // must not have drifted onto whatever the newest tracked set is.
+        let unrelated_result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Object(unrelated_creature),
+            3,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(unrelated_result, deal_damage::DamageResult::Applied(3)),
+            "the shield must NOT drift onto an unrelated later chain's tracked set"
+        );
     }
 
     /// CR 615.1a: A `Prevention { All }` shield is not depletion-based — it

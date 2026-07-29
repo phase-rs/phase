@@ -49543,6 +49543,146 @@ fn they_binds_producer_population_across_mass_effect_family() {
     }
 }
 
+/// CR 611.2c + CR 615.11 (issue #6682): Mutational Advantage's second clause
+/// ("Prevent all damage that would be dealt to those permanents this turn")
+/// must scope the shield to the SAME population its first clause locked onto
+/// ("Permanents you control with counters on them") — not the `Any` fallback
+/// that silently protected every permanent in the game, including
+/// opponents'. Verified against the official ruling: "The set of permanents
+/// affected by Mutational Advantage is determined at the time Mutational
+/// Advantage resolves."
+#[test]
+fn mutational_advantage_prevent_binds_to_countered_permanents_population() {
+    let def = parse_effect_chain(
+        "Permanents you control with counters on them gain hexproof and indestructible \
+         until end of turn. Prevent all damage that would be dealt to those permanents \
+         this turn.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::GenericEffect {
+        static_abilities,
+        target: None,
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected the hexproof/indestructible grant, got {:?}",
+            def.effect
+        );
+    };
+    let population = static_abilities
+        .first()
+        .and_then(|sd| sd.affected.clone())
+        .expect("the grant clause must carry an affected population filter");
+
+    let prevent = def
+        .sub_ability
+        .as_deref()
+        .expect("the prevent clause must chain after the grant");
+    let Effect::PreventDamage { target, .. } = &*prevent.effect else {
+        panic!("expected PreventDamage, got {:?}", prevent.effect);
+    };
+    assert_eq!(
+        *target, population,
+        "the prevention shield must bind to the SAME population the grant locked onto, \
+         not Any"
+    );
+    assert_ne!(
+        *target,
+        TargetFilter::Any,
+        "must never silently protect every permanent in the game"
+    );
+}
+
+/// CR 615.1 (issue #6682): Blinding Fog's bare "creatures" recipient (no
+/// anaphor, no antecedent clause — the prevent clause comes FIRST) must
+/// resolve to an unqualified `Typed(Creature)` mass filter via `parse_target`'s
+/// shared grammar, not the `Any` fallback that silently prevented damage to
+/// players too.
+#[test]
+fn blinding_fog_prevent_binds_to_bare_creatures_recipient() {
+    let def = parse_effect_chain(
+        "Prevent all damage that would be dealt to creatures this turn. Creatures you \
+         control gain hexproof until end of turn.",
+        AbilityKind::Spell,
+    );
+    let Effect::PreventDamage { target, .. } = &*def.effect else {
+        panic!("expected PreventDamage, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            target,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Creature) && tf.controller.is_none()
+        ),
+        "bare \"creatures\" must resolve to an unqualified Typed(Creature) filter, got {target:?}"
+    );
+}
+
+/// CR 615.1 (issue #6682): Defend the Hearth's bare "players" recipient must
+/// resolve to `TargetFilter::Player`, not the `Any` fallback that silently
+/// prevented combat damage to creatures too.
+#[test]
+fn defend_the_hearth_prevent_binds_to_bare_players_recipient() {
+    let def = parse_effect_chain(
+        "Prevent all combat damage that would be dealt to players this turn.",
+        AbilityKind::Spell,
+    );
+    let Effect::PreventDamage { target, scope, .. } = &*def.effect else {
+        panic!("expected PreventDamage, got {:?}", def.effect);
+    };
+    assert_eq!(*target, TargetFilter::Player);
+    assert_eq!(*scope, PreventionScope::CombatDamage);
+}
+
+/// CR 608.2c + CR 615 (issue #6682): Energy Arc's bidirectional "dealt to and
+/// dealt by those creatures" must bind BOTH shields to the untapped creatures
+/// selected by the preceding clause — a target-derived tracked-set anaphor —
+/// not the `Any` fallback that silently protected/exposed every creature.
+#[test]
+fn energy_arc_bidirectional_prevent_binds_to_untapped_targets() {
+    let def = parse_effect_chain(
+        "Untap any number of target creatures. Prevent all combat damage that would be \
+         dealt to and dealt by those creatures this turn.",
+        AbilityKind::Spell,
+    );
+    let prevent = def
+        .sub_ability
+        .as_deref()
+        .expect("the prevent clause must chain after the untap");
+    let Effect::PreventDamage { target, .. } = &*prevent.effect else {
+        panic!(
+            "expected the recipient (\"to\") shield, got {:?}",
+            prevent.effect
+        );
+    };
+    assert!(
+        matches!(target, TargetFilter::TrackedSet { .. }),
+        "the recipient shield must bind to the untapped-creatures tracked set, got {target:?}"
+    );
+    assert_ne!(*target, TargetFilter::Any);
+
+    let by_ability = prevent
+        .sub_ability
+        .as_deref()
+        .expect("the source (\"by\") shield must chain as a sequential sibling");
+    let Effect::PreventDamage {
+        damage_source_filter,
+        ..
+    } = &*by_ability.effect
+    else {
+        panic!(
+            "expected the source (\"by\") shield, got {:?}",
+            by_ability.effect
+        );
+    };
+    assert!(
+        matches!(damage_source_filter, Some(TargetFilter::TrackedSet { .. })),
+        "the source shield must also bind to the same tracked set, got {damage_source_filter:?}"
+    );
+}
+
 /// CR 111.3 + CR 118.12: A token created "with" a quoted activated ability whose
 /// effect is a soft counter ("Counter … unless its controller pays {mana}") must
 /// carry that whole ability, unless-pay included, on the TOKEN. Mage's Attendant's

@@ -1629,6 +1629,18 @@ pub fn parse_target_with_syntax<'a>(
         return (TargetFilter::Controller, rest, syntax);
     }
 
+    // CR 615.1 + CR 615.1a: Bare "players" — a mass, untargeted player
+    // recipient with no "target" keyword (Defend the Hearth: "prevent all
+    // combat damage that would be dealt to players this turn"). `Player` has
+    // no `TypeFilter` representation (it is not a card type), so the
+    // `parse_type_filter_word`-based fallback below never recognizes it; this
+    // needs its own bare-noun arm, mirroring the "target player" arm above.
+    if let Some((_, rest)) =
+        nom_on_lower(text, &lower, |input| parse_word_bounded(input, "players"))
+    {
+        return (TargetFilter::Player, rest, syntax);
+    }
+
     // "the top/bottom [N] [type] card[s] of [possessive] library/graveyard"
     // Zone position references that appear as targets of exile/mill/reveal effects.
     // Returns a filter with InZone for the referenced zone and controller.
@@ -11757,6 +11769,24 @@ mod tests {
             matches!(&f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)),
             "bare \"creatures\" must be a Typed creature filter, got {f:?}"
         );
+    }
+
+    /// CR 615.1 (issue #6682, Defend the Hearth class): bare "players" with no
+    /// "target" keyword must resolve to a mass player recipient, not the
+    /// unclassified `Any` fallback.
+    #[test]
+    fn bare_players_resolves_to_player_filter() {
+        let (f, rest) = parse_target("players");
+        assert_eq!(rest, "");
+        assert_eq!(f, TargetFilter::Player);
+    }
+
+    /// Negative: "players" must still require a word boundary — "playerskip"
+    /// (a hypothetical longer word) must not spuriously match the bare noun.
+    #[test]
+    fn bare_players_requires_word_boundary() {
+        let (f, _rest) = parse_target("playersXYZ");
+        assert_ne!(f, TargetFilter::Player);
     }
 
     /// Recursively check whether any leaf of the filter is `HasChosenName`.

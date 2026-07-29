@@ -24461,6 +24461,40 @@ fn clause_ir_mass_population(clause: &ClauseIr) -> Option<TargetFilter> {
     mass_population_filter(&clause.parsed.effect).cloned()
 }
 
+/// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): If this clause is a
+/// `GenericEffect` Continuous-mode static grant over a BROADCAST population (a
+/// keyword/P-T/ability "gain(s)"/"have"/"has" grant, not a chosen-target
+/// application), return the population filter it establishes. Feeds
+/// `ParseContext::chain_prior_mass_population` alongside
+/// `clause_ir_mass_population` so a later same-chain "those permanents"/
+/// "those creatures" anaphor binds to the SAME population the grant locked
+/// onto. Mutational Advantage's official ruling: "The set of permanents
+/// affected by Mutational Advantage is determined at the time Mutational
+/// Advantage resolves." Mirrors `is_mass_coerce_static`'s governing-filter
+/// selection but is not restricted to the MustAttack/MustAttackPlayer
+/// coercion statics that function targets — any Continuous static grant over
+/// a broadcast population qualifies. Only a single static definition is
+/// accepted: a `GenericEffect` carrying two or more static defs has no single
+/// population to name without risking a wrong-antecedent guess.
+fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilter> {
+    let Effect::GenericEffect {
+        static_abilities,
+        target: None,
+        ..
+    } = &clause.parsed.effect
+    else {
+        return None;
+    };
+    let [static_def] = static_abilities.as_slice() else {
+        return None;
+    };
+    if static_def.mode != StaticMode::Continuous {
+        return None;
+    }
+    let filter = static_def.affected.as_ref()?;
+    is_broadcast_population_filter(filter).then(|| filter.clone())
+}
+
 /// CR 400.1/400.2 + CR 601.2a: Map a possessive-hand player reference (as
 /// produced by `parse_hand_possessive_target`) to the `ControllerRef` axis
 /// used to scope a card filter to that same player's hand. Exhaustive over
@@ -29970,11 +30004,14 @@ pub(crate) fn parse_effect_chain_ir(
             // than reaching past it to the trigger's own subject (Ardbert,
             // Warrior of Darkness). Mass effects choose nothing, so
             // `parent_target_available` / `ParentTarget` cannot carry this.
-            chain_prior_mass_population: builder
-                .clauses()
-                .iter()
-                .rev()
-                .find_map(clause_ir_mass_population),
+            // CR 611.2c + CR 615.11 (issue #6682): also matches a preceding
+            // Continuous-mode keyword/P-T grant clause (Mutational Advantage,
+            // Blinding Fog), so a later "those permanents"/"those creatures"
+            // prevent-recipient anaphor binds to the SAME locked-in
+            // population instead of falling back to `Any`.
+            chain_prior_mass_population: builder.clauses().iter().rev().find_map(|d| {
+                clause_ir_mass_population(d).or_else(|| clause_ir_continuous_grant_population(d))
+            }),
             // CR 608.2c: bind a bare "it" in this chunk's counter/anaphor to the
             // token created by an earlier clause when that token is the chain's
             // most-recent object referent (Esper Terra's "put up to three lore

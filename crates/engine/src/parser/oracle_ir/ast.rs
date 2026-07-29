@@ -1211,6 +1211,15 @@ pub(crate) enum UtilityImperativeAst {
         /// `ctx.parent_target_available` at the one construction site where
         /// `ParseContext` is live (issue #1094).
         parent_target_available: bool,
+        /// CR 611.2c + CR 615.11 (issue #6682): the population filter
+        /// established by an earlier same-chain Continuous-mode static grant
+        /// clause (Mutational Advantage's hexproof/indestructible grant,
+        /// Blinding Fog-class cards), if any. Captured from
+        /// `ctx.chain_prior_mass_population` at the same construction site as
+        /// `parent_target_available`, so a "those permanents"/"those
+        /// creatures" recipient anaphor can bind to the SAME locked-in
+        /// population instead of the silently-permissive `Any` fallback.
+        chain_prior_mass_population: Option<TargetFilter>,
     },
     Regenerate {
         text: String,
