@@ -89,20 +89,34 @@ pub fn resolve(
         AbilityCost::Mana { cost: mana_cost }
             if payment_ability.chosen_x.is_none() && casting_costs::cost_has_x(mana_cost) =>
         {
-            let max = max_resolution_mana_x_value(state, payer, ability.source_id, mana_cost);
-            let max =
-                trigger_event_amount_for_x_payment(state).map_or(max, |amount| max.min(amount));
-            state.waiting_for = WaitingFor::PayAmountChoice {
-                player: payer,
-                resource: PayableResource::ManaGeneric {
-                    base_cost: mana_cost.clone(),
-                },
-                min: 0,
-                max,
-                accumulated: 0,
-                source_id: ability.source_id,
-                pending_mana_ability: None,
-            };
+            match resolution_mana_x_max(state, payer, ability.source_id, mana_cost) {
+                Some(max) => {
+                    let max = trigger_event_amount_for_x_payment(state)
+                        .map_or(max, |amount| max.min(amount));
+                    state.waiting_for = WaitingFor::PayAmountChoice {
+                        player: payer,
+                        resource: PayableResource::ManaGeneric {
+                            base_cost: mana_cost.clone(),
+                        },
+                        min: 0,
+                        max,
+                        accumulated: 0,
+                        source_id: ability.source_id,
+                        pending_mana_ability: None,
+                    };
+                }
+                // CR 608.2d + CR 118.12: not even X=0 is payable — the
+                // cost's fixed portion (colored/generic pips alongside X,
+                // e.g. `{X}{W}` with no white available) can't be paid
+                // regardless of what X is chosen, so there is no legal
+                // amount to offer. Presenting a `[0, 0]` prompt here would
+                // let the player "choose" an impossible option; fail the
+                // payment outright instead, exactly like any other
+                // unaffordable resolution-time cost.
+                None => {
+                    state.cost_payment_failed_flag = true;
+                }
+            }
         }
         // CR 107.1c + CR 107.14: "Pay any amount of {E}" — suspend the chain and
         // surface a `PayAmountChoice` prompt. The sub-ability continuation
@@ -292,12 +306,27 @@ fn resolve_ability_cost_payment(
     }
 }
 
-fn max_resolution_mana_x_value(
+/// CR 608.2d: while resolving, a player can't be offered an illegal or
+/// impossible choice. Returns `Some(max)` for the greatest affordable X —
+/// `Some(0)` covers both "a pure `{X}` cost with nothing to spend" (paying
+/// `{0}` is a trivial no-op, always legal) and "a fixed portion the player
+/// can just barely afford at X=0". Returns `None` only when the cost's
+/// fixed portion (any colored/generic pips alongside X, e.g. `{X}{W}` with
+/// no white available) can't be paid at ANY value of X, including 0 — the
+/// caller must treat that as an ordinary payment failure, never open a
+/// `[0, 0]` prompt (there is no legal amount to submit).
+///
+/// Monotonic by construction: `concretize_x` only ever ADDS generic mana as
+/// X grows while the fixed shards stay constant, so if some X = V is
+/// payable, X = 0 is payable too. The downward search below therefore never
+/// needs to re-check 0 separately — reaching `max == 0` and failing there is
+/// exactly the "not even 0 works" case.
+fn resolution_mana_x_max(
     state: &GameState,
     payer: PlayerId,
     source_id: crate::types::identifiers::ObjectId,
     cost: &ManaCost,
-) -> u32 {
+) -> Option<u32> {
     // Resolution-time X costs are not spell casts — convoke/improvise/waterbend
     // tap-payments do not apply, so no spell object is passed.
     let mut max = casting_costs::max_x_value(state, payer, cost, None);
@@ -305,10 +334,10 @@ fn max_resolution_mana_x_value(
         let mut concrete = cost.clone();
         concrete.concretize_x(max);
         if casting::can_pay_effect_mana_cost_after_auto_tap(state, payer, source_id, &concrete) {
-            return max;
+            return Some(max);
         }
         if max == 0 {
-            return 0;
+            return None;
         }
         max -= 1;
     }
@@ -1789,6 +1818,241 @@ mod tests {
             state.players[0].mana_pool.mana
         );
         assert_eq!(state.players[0].hand.len(), 4, "drew X=4 cards");
+    }
+
+    /// CR 608.2d + CR 118.12: a cost of `{X}{W}` with NO white mana available
+    /// can't be paid at any value of X, including 0 — there is no legal
+    /// amount to offer. Pre-fix, `max_resolution_mana_x_value` collapsed
+    /// "genuinely payable at X=0" and "not payable at all" into the same
+    /// `max = 0`, so this shape opened a `[0, 0]` `PayAmountChoice` that let
+    /// the player "choose" an impossible option, then failed with an
+    /// internal `InvalidAction` on submit instead of the ordinary
+    /// payment-failure path. Accepting the optional cost must instead fail
+    /// immediately: no `PayAmountChoice` ever appears, `cost_payment_failed_flag`
+    /// is set, and the `IfYouDo` Draw rider (gated on
+    /// `!cost_payment_failed_flag`) does not fire. Sibling control case:
+    /// `pay_x_plus_colored_mana_with_payable_fixed_pip_offers_zero_max_choice`
+    /// below covers the genuinely-payable `X=0` shape, which must still
+    /// present the prompt.
+    #[test]
+    fn pay_x_plus_colored_mana_with_unpayable_fixed_pip_fails_without_impossible_choice() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityCondition, SubAbilityLink};
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Elenda and Azor".to_string(),
+            Zone::Battlefield,
+        );
+        for n in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        assert!(
+            state.players[0].mana_pool.mana.is_empty(),
+            "controller must have no mana at all, so not even {{W}} at X=0 is payable"
+        );
+
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        draw.condition = Some(AbilityCondition::effect_performed());
+        draw.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X, ManaCostShard::White],
+                        generic: 0,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.sub_ability = Some(Box::new(draw));
+        pay.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        let waiting = handle_optional_effect_choice(&mut state, true, &mut events).unwrap();
+        assert!(
+            !matches!(waiting, WaitingFor::PayAmountChoice { .. }),
+            "an unpayable fixed pip must never open a PayAmountChoice prompt \
+             (CR 608.2d forbids offering an impossible choice), got {waiting:?}"
+        );
+        assert!(
+            state.cost_payment_failed_flag,
+            "PayCost with an unpayable fixed {{W}} pip must set cost_payment_failed_flag, \
+             exactly like any other unaffordable resolution-time cost"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            0,
+            "the IfYouDo Draw rider must not fire when the cost payment failed"
+        );
+        assert!(state.players[0].mana_pool.mana.is_empty());
+    }
+
+    /// Control case for the above: `{X}{W}` where the player has EXACTLY one
+    /// white mana and nothing else. X=0 (paying just `{W}`) IS genuinely
+    /// payable, so — unlike the unpayable-fixed-pip case — accepting the
+    /// optional cost MUST still present a `PayAmountChoice { min: 0, max: 0 }`
+    /// prompt, and submitting 0 must pay the `{W}` (not silently no-op).
+    #[test]
+    fn pay_x_plus_colored_mana_with_payable_fixed_pip_offers_zero_max_choice() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityCondition, SubAbilityLink};
+        use crate::types::actions::GameAction;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Elenda and Azor".to_string(),
+            Zone::Battlefield,
+        );
+        for n in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        // Exactly {W} — enough for X=0 ({W}), nothing left over for X>0.
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::White,
+            source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
+            supertype: None,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+        });
+
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        draw.condition = Some(AbilityCondition::effect_performed());
+        draw.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X, ManaCostShard::White],
+                        generic: 0,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.sub_ability = Some(Box::new(draw));
+        pay.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        let waiting = handle_optional_effect_choice(&mut state, true, &mut events).unwrap();
+        match &waiting {
+            WaitingFor::PayAmountChoice {
+                resource, min, max, ..
+            } => {
+                assert_eq!(
+                    *resource,
+                    PayableResource::ManaGeneric {
+                        base_cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X, ManaCostShard::White],
+                            generic: 0,
+                        },
+                    }
+                );
+                assert_eq!(*min, 0);
+                assert_eq!(*max, 0, "no spare mana beyond the {{W}} pip for X>0");
+            }
+            other => {
+                panic!("a genuinely payable X=0 cost must still present the choice, got {other:?}")
+            }
+        }
+
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SubmitPayAmount { amount: 0 },
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            state.players[0].mana_pool.mana.is_empty(),
+            "the {{W}} pip must be paid even though X=0"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            0,
+            "X=0 draws zero cards, but the IfYouDo rider still fires (payment succeeded)"
+        );
+        assert!(!state.cost_payment_failed_flag);
     }
 
     /// CR 603.2 + CR 603.5 + CR 107.3a + CR 608.2c + CR 119.3 + CR 121.1:
