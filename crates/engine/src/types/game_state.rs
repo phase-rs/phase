@@ -9598,15 +9598,22 @@ pub enum DistributionUnit {
 /// resource (energy, life, generic mana, counters); `LoopCollapse` is the one
 /// non-payment member — its N is the finite count an accepted CR 732.2a
 /// object-growth loop collapses into, deducting nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PayableResource {
     /// CR 107.14: Pay any amount of `{E}` — removes N energy counters from the player.
     Energy,
-    /// CR 107.3 + CR 118.1: Pay a chosen X as generic mana while resolving an effect.
+    /// CR 107.1b + CR 107.3 + CR 118.1: Pay a chosen X as part of a
+    /// resolution-time mana cost. `base_cost` is the UNCONCRETIZED cost
+    /// (still carrying `ManaCostShard::X` plus any colored/generic pips
+    /// alongside it, e.g. `{X}{W}{U}{B}`); the submit handler concretizes X
+    /// into it (`ManaCost::concretize_x`) and pays the resulting cost through
+    /// the standard mana-payment authority, so colored requirements are
+    /// enforced exactly like any other mana cost — never dropped in favor of
+    /// a generic-only payment (Elenda and Azor, #6410).
     ManaGeneric {
-        #[serde(default = "default_one")]
-        per_x: u32,
+        #[serde(default)]
+        base_cost: ManaCost,
     },
     /// CR 107.1c + CR 122.1: Choose how many counters to remove.
     Counters,
@@ -9707,10 +9714,6 @@ impl LoopCollapseAxis {
             | ResourceAxis::Poison(_) => None,
         }
     }
-}
-
-fn default_one() -> u32 {
-    1
 }
 
 /// CR 115.7: Scope of retargeting — single target, all targets, or forced.

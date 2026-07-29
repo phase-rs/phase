@@ -2350,7 +2350,11 @@ export type LoopCollapseAxis = "Tokens" | "Counters" | "Life" | "Mixed";
 
 export type PayableResource =
   | { type: "Energy" }
-  | { type: "ManaGeneric"; data: { per_x: number } }
+  // CR 107.1b + CR 107.3 + CR 118.1: `base_cost` is the UNCONCRETIZED mana
+  // cost (still carrying the X shard alongside any colored/generic pips,
+  // e.g. `{X}{W}{U}{B}`) — the engine concretizes X into it and pays the
+  // full result, so colored requirements are never dropped (#6410).
+  | { type: "ManaGeneric"; data: { base_cost: ManaCost } }
   | { type: "Counters" }
   | { type: "Speed" }
   // CR 732.2a: not a resource payment — the finite count an accepted
