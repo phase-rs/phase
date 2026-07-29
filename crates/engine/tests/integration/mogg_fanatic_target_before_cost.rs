@@ -73,7 +73,7 @@ fn sacrifice(runner: &mut GameRunner, permanent: ObjectId, selected_target: Obje
             runner.state().waiting_for
         );
     };
-    assert_eq!(kind, PayCostKind::Sacrifice);
+    assert_eq!(kind, &PayCostKind::Sacrifice);
     assert!(choices.contains(&permanent));
     assert!(
         runner.state().battlefield.contains(&selected_target),
