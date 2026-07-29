@@ -16846,7 +16846,11 @@ pub(super) fn try_finalize_pending_activation_mana_leg(
     if let Some(waiting) = waiting {
         return Ok(Some(waiting));
     }
-    casting_costs::finalize_automatic_mana_payment(state, player, events).map(Some)
+    // CR 601.2g-h + CR 602.2b: The shared payment entry point auto-pays only
+    // when this root is actually payable. A target-first activation with an
+    // insufficient or choice-bearing mana leg must instead expose ManaPayment
+    // after targets are declared, rather than failing target submission.
+    casting_costs::enter_payment_step(state, player, None, events).map(Some)
 }
 
 /// CR 602.2b + CR 605.3b + CR 616.1: Finalize an activation mana cost that
@@ -16887,7 +16891,9 @@ pub(super) fn finalize_pending_activation_mana_payment(
     ) {
         return Ok(waiting);
     }
-    casting_costs::finalize_automatic_mana_payment(state, player, events)
+    // CR 601.2g-h + CR 602.2b: Preserve the same manual-payment boundary when
+    // this already-serialized root resumes after target declaration.
+    casting_costs::enter_payment_step(state, player, None, events)
 }
 
 #[allow(clippy::too_many_arguments)]

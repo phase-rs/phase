@@ -4338,7 +4338,11 @@ pub(crate) fn target_first_activation_defers_interactive_costs_to_payment_bounda
     };
 
     (matches!(handoff, TargetFirstPaymentHandoff::BeforeManaPayment)
-        && extract_mana_leg(cost).is_some_and(|(mana_cost, _)| !mana_cost.is_without_paying_mana()))
+        && extract_mana_leg(cost).is_some_and(|(mana_cost, _)| !mana_cost.is_without_paying_mana())
+        // CR 601.2g-h: This established class keeps non-self battlefield
+        // removal after the mana window. Other interactive residuals (such as
+        // exile from hand and unattach) retain their dispatcher order.
+        && super::casting::find_non_self_battlefield_removal_cost(cost).is_some())
         || (pending.ability.chosen_x.is_some() && cost_has_targeted_symbolic_counter_removal(cost))
 }
 
