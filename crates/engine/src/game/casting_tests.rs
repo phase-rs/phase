@@ -7407,6 +7407,57 @@ fn x_cost_activation_defers_exact_target_count_until_x_is_announced() {
         .contains(&TargetRef::Object(target)));
 }
 
+/// CR 602.2b + CR 601.2b/c/f: An unresolved X target count may defer target
+/// declaration, but it cannot conceal a separate mandatory target's absence.
+#[test]
+fn x_target_count_does_not_mask_missing_fixed_target() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(956),
+        PlayerId(0),
+        "Mixed Target Relic".to_string(),
+        Zone::Battlefield,
+    );
+    let mut x_target = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        },
+    );
+    x_target.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    }));
+    let ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        },
+    )
+    .cost(AbilityCost::Mana {
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        },
+    })
+    .sub_ability(x_target);
+    Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability);
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+    let error = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
+        .expect_err("the missing fixed target must reject before choosing X");
+    assert!(matches!(
+        error,
+        EngineError::ActionNotAllowed(message) if message == "No legal targets available"
+    ));
+    assert!(state.pending_cast.is_none());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
 #[test]
 fn activation_discard_replacement_resumes_and_pays_remaining_composite_cost() {
     let mut state = setup_game_at_main_phase();

@@ -17150,12 +17150,19 @@ pub fn handle_activate_ability(
     // failure remains an immediate activation error.
     let has_effect_targets = match build_target_slots(state, &resolved) {
         Ok(target_slots) => !target_slots.is_empty(),
-        Err(_)
-            if activation_cost.as_ref().is_some_and(|cost| {
-                ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
-                    && (casting_costs::extract_x_mana_cost(cost).is_some()
+        // `resolve_multi_target_bounds` fails closed while the exact target
+        // count still depends on X. Do not treat another target-construction
+        // error (for example, a missing mandatory fixed target) as an X
+        // declaration: it must reject the activation immediately.
+        Err(EngineError::ActionNotAllowed(message))
+            if message == "Target count requires a resolved quantity before target selection"
+                && activation_cost.as_ref().is_some_and(|cost| {
+                    ability_target_legality_needs_chosen_x(
+                        &resolved,
+                        ability_def.distribute.as_ref(),
+                    ) && (casting_costs::extract_x_mana_cost(cost).is_some()
                         || casting_costs::activation_cost_needs_x_choice(&resolved, cost))
-            }) =>
+                }) =>
         {
             true
         }
