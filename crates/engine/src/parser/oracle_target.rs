@@ -2899,9 +2899,12 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // single authority for an EXPLICIT eligible set; this pass handles the form
     // whose population is the enclosing noun phrase itself.
     //
-    // CR 109.2a PRE-CHECK (fail-fast, NOT the authority): the accumulators bound
-    // so far already settle the "card" question, so a `card` phrase is never
-    // consumed and its text stays honest in the remainder. The zone passes have
+    // CR 109.2 PRE-CHECK (fail-fast, NOT the authority): CR 109.2 licenses the
+    // battlefield default only for a description that names no zone and contains no
+    // "card"/"spell"/"source"/"scheme"; CR 109.2a is what a "card" + zone
+    // description means instead. The accumulators bound so far already settle the
+    // "card" leg, so a `card` phrase is never consumed and its text stays honest in
+    // the remainder. The zone passes have
     // not run yet — which is exactly why the AUTHORITY is the identical call in
     // the materialization block below, over the FINAL accumulators.
     if phrase_denotes_battlefield_permanents(
@@ -2915,16 +2918,17 @@ pub fn parse_type_phrase_with_ctx<'a>(
         &properties,
     ) {
         if let Some((head, consumed)) = parse_bare_superlative_property_suffix(&lower[pos..]) {
-            // CR 109.2a: refuse BEFORE consuming when a non-battlefield zone clause
-            // still lies ahead. That population is not modelled here, and consuming
-            // first only to refuse at materialization would drop the restriction
-            // while leaving the card looking supported.
+            // CR 109.2: refuse BEFORE consuming when a non-battlefield zone clause
+            // still lies ahead. Naming a zone withdraws the battlefield default, and
+            // that population is not modelled here; consuming first only to refuse
+            // at materialization would drop the restriction while leaving the card
+            // looking supported.
             //
-            // A trailing relative type clause ("that's an artifact") is deliberately
-            // NOT refused here — it is folded into the population below so the
-            // population still equals the candidate set. Refusing it pre-consumption
-            // would leave the whole tail unparsed and drop the TYPE clause too,
-            // which is worse than the bug being fixed.
+            // A trailing relative type clause ("that's an artifact", "that's an
+            // artifact or creature") is deliberately NOT refused here — it is folded
+            // into the population below, so the population still equals the candidate
+            // set. Refusing it pre-consumption would leave the whole tail unparsed and
+            // drop the TYPE clause too, which is worse than the bug being fixed.
             if !nonbattlefield_zone_clause_lies_ahead(&lower[pos + consumed..]) {
                 pending_bare_superlative = Some(head);
                 pos += consumed;
@@ -3568,7 +3572,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // controller (including a trailing "you control" / "they control"), and every
     // other accumulated property.
     //
-    // CR 109.2a AUTHORITY. This re-check is NOT redundant with the pre-check at the
+    // CR 109.2 AUTHORITY. This re-check is NOT redundant with the pre-check at the
     // detection pass: `parse_zone_suffix` runs unconditionally after that pass and
     // pushes into the same `properties` this block snapshots. "creature with the
     // greatest power in your graveyard" therefore reaches here with
@@ -3583,24 +3587,30 @@ pub fn parse_type_phrase_with_ctx<'a>(
     if let Some((function, property)) = pending_bare_superlative.take() {
         // CR 109.2: the ranked population must be the SAME set as the candidates. A
         // trailing relative type clause closes the noun phrase AFTER the detection
-        // pass, so fold it into the population below rather than refusing —
-        // refusing would leave the tail unparsed and drop the type clause as well.
-        //
-        // A MULTI-type relative clause is a DISJUNCTION that `type_filter_branches`
-        // spreads across several branches, which one conjunctive population cannot
-        // express, so that shape is declined. (Zero corpus attestation for either
-        // form today.)
-        if relative_core_type_filters.len() <= 1
-            && phrase_denotes_battlefield_permanents(
-                left_card_suffix,
-                &[&base_type_filters, &relative_core_type_filters],
-                &properties,
-            )
-        {
-            // Population type set = candidate type set, INCLUDING any single-type
-            // relative clause, so ranking and candidacy agree object-for-object.
+        // pass, so fold it into the population here rather than refusing — refusing
+        // would leave the tail unparsed and drop the type clause as well.
+        if phrase_denotes_battlefield_permanents(
+            left_card_suffix,
+            &[&base_type_filters, &relative_core_type_filters],
+            &properties,
+        ) {
+            // Population type set == candidate type set, so ranking and candidacy
+            // agree object-for-object.
+            //
+            // A MULTI-type relative clause ("that's an artifact or creature") is a
+            // DISJUNCTION that `type_filter_branches` spreads across one `Or` leg per
+            // type. `TypeFilter::AnyOf` expresses that same union as a single
+            // conjunctive member, because
+            // `base ∧ (A ∨ B) == (base ∧ A) ∪ (base ∧ B)`. The prop built below is
+            // pushed into `properties`, which the branch cross-product then
+            // replicates onto every leg — so each leg ranks against the WHOLE
+            // population, not just its own type.
             let mut population_types = base_type_filters.clone();
-            population_types.extend(relative_core_type_filters.iter().cloned());
+            match relative_core_type_filters.as_slice() {
+                [] => {}
+                [only] => population_types.push(only.clone()),
+                many => population_types.push(TypeFilter::AnyOf(many.to_vec())),
+            }
             let population = TargetFilter::Typed(TypedFilter {
                 type_filters: population_types,
                 controller: controller.clone(),
@@ -3609,8 +3619,9 @@ pub fn parse_type_phrase_with_ctx<'a>(
             let prop = superlative_property_filter_prop(function, property, population);
             properties.push(prop);
         } else {
-            // CR 109.2a: the phrase names cards in a non-battlefield zone, whose
-            // ranked population this change does not model. Leave the text
+            // CR 109.2 (+ CR 109.2a for the "card" leg): the phrase names a
+            // non-battlefield zone, so the battlefield default is withdrawn and the
+            // ranked population is one this change does not model. Leave the text
             // unclaimed and record it, rather than emitting a population that
             // would silently be the wrong set.
             ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
@@ -5019,8 +5030,9 @@ fn parse_bare_superlative_property_suffix(
     Some((head, text.len() - rest.len()))
 }
 
-/// CR 109.2a look-ahead: does a NON-BATTLEFIELD zone clause still lie ahead in
-/// this noun phrase?
+/// CR 109.2 look-ahead: does a NON-BATTLEFIELD zone clause still lie ahead in
+/// this noun phrase? (CR 109.2 grants the battlefield default only to a
+/// description that names no zone; CR 109.2a is reserved for "card" + zone.)
 ///
 /// The zone passes run after the bare-superlative detection pass, so at detection
 /// the accumulators cannot yet show a graveyard/exile scope. Without this
@@ -17243,6 +17255,58 @@ mod tests {
     /// CR 109.2 — the explicit "among <set>" form keeps its own authority and is
     /// unchanged by the bare-form pass. Regression guard for the 37 corpus cards
     /// that already worked: the population here is the EXPLICIT set, not the
+    /// CR 109.2 — a MULTI-type trailing relative clause is a disjunction, and every
+    /// `Or` leg must rank against the WHOLE population, not just its own type.
+    ///
+    /// `target permanent with the greatest mana value that's an artifact or creature`
+    /// spreads into `Or { [Permanent+Artifact], [Permanent+Creature] }`. Before this
+    /// fix the superlative was consumed and then dropped, so the phrase targeted ANY
+    /// artifact or creature (maintainer review on PR #6789). The population is now a
+    /// single conjunctive `TypeFilter::AnyOf`, which is exactly that union:
+    /// `base ∧ (A ∨ B) == (base ∧ A) ∪ (base ∧ B)`.
+    #[test]
+    fn multi_type_relative_clause_ranks_every_leg_against_the_whole_population() {
+        let (filter, _) = parse_target(
+            "target permanent with the greatest mana value that's an artifact or creature",
+        );
+        let legs = match &filter {
+            TargetFilter::Or { filters } => filters,
+            other => panic!("expected an Or of one leg per relative type, got {other:?}"),
+        };
+        // Reach-guard: the disjunctive branch really was taken, so the per-leg
+        // assertions below cannot pass vacuously on a single collapsed filter.
+        assert_eq!(
+            legs.len(),
+            2,
+            "reach-guard: one leg per relative core type, got {legs:?}"
+        );
+
+        let expected_population_types = vec![
+            TypeFilter::Permanent,
+            TypeFilter::AnyOf(vec![TypeFilter::Artifact, TypeFilter::Creature]),
+        ];
+        for (leg, own_type) in legs
+            .iter()
+            .zip([TypeFilter::Artifact, TypeFilter::Creature])
+        {
+            let tf = typed_leg(leg).expect("each leg is a Typed filter");
+            assert!(
+                tf.type_filters.contains(&own_type),
+                "leg must keep its own candidate type {own_type:?}, got {:?}",
+                tf.type_filters
+            );
+            // Reverting the fix removes this prop entirely and the leg targets any
+            // artifact or creature.
+            let (_, population) = bare_superlative_parts(leg);
+            let pop = typed_leg(population).expect("typed population");
+            assert_eq!(
+                pop.type_filters, expected_population_types,
+                "every leg must rank against the FULL disjunctive population, not \
+                 just {own_type:?}"
+            );
+        }
+    }
+
     /// enclosing noun phrase, so it must NOT inherit "nonland permanent".
     #[test]
     fn among_form_population_still_comes_from_the_explicit_set() {
@@ -17336,7 +17400,7 @@ mod tests {
         }
     }
 
-    /// CR 109.2a — the look-ahead that stops the superlative being CONSUMED when a
+    /// CR 109.2 — the look-ahead that stops the superlative being CONSUMED when a
     /// non-battlefield zone clause still lies ahead. Refusing only later, after
     /// consumption, would leave a filter that looks supported with its ranked
     /// restriction silently gone — the exact defect this change removes.

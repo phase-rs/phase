@@ -177,3 +177,90 @@ fn culling_scales_offers_only_the_lowest_mana_value_nonland_permanent() {
          Non(Land) leg of the noun phrase; legal={legal:?}"
     );
 }
+
+/// Culling Scales' own shape carries no relative clause, so this row covers the
+/// building block one step out: a MULTI-type trailing relative clause, where the
+/// noun phrase spreads into one `Or` leg per type (maintainer review on PR #6789).
+///
+/// CR 109.2: the ranked population is the candidate set — here "permanents that are
+/// artifacts or creatures" — expressed as a single conjunctive `TypeFilter::AnyOf`
+/// (`base ∧ (A ∨ B) == (base ∧ A) ∪ (base ∧ B)`), and evaluated at runtime by
+/// `type_filter_matches` (`game/filter.rs`).
+///
+/// The Land is the discriminator that separates the two failure modes this test
+/// must tell apart:
+///   * aggregate dropped entirely (the pre-fix bug) → the MV 5 creature is legal;
+///   * aggregate present but ranked over `[Permanent]` only (the population/candidate
+///     mismatch) → the Land's MV 0 sets the bar, no artifact or creature matches it,
+///     so there is no legal target at all and the trigger never pauses for selection.
+///
+/// Both modes were confirmed to fail by patching them in and re-running.
+#[test]
+fn multi_type_relative_clause_ranks_over_the_disjunctive_population_at_runtime() {
+    const MULTI_TYPE: &str = "At the beginning of your upkeep, destroy target permanent \
+                              with the lowest mana value that's an artifact or creature.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let deck = ["Forest"; 12];
+    scenario.with_library_top(P0, &deck);
+    scenario.with_library_top(P1, &deck);
+
+    // MV 3, and a creature — so inside its own population, but not the minimum.
+    scenario
+        .add_creature_from_oracle(P0, "Culling Scales", 1, 1, MULTI_TYPE)
+        .with_mana_cost(ManaCost::generic(3));
+
+    // Deliberate TIE at the population minimum, one member per `Or` leg: a
+    // non-creature artifact and a non-artifact creature. A tie is required or the
+    // engine auto-targets the sole legal object and never pauses.
+    let artifact = scenario
+        .add_creature(P1, "Cheap Relic", 1, 1)
+        .as_artifact()
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let creature = scenario
+        .add_creature(P0, "Cheap Bear", 2, 2)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let expensive = scenario
+        .add_creature(P1, "Pricey Bear", 4, 4)
+        .with_mana_cost(ManaCost::generic(5))
+        .id();
+    // MV 0 — BELOW the tie, and neither an artifact nor a creature, so it must be
+    // outside both the candidate set and the ranked population.
+    let land = scenario.add_basic_land(P0, ManaColor::Green);
+
+    let mut runner = scenario.build();
+
+    advance_to_trigger_target_selection(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "the upkeep trigger must pause for target selection, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let legal = legal_target_ids(&runner);
+    assert!(
+        !legal.is_empty(),
+        "reach-guard: ranking over the disjunctive population must leave the MV 2 tie \
+         legal; an empty set means the Land's MV 0 set the bar, i.e. the population \
+         was the wider [Permanent] set"
+    );
+    assert!(
+        legal.contains(&artifact) && legal.contains(&creature),
+        "both MV 2 permanents tie for the population minimum, one per Or leg; legal={legal:?}"
+    );
+    assert!(
+        !legal.contains(&expensive),
+        "MV 5 is not the lowest — dropping the aggregate makes this legal again"
+    );
+    assert!(
+        !legal.contains(&land),
+        "a Land is neither an artifact nor a creature and must be excluded from the \
+         candidates; legal={legal:?}"
+    );
+}
