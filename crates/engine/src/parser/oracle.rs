@@ -63,6 +63,7 @@ use super::oracle_effect::{
     parse_effect_chain_with_context, rewrite_condition_keyword,
     try_parse_temporal_delayed_trigger_ability,
 };
+use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
@@ -70,7 +71,9 @@ use super::oracle_ir::doc::{
     OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan, OracleUnitSource,
     PrintedAbilityIndex, PrintedTriggerIndex, SpellPayloadIr, UnsupportedAbilityIr,
 };
-use super::oracle_ir::effect_chain::{AbilityIr, ShellStage};
+use super::oracle_ir::effect_chain::{
+    AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr, ShellStage,
+};
 use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
 use super::oracle_ir::replacement::ReplacementIr;
@@ -95,9 +98,9 @@ use super::oracle_replacement::{
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
 use super::oracle_special::{
-    attach_die_result_branches_to_chain, find_terminal_roll_die, normalize_self_refs_for_static,
-    parse_cumulative_upkeep_keyword, parse_defiler_cost_reduction, parse_die_result_branches_ir,
-    parse_harmonize_keyword, parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
+    find_terminal_roll_die, normalize_self_refs_for_static, parse_cumulative_upkeep_keyword,
+    parse_defiler_cost_reduction, parse_die_result_branches_ir, parse_harmonize_keyword,
+    parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
@@ -2848,6 +2851,37 @@ fn ability_word_to_ability_condition(
     )
 }
 
+/// CR 614.6 + CR 614.15: Preserve an unbindable self-replacement on the
+/// `instead_override` honest-failure floor without eagerly lowering it.
+///
+/// A separate override cannot be emitted as an independent effect: if the
+/// replacement applied, its original event never happens. Until the document
+/// relation can bind this particular shape, the unsupported root is the only
+/// rules-honest representation.
+fn instead_override_residual_ir(
+    effect_line: &str,
+    min_x_value: u32,
+    description: &str,
+) -> AbilityIr {
+    AbilityIr {
+        source_text: effect_line.to_string(),
+        body: EffectChainIr::single_clause(
+            effect_line,
+            AbilityKind::Spell,
+            parsed_clause(Effect::unimplemented("instead_override", effect_line)),
+            None,
+            None,
+            false,
+        ),
+        shell: AbilityShellIr::default(),
+        die_results: vec![],
+        root_transforms: vec![
+            AbilityRootTransform::SetMinXValue(min_x_value),
+            AbilityRootTransform::SetDescription(description.to_string()),
+        ],
+    }
+}
+
 /// Single-authority merge for composing a freshly-parsed `AbilityCondition` onto an
 /// existing one on an `AbilityDefinition`.
 ///
@@ -5163,7 +5197,10 @@ pub(crate) fn parse_oracle_ir(
             i += 1;
             // CR 706.3b: Preserve table rows as trigger IR until body lowering
             // attaches them before finalization.
-            if has_roll_die_pattern(&lower) {
+            let mut lowered_for_die_guard = lower_ability_ir(&ability_ir);
+            if has_roll_die_pattern(&lower)
+                && find_terminal_roll_die(&mut lowered_for_die_guard).is_some()
+            {
                 i = attach_trigger_die_result_branches(&mut triggers, &lines, i);
             }
             for __item in triggers {
@@ -6252,18 +6289,33 @@ pub(crate) fn parse_oracle_ir(
             // parsing would mis-parse "Each opponent separates ..." as
             // Unimplemented{separate} followed by a stray Sacrifice
             // sub-ability with a `repeat_for` rider.
-            let mut def = if let Some(pile_def) =
-                crate::parser::oracle_separate_piles::parse_separate_into_piles(
+            let mut ability_ir = if let Some(pile) =
+                crate::parser::oracle_separate_piles::parse_separate_into_piles_ir(
                     parse_line,
                     AbilityKind::Spell,
+                    &ctx,
                 ) {
-                pile_def
-            } else if let Some(vote_def) =
-                crate::parser::oracle_vote::parse_vote_block(parse_line, AbilityKind::Spell)
-            {
-                vote_def
+                AbilityIr {
+                    source_text: parse_line.to_string(),
+                    body: pile.effect_chain(AbilityKind::Spell),
+                    shell: AbilityShellIr::default(),
+                    die_results: vec![],
+                    root_transforms: vec![],
+                }
+            } else if let Some(vote) = crate::parser::oracle_vote::parse_vote_block_ir(
+                parse_line,
+                AbilityKind::Spell,
+                &ctx,
+            ) {
+                AbilityIr {
+                    source_text: parse_line.to_string(),
+                    body: vote.effect_chain(AbilityKind::Spell),
+                    shell: AbilityShellIr::default(),
+                    die_results: vec![],
+                    root_transforms: vec![],
+                }
             } else {
-                parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx)
+                parse_ability_ir_with_context(parse_line, AbilityKind::Spell, &mut ctx)
             };
 
             // CR 614.15 + CR 608.2c: a PARTIAL cross-line self-replacement whose
@@ -6300,11 +6352,15 @@ pub(crate) fn parse_oracle_ir(
             });
             let is_cross_line_dig_alt = dig_alt.is_some();
             if let Some(alt) = dig_alt {
-                def = alt;
+                ability_ir = alt;
             }
 
-            def.min_x_value = spell_min_x_value;
-            def.description = Some(description);
+            ability_ir
+                .root_transforms
+                .push(AbilityRootTransform::SetMinXValue(spell_min_x_value));
+            ability_ir
+                .root_transforms
+                .push(AbilityRootTransform::SetDescription(description));
             // CR 608.2c: Compose ability word condition with chain-extracted condition.
             // When both exist (e.g., Revolt + MV ≤ 4), compose through
             // `merge_ability_condition` which dedupes structurally-equal conditions
@@ -6314,26 +6370,33 @@ pub(crate) fn parse_oracle_ir(
             // Ability-word condition (if any) is the "existing" baseline —
             // the chain-extracted condition is merged onto it, preserving the
             // historical `[ability_word, chain]` ordering when both are distinct.
-            let chain = def.condition.take();
-            def.condition = match (
-                ability_word_to_ability_condition(&aw_condition, &mut ctx),
-                chain,
-            ) {
-                (Some(aw), Some(chain)) => Some(merge_ability_condition(Some(aw), chain)),
-                (Some(aw), None) => Some(aw),
-                (None, chain) => chain,
-            };
+            if let Some(ability_word_condition) =
+                ability_word_to_ability_condition(&aw_condition, &mut ctx)
+            {
+                ability_ir
+                    .root_transforms
+                    .push(AbilityRootTransform::PrependCondition(
+                        ability_word_condition,
+                    ));
+            }
             if let Some(instead_condition) = instead_condition {
-                def.condition = Some(merge_ability_condition(
-                    def.condition.take(),
-                    instead_condition,
-                ));
+                ability_ir
+                    .root_transforms
+                    .push(AbilityRootTransform::AppendCondition(instead_condition));
             }
             i = next_i;
             // CR 706: If the parsed chain ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
-            if has_roll_die_pattern(&lower) {
-                i = attach_die_result_branches_to_chain(&mut def, &lines, i);
+            let mut lowered_for_die_guard = lower_ability_ir(&ability_ir);
+            if has_roll_die_pattern(&lower)
+                && find_terminal_roll_die(&mut lowered_for_die_guard).is_some()
+            {
+                let (branches, next_i) =
+                    parse_die_result_branches_ir(&lines, i, AbilityKind::Spell);
+                if !branches.is_empty() {
+                    ability_ir.die_results = branches;
+                    i = next_i;
+                }
             }
             // CR 608.2c + CR 614.15: Cross-line "instead" self-replacement — a
             // separate printed line (usually an ability word, per CR 614.15)
@@ -6365,14 +6428,14 @@ pub(crate) fn parse_oracle_ir(
                 && !scan_contains(&effect_line_lower, "would");
 
             if is_instead || is_cross_line_dig_alt || is_instead_replacement_line(&effect_line) {
-                if def.condition.is_some() {
+                if lower_ability_ir(&ability_ir).condition.is_some() {
                     if let Some(base) = emitter.last_ability_id() {
                         let Some(_) = previous_spell else {
                             unreachable!(
                                 "`spells_emitted` holds only spell nodes, and all three spell shapes lower"
                             );
                         };
-                        let override_item = emitter.ability_at(item_line, def);
+                        let override_item = emitter.ability_ir_at(item_line, ability_ir);
                         document_relations.push(DocumentRelationIr::SelfReplacementOverride {
                             base,
                             override_item,
@@ -6399,9 +6462,8 @@ pub(crate) fn parse_oracle_ir(
                     // Fail honestly instead: the base ability stands as printed and the
                     // unbindable override is reported as unimplemented. This mirrors the
                     // intra-chain `InsteadLowering::ConditionUnlowerable` floor.
-                    def.effect = Box::new(Effect::unimplemented("instead_override", &effect_line));
-                    def.sub_ability = None;
-                    def.else_ability = None;
+                    ability_ir =
+                        instead_override_residual_ir(&effect_line, spell_min_x_value, &description);
                 }
             } else if is_unbindable_self_replacement && emitter.last_ability_node().is_some() {
                 // CR 614.6 + CR 614.15: the residual self-replacement printings — a
@@ -6422,12 +6484,10 @@ pub(crate) fn parse_oracle_ir(
                 // survives in BOTH branches. Until that exists, fail honestly: the base
                 // ability stands exactly as printed and the override is reported
                 // unimplemented. Never an independent ability.
-                def.effect = Box::new(Effect::unimplemented("instead_override", &effect_line));
-                def.condition = None;
-                def.sub_ability = None;
-                def.else_ability = None;
+                ability_ir =
+                    instead_override_residual_ir(&effect_line, spell_min_x_value, &description);
             }
-            emitter.ability_at(item_line, def);
+            emitter.ability_ir_at(item_line, ability_ir);
             continue;
         }
 

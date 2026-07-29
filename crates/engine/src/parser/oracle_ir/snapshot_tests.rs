@@ -201,6 +201,98 @@ fn nonterminal_activated_die_roll_does_not_consume_following_ability() {
     ));
 }
 
+/// CR 700.3 + CR 701.38: Priority 9 keeps its pile and vote roots native until
+/// document lowering; their nested per-choice and chosen-pile payloads remain
+/// deliberately pre-lowered effect internals.
+#[test]
+fn priority_nine_spell_router_keeps_vote_and_pile_roots_native() {
+    let (vote_ir, vote_lowered) = parse_two_layer(
+        "Starting with you, each player votes for evidence or bribery. For each evidence vote, investigate. For each bribery vote, create a Treasure token.",
+        "Vote Spell Fixture",
+        &["Sorcery"],
+        &[],
+    );
+    assert!(matches!(vote_ir.items[0].node, OracleNodeIr::Spell(_)));
+    assert!(matches!(
+        vote_lowered.abilities[0].effect.as_ref(),
+        Effect::Vote { .. }
+    ));
+
+    let (pile_ir, pile_lowered) = parse_two_layer(
+        "Reveal the top five cards of your library. An opponent separates those cards into two piles. Put one pile into your hand and the other into your graveyard.",
+        "Fact or Fiction",
+        &["Instant"],
+        &[],
+    );
+    assert!(matches!(pile_ir.items[0].node, OracleNodeIr::Spell(_)));
+    assert!(matches!(
+        pile_lowered.abilities[0].effect.as_ref(),
+        Effect::SeparateIntoPiles { .. }
+    ));
+}
+
+/// CR 706.3b: a spell's terminal roll owns its typed table before lowering;
+/// a nonterminal roll must leave following table-shaped text to normal routing.
+#[test]
+fn priority_nine_spell_die_table_respects_terminal_roll_guard() {
+    let (table_ir, table_lowered) = parse_two_layer(
+        "Roll a d20.\n1—9 | Draw a card.\n10—20 | Draw two cards.",
+        "Spell Die Table Fixture",
+        &["Instant"],
+        &[],
+    );
+    let OracleNodeIr::Spell(roll) = &table_ir.items[0].node else {
+        panic!("spell die-table header must remain native IR");
+    };
+    assert_eq!(roll.die_results.len(), 2);
+    assert!(matches!(
+        table_lowered.abilities[0].effect.as_ref(),
+        Effect::RollDie { results, .. } if results.len() == 2
+    ));
+
+    let (nonterminal_ir, _) = parse_two_layer(
+        "Roll a d20, then draw a card.\n1—20 | Draw two cards.",
+        "Nonterminal Spell Die Fixture",
+        &["Instant"],
+        &[],
+    );
+    let OracleNodeIr::Spell(nonterminal) = &nonterminal_ir.items[0].node else {
+        panic!("nonterminal spell roll must remain native IR");
+    };
+    assert!(nonterminal.die_results.is_empty());
+    assert_eq!(
+        nonterminal_ir.items.len(),
+        2,
+        "a nonterminal roll must not consume a following result row"
+    );
+}
+
+/// CR 601.2b: Priority 9 keeps all aggregate source text and the X floor on
+/// the native node until document lowering.
+#[test]
+fn priority_nine_multiline_spell_keeps_description_and_x_floor_in_ir() {
+    let oracle_text = "Draw a card.\nThen draw a card.\nX can't be 0.";
+    let (ir, lowered) = parse_two_layer(oracle_text, "Multiline Spell Fixture", &["Sorcery"], &[]);
+    let OracleNodeIr::Spell(ability) = &ir.items[0].node else {
+        panic!("multiline spell must remain native IR");
+    };
+    assert!(ability.root_transforms.iter().any(|transform| matches!(
+        transform,
+        crate::parser::oracle_ir::effect_chain::AbilityRootTransform::SetMinXValue(1)
+    )));
+    assert!(ability.root_transforms.iter().any(|transform| matches!(
+        transform,
+        crate::parser::oracle_ir::effect_chain::AbilityRootTransform::SetDescription(description)
+            if description == "Draw a card.\nThen draw a card."
+    )));
+    assert_eq!(lowered.abilities.len(), 1);
+    assert_eq!(lowered.abilities[0].min_x_value, 1);
+    assert_eq!(
+        lowered.abilities[0].description.as_deref(),
+        Some("Draw a card.\nThen draw a card.")
+    );
+}
+
 /// CR 706.3b: ordinary trigger dispatch retains a die-result table in native
 /// trigger IR and attaches it to the terminal roll before finalization.
 #[test]
@@ -1512,8 +1604,35 @@ fn follow_the_lumarets() {
         &["Sorcery"],
         &[],
     );
+    assert!(matches!(ir.items[0].node, OracleNodeIr::Spell(_)));
+    assert_eq!(
+        lowered.abilities.len(),
+        1,
+        "the Dig override must bind through the document relation"
+    );
+    assert!(lowered.abilities[0].sub_ability.is_some());
     insta::assert_json_snapshot!("follow_the_lumarets_ir", &ir);
     insta::assert_json_snapshot!("follow_the_lumarets_lowered", &lowered);
+}
+
+/// CR 614.6 + CR 614.15: an override whose condition cannot lower stays on the
+/// `instead_override` floor; it must never become an independent second spell.
+#[test]
+fn priority_nine_unbindable_conditioned_replacement_stays_honest() {
+    let (ir, lowered) = parse_two_layer(
+        "Draw a card.\nMystery — Draw two cards instead if the cracks in this artifact's art are completely covered.",
+        "Unbindable Override Fixture",
+        &["Sorcery"],
+        &[],
+    );
+    assert!(matches!(ir.items[0].node, OracleNodeIr::Spell(_)));
+    assert!(matches!(ir.items[1].node, OracleNodeIr::Spell(_)));
+    assert_eq!(lowered.abilities.len(), 2);
+    assert!(matches!(
+        lowered.abilities[1].effect.as_ref(),
+        Effect::Unimplemented { name, .. } if name == "instead_override"
+    ));
+    assert!(lowered.abilities[1].condition.is_none());
 }
 
 // CR 614.1a + CR 608.2c: Instead — the multi-clause Cow-swap. Clause 1 ("gain
