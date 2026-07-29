@@ -7,7 +7,9 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
+use crate::parser::oracle_ir::trigger::TriggerNodeIr;
 use crate::types::ability::MultiTargetSpec;
+use crate::types::ability::{Effect, TriggerCondition};
 use crate::types::game_state::DistributionUnit;
 
 /// Parse Oracle text through both IR and lowering layers.
@@ -33,6 +35,179 @@ fn parse_two_layer_with_keywords(
     let mut ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
     let lowered = lower_oracle_ir(&mut ir);
     (ir, lowered)
+}
+
+/// CR 706.3b: ordinary trigger dispatch retains a die-result table in native
+/// trigger IR and attaches it to the terminal roll before finalization.
+#[test]
+fn direct_trigger_die_table_is_ir_native_and_lowers_as_one_ability() {
+    let (ir, lowered) = parse_two_layer(
+        "Whenever this creature attacks, roll a d20.\n1—9 | Create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")\n10—19 | Create two Treasure tokens.\n20 | Create three Treasure tokens.",
+        "Hoarding Ogre",
+        &["Creature"],
+        &["Giant"],
+    );
+
+    assert_eq!(
+        ir.items.len(),
+        1,
+        "result rows must not become document items"
+    );
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &ir.items[0].node else {
+        panic!(
+            "expected a native parsed trigger, got {:?}",
+            ir.items[0].node
+        );
+    };
+    assert_eq!(trigger.die_results.len(), 3);
+    assert_eq!(
+        trigger
+            .die_results
+            .iter()
+            .map(|branch| (branch.min, branch.max))
+            .collect::<Vec<_>>(),
+        vec![(1, 9), (10, 19), (20, 20)]
+    );
+
+    let execute = lowered.triggers[0]
+        .execute
+        .as_deref()
+        .expect("Hoarding Ogre trigger must have an execute ability");
+    let Effect::RollDie { results, .. } = execute.effect.as_ref() else {
+        panic!(
+            "expected terminal roll-die effect, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(results.len(), 3);
+    assert!(
+        results
+            .iter()
+            .all(|branch| !matches!(branch.effect.effect.as_ref(), Effect::Unimplemented { .. })),
+        "table branches must be lowered through the ordinary ability authority: {results:?}"
+    );
+}
+
+/// The ability-word trigger route is likewise native IR. Its existing fallback
+/// condition is applied only when trigger parsing did not already find one.
+#[test]
+fn ability_word_trigger_table_is_ir_native_and_preserves_condition_fallback() {
+    let (ir, lowered) = parse_two_layer(
+        "Wild Magic Surge — Whenever this creature attacks, roll a d20.\n1—9 | Exile the top card of your library. You may play it this turn.\n10—19 | Exile the top two cards of your library. You may play them this turn.\n20 | Exile the top three cards of your library. You may play them this turn.",
+        "Chaos Channeler",
+        &["Creature"],
+        &["Human", "Shaman"],
+    );
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &ir.items[0].node else {
+        panic!("expected a native parsed ability-word trigger");
+    };
+    assert_eq!(trigger.die_results.len(), 3);
+    assert!(matches!(
+        lowered.triggers[0].execute.as_deref().map(|execute| execute.effect.as_ref()),
+        Some(Effect::RollDie { results, .. }) if results.len() == 3
+    ));
+
+    let (threshold_ir, threshold_lowered) = parse_two_layer(
+        "Threshold — Whenever this creature attacks, draw a card.",
+        "Threshold Fixture",
+        &["Creature"],
+        &[],
+    );
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(threshold)) = &threshold_ir.items[0].node
+    else {
+        panic!("expected a native parsed threshold trigger");
+    };
+    assert!(
+        threshold.modifiers.intervening_if.is_none(),
+        "fixture must exercise the ability-word fallback rather than an explicit if clause"
+    );
+    assert!(matches!(
+        threshold_lowered.triggers[0].condition,
+        Some(TriggerCondition::QuantityComparison { .. })
+    ));
+
+    let (shoreline_ir, shoreline_lowered) = parse_two_layer(
+        "Delirium — Whenever this creature deals combat damage to a player, draw a card. Then discard a card unless there are seven or more cards in your graveyard.",
+        "Shoreline Looter",
+        &["Creature"],
+        &["Rat", "Rogue"],
+    );
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(shoreline)) = &shoreline_ir.items[0].node
+    else {
+        panic!("expected a native parsed Shoreline Looter trigger");
+    };
+    assert!(shoreline.partial_def.condition.is_none());
+    assert!(
+        shoreline.modifiers.intervening_if.is_some(),
+        "parsed intervening-if must suppress the ability-word fallback"
+    );
+    assert!(matches!(
+        shoreline_lowered.triggers[0].condition,
+        Some(TriggerCondition::Not { .. })
+    ));
+}
+
+/// The table scanner consumes only actual rows. A following ordinary line stays
+/// available to document dispatch, while unsupported table text remains honest.
+#[test]
+fn trigger_die_table_scanner_preserves_non_table_and_unsupported_rows() {
+    let (non_table_ir, non_table_lowered) = parse_two_layer(
+        "Whenever this creature attacks, roll a d20.\nDraw a card.",
+        "Non-table Fixture",
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(
+        non_table_ir.items.len(),
+        2,
+        "ordinary next line must remain dispatched"
+    );
+    assert!(matches!(
+        non_table_ir.items[0].node,
+        OracleNodeIr::Trigger(_)
+    ));
+    assert!(matches!(non_table_ir.items[1].node, OracleNodeIr::Spell(_)));
+    assert!(matches!(
+        non_table_lowered.abilities[0].effect.as_ref(),
+        Effect::Draw { .. }
+    ));
+
+    let (_, unsupported_lowered) = parse_two_layer(
+        "Whenever this creature attacks, roll a d20.\n1—20 | Frobnicate target creature.",
+        "Unsupported Table Fixture",
+        &["Creature"],
+        &[],
+    );
+    let execute = unsupported_lowered.triggers[0]
+        .execute
+        .as_deref()
+        .expect("trigger must still lower");
+    let Effect::RollDie { results, .. } = execute.effect.as_ref() else {
+        panic!("expected roll die");
+    };
+    assert!(matches!(
+        results[0].effect.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+
+    let (mastiff_ir, mastiff_lowered) = parse_two_layer(
+        "Whenever this creature attacks, roll a d20 for each player being attacked and ignore all but the highest roll.\n1—9 | This creature deals damage equal to its power to you.\n10—19 | This creature deals damage equal to its power to defending player.\n20 | This creature deals damage equal to its power to each opponent.",
+        "Iron Mastiff",
+        &["Artifact", "Creature"],
+        &["Dog"],
+    );
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(mastiff)) = &mastiff_ir.items[0].node else {
+        panic!("expected a native parsed Iron Mastiff trigger");
+    };
+    assert!(
+        !mastiff.has_terminal_roll_die(),
+        "unsupported multi-player roll must not consume a result table"
+    );
+    assert_eq!(mastiff_ir.items.len(), 4);
+    assert!(mastiff_ir.items[1..]
+        .iter()
+        .all(|item| matches!(item.node, OracleNodeIr::Unsupported { .. })));
+    assert_eq!(mastiff_lowered.abilities.len(), 3);
 }
 
 /// ISSUES #17: the swallow audit's findings must live in the doc IR's diagnostics

@@ -22,95 +22,195 @@ expression: "&ir"
         "fragment": "At the beginning of each player's end step, that player draws a card. If the player is your opponent and has four or more cards in hand, ~ deals 2 damage to that player."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "Phase",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Draw",
-              "count": {
-                "type": "Fixed",
-                "value": 1
-              },
-              "target": {
-                "type": "ScopedPlayer"
-              }
-            },
-            "cost": null,
-            "sub_ability": {
-              "kind": "Spell",
-              "effect": {
-                "type": "DealDamage",
-                "amount": {
-                  "type": "Fixed",
-                  "value": 2
-                },
-                "target": {
-                  "type": "ScopedPlayer"
-                }
-              },
-              "cost": null,
-              "sub_ability": null,
-              "duration": null,
+        "Trigger": {
+          "Parsed": {
+            "condition": "Phase",
+            "partial_def": {
+              "mode": "Phase",
+              "execute": null,
+              "valid_card": null,
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": "End",
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
               "description": null,
-              "target_prompt": null,
-              "condition": {
-                "type": "And",
-                "conditions": [
+              "constraint": null,
+              "condition": null,
+              "batched": false
+            },
+            "body": {
+              "EffectChain": {
+                "clauses": [
                   {
-                    "type": "ScopedPlayerMatches",
-                    "filter": {
-                      "type": "Opponent"
-                    }
-                  },
-                  {
-                    "type": "QuantityCheck",
-                    "lhs": {
-                      "type": "Ref",
-                      "qty": {
-                        "type": "HandSize",
-                        "player": {
-                          "type": "ScopedPlayer"
-                        }
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 24,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "that player draws a card"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
                       }
                     },
-                    "comparator": "GE",
-                    "rhs": {
-                      "type": "Fixed",
-                      "value": 4
-                    }
+                    "parsed": {
+                      "effect": {
+                        "type": "Draw",
+                        "count": {
+                          "type": "Fixed",
+                          "value": 1
+                        },
+                        "target": {
+                          "type": "ScopedPlayer"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 1,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 2
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 26,
+                        "end_byte": 124,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 1
+                      },
+                      "fragment": "If the player is your opponent and has four or more cards in hand, ~ deals 2 damage to that player"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "DealDamage",
+                        "amount": {
+                          "type": "Fixed",
+                          "value": 2
+                        },
+                        "target": {
+                          "type": "ScopedPlayer"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": {
+                      "type": "And",
+                      "conditions": [
+                        {
+                          "type": "ScopedPlayerMatches",
+                          "filter": {
+                            "type": "Opponent"
+                          }
+                        },
+                        {
+                          "type": "QuantityCheck",
+                          "lhs": {
+                            "type": "Ref",
+                            "qty": {
+                              "type": "HandSize",
+                              "player": {
+                                "type": "ScopedPlayer"
+                              }
+                            }
+                          },
+                          "comparator": "GE",
+                          "rhs": {
+                            "type": "Fixed",
+                            "value": 4
+                          }
+                        }
+                      ]
+                    },
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
                   }
-                ]
-              },
-              "optional_targeting": false,
-              "optional": false,
-              "forward_result": false,
-              "sub_link": "SequentialSibling"
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
+              }
             },
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": null,
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": "End",
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "At the beginning of each player's end step, that player draws a card. If the player is your opponent and has four or more cards in hand, ~ deals 2 damage to that player.",
-          "constraint": null,
-          "condition": null,
-          "batched": false
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "Any"
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "that player draws a card. if the player is your opponent and has four or more cards in hand, ~ deals 2 damage to that player.",
+              "relative_player_scope": "ScopedPlayer"
+            },
+            "source_text": "At the beginning of each player's end step, that player draws a card. If the player is your opponent and has four or more cards in hand, ~ deals 2 damage to that player.",
+            "die_results": []
+          }
         }
       }
     }

@@ -96,8 +96,8 @@ use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
 use super::oracle_special::{
     attach_die_result_branches_to_chain, normalize_self_refs_for_static,
-    parse_cumulative_upkeep_keyword, parse_defiler_cost_reduction, parse_harmonize_keyword,
-    parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
+    parse_cumulative_upkeep_keyword, parse_defiler_cost_reduction, parse_die_result_branches_ir,
+    parse_harmonize_keyword, parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
@@ -109,6 +109,7 @@ use super::oracle_static::{
 };
 use super::oracle_trigger::{
     lower_trigger_ir, lower_trigger_node_ir, parse_trigger_lines_at_index,
+    parse_trigger_lines_at_index_ir,
 };
 use super::oracle_util::{
     normalize_card_name_refs, parse_mana_symbols, parse_number, split_same_is_true_static_tail,
@@ -1251,7 +1252,7 @@ fn item_trigger(item: &OracleItemIr) -> Option<Cow<'_, TriggerDefinition>> {
             Some(Cow::Owned(lower_trigger_ir(trigger)))
         }
         OracleNodeIr::Trigger(TriggerNodeIr::Assembled { definition, .. }) => {
-            Some(Cow::Borrowed(definition))
+            Some(Cow::Borrowed(definition.as_ref()))
         }
         OracleNodeIr::PreLoweredTrigger(def) => Some(Cow::Borrowed(def)),
         _ => None,
@@ -5106,24 +5107,28 @@ pub(crate) fn parse_oracle_ir(
             // CR 707.9a: Pass the running trigger count as the base index so
             // any "and it has this ability" except clause in this trigger's
             // body resolves to the correct printed-trigger slot.
-            let mut triggers = parse_trigger_lines_at_index(
+            let mut triggers = parse_trigger_lines_at_index_ir(
                 &line,
                 card_name,
                 Some(PrintedTriggerIndex::placeholder()),
                 &mut ctx,
             );
             i += 1;
-            // CR 706: If the trigger's effect ends with "roll a dN", consume
-            // subsequent d20 table lines and attach them as die result branches.
+            // CR 706.3b: Preserve table rows as trigger IR until body lowering
+            // attaches them before finalization.
             if has_roll_die_pattern(&lower) {
-                if let Some(last) = triggers.last_mut() {
-                    if let Some(ref mut execute) = last.execute {
-                        i = attach_die_result_branches_to_chain(execute, &lines, i);
-                    }
+                if let Some(last) = triggers
+                    .last_mut()
+                    .filter(|trigger| trigger.has_terminal_roll_die())
+                {
+                    let (branches, next_line) =
+                        parse_die_result_branches_ir(&lines, i, AbilityKind::Spell);
+                    last.die_results = branches;
+                    i = next_line;
                 }
             }
             for __item in triggers {
-                emitter.trigger_at(item_line, __item);
+                emitter.trigger_ir_at(item_line, TriggerNodeIr::Parsed(Box::new(__item)));
             }
             continue;
         }
@@ -5158,7 +5163,7 @@ pub(crate) fn parse_oracle_ir(
             }
             if has_trigger_prefix(&effect_lower) {
                 // CR 707.9a: Thread the running trigger count as the base index.
-                let mut triggers = parse_trigger_lines_at_index(
+                let mut triggers = parse_trigger_lines_at_index_ir(
                     &effect_text,
                     card_name,
                     Some(PrintedTriggerIndex::placeholder()),
@@ -5167,20 +5172,26 @@ pub(crate) fn parse_oracle_ir(
                 // B7: Attach ability-word condition as fallback when extract_if_condition
                 // doesn't recognize the intervening-if pattern.
                 for trigger in &mut triggers {
-                    if trigger.condition.is_none() {
-                        trigger.condition = ability_word_to_trigger_condition(&aw_name);
+                    if trigger.partial_def.condition.is_none()
+                        && trigger.modifiers.intervening_if.is_none()
+                    {
+                        trigger.partial_def.condition = ability_word_to_trigger_condition(&aw_name);
                     }
                 }
                 i += 1;
                 if has_roll_die_pattern(&effect_lower) {
-                    if let Some(last) = triggers.last_mut() {
-                        if let Some(ref mut execute) = last.execute {
-                            i = attach_die_result_branches_to_chain(execute, &lines, i);
-                        }
+                    if let Some(last) = triggers
+                        .last_mut()
+                        .filter(|trigger| trigger.has_terminal_roll_die())
+                    {
+                        let (branches, next_line) =
+                            parse_die_result_branches_ir(&lines, i, AbilityKind::Spell);
+                        last.die_results = branches;
+                        i = next_line;
                     }
                 }
                 for __item in triggers {
-                    emitter.trigger_at(item_line, __item);
+                    emitter.trigger_ir_at(item_line, TriggerNodeIr::Parsed(Box::new(__item)));
                 }
                 continue;
             }
@@ -6519,7 +6530,7 @@ pub(crate) fn parse_oracle_ir(
             // Try as trigger
             if has_trigger_prefix(&effect_lower) {
                 // CR 707.9a: Thread the running trigger count as the base index.
-                let mut triggers = parse_trigger_lines_at_index(
+                let mut triggers = parse_trigger_lines_at_index_ir(
                     &effect_text,
                     card_name,
                     Some(PrintedTriggerIndex::placeholder()),
@@ -6528,14 +6539,18 @@ pub(crate) fn parse_oracle_ir(
                 i += 1;
                 // CR 706: Consume subsequent d20 table lines for triggered die rolls.
                 if has_roll_die_pattern(&effect_lower) {
-                    if let Some(last) = triggers.last_mut() {
-                        if let Some(ref mut execute) = last.execute {
-                            i = attach_die_result_branches_to_chain(execute, &lines, i);
-                        }
+                    if let Some(last) = triggers
+                        .last_mut()
+                        .filter(|trigger| trigger.has_terminal_roll_die())
+                    {
+                        let (branches, next_line) =
+                            parse_die_result_branches_ir(&lines, i, AbilityKind::Spell);
+                        last.die_results = branches;
+                        i = next_line;
                     }
                 }
                 for __item in triggers {
-                    emitter.trigger_at(item_line, __item);
+                    emitter.trigger_ir_at(item_line, TriggerNodeIr::Parsed(Box::new(__item)));
                 }
                 continue;
             }

@@ -1588,7 +1588,7 @@ fn lower_trigger_effect_chain(
 pub(crate) fn lower_trigger_node_ir(ir: &TriggerNodeIr) -> TriggerDefinition {
     match ir {
         TriggerNodeIr::Parsed(trigger) => lower_trigger_ir(trigger),
-        TriggerNodeIr::Assembled { definition, .. } => definition.clone(),
+        TriggerNodeIr::Assembled { definition, .. } => (**definition).clone(),
     }
 }
 

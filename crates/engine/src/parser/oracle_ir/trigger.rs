@@ -42,12 +42,11 @@ use crate::types::triggers::TriggerMode;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum TriggerNodeIr {
     /// Native parsed trigger decomposition, lowered only at the document seam.
-    #[allow(dead_code)] // C1 installs the IR seam; C2 adds its producers.
     Parsed(Box<TriggerIr>),
     /// Already-assembled definition from a recognizer that builds its own.
     /// `lower_trigger_node_ir` returns it untouched.
     Assembled {
-        definition: TriggerDefinition,
+        definition: Box<TriggerDefinition>,
         /// The recognizer's own input text — provenance only. Document lowering
         /// derives spans and fragments from the emitting line, never from here.
         source_text: String,
@@ -58,7 +57,7 @@ impl TriggerNodeIr {
     /// Wrap a recognizer-produced trigger definition for source-ordered emission.
     pub(crate) fn from_definition(source_text: &str, definition: TriggerDefinition) -> Self {
         Self::Assembled {
-            definition,
+            definition: Box::new(definition),
             source_text: source_text.to_string(),
         }
     }
@@ -86,6 +85,19 @@ pub(crate) struct TriggerIr {
     /// CR 706.3b result-table rows for the terminal die roll in this trigger.
     /// They remain IR until trigger-body lowering attaches them before finalization.
     pub(crate) die_results: Vec<DieResultBranchIr>,
+}
+
+impl TriggerIr {
+    /// Whether the body ends in the typed die-roll node that owns a result table.
+    pub(crate) fn has_terminal_roll_die(&self) -> bool {
+        let Some(TriggerBody::EffectChain(chain)) = &self.body else {
+            return false;
+        };
+        chain
+            .clauses
+            .last()
+            .is_some_and(|clause| matches!(clause.parsed.effect, Effect::RollDie { .. }))
+    }
 }
 
 /// The body of a trigger. Whole-body recognizers retain their typed payloads
