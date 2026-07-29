@@ -1,4 +1,5 @@
 import type { BatchResolveResult, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, WaitingFor } from "../adapter/types";
+import type { InteractionSubmission } from "../adapter/generated/interaction";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
@@ -705,6 +706,29 @@ export function dispatchAction(
   actor: number = getPlayerId(),
 ): Promise<void> {
   return dispatchActionInternal(action, actor, null);
+}
+
+/**
+ * Submit an engine-authored interaction response through the same adapter and
+ * atomic snapshot boundary used by ordinary game actions.  The response is
+ * opaque: UI callers cannot materialize or reinterpret a GameAction.
+ */
+export async function dispatchInteraction(
+  submission: InteractionSubmission,
+  actor: number = getPlayerId(),
+): Promise<void> {
+  const { adapter, gameState, gameMode } = useGameStore.getState();
+  if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) return;
+  if (!adapter.submitInteraction) {
+    throw new AdapterError("WS_ERROR", "This game connection does not support interaction responses", false);
+  }
+
+  const result = await adapter.submitInteraction(submission, actor);
+  const snapshot = await adapter.getSnapshot();
+  useGameStore.getState().commitEngineSnapshot(snapshot, {
+    events: result.events,
+    logEntries: result.log_entries ?? [],
+  });
 }
 
 /** Dispatch a standing preference only while its captured game lifecycle is

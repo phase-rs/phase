@@ -449,6 +449,7 @@ export function signatureSpellSelectionPolicy(request: any): any;
  * applying the action as another player.
  */
 export function submit_action(actor: number, action: any): any;
+export function submit_interaction_js(actor: number, submission: any): any;
 
 /**
  * Drain the last captured panic message (consuming it). Returns `null` when
@@ -507,6 +508,7 @@ export interface InitOutput {
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];
     readonly submit_action: (a: number, b: any) => any;
+    readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly get_game_state: () => any;
     readonly get_legal_actions_js: () => any;

@@ -17,6 +17,7 @@ import type {
   SubmitResult,
   WaitingFor,
 } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
 import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq } from "./types";
@@ -258,6 +259,13 @@ class NativeP2PBridge {
 
   async submitAction(action: GameAction, playerId: PlayerId): Promise<SubmitResult> {
     return this.clientFor(playerId).submitAction(action, playerId);
+  }
+
+  async submitInteraction(
+    submission: InteractionSubmission,
+    playerId: PlayerId,
+  ): Promise<SubmitResult> {
+    return this.clientFor(playerId).submitInteraction(submission, playerId);
   }
 
   async previewManaPayment(action: GameAction, playerId: PlayerId): Promise<ObjectId[]> {
@@ -1534,6 +1542,26 @@ export class P2PHostAdapter implements EngineAdapter {
     return result;
   }
 
+  async submitInteraction(
+    submission: InteractionSubmission,
+    actor: PlayerId,
+  ): Promise<SubmitResult> {
+    if (this.gameRunState !== "running") {
+      throw new AdapterError(
+        "P2P_PAUSED",
+        `Cannot submit interaction while game state is ${this.gameRunState}`,
+        true,
+      );
+    }
+    const result = this.nativeBridge
+      ? await this.nativeBridge.submitInteraction(submission, actor)
+      : await this.wasm.submitInteraction(submission, actor);
+    await this.broadcastStateUpdate(result.events, result.log_entries);
+    await this.runAiLoop();
+    this.persistAuthoritativeState();
+    return result;
+  }
+
   async previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]> {
     if (this.gameRunState !== "running") {
       throw new AdapterError(
@@ -1815,6 +1843,44 @@ export class P2PHostAdapter implements EngineAdapter {
           const reason = err instanceof Error ? err.message : String(err);
           const session = this.guestSessions.get(pid);
           if (session) session.send({ type: "action_rejected", reason });
+        }
+        break;
+      }
+      case "interaction": {
+        const session = this.guestSessions.get(pid);
+        if (!session || msg.senderPlayerId !== pid) {
+          if (session) session.send({ type: "action_rejected", reason: "senderPlayerId mismatch" });
+          return;
+        }
+        if (this.eliminatedSeats.has(pid) || this.gameRunState !== "running") {
+          session.send({
+            type: "action_rejected",
+            reason: this.eliminatedSeats.has(pid)
+              ? "Player has conceded and can no longer act"
+              : `Game ${this.gameRunState}`,
+          });
+          return;
+        }
+        try {
+          const result = this.nativeBridge
+            ? await this.nativeBridge.submitInteraction(msg.submission, pid)
+            : await this.wasm.submitInteraction(msg.submission, pid);
+          await this.broadcastStateUpdate(result.events, result.log_entries);
+          await this.runAiLoop();
+          this.persistAuthoritativeState();
+          if (!this.nativeBridge) {
+            this.emit({
+              type: "stateChanged",
+              snapshot: await this.wasm.getSnapshot(),
+              events: result.events,
+              logEntries: result.log_entries,
+            });
+          }
+        } catch (err) {
+          session.send({
+            type: "action_rejected",
+            reason: err instanceof Error ? err.message : String(err),
+          });
         }
         break;
       }
@@ -2312,6 +2378,27 @@ export class P2PGuestAdapter implements EngineAdapter {
         type: "action",
         senderPlayerId: this.assignedPlayerId!,
         action,
+      });
+    });
+  }
+
+  async submitInteraction(
+    submission: InteractionSubmission,
+    _actor: PlayerId,
+  ): Promise<SubmitResult> {
+    if (!this.session) {
+      throw new AdapterError("P2P_ERROR", "Not connected to host", true);
+    }
+    if (this.assignedPlayerId === null) {
+      throw new AdapterError("P2P_ERROR", "Not yet assigned a player ID", true);
+    }
+    return new Promise<SubmitResult>((resolve, reject) => {
+      this.pendingResolve = resolve;
+      this.pendingReject = reject;
+      this.session!.send({
+        type: "interaction",
+        senderPlayerId: this.assignedPlayerId!,
+        submission,
       });
     });
   }

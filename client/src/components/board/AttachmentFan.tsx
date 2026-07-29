@@ -1,11 +1,15 @@
-import { type CSSProperties, useCallback, useEffect, useMemo } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import type { GameAction, ObjectId } from "../../adapter/types.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import type { ObjectId } from "../../adapter/types.ts";
+import type {
+  InteractionChoiceId,
+  InteractionOpportunity,
+  InteractionResponse,
+} from "../../adapter/generated/interaction";
+import { dispatchInteraction } from "../../game/dispatch.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -56,10 +60,8 @@ function fanCardSizingStyle(cardCount: number): CSSProperties {
  * the same precedence PermanentCard uses on the battlefield.
  */
 interface CardChoice {
-  isTarget: boolean;
-  boardEligible: boolean;
+  choiceId: InteractionChoiceId | null;
   isSelected: boolean;
-  activationActions: GameAction[];
 }
 
 /**
@@ -82,43 +84,52 @@ interface CardChoice {
  */
 export function AttachmentFan() {
   const { t } = useTranslation("game");
-  const playerId = usePlayerId();
   const hostId = useUiStore((s) => s.attachmentFanHostId);
   const setAttachmentFanHost = useUiStore((s) => s.setAttachmentFanHost);
   const dismissPreview = useUiStore((s) => s.dismissPreview);
-  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const toggleSelectedCard = useUiStore((s) => s.toggleSelectedCard);
-  const selectedCardIds = useUiStore((s) => s.selectedCardIds);
 
   const objects = useGameStore((s) => s.gameState?.objects);
-  const waitingFor = useGameStore((s) => s.waitingFor);
-  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const viewerInteraction = useGameStore((s) => s.viewerInteraction);
+  const [selectedChoiceIds, setSelectedChoiceIds] = useState<InteractionChoiceId[]>([]);
 
   const host = hostId != null ? objects?.[hostId] : undefined;
+  const interactionFan = useMemo(
+    () =>
+      hostId == null
+        ? null
+        : (viewerInteraction?.attachmentFans.find(
+            (fan) => Number(fan.host) === hostId,
+          ) ?? null),
+    [hostId, viewerInteraction],
+  );
 
-  const cardIds = host ? [host.id, ...host.attachments] : [];
+  // During an interaction, the engine projection is the sole authority for
+  // which direct attachments belong in the fan. The fallback preserves the
+  // existing read-only badge outside an interaction, where no choice is being
+  // exposed and therefore no interaction capability exists to consume.
+  const cardIds = host
+    ? [
+        host.id,
+        ...(interactionFan
+          ? interactionFan.children.map((child) => Number(child.object))
+          : host.attachments),
+      ]
+    : [];
 
-  const boardChoice = useMemo(() => {
-    const choice = getBoardChoiceView(waitingFor, objects);
-    return choice && choice.player === playerId ? choice : null;
-  }, [waitingFor, objects, playerId]);
-
-  // Engine's live target legal-set for the current prompt, as a plain id set.
-  const targetIds = useMemo(() => {
-    const set = new Set<ObjectId>();
-    if (
-      (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
-      && waitingFor.data.player === playerId
-    ) {
-      for (const target of waitingFor.data.selection?.current_legal_targets ?? []) {
-        if ("Object" in target) set.add(target.Object);
-      }
-    }
-    if (waitingFor?.type === "EquipTarget" && waitingFor.data.player === playerId) {
-      for (const id of waitingFor.data.valid_targets) set.add(id);
-    }
-    return set;
-  }, [waitingFor, playerId]);
+  const opportunity = useMemo(
+    () =>
+      interactionFan
+        ? (viewerInteraction?.opportunities.find(
+            (candidate) => candidate.interactionId === interactionFan.interactionId,
+          ) ?? null)
+        : null,
+    [interactionFan, viewerInteraction],
+  );
+  const requiresConfirmation =
+    opportunity?.response.type === "schema" &&
+    (opportunity.response.data.spec.type === "select" ||
+      opportunity.response.data.spec.type === "sequence") &&
+    opportunity.response.data.spec.data.confirm === "explicit";
 
   const close = useCallback(() => {
     setAttachmentFanHost(null);
@@ -138,58 +149,38 @@ export function AttachmentFan() {
   }, [hostId, close]);
 
   const choiceFor = useCallback(
-    (id: ObjectId): CardChoice => ({
-      isTarget: targetIds.has(id),
-      boardEligible: boardChoice?.objectIds.includes(id) ?? false,
-      isSelected: selectedCardIds.includes(id),
-      activationActions: legalActionsByObject ? collectObjectActions(legalActionsByObject, id) : [],
-    }),
-    [targetIds, boardChoice, selectedCardIds, legalActionsByObject],
+    (id: ObjectId): CardChoice => {
+      const choiceIds = interactionFan?.children.find((child) => Number(child.object) === id)?.choiceIds ?? [];
+      const choiceId = choiceIds[0] ?? null;
+      return {
+        choiceId,
+        isSelected: choiceId !== null && selectedChoiceIds.includes(choiceId),
+      };
+    },
+    [interactionFan, selectedChoiceIds],
   );
 
   const handlePick = useCallback(
-    (id: ObjectId, choice: CardChoice) => {
-      if (choice.isTarget) {
-        dispatchAction({ type: "ChooseTarget", data: { target: { Object: id } } });
-        close();
+    (_id: ObjectId, choice: CardChoice) => {
+      if (!choice.choiceId || !opportunity || !viewerInteraction?.canSubmit) return;
+      if (requiresConfirmation) {
+        setSelectedChoiceIds((selected) =>
+          selected.includes(choice.choiceId!)
+            ? selected.filter((id) => id !== choice.choiceId)
+            : [...selected, choice.choiceId!],
+        );
         return;
       }
-      if (choice.boardEligible && boardChoice) {
-        if (isBoardChoiceImmediate(boardChoice)) {
-          dispatchAction(buildBoardChoiceAction(boardChoice, [id]));
-          close();
-          return;
-        }
-        // Multi-select: toggle within the engine's max, then Confirm finishes.
-        const max = boardChoiceMaxSelection(boardChoice);
-        const selectedForChoice = selectedCardIds.filter((s) => boardChoice.objectIds.includes(s));
-        if (choice.isSelected || max == null || selectedForChoice.length < max) {
-          toggleSelectedCard(id);
-        }
-        return;
-      }
-      if (choice.activationActions.length > 0) {
-        if (choice.activationActions.length === 1) {
-          dispatchAction(choice.activationActions[0]);
-        } else {
-          setPendingAbilityChoice({ objectId: id, actions: choice.activationActions });
-        }
-        close();
-      }
+      const response = responseForChoices(opportunity, [choice.choiceId]);
+      if (!response) return;
+      void dispatchInteraction({ interactionId: opportunity.interactionId, response }).then(close).catch(() => {});
     },
-    [boardChoice, selectedCardIds, close, toggleSelectedCard, setPendingAbilityChoice],
+    [close, opportunity, requiresConfirmation, viewerInteraction?.canSubmit],
   );
 
-  const confirmSelection = useMemo(() => {
-    if (!boardChoice || isBoardChoiceImmediate(boardChoice)) return null;
-    const selectedForChoice = selectedCardIds.filter((s) => boardChoice.objectIds.includes(s));
-    if (selectedForChoice.length === 0) return null;
-    return {
-      enabled: canConfirmBoardChoice(boardChoice, selectedForChoice, objects),
-      selected: selectedForChoice,
-      choice: boardChoice,
-    };
-  }, [boardChoice, selectedCardIds, objects]);
+  const confirmSelection = requiresConfirmation && opportunity
+    ? responseForChoices(opportunity, selectedChoiceIds)
+    : null;
 
   if (hostId == null || !host || cardIds.length === 0) return null;
 
@@ -230,23 +221,42 @@ export function AttachmentFan() {
         ))}
       </div>
 
-      {confirmSelection && (
+      {confirmSelection && opportunity && (
         <button
           type="button"
           onClick={(e) => {
             e.stopPropagation();
-            dispatchAction(buildBoardChoiceAction(confirmSelection.choice, confirmSelection.selected));
-            close();
+            void dispatchInteraction({
+              interactionId: opportunity.interactionId,
+              response: confirmSelection,
+            }).then(close).catch(() => {});
           }}
-          disabled={!confirmSelection.enabled}
-          className="mt-8 rounded-full bg-cyan-500 px-5 py-2 text-sm font-bold text-cyan-950 shadow-[0_2px_10px_rgba(34,211,238,0.5)] transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300 disabled:shadow-none"
+          disabled={selectedChoiceIds.length === 0 || !viewerInteraction?.canSubmit}
+          className="mt-8 rounded-full bg-cyan-500 px-5 py-2 text-sm font-bold text-cyan-950 shadow-[0_2px_10px_rgba(34,211,238,0.5)] transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-white disabled:shadow-none"
         >
-          {t("permanent.fanConfirm", { count: confirmSelection.selected.length })}
+          {t("permanent.fanConfirm", { count: selectedChoiceIds.length })}
         </button>
       )}
     </div>,
     document.body,
   );
+}
+
+function responseForChoices(
+  opportunity: InteractionOpportunity,
+  choiceIds: InteractionChoiceId[],
+): InteractionResponse | null {
+  if (opportunity.response.type === "exactChoices") {
+    return choiceIds.length === 1 ? { type: "choose", data: { choiceId: choiceIds[0] } } : null;
+  }
+  switch (opportunity.response.data.spec.type) {
+    case "select":
+      return { type: "select", data: { choiceIds } };
+    case "sequence":
+      return { type: "sequence", data: { choiceIds } };
+    default:
+      return null;
+  }
 }
 
 function FanCard({
@@ -272,7 +282,7 @@ function FanCard({
 
   const lookup = cardImageLookup(obj);
   const isToken = obj.display_source === "Token";
-  const selectable = choice.isTarget || choice.boardEligible || choice.activationActions.length > 0;
+  const selectable = choice.choiceId !== null;
 
   // The whole fan speaks one "pick me" color — cyan — so a spread of a host and
   // its attachments reads as a single chooser regardless of whether the engine

@@ -16,6 +16,7 @@ import type {
   ViewerSnapshot,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
@@ -234,6 +235,13 @@ export class EngineWorkerClient {
   async submitAction(actor: number, action: GameAction): Promise<SubmitResult> {
     return this.request<SubmitResult>(
       { type: "submitAction", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async submitInteraction(actor: number, submission: InteractionSubmission): Promise<SubmitResult> {
+    return this.request<SubmitResult>(
+      { type: "submitInteraction", actor, submission },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }

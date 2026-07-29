@@ -29,6 +29,9 @@ opaque_string_id!(InteractionId);
 opaque_string_id!(InteractionChoiceId);
 opaque_string_id!(InteractionActionId);
 opaque_string_id!(PreviewRequestId);
+// Viewer-safe object reference. Only the engine maps this opaque interaction
+// value back to an in-game object.
+opaque_string_id!(InteractionObjectReference);
 
 /// Persistence slot semantics. Simultaneous pregame decisions deliberately
 /// retain one capability per semantic owner instead of sharing one global ID.
@@ -1080,6 +1083,30 @@ pub struct InteractionOpportunity {
     pub progress: InteractionProgress,
 }
 
+/// Direct attachment choices grouped under one visible host. Distinct choice
+/// ids remain intact even when they describe the same attachment object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionAttachmentFanChild {
+    pub object: InteractionObjectReference,
+    pub choice_ids: Vec<InteractionChoiceId>,
+}
+
+/// Viewer-scoped attachment affordance for a single interaction opportunity.
+/// It is derived from the filtered projection, not by consumers scanning game
+/// state that may carry authority-only relationship information.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionAttachmentFan {
+    pub interaction_id: InteractionId,
+    pub host: InteractionObjectReference,
+    pub children: Vec<InteractionAttachmentFanChild>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
 #[serde(
@@ -1112,6 +1139,7 @@ pub struct ViewerInteraction {
     pub can_submit: bool,
     pub auto_pass_recommended: bool,
     pub opportunities: Vec<InteractionOpportunity>,
+    pub attachment_fans: Vec<InteractionAttachmentFan>,
     pub availability: InteractionAvailability,
 }
 

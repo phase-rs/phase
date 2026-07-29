@@ -11,6 +11,8 @@ export type InteractionActionId = string & { readonly __brand: "InteractionActio
 
 export type PreviewRequestId = string & { readonly __brand: "PreviewRequestId" };
 
+export type InteractionObjectReference = string & { readonly __brand: "InteractionObjectReference" };
+
 export type InteractionSlotKind = "single" | "mulligan" | "openingBottom";
 
 export type ActiveInteractionSlot = { semanticOwner: number, slotKind: InteractionSlotKind, interactionId: InteractionId, };
@@ -99,9 +101,13 @@ export type InteractionProgress = { selected: number, minimum: number, maximum: 
 
 export type InteractionOpportunity = { interactionId: InteractionId, response: InteractionOpportunityResponse, surfaces: Array<InteractionPresentationSurface>, progress: InteractionProgress, };
 
+export type InteractionAttachmentFanChild = { object: InteractionObjectReference, choiceIds: Array<InteractionChoiceId>, };
+
+export type InteractionAttachmentFan = { interactionId: InteractionId, host: InteractionObjectReference, children: Array<InteractionAttachmentFanChild>, };
+
 export type InteractionAvailability = { "type": "progressAvailable", "data": { witness: InteractionSubmission, } } | { "type": "inputRequired" } | { "type": "escapeOnly", "data": { reason: InteractionReasonCode, } } | { "type": "waiting" } | { "type": "terminal", "data": { outcome: InteractionOutcomeCode, } } | { "type": "unsupported", "data": { reason: InteractionReasonCode, } } | { "type": "stuck", "data": { reason: InteractionReasonCode, } };
 
-export type ViewerInteraction = { waitingForKind: InteractionWaitingForKind, authorizedSubmitters: Array<number>, canSubmit: boolean, autoPassRecommended: boolean, opportunities: Array<InteractionOpportunity>, availability: InteractionAvailability, };
+export type ViewerInteraction = { waitingForKind: InteractionWaitingForKind, authorizedSubmitters: Array<number>, canSubmit: boolean, autoPassRecommended: boolean, opportunities: Array<InteractionOpportunity>, attachmentFans: Array<InteractionAttachmentFan>, availability: InteractionAvailability, };
 
 export type AmountAssignment = { choiceId: InteractionChoiceId, amount: number, };
 

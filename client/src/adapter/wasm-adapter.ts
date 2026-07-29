@@ -14,6 +14,7 @@ import type {
   ViewerSnapshot,
   WaitingFor,
 } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import { AdapterError, AdapterErrorCode, isStaleRejectionMessage, isStateLostMessage, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
@@ -273,6 +274,19 @@ export class WasmAdapter implements EngineAdapter {
     try {
       if (this.engine) return await this.engine.submitAction(actor, action);
       return await this.fallback!.submitAction(action, actor);
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  async submitInteraction(
+    submission: InteractionSubmission,
+    actor: PlayerId,
+  ): Promise<SubmitResult> {
+    this.assertInitialized();
+    try {
+      if (this.engine) return await this.engine.submitInteraction(actor, submission);
+      return await this.fallback!.submitInteraction(submission, actor);
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -838,6 +852,7 @@ export class WasmAdapter implements EngineAdapter {
 interface MainThreadFallback {
   ensureCardDatabase(): Promise<number>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  submitInteraction(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
   getState(): Promise<GameState>;
   getFilteredState(viewerId: number): Promise<GameState>;
@@ -890,6 +905,13 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     submitAction: (action: GameAction, actor: PlayerId) =>
       enqueue(() => {
         const r = wasm.submit_action(actor, action);
+        if (typeof r === "string") throw new Error(r);
+        return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
+      }),
+
+    submitInteraction: (submission: InteractionSubmission, actor: PlayerId) =>
+      enqueue(() => {
+        const r = wasm.submit_interaction_js(actor, submission);
         if (typeof r === "string") throw new Error(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),

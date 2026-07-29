@@ -317,8 +317,13 @@ fn resolving_a_response_materializes_the_advertised_action_under_the_same_author
     // live decision rather than one the engine would have refused anyway.
     // Equivalence between the two paths needs no assertion: `submit_interaction`
     // delegates here, so they cannot disagree.
-    submit_interaction(&mut state, P0, witness)
+    let applied = submit_interaction(&mut state, P0, witness)
         .expect("the witness the projection advertised is submittable");
+    assert_eq!(
+        applied.action,
+        GameAction::PassPriority,
+        "the post-success transaction exposes the exact engine-materialized action for replay"
+    );
 }
 
 #[test]
@@ -387,6 +392,63 @@ fn priority_projection_previews_submits_and_rejects_stale_or_unauthorized_ids() 
     )
     .expect_err("an accepted submission consumes its opaque capability");
     assert_eq!(stale.code, InteractionReasonCode::StaleInteraction);
+}
+
+#[test]
+fn attachment_fans_are_per_interaction_filtered_and_direct() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Fan Host", 2, 2).id();
+    let attachment = scenario.add_creature(P0, "Fan Attachment", 1, 1).id();
+    let unrelated = scenario.add_creature(P0, "Fan Unrelated", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        engine::game::effects::attach::attach_to(state, attachment, host);
+        state.objects.get_mut(&attachment).unwrap().tapped = true;
+        state.objects.get_mut(&unrelated).unwrap().tapped = true;
+        state.waiting_for = WaitingFor::ChooseUntapSubset {
+            player: P0,
+            group: vec![attachment, unrelated],
+            max: 1,
+        };
+        bind(state, "attachment-fan");
+    }
+
+    let view = viewer_interaction(runner.state(), P0);
+    let opportunity = view
+        .opportunities
+        .first()
+        .expect("reach guard: the selected attachment has a live opportunity");
+    assert_eq!(view.attachment_fans.len(), 1);
+    let fan = &view.attachment_fans[0];
+    assert_eq!(fan.interaction_id, opportunity.interaction_id);
+    assert_eq!(fan.host.as_str(), host.0.to_string());
+    assert_eq!(fan.children.len(), 1);
+    assert_eq!(fan.children[0].object.as_str(), attachment.0.to_string());
+    assert!(
+        !fan.children[0].choice_ids.is_empty(),
+        "reach guard: the attachment fan keeps an opaque engine choice for its child"
+    );
+
+    let mut mismatched_filtered = filter_state_for_viewer(runner.state(), P0);
+    mismatched_filtered
+        .objects
+        .get_mut(&host)
+        .expect("fixture host remains visible")
+        .attachments
+        .clear();
+    let mismatched = derive_viewer_interaction(runner.state(), &mismatched_filtered, P0);
+    assert!(
+        mismatched.attachment_fans.is_empty(),
+        "a stale host back-link must not expose an attachment fan from authoritative state"
+    );
+
+    let unauthorized = viewer_interaction(runner.state(), P1);
+    assert!(
+        unauthorized.attachment_fans.is_empty(),
+        "non-authorized viewers receive no attachment sidecar before any opportunity derivation"
+    );
 }
 
 #[test]

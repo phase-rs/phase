@@ -1,5 +1,9 @@
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
-import type { InteractionActionId, ViewerInteraction } from "./generated/interaction";
+import type {
+  InteractionActionId,
+  InteractionSubmission,
+  ViewerInteraction,
+} from "./generated/interaction";
 
 // ── Identifiers ──────────────────────────────────────────────────────────
 
@@ -3518,6 +3522,8 @@ export interface EngineAdapter {
    * action payload or the UI state.
    */
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  /** Submit an opaque response from the engine's current interaction projection. */
+  submitInteraction?(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   /**
    * Read-only preview of the exact automatic `CastSpell` action currently
    * offered by the engine. Unsupported transports omit this capability.

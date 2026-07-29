@@ -2,14 +2,15 @@ use std::path::{Path, PathBuf};
 
 use engine::types::interaction::{
     ActiveInteractionSlot, AggregateComparator, AmountAssignment, ConfirmSemantics,
-    InteractionActionCode, InteractionAggregateFunction, InteractionAvailability,
-    InteractionChoice, InteractionChoiceStatus, InteractionDamageAssignmentMode,
-    InteractionGroupConstraint, InteractionIntentCode, InteractionManaAbilityActivationScope,
-    InteractionManaColor, InteractionManaComparator, InteractionManaRestriction,
-    InteractionManaSpecialAction, InteractionManaSpellCostCriterion,
-    InteractionManaZoneSpendPolarity, InteractionObjectProperty, InteractionOpportunity,
-    InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
-    InteractionPreview, InteractionPreviewRequest, InteractionPreviewStatus, InteractionProgress,
+    InteractionActionCode, InteractionAggregateFunction, InteractionAttachmentFan,
+    InteractionAttachmentFanChild, InteractionAvailability, InteractionChoice,
+    InteractionChoiceStatus, InteractionDamageAssignmentMode, InteractionGroupConstraint,
+    InteractionIntentCode, InteractionManaAbilityActivationScope, InteractionManaColor,
+    InteractionManaComparator, InteractionManaRestriction, InteractionManaSpecialAction,
+    InteractionManaSpellCostCriterion, InteractionManaZoneSpendPolarity, InteractionObjectProperty,
+    InteractionObjectReference, InteractionOpportunity, InteractionOpportunityResponse,
+    InteractionOutcomeCode, InteractionPresentationSurface, InteractionPreview,
+    InteractionPreviewRequest, InteractionPreviewStatus, InteractionProgress,
     InteractionReasonCode, InteractionRelation, InteractionRelationConstraint,
     InteractionRelationSourceConstraint, InteractionResponse, InteractionResponseSpec,
     InteractionRoleCode, InteractionShortcutCountSpec, InteractionShortcutDecision,
@@ -41,6 +42,7 @@ fn expected_bindings() -> String {
         "InteractionChoiceId",
         "InteractionActionId",
         "PreviewRequestId",
+        "InteractionObjectReference",
     ] {
         output.push_str(&format!(
             "export type {name} = string & {{ readonly __brand: \"{name}\" }};\n\n"
@@ -97,6 +99,8 @@ fn expected_bindings() -> String {
         InteractionOpportunityResponse,
         InteractionProgress,
         InteractionOpportunity,
+        InteractionAttachmentFanChild,
+        InteractionAttachmentFan,
         InteractionAvailability,
         ViewerInteraction,
         AmountAssignment,

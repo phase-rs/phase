@@ -16,7 +16,7 @@ use engine::game::engine::{
     apply, apply_for_simulation, resolve_all_fast_forward, ResolveAllCallbackDecision,
     ResolveAllFastForwardResult as BatchResolveResult,
 };
-use engine::game::interaction::bind_interaction_authority;
+use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::game::preview::{compute_preview_diff, preview_auto_payment_sources};
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
@@ -30,7 +30,7 @@ use engine::game::{
 use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
 use engine::types::game_state::{PersistedGameState, TrustedGameStateEnvelope, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::interaction::InteractionSessionId;
+use engine::types::interaction::{InteractionSessionId, InteractionSubmission};
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::{GameAction, GameState, PlayerId, ReplayHeader, ReplayLog};
@@ -1023,6 +1023,30 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     }) {
         Ok(val) => val,
         Err(e) => e,
+    }
+}
+
+/// Submit one opaque, engine-authored interaction response. The browser never
+/// materializes a `GameAction`; only a successful engine reducer result exposes
+/// the exact action to the replay recorder.
+#[wasm_bindgen]
+pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
+    let submission: InteractionSubmission = match serde_wasm_bindgen::from_value(submission) {
+        Ok(submission) => submission,
+        Err(error) => {
+            return JsValue::from_str(&format!(
+                "Engine error: failed to deserialize interaction submission: {error}"
+            ));
+        }
+    };
+    let actor = PlayerId(actor);
+    match with_state_mut(|state| submit_interaction(state, actor, submission)) {
+        Ok(Ok(applied)) => {
+            record_replay_action(false, actor, applied.action);
+            to_js(&applied.result)
+        }
+        Ok(Err(error)) => JsValue::from_str(&format!("Engine error: {:?}", error.code)),
+        Err(error) => error,
     }
 }
 
