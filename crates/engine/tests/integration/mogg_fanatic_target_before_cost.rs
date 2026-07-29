@@ -3,8 +3,8 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, SacrificeCost, TargetFilter,
-    TargetRef, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, SacrificeCost,
+    TapCreaturesRequirement, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{PayCostKind, WaitingFor};
@@ -89,7 +89,7 @@ fn goblin_bombardment_targets_before_sacrifice_and_cancel_is_lossless() {
     activate(&mut runner, bombardment);
     choose_target(&mut runner, target);
 
-    let WaitingFor::PayCost { kind, .. } = runner.state().waiting_for else {
+    let WaitingFor::PayCost { ref kind, .. } = runner.state().waiting_for else {
         panic!("target selection must lead to the sacrifice prompt");
     };
     assert_eq!(kind, PayCostKind::Sacrifice);
@@ -137,6 +137,50 @@ fn goblin_bombardment_self_target_sacrifice_reaches_stack_and_fizzles() {
         runner.state().battlefield.contains(&fodder),
         "only the self-targeted Goblin was sacrificed"
     );
+}
+
+#[test]
+fn targeted_activation_surfaces_tap_creatures_cost_after_target_selection() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Targeted Tap Cost", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+            .cost(AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::count(1),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            }),
+        )
+        .id();
+    let payment = scenario.add_creature(P0, "Tap Payment", 1, 1).id();
+    let target = scenario.add_creature(P1, "Tap Cost Target", 1, 1).id();
+    let mut runner = scenario.build();
+
+    activate(&mut runner, source);
+    choose_target(&mut runner, target);
+
+    let WaitingFor::PayCost { kind, choices, .. } = runner.state().waiting_for.clone() else {
+        panic!("target declaration must surface the tap-creatures cost");
+    };
+    assert_eq!(kind, PayCostKind::TapCreatures { aggregate: None });
+    assert!(choices.contains(&payment));
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![payment],
+        })
+        .expect("paying the selected tap-creatures cost must succeed");
+    assert!(runner.state().objects[&payment].tapped);
+    assert_eq!(runner.state().stack.len(), 1);
 }
 
 #[test]

@@ -2257,7 +2257,7 @@ pub(crate) fn handle_activation_cost_one_of_choice(
     }
 
     if let Some(waiting_for) =
-        surface_next_unpaid_interactive_activation_cost(state, player, &pending)?
+        surface_next_unpaid_interactive_activation_cost(state, player, &pending, events)?
     {
         return Ok(waiting_for);
     }
@@ -2689,14 +2689,14 @@ fn finish_sacrifice_for_cost(
         current_end,
     );
 
-    if matches!(completion, PendingSacrificeCostCompletion::SelectedNonSelf)
-        && pending.activation_ability_index.is_some()
-    {
+    if pending.activation_ability_index.is_some() {
         pending.mark_activation_cost_committed();
-        pending.activation_cost = pending
-            .activation_cost
-            .take()
-            .and_then(super::casting::remove_selected_non_self_sacrifice_cost);
+        if matches!(completion, PendingSacrificeCostCompletion::SelectedNonSelf) {
+            pending.activation_cost = pending
+                .activation_cost
+                .take()
+                .and_then(super::casting::remove_selected_non_self_sacrifice_cost);
+        }
     }
 
     let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
@@ -4296,9 +4296,10 @@ pub(crate) fn finish_target_selected_activated_ability_at_payment_boundary(
 /// completed handler removes one matching leg, so repeated components and a
 /// chosen `OneOf` branch naturally re-enter here until no selection remains.
 pub(crate) fn surface_next_unpaid_interactive_activation_cost(
-    state: &GameState,
+    state: &mut GameState,
     player: PlayerId,
     pending: &PendingCast,
+    events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
     let Some(cost) = pending.activation_cost.as_ref() else {
         return Ok(None);
@@ -4322,6 +4323,25 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
                 spell: Box::new(pending.clone()),
             },
         }));
+    }
+
+    if let Some(amount) = super::casting::find_collect_evidence_activation_cost(cost) {
+        let mut pending = pending.clone();
+        pending.activation_cost = remove_first_activation_cost_matching(
+            pending
+                .activation_cost
+                .take()
+                .expect("checked activation cost is present"),
+            |cost| matches!(cost, AbilityCost::CollectEvidence { .. }),
+        );
+        return super::effects::collect_evidence::begin_cost_payment(
+            state,
+            player,
+            amount,
+            pending,
+            SpellCostSource::Other,
+        )
+        .map(Some);
     }
 
     if let Some((count, sacrifice_filter)) = super::casting::find_non_self_sacrifice_cost(cost) {
@@ -4372,6 +4392,99 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         }));
     }
 
+    if let Some((filter, function, property, comparator, value, zone)) =
+        super::casting::find_exile_with_aggregate_cost(cost)
+    {
+        let eligible = super::cost_payability::eligible_exile_with_aggregate_objects(
+            state, player, source_id, filter, zone,
+        );
+        let total = super::quantity::aggregate_property_over(state, &eligible, function, property);
+        if !comparator.evaluate(total, value) {
+            return Err(EngineError::ActionNotAllowed(
+                "Not enough eligible cards to reach the exile threshold".into(),
+            ));
+        }
+        let mut pending = pending.clone();
+        pending.activation_cost = remove_first_activation_cost_matching(
+            pending
+                .activation_cost
+                .take()
+                .expect("checked activation cost is present"),
+            |cost| matches!(cost, AbilityCost::ExileWithAggregate { .. }),
+        );
+        return Ok(Some(WaitingFor::PayCost {
+            player,
+            kind: PayCostKind::ExileAggregate {
+                zone,
+                function,
+                property,
+                comparator,
+                value,
+                filter: filter.clone(),
+            },
+            choices: eligible.clone(),
+            count: eligible.len(),
+            min_count: 1,
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
+        }));
+    }
+
+    if let Some((count, materials)) = super::casting::find_craft_materials_cost(cost) {
+        let eligible =
+            super::cost_payability::eligible_craft_materials(state, player, source_id, materials);
+        let min_count = count.min_count();
+        let max_count = count.max_count(eligible.len());
+        if eligible.len() < min_count {
+            return Err(EngineError::ActionNotAllowed(
+                "Not enough eligible materials to craft".into(),
+            ));
+        }
+        let mut pending = pending.clone();
+        pending.activation_cost = remove_first_activation_cost_matching(
+            pending
+                .activation_cost
+                .take()
+                .expect("checked activation cost is present"),
+            |cost| matches!(cost, AbilityCost::ExileMaterials { .. }),
+        );
+        return Ok(Some(WaitingFor::PayCost {
+            player,
+            kind: PayCostKind::ExileMaterials {
+                materials: materials.clone(),
+            },
+            choices: eligible,
+            count: max_count,
+            min_count,
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
+        }));
+    }
+
+    if let Some(costs) = super::casting::find_one_of_cost(cost) {
+        let payable = super::casting::payable_one_of_activation_branches(
+            state,
+            player,
+            source_id,
+            costs,
+            pending
+                .activation_ability_index
+                .expect("activation cost dispatcher requires an ability index"),
+        );
+        if payable.is_empty() {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot pay activation cost".to_string(),
+            ));
+        }
+        return Ok(Some(WaitingFor::ActivationCostOneOfChoice {
+            player,
+            costs: payable,
+            pending_cast: Box::new(pending.clone()),
+        }));
+    }
+
     if let Some((count, exile_filter)) = super::casting::find_battlefield_exile_cost(cost) {
         let effective_filter =
             super::cost_payability::exile_cost_effective_filter(Some(exile_filter));
@@ -4403,8 +4516,14 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
     }
 
     if let Some((count, filter)) = super::casting::find_unattach_from_cost(cost) {
+        let min_mana_value =
+            super::ability_utils::distribution_targets(&pending.ability).len() as u32;
         let eligible = super::casting::find_eligible_unattach_for_cost_targets(
-            state, player, source_id, filter, 0,
+            state,
+            player,
+            source_id,
+            filter,
+            min_mana_value,
         );
         if eligible.len() < count as usize {
             return Err(EngineError::ActionNotAllowed(
@@ -4447,7 +4566,176 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         }));
     }
 
+    if let Some((count, counter_type, target, selection)) =
+        super::casting::find_targeted_remove_counter_cost(cost)
+    {
+        let required_count = match selection {
+            CounterCostSelection::SingleObject => count,
+            CounterCostSelection::AmongObjects => 1,
+        };
+        let eligible = super::casting::find_eligible_remove_counter_for_cost_targets(
+            state,
+            player,
+            source_id,
+            target,
+            counter_type,
+            required_count,
+        );
+        if eligible.is_empty() {
+            return Err(EngineError::ActionNotAllowed(
+                "No eligible permanents with counters".into(),
+            ));
+        }
+        if selection == CounterCostSelection::AmongObjects {
+            let removable_count = eligible
+                .iter()
+                .filter_map(|object_id| state.objects.get(object_id))
+                .map(|obj| {
+                    super::casting::removable_counter_count_for_cost_selection(
+                        obj,
+                        counter_type,
+                        selection,
+                    )
+                })
+                .fold(0, u32::saturating_add);
+            if removable_count < count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible counters to remove".into(),
+                ));
+            }
+        }
+        let mut pending = pending.clone();
+        pending.activation_cost = remove_first_activation_cost_matching(
+            pending
+                .activation_cost
+                .take()
+                .expect("checked activation cost is present"),
+            |cost| {
+                matches!(
+                    cost,
+                    AbilityCost::RemoveCounter {
+                        target: Some(_),
+                        ..
+                    }
+                )
+            },
+        );
+        let max_count = match selection {
+            CounterCostSelection::SingleObject => 1,
+            CounterCostSelection::AmongObjects => eligible.len(),
+        };
+        return Ok(Some(WaitingFor::PayCost {
+            player,
+            kind: PayCostKind::RemoveCounter {
+                counter_type: counter_type.clone(),
+                count,
+                selection,
+            },
+            choices: eligible,
+            count: max_count,
+            min_count: match selection {
+                CounterCostSelection::SingleObject => 0,
+                CounterCostSelection::AmongObjects => 1,
+            },
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
+        }));
+    }
+
+    if let Some((requirement, filter)) = super::casting::find_tap_creatures_cost(cost) {
+        let count = requirement.fixed_count().ok_or_else(|| {
+            EngineError::ActionNotAllowed(
+                "Aggregate-power tap cost is not valid for this activation".into(),
+            )
+        })?;
+        let eligible = super::casting::find_eligible_tap_creatures_for_cost(
+            state, player, source_id, cost, filter,
+        );
+        if eligible.len() < count as usize {
+            return Err(EngineError::ActionNotAllowed(
+                "Not enough eligible creatures to tap".into(),
+            ));
+        }
+        let mut pending = pending.clone();
+        pending.activation_cost = remove_first_activation_cost_matching(
+            pending
+                .activation_cost
+                .take()
+                .expect("checked activation cost is present"),
+            |cost| matches!(cost, AbilityCost::TapCreatures { .. }),
+        );
+        return Ok(Some(WaitingFor::PayCost {
+            player,
+            kind: PayCostKind::TapCreatures { aggregate: None },
+            choices: eligible,
+            count: count as usize,
+            min_count: 0,
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
+        }));
+    }
+
+    if let Some((waterbend, residual)) = extract_waterbend_activation_cost(cost) {
+        let mut pending = pending.clone();
+        pending.cost = waterbend;
+        pending.activation_cost = residual;
+        state.pending_cast = Some(Box::new(pending));
+        return enter_payment_step(state, player, Some(ConvokeMode::Waterbend), events).map(Some);
+    }
+
     Ok(None)
+}
+
+fn remove_first_activation_cost_matching(
+    cost: AbilityCost,
+    predicate: impl Fn(&AbilityCost) -> bool + Copy,
+) -> Option<AbilityCost> {
+    remove_first_activation_cost_matching_inner(cost, predicate).0
+}
+
+fn remove_first_activation_cost_matching_inner(
+    cost: AbilityCost,
+    predicate: impl Fn(&AbilityCost) -> bool + Copy,
+) -> (Option<AbilityCost>, bool) {
+    if predicate(&cost) {
+        return (None, true);
+    }
+    let AbilityCost::Composite { costs } = cost else {
+        return (Some(cost), false);
+    };
+    let mut removed = false;
+    let mut remaining = Vec::with_capacity(costs.len());
+    for cost in costs {
+        if removed {
+            remaining.push(cost);
+            continue;
+        }
+        let (cost, did_remove) = remove_first_activation_cost_matching_inner(cost, predicate);
+        removed = did_remove;
+        if let Some(cost) = cost {
+            remaining.push(cost);
+        }
+    }
+    let cost = match remaining.len() {
+        0 => None,
+        1 => remaining.into_iter().next(),
+        _ => Some(AbilityCost::Composite { costs: remaining }),
+    };
+    (cost, removed)
+}
+
+fn extract_waterbend_activation_cost(
+    cost: &AbilityCost,
+) -> Option<(ManaCost, Option<AbilityCost>)> {
+    let waterbend = super::casting::find_waterbend_cost(cost)?.clone();
+    Some((
+        waterbend,
+        remove_first_activation_cost_matching(cost.clone(), |cost| {
+            matches!(cost, AbilityCost::Waterbend { .. })
+        }),
+    ))
 }
 
 /// Push an activated ability to the stack after costs are paid.
@@ -4574,9 +4862,12 @@ pub(super) fn push_activated_ability_to_stack(
         pending_interactive.pending_loyalty_activation_player = pending_loyalty_activation_player;
         pending_interactive.activation_target_selection = target_selection;
         pending_interactive.activation_trigger_collection = activation_trigger_collection.clone();
-        if let Some(waiting_for) =
-            surface_next_unpaid_interactive_activation_cost(state, player, &pending_interactive)?
-        {
+        if let Some(waiting_for) = surface_next_unpaid_interactive_activation_cost(
+            state,
+            player,
+            &pending_interactive,
+            events,
+        )? {
             return Ok(waiting_for);
         }
 

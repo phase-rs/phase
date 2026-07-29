@@ -19455,7 +19455,7 @@ pub mod tests {
             target: TargetRef::Object(observer),
             source_id: source,
         };
-        assert!(super::trigger_matchers::match_becomes_target(
+        assert!(crate::game::trigger_matchers::match_becomes_target(
             &event,
             &trigger,
             &crate::game::trigger_matchers::test_trigger_source_context(&staged, observer),

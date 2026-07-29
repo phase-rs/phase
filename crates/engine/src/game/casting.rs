@@ -15410,7 +15410,7 @@ pub fn pay_unless_cost(
 }
 
 /// Walk a cost tree and return the waterbend mana cost if present.
-fn find_waterbend_cost(cost: &AbilityCost) -> Option<&ManaCost> {
+pub(super) fn find_waterbend_cost(cost: &AbilityCost) -> Option<&ManaCost> {
     match cost {
         AbilityCost::Waterbend { cost } => Some(cost),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_waterbend_cost),
@@ -15791,7 +15791,9 @@ pub(super) fn find_collect_evidence_activation_cost(cost: &AbilityCost) -> Optio
 /// selection across the battlefield/graveyard union. Returns `(count,
 /// materials)`. Recurses into `Composite` (the synthesized craft cost is a
 /// `Composite[Mana, Exile{SelfRef}, ExileMaterials]`).
-fn find_craft_materials_cost(cost: &AbilityCost) -> Option<(CostObjectCount, &TargetFilter)> {
+pub(super) fn find_craft_materials_cost(
+    cost: &AbilityCost,
+) -> Option<(CostObjectCount, &TargetFilter)> {
     match cost {
         AbilityCost::ExileMaterials { materials, count } => Some((*count, materials)),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_craft_materials_cost),
@@ -15812,7 +15814,7 @@ pub(super) fn find_tap_creatures_cost(
     }
 }
 
-fn find_targeted_remove_counter_cost(
+pub(super) fn find_targeted_remove_counter_cost(
     cost: &AbilityCost,
 ) -> Option<(
     u32,
@@ -15960,7 +15962,7 @@ pub(crate) fn find_eligible_unattach_for_cost_targets(
         .collect()
 }
 
-fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
+pub(super) fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
     match cost {
         AbilityCost::OneOf { costs } => Some(costs),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_one_of_cost),
@@ -16227,7 +16229,7 @@ pub(crate) fn find_eligible_remove_counter_for_cost_targets(
         .collect()
 }
 
-fn find_eligible_tap_creatures_for_cost(
+pub(super) fn find_eligible_tap_creatures_for_cost(
     state: &GameState,
     player: PlayerId,
     source: ObjectId,
@@ -17615,6 +17617,7 @@ pub fn handle_activate_ability(
                         state,
                         player,
                         &pending_interactive,
+                        events,
                     )?
                 {
                     return Ok(waiting_for);
