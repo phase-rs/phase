@@ -2916,8 +2916,15 @@ pub fn parse_type_phrase_with_ctx<'a>(
     ) {
         if let Some((head, consumed)) = parse_bare_superlative_property_suffix(&lower[pos..]) {
             // CR 109.2a: refuse BEFORE consuming when a non-battlefield zone clause
-            // still lies ahead. Consuming first and refusing at materialization
-            // would drop the restriction while leaving the card looking supported.
+            // still lies ahead. That population is not modelled here, and consuming
+            // first only to refuse at materialization would drop the restriction
+            // while leaving the card looking supported.
+            //
+            // A trailing relative type clause ("that's an artifact") is deliberately
+            // NOT refused here — it is folded into the population below so the
+            // population still equals the candidate set. Refusing it pre-consumption
+            // would leave the whole tail unparsed and drop the TYPE clause too,
+            // which is worse than the bug being fixed.
             if !nonbattlefield_zone_clause_lies_ahead(&lower[pos + consumed..]) {
                 pending_bare_superlative = Some(head);
                 pos += consumed;
@@ -3574,21 +3581,28 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // prop. Reversed, the prop nests inside its own population and
     // `resolve_filter_threshold` recurses without bound.
     if let Some((function, property)) = pending_bare_superlative.take() {
-        // CR 109.2: the population must be the SAME set as the candidate filter. A
-        // trailing "that's an artifact" relative clause closes the noun phrase
-        // AFTER the detection pass and lands in `relative_core_type_filters`, which
-        // the population snapshot below does not carry — so ranking would use a
-        // wider set than the candidates. Refuse rather than rank over the wrong
-        // population. (Zero corpus attestation today; this keeps it that way.)
-        if relative_core_type_filters.is_empty()
+        // CR 109.2: the ranked population must be the SAME set as the candidates. A
+        // trailing relative type clause closes the noun phrase AFTER the detection
+        // pass, so fold it into the population below rather than refusing —
+        // refusing would leave the tail unparsed and drop the type clause as well.
+        //
+        // A MULTI-type relative clause is a DISJUNCTION that `type_filter_branches`
+        // spreads across several branches, which one conjunctive population cannot
+        // express, so that shape is declined. (Zero corpus attestation for either
+        // form today.)
+        if relative_core_type_filters.len() <= 1
             && phrase_denotes_battlefield_permanents(
                 left_card_suffix,
                 &[&base_type_filters, &relative_core_type_filters],
                 &properties,
             )
         {
+            // Population type set = candidate type set, INCLUDING any single-type
+            // relative clause, so ranking and candidacy agree object-for-object.
+            let mut population_types = base_type_filters.clone();
+            population_types.extend(relative_core_type_filters.iter().cloned());
             let population = TargetFilter::Typed(TypedFilter {
-                type_filters: base_type_filters.clone(),
+                type_filters: population_types,
                 controller: controller.clone(),
                 properties: properties.clone(),
             });
@@ -17358,35 +17372,32 @@ mod tests {
         }
     }
 
-    /// CR 109.2 — the ranked population must be the SAME set as the candidates. A
-    /// trailing "that's an artifact" relative clause closes the noun phrase after
-    /// the detection pass and is not carried by the population snapshot, so
-    /// materialization must refuse rather than rank over a wider set.
+    /// CR 109.2 — a trailing relative type clause must end up in the ranked
+    /// POPULATION, not merely on the candidates: ranking `[Permanent, Artifact]`
+    /// candidates against a `[Permanent]` population would select the wrong object.
+    ///
+    /// This is the CodeRabbit finding on PR #6789. Refusing the superlative instead
+    /// was tried and rejected — it left the whole tail unparsed and dropped the
+    /// TYPE clause too, which is worse than the bug being fixed.
     #[test]
-    fn trailing_relative_type_clause_refuses_superlative_materialization() {
+    fn trailing_relative_type_clause_is_folded_into_the_population() {
         let (filter, _) =
             parse_target("target permanent with the greatest mana value that's an artifact");
         let tf = typed_leg(&filter).expect("typed");
-        // Reach-guard: the relative clause really was parsed onto the candidates.
+        // Reach-guard: the relative clause reached the candidate filter.
         assert!(
             tf.type_filters.contains(&TypeFilter::Artifact),
             "reach-guard: the \"that's an artifact\" clause must reach the candidate \
              filter, got {:?}",
             tf.type_filters
         );
+        let (_, population) = bare_superlative_parts(&filter);
+        let pop = typed_leg(population).expect("typed population");
         assert!(
-            !tf.properties.iter().any(|p| matches!(
-                p,
-                FilterProp::Cmc {
-                    value: QuantityExpr::Ref {
-                        qty: QuantityRef::Aggregate { .. }
-                    },
-                    ..
-                }
-            )),
-            "the population snapshot omits the relative clause, so no superlative \
-             may be emitted; got {:?}",
-            tf.properties
+            pop.type_filters.contains(&TypeFilter::Artifact)
+                && pop.type_filters.contains(&TypeFilter::Permanent),
+            "the population must carry the SAME type set as the candidates, got {:?}",
+            pop.type_filters
         );
     }
 }
