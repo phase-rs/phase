@@ -26054,7 +26054,7 @@ fn colored_cost_reduction_spills_excess_beyond_matching_color_to_generic() {
     );
 }
 
-/// CR 118.7a: a reduction shard never reduces a mismatched color's pip — a
+/// CR 118.7b: a reduction shard never reduces a mismatched color's pip — a
 /// {G} cost is untouched by a {W} reduction unit (which instead spills to
 /// generic), so the green pip must survive.
 #[test]

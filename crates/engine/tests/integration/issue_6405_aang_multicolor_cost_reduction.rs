@@ -6,10 +6,10 @@
 //! instead of letting it spill over to generic mana.
 //!
 //! CR 118.7b: a colored reduction unit with no matching component in the cost
-//! converts to reducing generic mana. CR 118.7c: a colored reduction that
+//! converts to reducing generic mana — this is also why a reduction never
+//! touches a mismatched color's pip. CR 118.7c: a colored reduction that
 //! exceeds the cost's component of that color reduces the color to nothing,
-//! then spills the excess to generic. CR 118.7a: a reduction never touches a
-//! mismatched color's pip.
+//! then spills the excess to generic.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::parser::oracle_static::parse_static_line;

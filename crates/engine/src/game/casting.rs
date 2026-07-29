@@ -7685,12 +7685,13 @@ pub(super) fn cost_shard_matches_reduction(
 }
 
 /// CR 118.7b + CR 118.7c + CR 118.7d: Apply one unit of colored/colorless mana
-/// reduction. If the cost still has a matching component, remove it (118.7a
-/// scope). Otherwise — the cost never had that color/colorless component, or
-/// this reduction unit is the excess beyond what the component had left — the
-/// unit spills over to reduce the generic component instead. A reduction can
-/// never touch a mismatched color's pip, and each unit reduces exactly one
-/// cost component (colored/colorless match XOR generic spillover), never both.
+/// reduction. If the cost still has a matching component, remove it. Otherwise
+/// — the cost never had that color/colorless component (118.7b), or this
+/// reduction unit is the excess beyond what the component had left (118.7c/d)
+/// — the unit spills over to reduce the generic component instead. A
+/// reduction can never touch a mismatched color's pip, and each unit reduces
+/// exactly one cost component (colored/colorless match XOR generic
+/// spillover), never both.
 pub(super) fn apply_shard_reduction(
     shards: &mut Vec<ManaCostShard>,
     generic: &mut u32,
