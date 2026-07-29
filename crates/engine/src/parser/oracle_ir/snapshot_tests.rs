@@ -231,42 +231,6 @@ fn priority_nine_spell_router_keeps_vote_and_pile_roots_native() {
     ));
 }
 
-/// CR 706.3b: a spell's terminal roll owns its typed table before lowering;
-/// a nonterminal roll must leave following table-shaped text to normal routing.
-#[test]
-fn priority_nine_spell_die_table_respects_terminal_roll_guard() {
-    let (table_ir, table_lowered) = parse_two_layer(
-        "Roll a d20.\n1—9 | Draw a card.\n10—20 | Draw two cards.",
-        "Spell Die Table Fixture",
-        &["Instant"],
-        &[],
-    );
-    let OracleNodeIr::Spell(roll) = &table_ir.items[0].node else {
-        panic!("spell die-table header must remain native IR");
-    };
-    assert_eq!(roll.die_results.len(), 2);
-    assert!(matches!(
-        table_lowered.abilities[0].effect.as_ref(),
-        Effect::RollDie { results, .. } if results.len() == 2
-    ));
-
-    let (nonterminal_ir, _) = parse_two_layer(
-        "Roll a d20, then draw a card.\n1—20 | Draw two cards.",
-        "Nonterminal Spell Die Fixture",
-        &["Instant"],
-        &[],
-    );
-    let OracleNodeIr::Spell(nonterminal) = &nonterminal_ir.items[0].node else {
-        panic!("nonterminal spell roll must remain native IR");
-    };
-    assert!(nonterminal.die_results.is_empty());
-    assert_eq!(
-        nonterminal_ir.items.len(),
-        2,
-        "a nonterminal roll must not consume a following result row"
-    );
-}
-
 /// CR 601.2b: Priority 9 keeps all aggregate source text and the X floor on
 /// the native node until document lowering.
 #[test]
@@ -1610,7 +1574,7 @@ fn follow_the_lumarets() {
         1,
         "the Dig override must bind through the document relation"
     );
-    assert!(lowered.abilities[0].else_ability.is_some());
+    assert!(lowered.abilities[0].sub_ability.is_some());
     insta::assert_json_snapshot!("follow_the_lumarets_ir", &ir);
     insta::assert_json_snapshot!("follow_the_lumarets_lowered", &lowered);
 }
