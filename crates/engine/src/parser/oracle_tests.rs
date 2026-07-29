@@ -8214,6 +8214,50 @@ fn mox_pearl_mana_ability() {
     assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
 }
 
+/// Issue #6507: Gemstone Mine's mana ability is targetless ("Add one mana of
+/// any color" chooses no target), so the trailing "If there are no mining
+/// counters on this land, sacrifice it" conditional has no parent target to
+/// inherit. The bare "it" pronoun must bind to the ability's own source
+/// (`TargetFilter::SelfRef`), not `ParentTarget` — `ParentTarget` resolves to
+/// nothing here and the land was never sacrificed. This is the
+/// depletion-land class, not a one-off: any targetless activated ability
+/// whose trailing conditional says "sacrifice it" shares the exposure.
+#[test]
+fn gemstone_mine_conditional_sacrifice_binds_to_self_ref() {
+    let r = parse(
+        "This land enters with three mining counters on it.\n\
+         {T}, Remove a mining counter from this land: Add one mana of any color. \
+         If there are no mining counters on this land, sacrifice it.",
+        "Gemstone Mine",
+        &[],
+        &["Land"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1);
+    let ability = &r.abilities[0];
+    assert!(
+        matches!(*ability.effect, Effect::Mana { .. }),
+        "expected Effect::Mana, got {:?}",
+        ability.effect
+    );
+    let sub_ability = ability
+        .sub_ability
+        .as_ref()
+        .expect("expected a conditional sub_ability for the trailing sacrifice sentence");
+    assert!(
+        sub_ability.condition.is_some(),
+        "expected the 'if there are no mining counters' gate to survive as a condition"
+    );
+    let Effect::Sacrifice { target, .. } = &*sub_ability.effect else {
+        panic!("expected Effect::Sacrifice, got {:?}", sub_ability.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::SelfRef,
+        "sacrifice target must bind to the source land, not an unestablished ParentTarget"
+    );
+}
+
 #[test]
 fn parses_return_forest_cost_untap_activated_ability() {
     let r = parse(

@@ -30668,10 +30668,31 @@ pub(crate) fn parse_effect_chain_ir(
         // which is exactly why a head-only rewrite corrupts the chain.
         let is_distributed_chunk = text_is_compound_subject_distribution(&text);
         // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
+        //
+        // CR 608.2c + CR 122.1 (issue #6507): gated on the immediately preceding
+        // clause actually exposing SOME target concept (`target_filter().is_some()`),
+        // not merely `!builder.is_empty()`. A prior clause can establish a legitimate
+        // antecedent through several different shapes (a chosen typed target — the
+        // kicker_instead_chain_produces_correct_condition DealDamage head; a
+        // self-reference by printed name — Managorger Phoenix's `PutCounter{SelfRef}`;
+        // a cost-paid object — Jhoira of the Ghitu's exiled card), so this deliberately
+        // does not enumerate those shapes — it only excludes the one shape that has NO
+        // target concept at all. A mana ability's `Effect::Mana` has an `Option<target>`
+        // that is `None` for every ordinary mana ability (Gemstone Mine's "Add one mana
+        // of any color" chooses nothing), so `target_filter()` returns `None` and there
+        // is no antecedent for a following "it" to inherit. Previously this rewrite
+        // fired unconditionally whenever the builder was non-empty, clobbering an
+        // unbound sacrifice target into `ParentTarget`, which resolves to nothing at
+        // runtime — see the sibling fixup immediately below for the other half of the
+        // fix (rebinding that unbound default to the ability's own source instead).
+        let prior_clause_has_no_target_concept = builder
+            .clauses()
+            .last()
+            .is_some_and(|prev| prev.parsed.effect.target_filter().is_none());
         if condition.is_some()
             && !is_distributed_chunk
             && !condition.as_ref().is_some_and(condition_refs_source_object)
-            && !builder.is_empty()
+            && !prior_clause_has_no_target_concept
             && has_anaphoric_reference(&text_lower)
             && !matches!(if_you_do_anchor, Some(TargetFilter::SelfRef))
             && !typed_trigger_subject
@@ -30682,6 +30703,25 @@ pub(crate) fn parse_effect_chain_ir(
             )
         {
             replace_target_with_parent(&mut clause.effect);
+        }
+        // CR 608.2c + CR 122.1 (issue #6507): the sacrifice imperative parser
+        // (`parse_targeted_action_ast`) defaults a bare "it"/"them" pronoun with no
+        // trigger subject to `ParentTarget`, on the assumption that SOME earlier
+        // clause in the chain chose a real target for it to inherit — the common case
+        // (`bare_it_without_trigger_subject_preserves_parent_target`). When the
+        // immediately preceding clause has no target concept at all (the Kicker-clause
+        // guard above), that assumption is false: there is nothing for `ParentTarget`
+        // to resolve to, so a conditional "sacrifice it" tail (Gemstone Mine's "{T},
+        // Remove a mining counter: Add one mana of any color. If there are no mining
+        // counters on this land, sacrifice it.") silently never sacrifices anything.
+        // Rebind it to the ability's own source, the only object "it" can plausibly
+        // name here.
+        if condition.is_some() && !is_distributed_chunk && prior_clause_has_no_target_concept {
+            if let Effect::Sacrifice { target, .. } = &mut clause.effect {
+                if matches!(target, TargetFilter::ParentTarget) {
+                    *target = TargetFilter::SelfRef;
+                }
+            }
         }
         // CR 608.2c: Pronoun clause following a conditional targeted effect.
         if condition.is_none()
