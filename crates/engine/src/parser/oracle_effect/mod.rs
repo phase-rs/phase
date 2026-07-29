@@ -155,9 +155,9 @@ use self::subject::{
 use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{
-    AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
-    DieResultBranchIr, EffectChainIr, OtherwiseKind, PlayerScopeRewrite, PriorModifier,
-    ReplaceMeaningKind, ReplicateKind, ShellStage,
+    AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr,
+    ClauseIrBuilder, DieResultBranchIr, EffectChainIr, OtherwiseKind, PlayerScopeRewrite,
+    PriorModifier, ReplaceMeaningKind, ReplicateKind, ShellStage,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -26983,7 +26983,7 @@ pub(crate) enum ChainLoweringMode {
 /// # The order is pinned and behavior-load-bearing
 ///
 /// **chain → die results → finalize → anchor → `sub_link` → envelope stamps →
-/// stages.**
+/// stages → root transforms.**
 ///
 /// It is not an aesthetic choice: it reproduces what the whole-body recognizers
 /// in `oracle.rs` do by hand. Every one of them stamps its root fields *after*
@@ -27022,7 +27022,41 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
             }
         }
     }
+    apply_ability_root_transforms(&mut def, &ir.root_transforms);
     def
+}
+
+/// Apply ordered whole-ability transforms after every chain and shell stage.
+///
+/// CR 608.2c: this is the only point where the final root is known, so the
+/// condition order is preserved without assuming any particular clause becomes
+/// that root during assembly.
+fn apply_ability_root_transforms(def: &mut AbilityDefinition, transforms: &[AbilityRootTransform]) {
+    for transform in transforms {
+        match transform {
+            AbilityRootTransform::SetMinXValue(min_x_value) => {
+                def.min_x_value = *min_x_value;
+            }
+            AbilityRootTransform::SetDescription(description) => {
+                def.description = Some(description.clone());
+            }
+            AbilityRootTransform::PrependCondition(condition) => {
+                def.condition = match def.condition.take() {
+                    Some(chain) => Some(crate::parser::oracle::merge_ability_condition(
+                        Some(condition.clone()),
+                        chain,
+                    )),
+                    None => Some(condition.clone()),
+                };
+            }
+            AbilityRootTransform::AppendCondition(condition) => {
+                def.condition = Some(crate::parser::oracle::merge_ability_condition(
+                    def.condition.take(),
+                    condition.clone(),
+                ));
+            }
+        }
+    }
 }
 
 /// CR 706.3b: Attach typed die-result branches before finalization so every
@@ -27133,6 +27167,7 @@ pub(crate) fn parse_ability_ir(
             body,
             shell: AbilityShellIr::default(),
             die_results: vec![],
+            root_transforms: vec![],
         };
     }
     if let Some(body) = parse_for_each_attacker_copy_blocker_ir(text, kind, ctx) {
@@ -27141,6 +27176,7 @@ pub(crate) fn parse_ability_ir(
             body,
             shell: AbilityShellIr::default(),
             die_results: vec![],
+            root_transforms: vec![],
         };
     }
     if let ChainLoweringMode::WithContext = mode {
@@ -27150,6 +27186,7 @@ pub(crate) fn parse_ability_ir(
                 body,
                 shell: AbilityShellIr::default(),
                 die_results: vec![],
+                root_transforms: vec![],
             };
         }
     }
@@ -27164,6 +27201,7 @@ pub(crate) fn parse_ability_ir(
                 ..AbilityShellIr::default()
             },
             die_results: vec![],
+            root_transforms: vec![],
         };
     }
     AbilityIr {
@@ -27171,6 +27209,7 @@ pub(crate) fn parse_ability_ir(
         body: parse_effect_chain_ir(text, kind, ctx),
         shell: AbilityShellIr::default(),
         die_results: vec![],
+        root_transforms: vec![],
     }
 }
 

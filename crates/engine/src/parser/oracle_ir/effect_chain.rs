@@ -407,6 +407,32 @@ pub(crate) struct AbilityIr {
     ///
     /// Empty is the default for every ordinary ability IR and is a lowering no-op.
     pub(crate) die_results: Vec<DieResultBranchIr>,
+    /// Ordered root transforms applied after whole-ability lowering.
+    ///
+    /// This is intentionally separate from [`AbilityShellIr`]. The shell carries
+    /// the activation envelope; these transforms compose post-chain resolution
+    /// metadata whose order depends on the root that chain assembly selected.
+    /// An empty list is a lowering no-op.
+    pub(crate) root_transforms: Vec<AbilityRootTransform>,
+}
+
+/// A root-level transform applied only after an [`AbilityIr`] has been fully
+/// lowered.
+///
+/// CR 608.2c: chain assembly may change which parsed clause becomes the root,
+/// so a whole-ability condition cannot be assigned to the first clause. These
+/// transforms operate on the finalized root in their stored order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum AbilityRootTransform {
+    /// CR 601.2b: stamp the announced-X floor from this printed ability.
+    SetMinXValue(u32),
+    /// Preserve the complete printed source text for this multi-line ability.
+    SetDescription(String),
+    /// CR 608.2c: prepend a condition (ability word) before the chain-derived
+    /// root condition.
+    PrependCondition(AbilityCondition),
+    /// CR 608.2c: append a condition extracted from a line-level `instead`.
+    AppendCondition(AbilityCondition),
 }
 
 /// CR 608.2c + CR 601.2c: Subject of a "does the same / does so" effect-replication
