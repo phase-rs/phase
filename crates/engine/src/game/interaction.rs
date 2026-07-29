@@ -7795,16 +7795,11 @@ fn bound_outbound_view(view: &ViewerInteraction) -> Result<(), InteractionReason
         bound_outbound_opportunity_with_budget(opportunity, &mut budget)?;
     }
     budget.list(view.attachment_fans.len())?;
-    for fan in &view.attachment_fans {
-        budget.string(fan.interaction_id.as_str())?;
-        budget.string(fan.host.as_str())?;
+    for fan in view.attachment_fans.values() {
         budget.list(fan.children.len())?;
         for child in &fan.children {
-            budget.string(child.object.as_str())?;
-            budget.list(child.choice_ids.len())?;
-            for choice_id in &child.choice_ids {
-                budget.string(choice_id.as_str())?;
-            }
+            budget.string(child.submission.interaction_id.as_str())?;
+            bound_outbound_response(&child.submission.response, &mut budget)?;
         }
     }
     if let InteractionAvailability::ProgressAvailable { witness } = &view.availability {
