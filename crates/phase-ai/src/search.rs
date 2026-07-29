@@ -26,11 +26,10 @@ use crate::combat_ai::{choose_attackers_with_targets_with_profile, choose_blocke
 use crate::config::{AiConfig, PlannerMode, ThreatAwareness};
 use crate::context::AiContext;
 use crate::features::DeckFeatures;
-use crate::mana_colors::demand_aware_single_color;
 use crate::plan::{PlanSnapshot, PlanState};
 use crate::planner::{
-    apply_candidate, BeamContinuationPlanner, ContinuationPlanner, PlannerServices,
-    RankedCandidate, RungStat, SearchBudget,
+    apply_candidate, prepare_payment_candidates, BeamContinuationPlanner, ContinuationPlanner,
+    PlannerServices, PreparedCandidate, RankedCandidate, RungStat, SearchBudget,
 };
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::copy_value::score_legend_rule_keep;
@@ -198,28 +197,6 @@ pub fn choose_action_with_session(
         let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
         if let Some(action) = deterministic_choice(state, ai_player, config, &[], Some(&context)) {
             return Some(action);
-        }
-    }
-
-    // CR 106.3 + CR 608.2d: Selecting which color a flexible mana source
-    // produces while paying for a spell is mechanical, not a policy judgment —
-    // the AI must produce the color the in-flight cost demands. `candidates.rs`
-    // enumerates *every* color option, so `score_candidates` is always non-empty
-    // and the old `fallback_action` SingleColor arm never fired on the normal
-    // path; the scorer then picked an arbitrary (first-enumerated) color,
-    // tapping a U/R dual for {R} when the spell needed {U} and stranding the pip
-    // (ManaPayment dead-end). This deterministic pre-emption — parallel to the
-    // TributeChoice and SearchChoice pre-emptions above — is the real fix.
-    if let WaitingFor::ChooseManaColor {
-        choice: ManaChoicePrompt::SingleColor { ref options },
-        ..
-    } = state.waiting_for
-    {
-        if let Some(color) = demand_aware_single_color(options, state) {
-            return Some(GameAction::ChooseManaColor {
-                choice: ManaChoice::SingleColor(color),
-                count: 1,
-            });
         }
     }
 
@@ -1649,40 +1626,36 @@ pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameActio
         }
 
         // Mana-related states: picking a color or paying mana.
-        WaitingFor::ChooseManaColor { choice, .. } => {
-            match choice {
-                ManaChoicePrompt::SingleColor { options } => {
-                    // Defense-in-depth: the primary fix is the pre-emption in
-                    // `choose_action_with_session`; this honors the demanded
-                    // color too should this path ever be reached.
-                    demand_aware_single_color(options, state).map(|color| {
-                        GameAction::ChooseManaColor {
-                            choice: ManaChoice::SingleColor(color),
-                            count: 1,
-                        }
-                    })
-                }
-                ManaChoicePrompt::Combination { options } => {
-                    options.first().map(|combo| GameAction::ChooseManaColor {
-                        choice: ManaChoice::Combination(combo.clone()),
+        WaitingFor::ChooseManaColor { choice, .. } => match choice {
+            ManaChoicePrompt::SingleColor { options } => {
+                options
+                    .first()
+                    .copied()
+                    .map(|color| GameAction::ChooseManaColor {
+                        choice: ManaChoice::SingleColor(color),
                         count: 1,
                     })
-                }
-                ManaChoicePrompt::AnyCombination { count, options } => {
-                    let combo = vec![
-                        options
-                            .first()
-                            .copied()
-                            .unwrap_or(engine::types::mana::ManaType::Colorless);
-                        *count
-                    ];
-                    Some(GameAction::ChooseManaColor {
-                        choice: ManaChoice::Combination(combo),
-                        count: 1,
-                    })
-                }
             }
-        }
+            ManaChoicePrompt::Combination { options } => {
+                options.first().map(|combo| GameAction::ChooseManaColor {
+                    choice: ManaChoice::Combination(combo.clone()),
+                    count: 1,
+                })
+            }
+            ManaChoicePrompt::AnyCombination { count, options } => {
+                let combo = vec![
+                    options
+                        .first()
+                        .copied()
+                        .unwrap_or(engine::types::mana::ManaType::Colorless);
+                    *count
+                ];
+                Some(GameAction::ChooseManaColor {
+                    choice: ManaChoice::Combination(combo),
+                    count: 1,
+                })
+            }
+        },
         WaitingFor::PayManaAbilityMana { options, .. } => {
             options.first().map(|plan| GameAction::PayManaAbilityMana {
                 payment: plan.clone(),
@@ -1980,6 +1953,57 @@ fn priority_action_is_allowed_by_loop_guards(
     }
 }
 
+/// Rank the root beam after validation and gating, retaining an affiliated
+/// payment candidate's already-witnessed reducer successor through width
+/// truncation. This is the single production seam for root payment ranking;
+/// tests exercise it directly to prove the enabled-search beam boundary.
+fn rank_root_payment_candidates(
+    state: &GameState,
+    decision: &engine::ai_support::AiDecisionContext,
+    prepared: &[PreparedCandidate],
+    gated: &[crate::tactical_gate::GatedCandidate],
+    services: &PlannerServices<'_>,
+    max_branching: usize,
+) -> Vec<RankedCandidate> {
+    let mut ranked: Vec<RankedCandidate> = gated
+        .iter()
+        .map(|gated_candidate| {
+            let score = services.tactical_score(
+                state,
+                decision,
+                &gated_candidate.candidate,
+                services.ai_player,
+                SearchDepth::Root,
+            ) + gated_candidate.penalty;
+            prepared
+                .iter()
+                .find(|prepared_candidate| {
+                    prepared_candidate.candidate.action == gated_candidate.candidate.action
+                })
+                .and_then(|prepared_candidate| prepared_candidate.payment_successor.clone())
+                .map_or_else(
+                    || RankedCandidate::new(gated_candidate.candidate.clone(), score),
+                    |successor| {
+                        RankedCandidate::with_payment_successor(
+                            gated_candidate.candidate.clone(),
+                            score,
+                            successor,
+                        )
+                    },
+                )
+        })
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.candidate.action.cmp_stable(&right.candidate.action))
+    });
+    ranked.truncate(max_branching);
+    ranked
+}
+
 /// Core scoring for a single (possibly determinized) state. Byte-identical to
 /// the pre-feature `score_candidates_with_session` except it threads a shared
 /// `deadline_override` into `PlannerServices` — `None` reproduces the old
@@ -1996,6 +2020,12 @@ fn score_candidates_core(
     }
 
     let ctx = build_decision_context(state);
+    #[cfg(test)]
+    let policies = session
+        .policy_registry_override
+        .as_deref()
+        .unwrap_or_else(|| PolicyRegistry::shared());
+    #[cfg(not(test))]
     let policies = PolicyRegistry::shared();
     let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
 
@@ -2021,7 +2051,14 @@ fn score_candidates_core(
 
     let mut services =
         PlannerServices::with_deadline(ai_player, config, policies, context, deadline_override);
-    let candidates = services.validate_candidates(state, ctx.candidates.clone());
+    let prepared = prepare_payment_candidates(state, ctx.candidates.clone());
+    let candidates = services.validate_candidates(
+        state,
+        prepared
+            .iter()
+            .map(|candidate| candidate.candidate.clone())
+            .collect(),
+    );
     let gated = gate_candidates(
         state,
         &ctx,
@@ -2052,10 +2089,15 @@ fn score_candidates_core(
     // Deterministic early returns — these don't benefit from search/parallelism.
     // Pass the already-built context so the mulligan branch avoids a second
     // full deck analysis (DeckProfile + SynergyGraph for both players).
-    if let Some(action) =
-        deterministic_choice(state, ai_player, config, &actions, Some(&services.context))
-    {
-        return vec![(action, 1.0)];
+    if matches!(
+        engine::ai_support::classify_payment_continuation(state),
+        engine::ai_support::PaymentContinuationState::NotAffiliated
+    ) {
+        if let Some(action) =
+            deterministic_choice(state, ai_player, config, &actions, Some(&services.context))
+        {
+            return vec![(action, 1.0)];
+        }
     }
 
     // Score actions via search or heuristics
@@ -2096,29 +2138,8 @@ fn score_candidates_core(
         // O(n) linear scan of `gated` per scored candidate — O(n²) overall.
         // GameAction is not Hash, so we can't key a HashMap; carrying the
         // penalty with its candidate is both cheaper and more idiomatic.
-        let mut ranked: Vec<RankedCandidate> = gated
-            .iter()
-            .map(|g| {
-                let tactical = services.tactical_score(
-                    state,
-                    &ctx,
-                    &g.candidate,
-                    ai_player,
-                    SearchDepth::Root,
-                );
-                RankedCandidate {
-                    candidate: g.candidate.clone(),
-                    score: tactical + g.penalty,
-                }
-            })
-            .collect();
-        ranked.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
-        });
-        ranked.truncate(branching);
+        let ranked =
+            rank_root_payment_candidates(state, &ctx, &prepared, &gated, &services, branching);
 
         run_iterative_deepening(state, ranked, tactical_weight, config, &mut services)
     } else {
@@ -2204,7 +2225,11 @@ fn run_iterative_deepening(
                 completed = false;
                 break;
             }
-            let score = if let Some(sim) = apply_candidate(state, &r.candidate) {
+            let score = if let Some(sim) = r
+                .payment_successor
+                .clone()
+                .or_else(|| apply_candidate(state, &r.candidate))
+            {
                 let cont = planner.evaluate_after_action(&sim, services, &mut budget);
                 cont + (r.score * tactical_weight)
             } else {
@@ -3218,11 +3243,12 @@ pub fn softmax_select_pairs(
 mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::scenario::{GameScenario, P0};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification, Duration,
-        Effect, EffectKind, QuantityExpr, ResolvedAbility, StaticDefinition, TargetFilter,
-        TargetRef, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification,
+        Duration, Effect, EffectKind, ManaProduction, QuantityExpr, ResolvedAbility,
+        StaticDefinition, TargetFilter, TargetRef, TypedFilter,
     };
     use engine::types::ability::{ChoiceType, ChosenAttribute};
     use engine::types::card_type::CoreType;
@@ -3232,7 +3258,8 @@ mod tests {
         PromptSourceBinding, StackEntry, StackEntryKind,
     };
     use engine::types::identifiers::{CardId, ObjectId};
-    use engine::types::mana::{ManaCostShard, ManaType, ManaUnit};
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
     use rand::rngs::SmallRng;
@@ -3240,6 +3267,7 @@ mod tests {
 
     use crate::config::{create_config, AiDifficulty, Platform};
     use crate::policies::context::PolicyContext;
+    use crate::policies::{DecisionKind, PolicyReason, TacticalPolicy};
     use crate::session::SessionCache;
     use crate::test_support::{context_with_plans, default_deck_plan, ramp_deck_plan};
 
@@ -4485,28 +4513,6 @@ mod tests {
         );
     }
 
-    fn pending_cast_with_cost(
-        shards: Vec<engine::types::mana::ManaCostShard>,
-        generic: u32,
-    ) -> Box<engine::types::game_state::PendingCast> {
-        use engine::types::ability::{QuantityExpr, ResolvedAbility, TargetFilter};
-        use engine::types::game_state::PendingCast;
-        Box::new(PendingCast::new(
-            ObjectId(100),
-            CardId(100),
-            ResolvedAbility::new(
-                engine::types::ability::Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 0 },
-                    target: TargetFilter::Controller,
-                },
-                Vec::new(),
-                ObjectId(100),
-                PlayerId(0),
-            ),
-            engine::types::mana::ManaCost::Cost { shards, generic },
-        ))
-    }
-
     fn spell_target_selection_state(
         current_legal_targets: Vec<TargetRef>,
         stale_slot_targets: Vec<TargetRef>,
@@ -4564,21 +4570,13 @@ mod tests {
         state
     }
 
-    /// Minimal ChooseManaColor SingleColor state with the given option list and
-    /// pending cast. The `context` is a degenerate `ResolvingEffect` resume — the
-    /// pre-emption never inspects it, only `choice` and `state.pending_cast`.
-    /// Production Improvise/dual repro paths use `ManaChoiceContext::ManaAbility`,
-    /// but the context variant is irrelevant to the pre-emption (which reads only
-    /// `pending_cast` + `options`), so `ResolvingEffect` is used for fixture
-    /// simplicity.
-    fn choose_mana_color_state(
-        options: Vec<ManaType>,
-        pending: Option<Box<engine::types::game_state::PendingCast>>,
-    ) -> GameState {
+    /// Minimal non-payment mana-color prompt. The production payment path uses
+    /// a live mana-ability carrier below; this fixture is deliberately outside
+    /// that authority so it pins the established first-option fallback.
+    fn non_affiliated_choose_mana_color_state(options: Vec<ManaType>) -> GameState {
         use engine::types::ability::{QuantityExpr, ResolvedAbility, TargetFilter};
         use engine::types::game_state::{ManaChoiceContext, ManaChoicePrompt};
         let mut state = make_state();
-        state.pending_cast = pending;
         let resume = ResolvedAbility::new(
             engine::types::ability::Effect::Draw {
                 count: QuantityExpr::Fixed { value: 0 },
@@ -4597,39 +4595,8 @@ mod tests {
     }
 
     #[test]
-    fn choose_mana_color_preemption_selects_demanded_color() {
-        // Repro: {2}{U} spell, U/R source offered [Red, Blue]. The AI must
-        // produce Blue (demanded) — the old scorer picked the first-enumerated
-        // color (Red) and stranded the {U} pip into a ManaPayment dead-end.
-        // Drives the PUBLIC choose_action path, not fallback_action.
-        let state = choose_mana_color_state(
-            vec![ManaType::Red, ManaType::Blue],
-            Some(pending_cast_with_cost(
-                vec![engine::types::mana::ManaCostShard::Blue],
-                2,
-            )),
-        );
-        let config = create_config(AiDifficulty::Medium, Platform::Native);
-        let mut rng = SmallRng::seed_from_u64(1);
-        assert_eq!(
-            choose_action(&state, PlayerId(0), &config, &mut rng),
-            Some(GameAction::ChooseManaColor {
-                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Blue),
-                count: 1,
-            })
-        );
-    }
-
-    #[test]
-    fn choose_mana_color_preemption_selects_demanded_red() {
-        // {1}{R} spell, source offered [Blue, Red] → must produce Red.
-        let state = choose_mana_color_state(
-            vec![ManaType::Blue, ManaType::Red],
-            Some(pending_cast_with_cost(
-                vec![engine::types::mana::ManaCostShard::Red],
-                1,
-            )),
-        );
+    fn non_affiliated_choose_mana_color_uses_first_option() {
+        let state = non_affiliated_choose_mana_color_state(vec![ManaType::Red, ManaType::Blue]);
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         let mut rng = SmallRng::seed_from_u64(1);
         assert_eq!(
@@ -4641,41 +4608,383 @@ mod tests {
         );
     }
 
-    #[test]
-    fn choose_mana_color_preemption_demanded_color_first() {
-        // Demanded color is first here; paired with selects_demanded_color
-        // (demanded second) this proves demand-driven, not positional.
-        let state = choose_mana_color_state(
-            vec![ManaType::Blue, ManaType::Red],
-            Some(pending_cast_with_cost(
-                vec![engine::types::mana::ManaCostShard::Blue],
-                2,
-            )),
-        );
-        let config = create_config(AiDifficulty::Medium, Platform::Native);
-        let mut rng = SmallRng::seed_from_u64(1);
-        assert_eq!(
-            choose_action(&state, PlayerId(0), &config, &mut rng),
-            Some(GameAction::ChooseManaColor {
-                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Blue),
-                count: 1,
+    fn flexible_mana_payment_state() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Flexible AI Witness", true, "Draw a card.")
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
             })
-        );
+            .id();
+        let source = scenario.add_creature(P0, "Flexible AI Source", 1, 1).id();
+        let mut runner = scenario.build();
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyCombination {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    color_options: vec![ManaColor::Blue, ManaColor::Red],
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let source_object = runner.state_mut().objects.get_mut(&source).unwrap();
+        Arc::make_mut(&mut source_object.abilities).push(ability);
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Manual,
+            })
+            .expect("the test spell reaches manual payment");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .expect("the real mana ability opens its colour prompt");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ));
+        runner.state().clone()
+    }
+
+    fn mana_product(colors: &[ManaType]) -> GameAction {
+        GameAction::ChooseManaColor {
+            choice: engine::types::game_state::ManaChoice::Combination(colors.to_vec()),
+            count: 1,
+        }
+    }
+
+    /// Reach a live CR 702.126a Improvise payment carrier, then leave its last
+    /// mana open for the red-first flexible mana ability. `improvise_taps`
+    /// deliberately differs between the coloured and generic control so each
+    /// still needs exactly one colour allocation after its artifact payment.
+    fn red_first_improvise_payment_state(cost: ManaCost, improvise_taps: usize) -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = {
+            let mut builder = scenario.add_spell_to_hand_from_oracle(
+                P0,
+                "Improvise Payment Witness",
+                true,
+                "Draw a card.",
+            );
+            builder.with_mana_cost(cost);
+            builder.with_keyword(Keyword::Improvise);
+            builder.id()
+        };
+        let artifacts: Vec<_> = (0..improvise_taps)
+            .map(|index| {
+                let mut builder =
+                    scenario.add_creature(P0, &format!("Improvise Artifact {index}"), 0, 1);
+                builder.as_artifact();
+                builder.id()
+            })
+            .collect();
+        let source = scenario
+            .add_creature(P0, "Red First Mana Source", 1, 1)
+            .id();
+        let mut runner = scenario.build();
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyCombination {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::Red, ManaColor::Blue],
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(
+            &mut runner
+                .state_mut()
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .abilities,
+        )
+        .push(ability);
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Manual,
+            })
+            .expect("the Improvise spell reaches manual payment");
+        for artifact in artifacts {
+            runner
+                .act(GameAction::TapForConvoke {
+                    object_id: artifact,
+                    mana_type: ManaType::Colorless,
+                })
+                .expect("each artifact pays one generic mana through Improvise");
+        }
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .expect("the real mana ability opens its red-first colour prompt");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ));
+        runner.state().clone()
+    }
+
+    struct FlexibleManaPolicy(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl TacticalPolicy for FlexibleManaPolicy {
+        fn id(&self) -> PolicyId {
+            PolicyId::PaymentSelection
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            &[DecisionKind::ActivateAbility]
+        }
+
+        fn activation(
+            &self,
+            _: &crate::features::DeckFeatures,
+            _: &GameState,
+            _: PlayerId,
+        ) -> Option<f32> {
+            Some(1.0)
+        }
+
+        fn verdict(&self, context: &PolicyContext<'_>) -> PolicyVerdict {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match &context.candidate.action {
+                GameAction::ChooseManaColor {
+                    choice: engine::types::game_state::ManaChoice::Combination(colors),
+                    ..
+                } if colors == &[ManaType::Blue, ManaType::Red] => {
+                    PolicyVerdict::critical(15.0, PolicyReason::new("flexible_mana_test"))
+                }
+                GameAction::ChooseManaColor {
+                    choice: engine::types::game_state::ManaChoice::Combination(colors),
+                    ..
+                } if colors == &[ManaType::Red, ManaType::Blue] => {
+                    PolicyVerdict::strong(5.0, PolicyReason::new("flexible_mana_test"))
+                }
+                _ => PolicyVerdict::neutral(PolicyReason::new("flexible_mana_test")),
+            }
+        }
+    }
+
+    fn flexible_mana_session(
+        state: &GameState,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Arc<AiSession> {
+        let mut session = AiSession::from_game(state);
+        session.policy_registry_override =
+            Some(Arc::new(PolicyRegistry::for_tests(vec![Box::new(
+                FlexibleManaPolicy(calls),
+            )])));
+        Arc::new(session)
     }
 
     #[test]
-    fn choose_mana_color_preemption_no_pending_cast_uses_first() {
-        // No pending cast (e.g. a mana-ability color choice at priority) →
-        // first option, identical to the old behavior.
-        let state = choose_mana_color_state(vec![ManaType::Red, ManaType::Blue], None);
-        let config = create_config(AiDifficulty::Medium, Platform::Native);
-        let mut rng = SmallRng::seed_from_u64(1);
+    fn affiliated_flexible_mana_uses_witnessed_support_in_public_and_enabled_beam_paths() {
+        let state = flexible_mana_payment_state();
+        let all = engine::ai_support::legal_actions(&state);
+        let expected_all = vec![
+            mana_product(&[ManaType::Blue, ManaType::Blue]),
+            mana_product(&[ManaType::Blue, ManaType::Red]),
+            mana_product(&[ManaType::Red, ManaType::Blue]),
+            mana_product(&[ManaType::Red, ManaType::Red]),
+        ];
         assert_eq!(
-            choose_action(&state, PlayerId(0), &config, &mut rng),
-            Some(GameAction::ChooseManaColor {
-                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Red),
-                count: 1,
-            })
+            all, expected_all,
+            "live AnyCombination exposes all four products"
+        );
+        let witnessed: Vec<_> = all
+            .iter()
+            .filter_map(|action| engine::ai_support::witness_payment_continuation(&state, action))
+            .collect();
+        let expected = expected_all[..3].to_vec();
+        assert_eq!(
+            witnessed
+                .iter()
+                .map(|accepted| accepted.action.clone())
+                .collect::<Vec<_>>(),
+            expected,
+            "only the three products that can finish the announced root survive"
+        );
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let session = flexible_mana_session(&state, Arc::clone(&calls));
+        let mut disabled = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(43);
+        disabled.search.enabled = false;
+        disabled.temperature = 0.25;
+        let scored = score_candidates_with_session(&state, P0, &disabled, &session);
+        assert_eq!(
+            scored
+                .iter()
+                .map(|(action, _)| action.clone())
+                .collect::<Vec<_>>(),
+            expected,
+            "the public scorer retains every witnessed successor and rejects RR"
+        );
+        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) >= 3);
+        assert_eq!(score_of(&scored, &expected[0]), 0.45);
+        assert_eq!(score_of(&scored, &expected[1]), 15.45);
+        assert_eq!(score_of(&scored, &expected[2]), 5.45);
+
+        let max_score = scored
+            .iter()
+            .map(|(_, score)| *score)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let weights: Vec<_> = scored
+            .iter()
+            .map(|(_, score)| ((*score - max_score) / disabled.temperature).exp())
+            .collect();
+        let total: f64 = weights.iter().sum();
+        let mut threshold_rng = SmallRng::seed_from_u64(0);
+        let threshold = threshold_rng.random::<f64>() * total;
+        assert!(
+            weights[0] < threshold && threshold <= weights[0] + weights[1],
+            "the seeded full-support softmax threshold lies in BR's interval"
+        );
+        let mut direct_rng = SmallRng::seed_from_u64(0);
+        assert_eq!(
+            softmax_select_pairs(&scored, disabled.temperature, &mut direct_rng),
+            Some(expected[1].clone()),
+            "the full accepted support selects BR, not stable-first BB"
+        );
+        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut chooser_rng = SmallRng::seed_from_u64(0);
+        assert_eq!(
+            choose_action_with_session(&state, P0, &disabled, &mut chooser_rng, &session),
+            Some(expected[1].clone()),
+            "the disabled public chooser uses the ordinary full-support softmax path"
+        );
+        assert!(
+            calls.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the public chooser reaches tactical policy scoring after its counter reset"
+        );
+
+        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut enabled = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(43);
+        enabled.search.enabled = true;
+        enabled.search.max_branching = 3;
+        enabled.search.planner_mode = PlannerMode::BeamOnly;
+        enabled.search.determinization_samples = 0;
+        let context = build_ai_context_with_session(&state, P0, &enabled, Arc::clone(&session));
+        let policies = session.policy_registry_override.as_deref().unwrap();
+        let services = PlannerServices::with_deadline(P0, &enabled, policies, context, None);
+        let decision = build_decision_context(&state);
+        let prepared = prepare_payment_candidates(&state, decision.candidates.clone());
+        let validated = services.validate_candidates(
+            &state,
+            prepared
+                .iter()
+                .map(|candidate| candidate.candidate.clone())
+                .collect(),
+        );
+        let gated = gate_candidates(
+            &state,
+            &decision,
+            validated,
+            P0,
+            &enabled,
+            &services.context,
+        );
+        let beam = rank_root_payment_candidates(&state, &decision, &prepared, &gated, &services, 3);
+        assert_eq!(
+            beam.iter()
+                .map(|candidate| candidate.candidate.action.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                expected[1].clone(),
+                expected[2].clone(),
+                expected[0].clone()
+            ],
+            "the enabled root beam ranks BR > RB > BB and retains width three"
+        );
+        assert!(beam
+            .iter()
+            .all(|candidate| candidate.payment_successor.is_some()));
+
+        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        let enabled_scored = score_candidates_with_session(&state, P0, &enabled, &session);
+        assert_eq!(enabled_scored.len(), 3);
+        assert!(enabled_scored
+            .iter()
+            .all(|(action, _)| expected.contains(action)));
+        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+
+        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut rng = SmallRng::seed_from_u64(0);
+        let chosen = choose_action_with_session(&state, P0, &enabled, &mut rng, &session);
+        assert!(chosen
+            .as_ref()
+            .is_some_and(|action| expected.contains(action)));
+        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn improvise_mana_only_strands_mandatory_blue() {
+        let coloured = red_first_improvise_payment_state(
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            },
+            2,
+        );
+        let generic = red_first_improvise_payment_state(ManaCost::generic(2), 1);
+        let red = mana_product(&[ManaType::Red]);
+        let blue = mana_product(&[ManaType::Blue]);
+
+        let coloured_actions = engine::ai_support::legal_actions(&coloured);
+        assert!(
+            coloured_actions.contains(&red),
+            "the live Metallic-Rebuke-style carrier offers a red allocation"
+        );
+        assert!(
+            coloured_actions.contains(&blue),
+            "the live Metallic-Rebuke-style carrier offers a blue allocation"
+        );
+        assert!(matches!(
+            engine::ai_support::classify_payment_continuation(&coloured),
+            engine::ai_support::PaymentContinuationState::Affiliated(_)
+        ));
+        assert!(
+            engine::ai_support::witness_payment_continuation(&coloured, &red).is_none(),
+            "red cannot pay the mandatory blue shard after Improvise covers only generic mana"
+        );
+        assert!(
+            engine::ai_support::witness_payment_continuation(&coloured, &blue).is_some(),
+            "blue finalizes the coloured Improvise cast"
+        );
+        let generic_actions = engine::ai_support::legal_actions(&generic);
+        assert!(
+            generic_actions.contains(&red),
+            "the paired generic control offers a red allocation"
+        );
+        assert!(
+            generic_actions.contains(&blue),
+            "the paired generic control offers a blue allocation"
+        );
+        assert!(
+            engine::ai_support::witness_payment_continuation(&generic, &red).is_some(),
+            "red remains a valid final allocation when no mandatory blue shard exists"
         );
     }
 
@@ -6614,14 +6923,19 @@ mod tests {
 
     // ---- U2: PV threading + rung witnesses (drive `run_iterative_deepening`) ----
 
-    /// Rebuild the root beam exactly as `score_candidates_core` does (validate ->
-    /// gate -> tactical rank -> #4878 stable sort -> truncate) so tests can drive
-    /// `run_iterative_deepening` directly and inspect the witness state it leaves
-    /// on `services`. `&PlannerServices` — reads only (validate/tactical_score are
-    /// `&self`); the caller owns construction so it controls the deadline/TT.
+    /// Reach the production root beam seam so iterative-deepening tests observe
+    /// the same validation, payment-successor retention, rank, and width path
+    /// that public scoring uses.
     fn build_root_beam(state: &GameState, services: &PlannerServices<'_>) -> Vec<RankedCandidate> {
         let ctx = build_decision_context(state);
-        let candidates = services.validate_candidates(state, ctx.candidates.clone());
+        let prepared = prepare_payment_candidates(state, ctx.candidates.clone());
+        let candidates = services.validate_candidates(
+            state,
+            prepared
+                .iter()
+                .map(|candidate| candidate.candidate.clone())
+                .collect(),
+        );
         let gated = gate_candidates(
             state,
             &ctx,
@@ -6630,30 +6944,25 @@ mod tests {
             services.config,
             &services.context,
         );
-        let mut ranked: Vec<RankedCandidate> = gated
-            .iter()
-            .map(|g| {
-                let tactical = services.tactical_score(
+        let mut gated: Vec<_> = gated
+            .into_iter()
+            .filter(|candidate| {
+                priority_action_is_allowed_by_loop_guards(
                     state,
-                    &ctx,
-                    &g.candidate,
                     services.ai_player,
-                    SearchDepth::Root,
-                );
-                RankedCandidate {
-                    candidate: g.candidate.clone(),
-                    score: tactical + g.penalty,
-                }
+                    &candidate.candidate.action,
+                )
             })
             .collect();
-        ranked.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
-        });
-        ranked.truncate(services.config.search.max_branching as usize);
-        ranked
+        gated.sort_by(|left, right| left.candidate.action.cmp_stable(&right.candidate.action));
+        rank_root_payment_candidates(
+            state,
+            &ctx,
+            &prepared,
+            &gated,
+            services,
+            services.config.search.max_branching as usize,
+        )
     }
 
     fn score_of(scored: &[(GameAction, f64)], action: &GameAction) -> f64 {
@@ -6662,6 +6971,65 @@ mod tests {
             .find(|(a, _)| a == action)
             .map(|(_, s)| *s)
             .unwrap_or_else(|| panic!("action {action:?} absent from scored output"))
+    }
+
+    #[test]
+    fn retained_root_payment_successor_bypasses_inapplicable_fallback() {
+        let state = make_state();
+        let retained = apply_candidate(
+            &state,
+            &CandidateAction {
+                action: GameAction::PassPriority,
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
+            },
+        )
+        .expect("reach-guard: a concrete root successor exists");
+        let hostile = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id: ObjectId(99999),
+                ability_index: 0,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Mana),
+        };
+        assert!(
+            apply_candidate(&state, &hostile).is_none(),
+            "reach-guard: the fallback action is inapplicable at the root"
+        );
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(43);
+        config.search.planner_mode = PlannerMode::BeamOnly;
+        let policies = PolicyRegistry::shared();
+        let mut hostile_services = PlannerServices::new_default(PlayerId(0), &config, policies);
+        let hostile_result = run_iterative_deepening(
+            &state,
+            vec![RankedCandidate::with_payment_successor(
+                hostile,
+                0.0,
+                retained.clone(),
+            )],
+            0.1,
+            &config,
+            &mut hostile_services,
+        );
+        let mut control_services = PlannerServices::new_default(PlayerId(0), &config, policies);
+        let control_result = run_iterative_deepening(
+            &state,
+            vec![RankedCandidate::with_payment_successor(
+                CandidateAction {
+                    action: GameAction::PassPriority,
+                    metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
+                },
+                0.0,
+                retained,
+            )],
+            0.1,
+            &config,
+            &mut control_services,
+        );
+        assert_eq!(hostile_result[0].1, control_result[0].1);
+        assert!(
+            hostile_result[0].1 > -900.0,
+            "the retained successor prevents the failed-apply penalty"
+        );
     }
 
     /// Fixture with several cheap castable creatures + an opponent threat, so the
@@ -6880,14 +7248,8 @@ mod tests {
         // (no tactical term interfering with the demonstration).
         let (pass, cast) = pass_and_first_cast(&state);
         let ranked = vec![
-            RankedCandidate {
-                candidate: pass.clone(),
-                score: 0.0,
-            },
-            RankedCandidate {
-                candidate: cast.clone(),
-                score: 0.0,
-            },
+            RankedCandidate::new(pass.clone(), 0.0),
+            RankedCandidate::new(cast.clone(), 0.0),
         ];
         let a = ranked[0].candidate.action.clone();
 
@@ -6990,14 +7352,8 @@ mod tests {
         // from ranked[0] = pass — making a rung-0 rotate observable.
         let (pass, cast) = pass_and_first_cast(&state);
         let ranked = vec![
-            RankedCandidate {
-                candidate: pass.clone(),
-                score: 0.0,
-            },
-            RankedCandidate {
-                candidate: cast.clone(),
-                score: 0.0,
-            },
+            RankedCandidate::new(pass.clone(), 0.0),
+            RankedCandidate::new(cast.clone(), 0.0),
         ];
         let a = ranked[0].candidate.action.clone();
 

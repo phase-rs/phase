@@ -11,7 +11,10 @@
 
 use std::collections::HashMap;
 
-use engine::ai_support::legal_actions;
+use engine::ai_support::{
+    classify_payment_continuation, legal_actions, witness_payment_continuation,
+    PaymentContinuationState,
+};
 use engine::game::combat::AttackTarget;
 use engine::game::engine::{apply_for_simulation, EngineError};
 use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
@@ -19,7 +22,6 @@ use engine::types::{
     CoreType, GameAction, GameState, ObjectId, PayCostKind, Phase, PlayerId, WaitingFor,
 };
 
-use crate::mana_colors::demand_aware_single_color;
 use web_time::{Duration, Instant};
 
 /// How far into the opponent's upcoming turn to project.
@@ -157,12 +159,17 @@ pub fn project_to(
             });
         }
 
-        let (actor, action, is_policy_choice) = resolve_choice(&state, ai_player, target_opponent)?;
+        let (actor, action, is_policy_choice, witnessed_successor) =
+            resolve_choice(&state, ai_player, target_opponent)?;
         if is_policy_choice {
             choice_count += 1;
         }
 
-        apply_for_simulation(&mut state, actor, action).map_err(BailReason::EngineRejected)?;
+        if let Some(successor) = witnessed_successor {
+            state = successor;
+        } else {
+            apply_for_simulation(&mut state, actor, action).map_err(BailReason::EngineRejected)?;
+        }
 
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             return Err(BailReason::GameOverDuringProjection);
@@ -283,7 +290,7 @@ fn resolve_choice(
     state: &GameState,
     ai_player: PlayerId,
     target_opponent: PlayerId,
-) -> Result<(PlayerId, GameAction, bool), BailReason> {
+) -> Result<(PlayerId, GameAction, bool, Option<GameState>), BailReason> {
     // Impossible-mid-game gates.
     match &state.waiting_for {
         WaitingFor::MulliganDecision { .. }
@@ -310,6 +317,22 @@ fn resolve_choice(
         return Err(BailReason::NoLegalAction {
             waiting_for: format!("{:?}", state.waiting_for),
         });
+    }
+
+    match classify_payment_continuation(state) {
+        PaymentContinuationState::NotAffiliated => {}
+        PaymentContinuationState::UnsupportedAffiliated(_) => {
+            return Err(BailReason::NoLegalManaPayment);
+        }
+        PaymentContinuationState::Affiliated(_) => {
+            let mut actions = actions;
+            actions.sort_by(|left, right| left.cmp_stable(right));
+            let accepted = actions
+                .into_iter()
+                .find_map(|action| witness_payment_continuation(state, &action))
+                .ok_or(BailReason::NoLegalManaPayment)?;
+            return Ok((acting, accepted.action, true, Some(accepted.state)));
+        }
     }
 
     // Policy dispatch on WaitingFor kind + actor identity.
@@ -354,9 +377,7 @@ fn resolve_choice(
                 | PayCostKind::TapCreatures { .. },
             ..
         }
-        | WaitingFor::ManaPayment { .. }
         | WaitingFor::DefilerPayment { .. }
-        | WaitingFor::PhyrexianPayment { .. }
         | WaitingFor::CombatTaxPayment { .. }
         | WaitingFor::HarmonizeTapChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
@@ -368,14 +389,12 @@ fn resolve_choice(
                 .ok_or(BailReason::NoLegalManaPayment)?
         }
 
-        // CR 106.3 + CR 608.2d: Mana-color choice during payment. The
-        // SingleColor prompt must produce the color the pending cost demands —
-        // projecting an arbitrary color (the old `actions.first()`) can strand a
-        // colored pip and dead-end the projected ManaPayment, mirroring the live
-        // AI bug fixed in `search.rs`. Combination / AnyCombination keep
-        // first-legal, matching the `fallback_action` shapes.
+        // Non-payment color choices retain their established first-legal policy.
+        // Affiliated mana-ability choices return through the witness above.
         WaitingFor::ChooseManaColor { choice, .. } => match choice {
-            ManaChoicePrompt::SingleColor { options } => demand_aware_single_color(options, state)
+            ManaChoicePrompt::SingleColor { options } => options
+                .first()
+                .copied()
                 .map(|color| GameAction::ChooseManaColor {
                     choice: ManaChoice::SingleColor(color),
                     count: 1,
@@ -491,7 +510,7 @@ fn resolve_choice(
     };
 
     let is_policy_choice = !matches!(action, GameAction::PassPriority);
-    Ok((acting, action, is_policy_choice))
+    Ok((acting, action, is_policy_choice, None))
 }
 
 fn pick_pass_or_first(actions: &[GameAction]) -> GameAction {
@@ -630,7 +649,7 @@ mod tests {
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
         };
 
-        let (_actor, action, is_policy_choice) =
+        let (_actor, action, is_policy_choice, _successor) =
             resolve_choice(&state, PlayerId(0), PlayerId(1)).expect("the offer has legal actions");
         assert_eq!(action, GameAction::DeclineShortcut);
         assert!(
@@ -687,7 +706,7 @@ mod tests {
     #[test]
     fn projection_declines_precast_shortcut_offer() {
         let state = precast_offer_state();
-        let (_, action, is_policy_choice) =
+        let (_, action, is_policy_choice, _successor) =
             resolve_choice(&state, PlayerId(0), PlayerId(1)).expect("offer has a legal decline");
 
         assert!(matches!(
