@@ -2632,12 +2632,19 @@ fn resolve_ref(
         //
         // CR 107.3e + CR 107.3m + CR 603.7c: When the trigger source itself has
         // no `chosen_x` (SpellCast triggers and similar event triggers do not
-        // have their own cost), fall back to the triggering spell's
+        // have their own cost), first fall back to the triggering spell's
         // `cost_x_paid`. This covers "whenever you cast your first spell with
         // {X} in its mana cost each turn, put X +1/+1 counters on ~" — the X
         // there is the triggering spell's X, not this trigger's X (which
         // doesn't exist). CR 107.3e explicitly permits an ability to refer to
         // X of another object's cost.
+        //
+        // CR 107.3m + CR 603.3b: Trigger target selection happens before the
+        // trigger enters resolution, so `current_trigger_event` is not yet
+        // installed. A self-ETB trigger's bare X in a target-filter threshold
+        // must therefore fall back to its exact source context's cast X; the
+        // context preserves that value across zone changes without rebinding a
+        // later incarnation of the same storage id.
         //
         // Other named variables (set by `NamedChoice` handlers for things like
         // "chosen number") keep their single-responsibility path through
@@ -2651,6 +2658,12 @@ fn resolve_ref(
                     .and_then(crate::game::targeting::extract_source_from_event)
                     .and_then(|id| state.objects.get(&id))
                     .and_then(|obj| obj.cost_x_paid)
+                    .map(u32_to_i32_saturating)
+            })
+            .or_else(|| {
+                trigger_source
+                    .as_ref()
+                    .and_then(|source| source.source_read(state).cost_x_paid())
                     .map(u32_to_i32_saturating)
             })
             .unwrap_or(0),

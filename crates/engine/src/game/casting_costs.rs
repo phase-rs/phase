@@ -4314,6 +4314,24 @@ pub(crate) fn finish_target_selected_activated_ability_at_payment_boundary(
     finish_activated_ability_at_payment_boundary(state, player, pending, events)
 }
 
+/// CR 601.2c + CR 601.2g-h + CR 602.2b: Targeted activations whose payment
+/// boundary must first process a mana leg or bind announced X defer their
+/// interactive residual until that common boundary has run.
+///
+/// This is deliberately limited to the target-declaration transition. The
+/// shared interactive-cost dispatcher also resumes ordinary activation and
+/// craft/material flows, which must retain their established routing.
+pub(crate) fn target_first_activation_defers_interactive_costs_to_payment_boundary(
+    pending: &PendingCast,
+) -> bool {
+    let Some(cost) = pending.activation_cost.as_ref() else {
+        return false;
+    };
+
+    extract_mana_leg(cost).is_some_and(|(mana_cost, _)| !mana_cost.is_without_paying_mana())
+        || (pending.ability.chosen_x.is_some() && cost_has_targeted_symbolic_counter_removal(cost))
+}
+
 /// CR 118.3 + CR 601.2h + CR 602.2b: Surface exactly the next unpaid
 /// interactive activation-cost component from the serialized residual. Every
 /// completed handler removes one matching leg, so repeated components and a
@@ -4328,22 +4346,6 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         return Ok(None);
     };
     let source_id = pending.object_id;
-
-    // CR 601.2g-h + CR 602.2b: Once an activation's targets are declared,
-    // a mana leg is still paid before every non-mana component, regardless of
-    // the serialized `Composite` order. Defer the interactive dispatcher to
-    // the payment boundary, which hoists that mana leg and preserves this
-    // root's chosen targets for the remaining cost.
-    if extract_mana_leg(cost).is_some_and(|(mana_cost, _)| !mana_cost.is_without_paying_mana()) {
-        return Ok(None);
-    }
-    // CR 107.1b + CR 601.2f-h: a targeted remove-X-counters cost cannot be
-    // surfaced until the common payment step has substituted the announced X
-    // for its symbolic counter count. The payment step then prompts for the
-    // counter source after all effect targets are fixed.
-    if pending.ability.chosen_x.is_some() && cost_has_targeted_symbolic_counter_removal(cost) {
-        return Ok(None);
-    }
 
     // CR 601.2h + CR 701.9a: A resolved zero-card FromHand discard leg (Lion's Eye Diamond /
     // Bomat Courier's "Discard your hand" on an empty hand) is paid by doing nothing — the

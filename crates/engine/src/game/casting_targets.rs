@@ -22,6 +22,7 @@ use super::ability_utils::{
 use super::casting_costs::{
     cost_has_x, drain_deferred_triggers_after_stack_object_announcement, enter_payment_step,
     finish_pending_cast_cost_or_pay,
+    target_first_activation_defers_interactive_costs_to_payment_boundary,
 };
 use super::engine::EngineError;
 use super::restrictions;
@@ -392,15 +393,17 @@ pub(crate) fn handle_select_targets(
         let mut pending = pending;
         pending.ability = ability;
         pending.activation_target_selection = ActivationTargetSelection::Settled;
-        if let Some(waiting_for) =
-            super::casting_costs::surface_next_unpaid_interactive_activation_cost(
-                state,
-                player,
-                &mut pending,
-                events,
-            )?
-        {
-            return Ok(waiting_for);
+        if !target_first_activation_defers_interactive_costs_to_payment_boundary(&pending) {
+            if let Some(waiting_for) =
+                super::casting_costs::surface_next_unpaid_interactive_activation_cost(
+                    state,
+                    player,
+                    &mut pending,
+                    events,
+                )?
+            {
+                return Ok(waiting_for);
+            }
         }
 
         return super::casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
@@ -502,15 +505,17 @@ pub(crate) fn handle_choose_target(
                 let mut pending = pending;
                 pending.ability = ability;
                 pending.activation_target_selection = ActivationTargetSelection::Settled;
-                if let Some(waiting_for) =
-                    super::casting_costs::surface_next_unpaid_interactive_activation_cost(
-                        state,
-                        controller,
-                        &mut pending,
-                        events,
-                    )?
-                {
-                    return Ok(waiting_for);
+                if !target_first_activation_defers_interactive_costs_to_payment_boundary(&pending) {
+                    if let Some(waiting_for) =
+                        super::casting_costs::surface_next_unpaid_interactive_activation_cost(
+                            state,
+                            controller,
+                            &mut pending,
+                            events,
+                        )?
+                    {
+                        return Ok(waiting_for);
+                    }
                 }
 
                 let waiting_for =
