@@ -290,7 +290,9 @@ fn targeted_activation_surfaces_blight_cost_after_target_selection() {
             count: 1,
         }))
         .id();
-    let blighted = scenario.add_creature(P0, "Blight Payment", 1, 1).id();
+    // Keep the payment creature alive after the -1/-1 counter so this test
+    // observes the paid cost rather than its later state-based-action cleanup.
+    let blighted = scenario.add_creature(P0, "Blight Payment", 2, 2).id();
     let target = scenario.add_creature(P1, "Blight Cost Target", 1, 1).id();
     let mut runner = scenario.build();
 

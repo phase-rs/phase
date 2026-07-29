@@ -4242,6 +4242,21 @@ pub(crate) fn finish_activated_ability_at_payment_boundary(
         );
     }
 
+    // CR 107.1b + CR 601.2f-h: target declaration may have deferred a
+    // targeted remove-X-counters cost. Route that exact residual back through
+    // `enter_payment_step`, its single authority for concretizing X and
+    // selecting the counter source, before any generic cost payment can see
+    // the symbolic sentinel.
+    if pending.ability.chosen_x.is_some()
+        && pending
+            .activation_cost
+            .as_ref()
+            .is_some_and(cost_has_targeted_symbolic_counter_removal)
+    {
+        state.pending_cast = Some(Box::new(pending));
+        return enter_payment_step(state, player, None, events);
+    }
+
     let should_finalize_mana_leg = !matches!(
         pending.activation_residual,
         ActivationResidual::ManaLeg | ActivationResidual::XMana
@@ -4313,6 +4328,22 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         return Ok(None);
     };
     let source_id = pending.object_id;
+
+    // CR 601.2g-h + CR 602.2b: Once an activation's targets are declared,
+    // a mana leg is still paid before every non-mana component, regardless of
+    // the serialized `Composite` order. Defer the interactive dispatcher to
+    // the payment boundary, which hoists that mana leg and preserves this
+    // root's chosen targets for the remaining cost.
+    if extract_mana_leg(cost).is_some_and(|(mana_cost, _)| !mana_cost.is_without_paying_mana()) {
+        return Ok(None);
+    }
+    // CR 107.1b + CR 601.2f-h: a targeted remove-X-counters cost cannot be
+    // surfaced until the common payment step has substituted the announced X
+    // for its symbolic counter count. The payment step then prompts for the
+    // counter source after all effect targets are fixed.
+    if pending.ability.chosen_x.is_some() && cost_has_targeted_symbolic_counter_removal(cost) {
+        return Ok(None);
+    }
 
     // CR 601.2h + CR 701.9a: A resolved zero-card FromHand discard leg (Lion's Eye Diamond /
     // Bomat Courier's "Discard your hand" on an empty hand) is paid by doing nothing — the
