@@ -456,7 +456,6 @@ describe("ManaSourceSelectionUI", () => {
         data: {
           player: 0,
           options: [selection],
-          convoke_mode: null,
         },
       },
     });
