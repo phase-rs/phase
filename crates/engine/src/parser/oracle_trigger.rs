@@ -11711,7 +11711,6 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     // Each branch consumes the trailing space so the caller can chain into
     // `tag("deals ")`, mirroring the article path's own trailing-space consume.
     if let Ok((rest, filter)) = alt((
-        value(TargetFilter::SelfRef, tag::<_, _, OracleError<'_>>("~ ")),
         value(
             TargetFilter::AttachedTo,
             tag::<_, _, OracleError<'_>>("enchanted creature "),

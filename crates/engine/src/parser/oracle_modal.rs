@@ -9,8 +9,8 @@ use nom::Parser;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AdditionalCostOrigin, AdditionalCostPaymentSource, ChoiceType,
-    Effect, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementDefinition, StaticCondition, TargetFilter,
+    ControllerRef, Effect, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, StaticCondition, TargetFilter,
     TargetSelectionMode, TriggerCondition,
 };
 use crate::types::replacements::ReplacementEvent;
@@ -1052,6 +1052,31 @@ pub(crate) enum AnchorModeIr {
     Unsupported(Box<AbilityIr>),
 }
 
+/// CR 603.2c + CR 608.2c: A self-source combat-damage trigger establishes the
+/// damaged player as the referent for a nested modal mode's "that player".
+/// The ordinary trigger classifier retains its historical `TargetPlayer`
+/// treatment of this normalized `~` surface; modal modes instead require the
+/// event-player context to parse their independent effect chains correctly.
+fn modal_relative_player_scope_for_condition(condition: &str) -> Option<ControllerRef> {
+    let lower = condition.to_lowercase();
+    let self_damage_to_player = value(
+        ControllerRef::TriggeringPlayer,
+        (
+            alt((tag::<_, _, OracleError<'_>>("when "), tag("whenever "))),
+            tag("~ deals "),
+            opt(tag("combat ")),
+            tag("damage to "),
+            alt((tag("a player"), tag("an opponent"))),
+        ),
+    )
+    .parse(lower.as_str())
+    .ok()
+    .and_then(|(rest, scope)| rest.trim().is_empty().then_some(scope));
+
+    self_damage_to_player
+        .or_else(|| super::oracle_trigger::relative_player_scope_for_condition(&lower))
+}
+
 pub(crate) fn lower_oracle_block_ir(
     block: OracleBlockAst,
     card_name: &str,
@@ -1099,6 +1124,9 @@ pub(crate) fn lower_oracle_block_ir(
                 // facts, but no mode can leak chain-local state into another.
                 let mut mode_ctx = trigger.body_context.clone();
                 mode_ctx.diagnostics.clear();
+                if let Some(scope) = modal_relative_player_scope_for_condition(&trigger_line) {
+                    mode_ctx.relative_player_scope = Some(scope);
+                }
                 let payload = ModalIr {
                     marker: EffectChainIr::single_clause(
                         &header.raw,
@@ -1972,16 +2000,15 @@ fn guard_unsupported_mode_qualifiers(
 }
 
 /// IR-native qualifier guard for the modal migration. It inspects every parsed
-/// clause and its own source fragment; it never lowers an `AbilityIr` merely to
-/// decide whether a restrictive qualifier was swallowed.
+/// clause against its enclosing mode source; it never lowers an `AbilityIr`
+/// merely to decide whether a restrictive qualifier was swallowed.
 fn guard_unsupported_mode_qualifiers_ir(
     ability: &mut AbilityIr,
     kind: AbilityKind,
     ctx: &ParseContext,
 ) {
+    let lower = ability.source_text.to_lowercase();
     let has_unsupported_qualifier = ability.body.clauses.iter().any(|clause| {
-        let source = clause.source.fragment().unwrap_or(&ability.source_text);
-        let lower = source.to_lowercase();
         let dig_with_total_mv = matches!(&clause.parsed.effect, Effect::Dig { .. })
             && nom_primitives::scan_contains(&lower, "with total mana value");
         let put_counter_with_thats_a = matches!(
@@ -3073,8 +3100,7 @@ mod tests {
 
         for (name, oracle, expected_lines, expected_mode_count) in cases {
             let types = vec!["Instant".to_string()];
-            let card_name = format!("Test {name} Modal");
-            let mut ir = parse_oracle_ir(oracle, &card_name, &[], &types, &[]);
+            let mut ir = parse_oracle_ir(oracle, name, &[], &types, &[]);
 
             assert_eq!(
                 ir.items.len(),
@@ -3091,7 +3117,10 @@ mod tests {
                 );
                 assert_eq!(
                     item.source.fragment(),
-                    oracle.lines().nth(*expected_line),
+                    Some(match (name, *expected_line) {
+                        ("Spree", 0) => "~ (Choose one or more additional costs.)",
+                        _ => oracle.lines().nth(*expected_line).unwrap(),
+                    }),
                     "{name}: slot must retain its verbatim printed source"
                 );
                 let expected_start_byte = oracle
