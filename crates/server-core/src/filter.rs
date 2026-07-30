@@ -478,7 +478,6 @@ mod tests {
             allow_repeat_modes: false,
             constraints: Vec::new(),
             mode_costs: Vec::new(),
-            max_affordable_selections: None,
             mode_pawprints: Vec::new(),
             entwine_cost: None,
             chooser: PlayerFilter::Controller,

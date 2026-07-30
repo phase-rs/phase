@@ -1948,12 +1948,10 @@
     "eyebrowAbility": "Tryby zdolności",
     "eyebrowSpell": "Tryby czaru",
     "subtitle": "Wybierz tryb lub tryby do zastosowania.",
-    "subtitleModeCost": "Wybrane tryby: {{selected}} / {{max}} do opłacenia.",
     "chooseExact": "Wybierz {{count}}",
     "chooseRange": "Wybierz od {{min}} do {{max}}",
     "confirm": "Potwierdź ({{selected}}/{{count}})",
     "confirmBudget": "Potwierdź ({{spent}}/{{budget}} {P})",
-    "confirmModeCost": "Potwierdź ({{selected}}/{{max}} trybów)",
     "clear": "Wyczyść",
     "alreadyChosen": "(już wybrane)"
   },

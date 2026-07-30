@@ -1555,12 +1555,6 @@ export interface ModalChoice {
   /** Per-mode additional mana costs (Spree). Empty/absent for standard modal spells. */
   mode_costs?: ManaCost[];
   /**
-   * CR 118.1 + CR 702.172a: When `mode_costs` is present, the engine-probed
-   * maximum number of mode selections affordable with current mana. The UI must
-   * use this — not mana-pool size or pip counts — to gate selection.
-   */
-  max_affordable_selections?: number;
-  /**
    * CR 700.2i: Per-mode pawprint weights for points-budget modals ("up to N {P}
    * worth of modes"). Empty/absent for non-pawprint modals. When present,
    * `max_choices` is the point budget (Σ of chosen weights ≤ budget), not a count.

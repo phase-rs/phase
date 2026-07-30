@@ -5788,10 +5788,9 @@ fn is_synchronous_mana_pay_cost(effect: &Effect) -> bool {
 }
 
 /// CR 603.12a: Fire the repeated-optional-payment process and stash the
-/// continuation. Modal reflexives (Hawkeye, Tranquil Frillback) batch payment
-/// and mode choice into one `AbilityModeChoice` (CR 702.172a Spree-shaped
-/// `mode_costs`). Non-modal reflexives keep the legacy per-iteration
-/// `OptionalEffectChoice` driver.
+/// continuation. Each payment is offered through `OptionalEffectChoice`; once
+/// payment has completed, the reflexive trigger follows the normal triggered
+/// modal placement and targeting flow.
 fn drive_repeated_optional_payment(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -5811,144 +5810,11 @@ fn drive_repeated_optional_payment(
         return Ok(());
     }
 
-    if repeated_optional_reflexive_is_modal(reflexive) {
-        return drive_batched_repeated_optional_modal_payment(state, ability, reflexive, n, events);
-    }
-
     drive_sequential_repeated_optional_payment(state, ability, reflexive, n)
 }
 
-fn repeated_optional_reflexive_is_modal(reflexive: &ResolvedAbility) -> bool {
-    reflexive.modal.is_some() && !reflexive.mode_abilities.is_empty()
-}
-
-/// CR 702.172a + CR 603.12a: Batch "pay up to N × {cost}" with "choose up to
-/// that many modes" into a single `AbilityModeChoice`. Affordability is probed
-/// once at prompt time; `mode_costs` carries the per-mode payment unit for
-/// display and `max_affordable_selections` stamps the engine-authoritative cap.
-fn drive_batched_repeated_optional_modal_payment(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    reflexive: &ResolvedAbility,
-    n: i32,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    let Effect::PayCost {
-        cost: AbilityCost::Mana { cost: payment_mana },
-        ..
-    } = &ability.effect
-    else {
-        return Err(EffectError::InvalidParam(
-            "batched repeated optional payment requires a synchronous mana PayCost".to_string(),
-        ));
-    };
-
-    let player = ability.controller;
-    let source_id = ability.source_id;
-    let n_u32 = u32::try_from(n).unwrap_or(0);
-    let max_affordable =
-        max_affordable_mana_payments(state, player, source_id, payment_mana, n_u32);
-    let modal_template = reflexive
-        .modal
-        .as_ref()
-        .expect("modal reflexive checked by caller");
-    let mode_count = modal_template.mode_count;
-    let max_choices = (n as usize).min(max_affordable as usize).min(mode_count);
-
-    let mut payment_unit = ability.clone();
-    payment_unit.repeat_for = None;
-    payment_unit.sub_ability = None;
-    payment_unit.optional = false;
-    payment_unit.condition = None;
-
-    let mut modal = modal_template.clone();
-    modal.mode_costs = vec![payment_mana.clone(); mode_count];
-    modal.min_choices = 0;
-    modal.max_choices = max_choices;
-    modal.max_affordable_selections = Some(max_affordable.min(max_choices as u32));
-    modal.dynamic_max_choices = None;
-
-    let mut reflexive_prepared = reflexive.clone();
-    apply_parent_chain_context(&mut reflexive_prepared, ability, None, state);
-    reflexive_prepared.modal = Some(modal.clone());
-
-    let trigger_description = reflexive_prepared
-        .description
-        .clone()
-        .or_else(|| ability.description.clone());
-    let pending = crate::game::triggers::PendingTrigger {
-        source_id,
-        controller: player,
-        condition: None,
-        ability: Box::new(reflexive_prepared),
-        timestamp: state.turn_number,
-        target_constraints: reflexive.target_constraints.clone(),
-        distribute: None,
-        trigger_event: state.current_trigger_event.clone(),
-        modal: Some(modal),
-        mode_abilities: reflexive.mode_abilities.clone(),
-        description: trigger_description,
-        may_trigger_origin: None,
-        subject_match_count: freeze_reflexive_event_count(state, player, source_id),
-        die_result: state.die_result_this_resolution,
-    };
-    let trigger_events = crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
-    let pending_for_state = pending.clone();
-    let entry_id = crate::game::triggers::push_pending_trigger_to_stack_with_event_batch(
-        state,
-        pending,
-        trigger_events,
-        events,
-    );
-    state.pending_trigger = Some(Box::new(pending_for_state));
-    state.pending_trigger_entry = Some(entry_id);
-
-    state.push_repeated_optional_payment_frame(RepeatedOptionalPaymentFrame {
-        pending: Some(Box::new(PendingRepeatedOptionalPayment {
-            payment_unit: Box::new(payment_unit),
-            reflexive: Box::new(reflexive.clone()),
-            remaining: 0,
-            batched: true,
-        })),
-        optional_cost_payments_this_resolution: 0,
-    });
-
-    match crate::game::engine::begin_pending_trigger_target_selection(state)
-        .map_err(|e| EffectError::InvalidParam(e.to_string()))?
-    {
-        Some(waiting_for) => {
-            state.waiting_for = waiting_for;
-            Ok(())
-        }
-        None => {
-            state
-                .take_active_repeated_optional_payment_frame()
-                .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
-            Ok(())
-        }
-    }
-}
-
-/// CR 118.1: How many times `unit` can be paid from the current board/pool,
-/// capped at `max_n`. Probed synchronously via auto-tap planning.
-fn max_affordable_mana_payments(
-    state: &GameState,
-    player: PlayerId,
-    source_id: ObjectId,
-    unit: &ManaCost,
-    max_n: u32,
-) -> u32 {
-    (0..=max_n)
-        .rev()
-        .find(|&times| {
-            let total = pay::scale_mana_cost(unit, times);
-            crate::game::casting::can_pay_cost_after_auto_tap(state, player, source_id, &total)
-        })
-        .unwrap_or(0)
-}
-
-/// CR 603.12a: Legacy per-iteration `OptionalEffectChoice` driver for
-/// repeated-optional processes whose reflexive is not a mode-choice modal.
+/// CR 603.12a: Per-iteration `OptionalEffectChoice` driver for repeated
+/// optional-payment processes.
 fn drive_sequential_repeated_optional_payment(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -5973,7 +5839,6 @@ fn drive_sequential_repeated_optional_payment(
             payment_unit: Box::new(payment_unit),
             reflexive: Box::new(reflexive.clone()),
             remaining: (n - 1) as u32,
-            batched: false,
         })),
         optional_cost_payments_this_resolution: 0,
     });
@@ -5984,85 +5849,6 @@ fn drive_sequential_repeated_optional_payment(
         may_trigger_key: None,
     };
     Ok(())
-}
-
-/// CR 603.12a + CR 702.172a: Settle a batched repeated-optional payment when the
-/// player submits `SelectModes`. Empty indices decline without paying; non-empty
-/// indices pay `len × unit` via the single PayCost authority, then mode
-/// resolution proceeds with K = len.
-///
-/// `pending` is only cleared after a successful payment (or on empty decline).
-/// A failed payment leaves the frame intact so the prompt remains retryable.
-pub(super) fn settle_batched_repeated_optional_payment_on_mode_choice(
-    state: &mut GameState,
-    indices: &[usize],
-    events: &mut Vec<GameEvent>,
-) -> Result<bool, EffectError> {
-    let is_batched = state
-        .active_repeated_optional_payment_frame()
-        .and_then(|frame| frame.pending.as_ref())
-        .is_some_and(|pending| pending.batched);
-    if !is_batched {
-        return Ok(false);
-    }
-
-    if indices.is_empty() {
-        let _ = state
-            .active_repeated_optional_payment_frame_mut()
-            .and_then(|frame| frame.pending.take());
-        state
-            .take_active_repeated_optional_payment_frame()
-            .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
-        crate::game::engine::drop_mid_construction_pending_trigger(state);
-        return Ok(true);
-    }
-
-    let payment_count = indices.len();
-    let mut payment = {
-        let frame = state
-            .active_repeated_optional_payment_frame()
-            .ok_or_else(|| {
-                EffectError::InvalidParam(
-                    "batched repeated optional payment frame missing during settle".to_string(),
-                )
-            })?;
-        let pending = frame.pending.as_ref().ok_or_else(|| {
-            EffectError::InvalidParam(
-                "batched repeated optional payment pending missing during settle".to_string(),
-            )
-        })?;
-        (*pending.payment_unit).clone()
-    };
-    if let Effect::PayCost { scale, .. } = &mut payment.effect {
-        *scale = Some(QuantityExpr::Fixed {
-            value: i32::try_from(payment_count).unwrap_or(i32::MAX),
-        });
-    } else {
-        return Err(EffectError::InvalidParam(
-            "batched repeated optional payment unit must be PayCost".to_string(),
-        ));
-    }
-
-    state.cost_payment_failed_flag = false;
-    resolve_ability_chain(state, &payment, events, 1)?;
-    if state.cost_payment_failed_flag {
-        // Leave `pending` in place — AbilityModeChoice stays live for retry/decline.
-        return Err(EffectError::InvalidParam(
-            "Cannot pay batched repeated optional cost".to_string(),
-        ));
-    }
-
-    let frame = state
-        .active_repeated_optional_payment_frame_mut()
-        .ok_or_else(|| {
-            EffectError::InvalidParam(
-                "repeated optional-payment frame must remain active during batched payment"
-                    .to_string(),
-            )
-        })?;
-    frame.optional_cost_payments_this_resolution = u32::try_from(payment_count).unwrap_or(u32::MAX);
-    frame.pending = None;
-    Ok(true)
 }
 
 /// CR 603.12a + CR 608.2c: Resume a repeated-optional-payment process for one
@@ -6086,7 +5872,6 @@ pub(super) fn resolve_repeated_optional_payment_choice(
         payment_unit,
         reflexive,
         remaining,
-        batched: _,
     } = *pending;
 
     if accept {
@@ -6130,7 +5915,6 @@ pub(super) fn resolve_repeated_optional_payment_choice(
                             payment_unit,
                             reflexive,
                             remaining: remaining - 1,
-                            batched: false,
                         })),
                         optional_cost_payments_this_resolution,
                     })

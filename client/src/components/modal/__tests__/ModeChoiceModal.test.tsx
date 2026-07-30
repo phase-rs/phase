@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ModalChoice, WaitingFor } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
-import { buildGameState, buildPendingCast, buildPlayers } from "../../../test/factories/gameStateFactory.ts";
+import { buildGameState, buildPendingCast } from "../../../test/factories/gameStateFactory.ts";
 import { ModeChoiceModal } from "../ModeChoiceModal.tsx";
 
 const dispatchMock = vi.fn();
@@ -98,111 +98,4 @@ describe("ModeChoiceModal", () => {
     expect(dispatchMock).toHaveBeenCalledWith({ type: "CancelCast" });
   });
 
-  it("caps per-mode payment selection using engine max_affordable_selections, not pool size", () => {
-    const modal: ModalChoice = {
-      min_choices: 0,
-      max_choices: 3,
-      max_affordable_selections: 1,
-      mode_count: 3,
-      mode_descriptions: ["Mode A", "Mode B", "Mode C"],
-      allow_repeat_modes: false,
-      mode_costs: [
-        { type: "Cost", generic: 1, shards: ["R"] },
-        { type: "Cost", generic: 1, shards: ["R"] },
-        { type: "Cost", generic: 1, shards: ["R"] },
-      ],
-    };
-    const gameState = buildGameState({
-      objects: {},
-      priority_player: 0,
-      players: buildPlayers([
-        {
-          id: 0,
-          mana_pool: {
-            mana: [
-              { color: "Red", source_id: 1, pip_id: 1, snow: false, restrictions: [] },
-              { color: "Red", source_id: 2, pip_id: 2, snow: false, restrictions: [] },
-              { color: "Red", source_id: 3, pip_id: 3, snow: false, restrictions: [] },
-            ],
-          },
-        },
-        1,
-      ]),
-      waiting_for: {
-        type: "AbilityModeChoice",
-        data: {
-          player: 0,
-          modal,
-          source_id: 90,
-          mode_abilities: [],
-          is_activated: false,
-        },
-      },
-    });
-
-    useGameStore.setState({
-      gameState,
-      waitingFor: gameState.waiting_for,
-      dispatch: dispatchMock,
-    });
-
-    render(<ModeChoiceModal />);
-
-    fireEvent.click(screen.getByText("Mode A"));
-    fireEvent.click(screen.getByText("Mode B"));
-    expect(screen.getByRole("button", { name: "Confirm (1/1 modes)" })).not.toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Confirm (1/1 modes)" }));
-    expect(dispatchMock).toHaveBeenCalledWith({
-      type: "SelectModes",
-      data: { indices: [0] },
-    });
-  });
-
-  it("caps repeatable mode-cost selection at modal.max_choices", () => {
-    const modal: ModalChoice = {
-      min_choices: 0,
-      max_choices: 2,
-      max_affordable_selections: 3,
-      mode_count: 2,
-      mode_descriptions: ["Mode A", "Mode B"],
-      allow_repeat_modes: true,
-      mode_costs: [
-        { type: "Cost", generic: 1, shards: [] },
-        { type: "Cost", generic: 1, shards: [] },
-      ],
-    };
-    const gameState = buildGameState({
-      objects: {},
-      priority_player: 0,
-      players: buildPlayers([1, 1]),
-      waiting_for: {
-        type: "AbilityModeChoice",
-        data: {
-          player: 0,
-          modal,
-          source_id: 90,
-          mode_abilities: [],
-          is_activated: false,
-        },
-      },
-    });
-
-    useGameStore.setState({
-      gameState,
-      waitingFor: gameState.waiting_for,
-      dispatch: dispatchMock,
-    });
-
-    render(<ModeChoiceModal />);
-
-    fireEvent.click(screen.getByText("Mode A"));
-    fireEvent.click(screen.getByText("Mode A"));
-    fireEvent.click(screen.getByText("Mode B"));
-    expect(screen.getByRole("button", { name: "Confirm (2/2 modes)" })).not.toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Confirm (2/2 modes)" }));
-    expect(dispatchMock).toHaveBeenCalledWith({
-      type: "SelectModes",
-      data: { indices: [0, 0] },
-    });
-  });
 });

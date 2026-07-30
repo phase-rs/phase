@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 import type { ModalChoice } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { DialogShell } from "./DialogShell.tsx";
 
 export function ModeChoiceModal() {
@@ -36,19 +35,10 @@ export function ModeChoiceModal() {
   // (Σ of chosen mode weights ≤ budget), NOT a mode count. The engine remains
   // the legality authority; this is pure display arithmetic over engine data.
   const pawprints = useMemo(() => modal?.mode_pawprints ?? [], [modal]);
-  const modeCosts = useMemo(() => modal?.mode_costs ?? [], [modal]);
   const isBudget = pawprints.length > 0;
-  const isModeCost = !isBudget && modeCosts.length > 0;
   const budget = modal?.max_choices ?? 0;
-  // CR 118.1 + CR 702.172a: per-mode payment caps come from the engine probe,
-  // bounded by the modal's legal selection cap (`max_choices`).
-  const maxAffordableSelections = Math.min(
-    modal?.max_affordable_selections ?? modal?.max_choices ?? 0,
-    modal?.max_choices ?? 0,
-  );
   const spent = useMemo(
-    () =>
-      isBudget ? selected.reduce((sum, i) => sum + (pawprints[i] ?? 0), 0) : 0,
+    () => (isBudget ? selected.reduce((sum, i) => sum + (pawprints[i] ?? 0), 0) : 0),
     [isBudget, selected, pawprints],
   );
 
@@ -62,10 +52,6 @@ export function ModeChoiceModal() {
           if (isBudget) {
             const spentPrev = prev.reduce((sum, i) => sum + (pawprints[i] ?? 0), 0);
             if (spentPrev + (pawprints[index] ?? 0) > budget) {
-              return prev;
-            }
-          } else if (isModeCost) {
-            if (prev.length >= maxAffordableSelections) {
               return prev;
             }
           } else if (prev.length >= modal.max_choices) {
@@ -82,17 +68,13 @@ export function ModeChoiceModal() {
           if (spentPrev + (pawprints[index] ?? 0) > budget) {
             return prev;
           }
-        } else if (isModeCost) {
-          if (prev.length >= maxAffordableSelections) {
-            return prev;
-          }
         } else if (prev.length >= modal.max_choices) {
           return prev;
         }
         return [...prev, index].sort((a, b) => a - b);
       });
     },
-    [modal, unavailableModes, isBudget, isModeCost, pawprints, budget, maxAffordableSelections],
+    [modal, unavailableModes, isBudget, pawprints, budget],
   );
 
   const handleConfirm = useCallback(() => {
@@ -102,14 +84,12 @@ export function ModeChoiceModal() {
     if (isBudget) {
       const spentSum = indices.reduce((sum, i) => sum + (pawprints[i] ?? 0), 0);
       if (spentSum > modal.max_choices) return;
-    } else if (isModeCost) {
-      if (indices.length > maxAffordableSelections) return;
     } else if (indices.length > modal.max_choices) {
       return;
     }
     dispatch({ type: "SelectModes", data: { indices } });
     setSelected([]);
-  }, [modal, selected, dispatch, isBudget, isModeCost, pawprints, maxAffordableSelections]);
+  }, [modal, selected, dispatch, isBudget, pawprints]);
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
@@ -120,24 +100,11 @@ export function ModeChoiceModal() {
 
   const canConfirm =
     selected.length >= modal.min_choices &&
-    (isBudget
-      ? spent <= budget
-      : isModeCost
-        ? selected.length <= maxAffordableSelections
-        : selected.length <= modal.max_choices);
+    (isBudget ? spent <= budget : selected.length <= modal.max_choices);
   // A pawprint budget modal (budget 5, min weight 1) is never a single-choice
   // dispatch; only a genuine 1-of-1 count modal collapses to immediate dispatch.
-  const isSingleChoice =
-    !isBudget && !isModeCost && modal.min_choices === 1 && modal.max_choices === 1;
-  const canAdd = (index: number) => {
-    if (isBudget) {
-      return spent + (pawprints[index] ?? 0) <= budget;
-    }
-    if (isModeCost) {
-      return selected.length < maxAffordableSelections;
-    }
-    return selected.length < modal.max_choices;
-  };
+  const isSingleChoice = !isBudget && modal.min_choices === 1 && modal.max_choices === 1;
+  const canAdd = (index: number) => !isBudget || spent + (pawprints[index] ?? 0) <= budget;
 
   // CR 602.2b vs CR 603.3c: only an ACTIVATED modal ability is cancellable at the
   // mode-choice step; a triggered one must resolve its mode. Read engine-provided
@@ -166,12 +133,7 @@ export function ModeChoiceModal() {
         >
           {isBudget
             ? t("modeChoice.confirmBudget", { spent, budget })
-            : isModeCost
-              ? t("modeChoice.confirmModeCost", {
-                  selected: selected.length,
-                  max: maxAffordableSelections,
-                })
-              : t("modeChoice.confirm", { selected: selected.length, count: modal.max_choices })}
+            : t("modeChoice.confirm", { selected: selected.length, count: modal.max_choices })}
         </button>
       )}
       {!isSingleChoice && selected.length > 0 && (
@@ -197,14 +159,7 @@ export function ModeChoiceModal() {
     <DialogShell
       eyebrow={isAbilityMode ? t("modeChoice.eyebrowAbility") : t("modeChoice.eyebrowSpell")}
       title={chooseLabel}
-      subtitle={
-        isModeCost
-          ? t("modeChoice.subtitleModeCost", {
-              selected: selected.length,
-              max: maxAffordableSelections,
-            })
-          : t("modeChoice.subtitle")
-      }
+      subtitle={t("modeChoice.subtitle")}
       size="md"
       scrollable
       footer={footer}
@@ -220,10 +175,8 @@ export function ModeChoiceModal() {
             // is greyed like an unavailable mode (unless it's already selected in
             // a non-repeat modal, where the row toggles it back off).
             const budgetBlocked = isBudget && !canAdd(index) && !(isSelected && !modal.allow_repeat_modes);
-            const modeCostBlocked =
-              isModeCost && !canAdd(index) && !(isSelected && !modal.allow_repeat_modes);
             const isUnavailable = unavailableModes.includes(index);
-            const isDisabled = isUnavailable || budgetBlocked || modeCostBlocked;
+            const isDisabled = isUnavailable || budgetBlocked;
             return (
               <button
                 key={index}
@@ -248,11 +201,6 @@ export function ModeChoiceModal() {
                 {isBudget && weight > 0 && (
                   <span className="mr-2 inline-flex items-center justify-center rounded-full bg-amber-300/20 px-2 py-0.5 text-xs font-semibold text-amber-100">
                     {"{P}".repeat(weight)}
-                  </span>
-                )}
-                {isModeCost && modeCosts[index] && (
-                  <span className="mr-2 inline-flex align-middle">
-                    <ManaCostPips cost={modeCosts[index]!} size="xs" />
                   </span>
                 )}
                 <span className={`font-semibold ${isDisabled ? "text-slate-500" : "text-white"}`}>{desc}</span>

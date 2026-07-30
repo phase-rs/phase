@@ -1948,12 +1948,10 @@
     "eyebrowAbility": "Modes de capacité",
     "eyebrowSpell": "Modes de sort",
     "subtitle": "Sélectionnez le ou les modes à appliquer.",
-    "subtitleModeCost": "Modes sélectionnés : {{selected}} / {{max}} abordables.",
     "chooseExact": "Choisissez {{count}}",
     "chooseRange": "Choisissez de {{min}} à {{max}}",
     "confirm": "Confirmer ({{selected}}/{{count}})",
     "confirmBudget": "Confirmer ({{spent}}/{{budget}} {P})",
-    "confirmModeCost": "Confirmer ({{selected}}/{{max}} modes)",
     "clear": "Effacer",
     "alreadyChosen": "(déjà choisi)"
   },

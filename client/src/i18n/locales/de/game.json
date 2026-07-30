@@ -1948,12 +1948,10 @@
     "eyebrowAbility": "Fähigkeitsmodi",
     "eyebrowSpell": "Zauberspruchmodi",
     "subtitle": "Wähle den oder die anzuwendenden Modi.",
-    "subtitleModeCost": "Gewählte Modi: {{selected}} / {{max}} bezahlbar.",
     "chooseExact": "Wähle {{count}}",
     "chooseRange": "Wähle {{min}} bis {{max}}",
     "confirm": "Bestätigen ({{selected}}/{{count}})",
     "confirmBudget": "Bestätigen ({{spent}}/{{budget}} {P})",
-    "confirmModeCost": "Bestätigen ({{selected}}/{{max}} Modi)",
     "clear": "Leeren",
     "alreadyChosen": "(bereits gewählt)"
   },

@@ -31222,7 +31222,6 @@ pub mod tests {
             allow_repeat_modes: false,
             constraints: vec![],
             mode_costs: vec![],
-            max_affordable_selections: None,
             mode_pawprints: vec![],
             entwine_cost: None,
             chooser: PlayerFilter::Controller,

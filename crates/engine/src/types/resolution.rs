@@ -49,11 +49,6 @@ pub struct PendingRepeatedOptionalPayment {
     pub payment_unit: Box<ResolvedAbility>,
     pub reflexive: Box<ResolvedAbility>,
     pub remaining: u32,
-    /// CR 603.12a + CR 702.172a: When true, payment and mode choice are batched
-    /// into one `AbilityModeChoice` (Hawkeye / Tranquil Frillback class). When
-    /// false, the legacy per-iteration `OptionalEffectChoice` driver applies.
-    #[serde(default)]
-    pub batched: bool,
 }
 
 /// The complete parked repeated optional-payment authority.
@@ -296,10 +291,6 @@ impl ResolutionFrame {
     pub const fn gate(&self) -> FrameGate {
         match self {
             Self::RepeatedOptionalPayment(RepeatedOptionalPaymentFrame {
-                pending: Some(pending),
-                ..
-            }) if pending.batched => FrameGate::DirectChoice(DirectChoiceGate::AbilityModeChoice),
-            Self::RepeatedOptionalPayment(RepeatedOptionalPaymentFrame {
                 pending: Some(_),
                 ..
             })
@@ -345,7 +336,6 @@ pub enum FrameGate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DirectChoiceGate {
     OptionalEffect,
-    AbilityModeChoice,
     CoinFlipKeep,
     Proliferate,
     MutateMerge,
@@ -359,10 +349,6 @@ impl DirectChoiceGate {
                 Self::OptionalEffect,
                 WaitingFor::OptionalEffectChoice { .. }
             ) | (Self::OptionalEffect, WaitingFor::OpponentMayChoice { .. })
-                | (
-                    Self::AbilityModeChoice,
-                    WaitingFor::AbilityModeChoice { .. }
-                )
                 | (Self::CoinFlipKeep, WaitingFor::CoinFlipKeepChoice { .. })
                 | (Self::Proliferate, WaitingFor::ProliferateChoice { .. })
                 | (Self::MutateMerge, WaitingFor::MutateMergeChoice { .. })
@@ -2651,6 +2637,12 @@ impl ResolutionStateWire {
                 let frames_value = object
                     .get("resolution_frames")
                     .ok_or_else(|| "v2 resolution state is missing resolution_frames".to_string())?;
+                if has_removed_batched_repeated_optional_payment(frames_value) {
+                    return Err(
+                        "v2 repeated optional-payment snapshot uses removed batched:true flow; restart the game from a current save"
+                            .to_string(),
+                    );
+                }
                 let mut frames: ResolutionStack = serde_json::from_value(frames_value.clone())
                     .map_err(|error| error.to_string())?;
                 frames.recover_draw_sequence_allocator();
@@ -2702,6 +2694,32 @@ impl<'de> Deserialize<'de> for ResolutionStateWire {
         D: Deserializer<'de>,
     {
         Self::from_value(Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// The one-dialog repeated-payment experiment serialized a `batched` marker
+/// inside its frame. It created a reflexive trigger before payment succeeded,
+/// so treating such a snapshot as the sequential flow would change game state
+/// mid-resolution. Reject only that obsolete persisted frame explicitly.
+fn has_removed_batched_repeated_optional_payment(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(has_removed_batched_repeated_optional_payment),
+        Value::Object(values) => {
+            values
+                .get("RepeatedOptionalPayment")
+                .and_then(Value::as_object)
+                .and_then(|frame| frame.get("pending"))
+                .and_then(Value::as_object)
+                .and_then(|pending| pending.get("batched"))
+                .and_then(Value::as_bool)
+                .is_some_and(|batched| batched)
+                || values
+                    .values()
+                    .any(has_removed_batched_repeated_optional_payment)
+        }
+        _ => false,
     }
 }
 
@@ -4519,7 +4537,6 @@ mod tests {
                     payment_unit: Box::new(resolved_draw(100)),
                     reflexive: Box::new(resolved_draw(101)),
                     remaining: 0,
-                    batched: false,
                 })),
                 optional_cost_payments_this_resolution: 0,
             },

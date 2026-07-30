@@ -1,7 +1,6 @@
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::mana::ManaCost;
 
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_targets_in_chain,
@@ -40,40 +39,6 @@ pub(super) fn handle_ability_mode_choice(
 
     validate_modal_indices(&modal, &indices, &unavailable_modes)?;
 
-    // Batched repeated-optional prompts snapshot `max_choices` and
-    // `max_affordable_selections` at offer time. Re-probe affordability on submit
-    // so a stale selection cannot take the payment path after the pool/board
-    // changed (CR 118.1 / CR 702.172a).
-    if !indices.is_empty()
-        && !modal.mode_costs.is_empty()
-        && state
-            .active_repeated_optional_payment_frame()
-            .and_then(|frame| frame.pending.as_ref())
-            .is_some_and(|pending| pending.batched)
-    {
-        let total = indices.iter().fold(ManaCost::zero(), |acc, &idx| {
-            let mode_cost = modal
-                .mode_costs
-                .get(idx)
-                .cloned()
-                .unwrap_or_else(ManaCost::zero);
-            crate::game::restrictions::add_mana_cost(&acc, &mode_cost)
-        });
-        if !casting::can_pay_cost_after_auto_tap(state, player, source_id, &total) {
-            return Err(EngineError::InvalidAction(
-                "Cannot afford selected ability modes".to_string(),
-            ));
-        }
-    }
-
-    if effects::settle_batched_repeated_optional_payment_on_mode_choice(state, &indices, events)
-        .map_err(|e| EngineError::InvalidAction(e.to_string()))?
-        && indices.is_empty()
-    {
-        priority::clear_priority_passes(state);
-        return Ok(WaitingFor::Priority { player });
-    }
-
     record_modal_mode_choices(state, source_id, &modal, &indices);
 
     let mut resolved =
@@ -110,28 +75,7 @@ pub(super) fn handle_ability_mode_choice(
         )
     }?;
 
-    if !is_activated {
-        settle_completed_repeated_optional_payment_frame(state)?;
-    }
-
     Ok(waiting_for)
-}
-
-/// CR 603.12a: A repeated-payment frame retains K only until its reflexive
-/// modal has consumed the dynamic cap. The frame is then an AfterChild owner
-/// with no driver, so selection completion is its exact action boundary.
-fn settle_completed_repeated_optional_payment_frame(
-    state: &mut GameState,
-) -> Result<(), EngineError> {
-    if state
-        .active_repeated_optional_payment_frame()
-        .is_some_and(|frame| frame.pending.is_none())
-    {
-        state
-            .take_active_repeated_optional_payment_frame()
-            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
-    }
-    Ok(())
 }
 
 struct ActivatedModeChoice {
