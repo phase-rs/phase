@@ -3121,12 +3121,13 @@ mod tests {
                     (*expected_line, *expected_line),
                     "{name}: source-order slot drift"
                 );
+                let expected_fragment = match (name, *expected_line) {
+                    ("Spree", 0) => "~ (Choose one or more additional costs.)",
+                    _ => oracle.lines().nth(*expected_line).unwrap(),
+                };
                 assert_eq!(
                     item.source.fragment(),
-                    Some(match (name, *expected_line) {
-                        ("Spree", 0) => "~ (Choose one or more additional costs.)",
-                        _ => oracle.lines().nth(*expected_line).unwrap(),
-                    }),
+                    Some(expected_fragment),
                     "{name}: slot must retain its verbatim printed source"
                 );
                 let expected_start_byte = oracle
@@ -3138,7 +3139,7 @@ mod tests {
                     (span.start_byte, span.end_byte),
                     (
                         expected_start_byte,
-                        expected_start_byte + oracle.lines().nth(*expected_line).unwrap().len()
+                        expected_start_byte + expected_fragment.len()
                     ),
                     "{name}: exact source span must bound this header or bullet only"
                 );
