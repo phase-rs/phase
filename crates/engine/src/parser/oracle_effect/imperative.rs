@@ -23,6 +23,7 @@ use super::{
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
+use crate::parser::oracle_nom::enters_under::{bind_control_clause, name_entry_control_antecedent};
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_nom::target as nom_target;
@@ -2006,12 +2007,21 @@ pub(super) fn parse_targeted_action_ast(
                 // from your graveyard to the battlefield. They enter with a
                 // finality counter" (Shilgengar) applies the finality counter
                 // (CR 122.1h) to every returned object, not just one.
+                // CR 110.2a (docs/MagicCompRules.txt:618) + CR 608.2c (:2793):
+                // bind the raw control clause BEFORE either struct literal —
+                // the `target,` field shorthand MOVES `target`, so a `&target`
+                // borrow inside the literal would not compile. `d.control` is
+                // `Copy`, so reading it here does not disturb `d`.
+                let enters_under = bind_control_clause(
+                    d.control,
+                    name_entry_control_antecedent(Some(&target), ctx),
+                );
                 if is_mass {
                     Some(TargetedImperativeAst::ReturnAllToZone {
                         target,
                         origin,
                         destination: Zone::Battlefield,
-                        enters_under: d.enters_under,
+                        enters_under,
                         enter_tapped: d.enter_tapped,
                         enter_with_counters: d.enter_with_counters,
                     })
@@ -2024,7 +2034,7 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         enter_transformed: d.transformed,
-                        enters_under: d.enters_under,
+                        enters_under,
                         enter_tapped: d.enter_tapped,
                         enters_attacking: d.enters_attacking,
                         enter_with_counters: d.enter_with_counters,
@@ -2045,7 +2055,9 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: Zone::Hand,
-                        enters_under: None,
+                        // CR 110.1 (docs/MagicCompRules.txt:614): only
+                        // permanents have a controller.
+                        enters_under: EntersUnderSpec::Default,
                         enter_tapped: false,
                         enter_with_counters: vec![],
                     })
@@ -2071,7 +2083,9 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: d.zone,
-                        enters_under: None,
+                        // CR 110.1 (docs/MagicCompRules.txt:614): only
+                        // permanents have a controller.
+                        enters_under: EntersUnderSpec::Default,
                         enter_tapped: false,
                         enter_with_counters: vec![],
                     })
@@ -2317,24 +2331,39 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_with_counters,
             face_down,
             attach_host: _,
-        } => Effect::ChangeZone {
-            origin,
-            destination: Zone::Battlefield,
-            target,
-            owner_library: false,
-            enter_transformed,
-            enters_under,
-            enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
-            enters_attacking,
-            up_to: false,
-            enter_with_counters,
-            conditional_enter_with_counters: vec![],
-            // CR 708.2a + CR 708.3: a "face down" return seeds the default
-            // vanilla-2/2 face-down profile; a trailing "It's a <type>" sentence
-            // (Yedora's "It's a Forest land.") refines it via FaceDownProfileSpec.
-            face_down_profile: face_down.then(crate::types::ability::FaceDownProfile::vanilla_2_2),
-            enters_modified_if: None,
-        },
+        } => {
+            // CR 110.2a (docs/MagicCompRules.txt:618): fail closed. A printed
+            // control clause whose antecedent could not be named must NOT
+            // collapse into the CR 110.2 default — that would put the permanent
+            // under the wrong player's control while the card reported as fully
+            // supported.
+            if let Some(p) = enters_under.unbound_possessor() {
+                return Effect::unimplemented(
+                    "change_zone_enters_under_anaphor",
+                    p.printed_clause(),
+                );
+            }
+            Effect::ChangeZone {
+                origin,
+                destination: Zone::Battlefield,
+                target,
+                owner_library: false,
+                enter_transformed,
+                enters_under: enters_under.as_controller_ref(),
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                enters_attacking,
+                up_to: false,
+                enter_with_counters,
+                conditional_enter_with_counters: vec![],
+                // CR 708.2a + CR 708.3: a "face down" return seeds the default
+                // vanilla-2/2 face-down profile; a trailing "It's a <type>"
+                // sentence (Yedora's "It's a Forest land.") refines it via
+                // FaceDownProfileSpec.
+                face_down_profile: face_down
+                    .then(crate::types::ability::FaceDownProfile::vanilla_2_2),
+                enters_modified_if: None,
+            }
+        }
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         // CR 115.1d + CR 601.2c: `multi_target` (the bounded "up to N" count)
         // is an ability-level field (`ParsedEffectClause.multi_target`), not
@@ -2370,6 +2399,15 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_tapped,
             enter_with_counters,
         } => {
+            // CR 110.2a (docs/MagicCompRules.txt:618): fail closed on an
+            // unbindable control clause rather than silently defaulting the
+            // controller for the whole moved population.
+            if let Some(p) = enters_under.unbound_possessor() {
+                return Effect::unimplemented(
+                    "change_zone_enters_under_anaphor",
+                    p.printed_clause(),
+                );
+            }
             let origin = match &target {
                 TargetFilter::ExiledBySource => Some(Zone::Exile),
                 TargetFilter::TrackedSetFiltered {
@@ -2382,7 +2420,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 origin,
                 destination,
                 target,
-                enters_under,
+                enters_under: enters_under.as_controller_ref(),
                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                 // CR 122.1 + CR 122.1h: each returned object enters with these
                 // counters (e.g. a finality counter on Shilgengar's mass return).
@@ -6637,13 +6675,19 @@ pub(super) fn parse_put_ast(
         }
     }
 
-    if let Some((effect, choice_count)) = super::try_parse_put_zone_change_parts(lower, text, ctx) {
+    if let Some((effect, choice_count, enters_under)) =
+        super::try_parse_put_zone_change_parts(lower, text, ctx)
+    {
+        // CR 110.2a (docs/MagicCompRules.txt:618): the control clause is bound
+        // by the seam that owns the destination text and returned alongside the
+        // `Effect`, so the AST carries the full three-state spec (including the
+        // fail-closed `UnboundAnaphor`) rather than the `Effect`'s already
+        // collapsed `Option<ControllerRef>`.
         return match effect {
             Effect::ChangeZoneAll {
                 origin,
                 destination,
                 target,
-                enters_under,
                 enter_tapped,
                 library_position,
                 random_order,
@@ -6686,7 +6730,6 @@ pub(super) fn parse_put_ast(
                 origin,
                 destination,
                 target,
-                enters_under,
                 enter_tapped,
                 enter_transformed,
                 enters_attacking,
@@ -6789,17 +6832,29 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             // complement move, which `lower_imperative_family_ast` emits; the
             // bare (non-partition) lowering never carries it.
             rest_library_position: _,
-        } => Effect::ChangeZoneAll {
-            origin,
-            destination,
-            target,
-            enters_under,
-            enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
-            enter_with_counters: vec![],
-            face_down_profile: None,
-            library_position,
-            random_order,
-        },
+        } => {
+            // CR 110.2a (docs/MagicCompRules.txt:618): fail closed. This
+            // lowering receives NO text, which is exactly why
+            // `EntersUnderSpec::UnboundAnaphor` carries the possessor — the
+            // printed clause is recoverable here without a text slice.
+            if let Some(p) = enters_under.unbound_possessor() {
+                return Effect::unimplemented(
+                    "change_zone_enters_under_anaphor",
+                    p.printed_clause(),
+                );
+            }
+            Effect::ChangeZoneAll {
+                origin,
+                destination,
+                target,
+                enters_under: enters_under.as_controller_ref(),
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position,
+                random_order,
+            }
+        }
         PutImperativeAst::ZoneChange {
             origin,
             destination,
@@ -6812,6 +6867,17 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             choice_count: _,
             enter_with_counters,
         } => {
+            // CR 110.2a (docs/MagicCompRules.txt:618): fail closed. This
+            // lowering receives NO text, which is exactly why
+            // `EntersUnderSpec::UnboundAnaphor` carries the possessor — the
+            // printed clause is recoverable here without a text slice.
+            if let Some(p) = enters_under.unbound_possessor() {
+                return Effect::unimplemented(
+                    "change_zone_enters_under_anaphor",
+                    p.printed_clause(),
+                );
+            }
+            let enters_under = enters_under.as_controller_ref();
             // CR 610.3: Mass filters (ExiledBySource, TrackedSet,
             // TrackedSetFiltered) act on all matching objects without individual
             // targeting — use ChangeZoneAll. Bounded "up to N" picks from the
@@ -11641,6 +11707,16 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             rest_destination: Some(rest_destination),
             rest_library_position,
         }) => {
+            // CR 110.2a (docs/MagicCompRules.txt:618): fail closed before the
+            // partition is materialized — a wrong controller on the primary
+            // pile would otherwise ship silently.
+            if let Some(p) = enters_under.unbound_possessor() {
+                return parsed_clause(Effect::unimplemented(
+                    "change_zone_enters_under_anaphor",
+                    p.printed_clause(),
+                ));
+            }
+            let enters_under = enters_under.as_controller_ref();
             // CR 401.4: "in a random order" (and the bottom/top position)
             // describes whichever pile returns to the library. Exactly one pile
             // does in the printed partition class (the other goes to a

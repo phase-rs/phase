@@ -2,6 +2,10 @@ use super::lower::{
     rewrite_parent_target_to_last_created, target_filter_is_explicit_target_player_graveyard_card,
 };
 use super::*;
+use crate::parser::oracle_ir::ast::EntersUnderSpec;
+use crate::parser::oracle_nom::enters_under::{
+    bind_control_clause, ControlAnaphorAntecedent, ControlClausePossessor,
+};
 use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
@@ -30113,6 +30117,135 @@ fn suffix_condition_with_otherwise_integration() {
             .unwrap();
 }
 
+// --- CR 110.2a controller-override binding (#6691) ---
+
+/// CR 110.2a (docs/MagicCompRules.txt:618) + CR 400.1 (:1933) + CR 400.3
+/// (:1937) + CR 404.1 (:2030) + CR 108.3 (:564): Jailbreak's
+/// "under their control" binds to the moved card's OWNER, because a card in an
+/// opponent's graveyard is in ITS OWNER's graveyard.
+///
+/// REVERT-FAILING ASSERTION: `enters_under == Some(ParentTargetOwner)`. Before
+/// the fix the clause was dropped entirely and this field was `None`, which
+/// makes the permanent enter under the CASTER's control (CR 110.2a's default) —
+/// the exact defect #6691 reports.
+#[test]
+fn jailbreak_enters_under_their_control_binds_to_the_owner() {
+    // Verbatim Oracle text (client/public/card-data.json).
+    let parsed = parse_oracle_text(
+        "Return target permanent card in an opponent's graveyard to the battlefield under \
+         their control. When that permanent enters, return up to one target permanent card \
+         with equal or lesser mana value from your graveyard to the battlefield.",
+        "Jailbreak",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Jailbreak must parse a spell ability");
+    match &*ability.effect {
+        Effect::ChangeZone {
+            origin,
+            destination,
+            enters_under,
+            target,
+            ..
+        } => {
+            assert_eq!(
+                *enters_under,
+                Some(ControllerRef::ParentTargetOwner),
+                "the CR 110.2a control clause must bind to the moved card's owner"
+            );
+            // Reach guards: the excision must not have corrupted the rest of
+            // the clause (foot-gun #6 — a degraded parse would pass vacuously).
+            assert_eq!(*origin, Some(Zone::Graveyard));
+            assert_eq!(*destination, Zone::Battlefield);
+            let TargetFilter::Typed(tf) = target else {
+                panic!("expected a typed permanent filter, got {target:?}");
+            };
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Owned {
+                        controller: ControllerRef::Opponent
+                    }
+                )),
+                "the opponent-ownership NP that LICENSES the binding must survive: {tf:?}"
+            );
+        }
+        other => panic!("Jailbreak must lower to a ChangeZone, got {other:?}"),
+    }
+    // The consumed clause must not be re-emitted as a dangling gap.
+    let dump = format!("{parsed:?}");
+    assert!(
+        !dump.contains("change_zone_enters_under_anaphor"),
+        "Jailbreak must be BOUND, not failed closed"
+    );
+}
+
+/// CR 110.2a: `"under your control"` is unchanged — the 558-card population
+/// that already worked must stay byte-identical through the new grammar.
+#[test]
+fn under_your_control_still_binds_to_you_after_the_collapse() {
+    let def = parse_effect_chain(
+        "Return target creature card from your graveyard to the battlefield under your control.",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::ChangeZone { enters_under, .. } => {
+            assert_eq!(*enters_under, Some(ControllerRef::You));
+        }
+        other => panic!("expected ChangeZone, got {other:?}"),
+    }
+}
+
+/// CR 110.2 (docs/MagicCompRules.txt:616): the owner forms restate the default,
+/// so they must still produce NO override — and specifically must not be
+/// misread as the third-person `TheirAnaphor` (the B3 trap).
+#[test]
+fn owner_forms_still_produce_no_controller_override() {
+    for text in [
+        "Return target creature card from your graveyard to the battlefield under its owner's \
+         control.",
+        "Return target creature card from your graveyard to the battlefield under their owner's \
+         control.",
+        "Return target creature card from your graveyard to the battlefield under their owners' \
+         control.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        match &*def.effect {
+            Effect::ChangeZone { enters_under, .. } => {
+                assert_eq!(*enters_under, None, "{text}");
+            }
+            other => panic!("expected ChangeZone for {text}, got {other:?}"),
+        }
+    }
+}
+
+/// CR 110.2a fail-closed: an anaphor with no nameable antecedent must become an
+/// honest `Effect::unimplemented`, NEVER a silently-defaulted controller.
+///
+/// REVERT-FAILING ASSERTION: the effect is the `change_zone_enters_under_anaphor`
+/// gap. Before the fix this parsed to a `ChangeZone` with `enters_under: None`,
+/// i.e. the permanent entered under the caster's control while the card
+/// reported as fully supported.
+#[test]
+fn unbindable_anaphor_fails_closed_instead_of_defaulting() {
+    // `TargetFilter::Any`-style filter with NO ownership NP and no relative
+    // player scope: neither antecedent source can fire.
+    let def = parse_effect_chain(
+        "Return target creature card to the battlefield under that player's control.",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::Unimplemented { name, .. } => {
+            assert_eq!(name, "change_zone_enters_under_anaphor");
+        }
+        other => panic!("an unbindable control clause must fail closed, got {other:?}"),
+    }
+}
+
 // --- ReturnDestination flag propagation tests ---
 
 #[test]
@@ -30122,7 +30255,7 @@ fn return_destination_under_your_control() {
     assert_eq!(target_text, "target creature");
     let d = dest.expect("should parse destination");
     assert_eq!(d.zone, Zone::Battlefield);
-    assert_eq!(d.enters_under, Some(ControllerRef::You));
+    assert_eq!(d.control, Some(ControlClausePossessor::You));
     assert!(!d.enter_tapped);
     assert!(!d.transformed);
 }
@@ -30135,15 +30268,21 @@ fn return_destination_tapped() {
     let d = dest.expect("should parse destination");
     assert_eq!(d.zone, Zone::Battlefield);
     assert!(d.enter_tapped);
-    assert_eq!(d.enters_under, None);
+    assert_eq!(d.control, None);
 }
 
 #[test]
 fn return_destination_owners_control_not_under_your_control() {
     let (_, dest) = strip_return_destination_ext("it to the battlefield under its owner's control");
     let d = dest.expect("should parse destination");
+    // CR 110.2 (docs/MagicCompRules.txt:616): the owner form is RECOGNIZED as a
+    // clause but restates the default, so binding it yields
+    // `EntersUnderSpec::Default` — never a controller override, and never the
+    // third-person `TheirAnaphor`.
+    assert_eq!(d.control, Some(ControlClausePossessor::Owner));
     assert_eq!(
-        d.enters_under, None,
+        bind_control_clause(d.control, ControlAnaphorAntecedent::Unnameable),
+        EntersUnderSpec::Default,
         "owner's control should not set a controller override"
     );
 }
@@ -30153,7 +30292,7 @@ fn return_destination_tapped_under_your_control() {
     let (_, dest) = strip_return_destination_ext("it to the battlefield tapped under your control");
     let d = dest.expect("should parse destination");
     assert!(d.enter_tapped);
-    assert_eq!(d.enters_under, Some(ControllerRef::You));
+    assert_eq!(d.control, Some(ControlClausePossessor::You));
 }
 
 #[test]
@@ -30162,7 +30301,7 @@ fn return_destination_transformed_under_your_control() {
         strip_return_destination_ext("it to the battlefield transformed under your control");
     let d = dest.expect("should parse destination");
     assert!(d.transformed);
-    assert_eq!(d.enters_under, Some(ControllerRef::You));
+    assert_eq!(d.control, Some(ControlClausePossessor::You));
     assert!(!d.enter_tapped);
 }
 
@@ -30170,7 +30309,7 @@ fn return_destination_transformed_under_your_control() {
 fn return_destination_plain_battlefield() {
     let (_, dest) = strip_return_destination_ext("target creature to the battlefield");
     let d = dest.expect("should parse destination");
-    assert_eq!(d.enters_under, None);
+    assert_eq!(d.control, None);
     assert!(!d.enter_tapped);
     assert!(!d.transformed);
 }
@@ -30186,7 +30325,7 @@ fn return_destination_tapped_and_attacking() {
     assert!(d.enter_tapped);
     assert!(d.enters_attacking);
     assert!(!d.transformed);
-    assert_eq!(d.enters_under, None);
+    assert_eq!(d.control, None);
 }
 
 /// CR 110.2a + CR 708.3 + CR 614.1: order-independent entry-riders trailing
@@ -30201,7 +30340,7 @@ fn return_destination_face_down_and_tapped_after_control() {
     assert_eq!(target_text, "it");
     let d = dest.expect("should parse destination");
     assert_eq!(d.zone, Zone::Battlefield);
-    assert_eq!(d.enters_under, Some(ControllerRef::You));
+    assert_eq!(d.control, Some(ControlClausePossessor::You));
     assert!(d.face_down, "face down rider must be captured");
     assert!(d.enter_tapped, "tapped rider must be captured");
     assert!(!d.transformed);
@@ -30245,8 +30384,10 @@ fn return_destination_face_down_before_control_splice() {
         strip_return_destination_ext("it to the battlefield face down under its owner's control");
     let d = dest.expect("should parse destination");
     assert!(d.face_down);
+    assert_eq!(d.control, Some(ControlClausePossessor::Owner));
     assert_eq!(
-        d.enters_under, None,
+        bind_control_clause(d.control, ControlAnaphorAntecedent::Unnameable),
+        EntersUnderSpec::Default,
         "owner's control must not set a controller override"
     );
 }

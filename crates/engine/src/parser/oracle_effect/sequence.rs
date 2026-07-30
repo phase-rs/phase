@@ -7,6 +7,9 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
+use super::super::oracle_nom::enters_under::{
+    bind_control_clause, fold_control_clauses, name_entry_control_antecedent,
+};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx};
@@ -3726,11 +3729,19 @@ pub(super) fn apply_clause_continuation(
                     *existing_reveal |= reveal;
                     multi_zone_search = source_zones.iter().any(|zone| *zone != Zone::Library);
                 }
+                // CR 110.2a (docs/MagicCompRules.txt:618): ALWAYS call the
+                // chain patcher, with the COLLAPSED reference. The patcher
+                // rewrites the existing destination and tapped flag
+                // UNCONDITIONALLY and the controller only behind its own
+                // `is_some()` guard, so skipping the whole call on an unbound
+                // anaphor would silently drop the DESTINATION and TAPPED
+                // patches as well. Passing `None` reuses that existing guard to
+                // no-op exactly the controller patch.
                 apply_search_destination_to_ability_chain(
                     previous,
                     destination,
                     enter_tapped,
-                    enters_under.clone(),
+                    enters_under.as_controller_ref(),
                 );
             }
             let put_origin = if multi_zone_search {
@@ -3738,15 +3749,20 @@ pub(super) fn apply_clause_continuation(
             } else {
                 Some(Zone::Library)
             };
-            let mut change_zone = AbilityDefinition::new(
-                kind,
-                Effect::ChangeZone {
+            // CR 110.2a: fail closed on the newly-built move. A printed
+            // control clause with no nameable antecedent must not degrade into
+            // the CR 110.2 default controller.
+            let put_effect = match enters_under.unbound_possessor() {
+                Some(p) => {
+                    Effect::unimplemented("change_zone_enters_under_anaphor", p.printed_clause())
+                }
+                None => Effect::ChangeZone {
                     origin: put_origin,
                     destination,
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    enters_under,
+                    enters_under: enters_under.as_controller_ref(),
                     enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                     enters_attacking: false,
                     up_to: false,
@@ -3755,7 +3771,8 @@ pub(super) fn apply_clause_continuation(
                     face_down_profile: None,
                     enters_modified_if: None,
                 },
-            );
+            };
+            let mut change_zone = AbilityDefinition::new(kind, put_effect);
             if let Some(host) = attach_host {
                 change_zone.forward_result = true;
                 change_zone.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -5193,6 +5210,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
     text: &str,
     effect: &Effect,
     full_text: &str,
+    ctx: &ParseContext,
 ) -> Option<ContinuationAst> {
     match effect {
         Effect::SearchLibrary { split, .. } => {
@@ -5294,9 +5312,22 @@ pub(super) fn parse_intrinsic_continuation_ast(
             Some(ContinuationAst::SearchDestination {
                 destination: super::parse_search_destination(&full_lower),
                 enter_tapped,
-                // CR 110.2a: "... under your control" routes the found card to the ability controller.
-                enters_under: nom_primitives::scan_contains(&full_lower, "under your control")
-                    .then_some(ControllerRef::You),
+                // CR 110.2a (docs/MagicCompRules.txt:618): the SAME span
+                // (`full_lower`) as the single-literal `scan_contains` this
+                // replaces — no widening. `You`-wins makes the fold
+                // byte-for-byte non-regressive. This seam has no object filter
+                // of its own (the found card is not a parsed `TargetFilter`
+                // here), so the CR 108.3 moved-object-owner source can never
+                // fire: only a mapped, `ParseContext`-declared referent binds.
+                // The one dangerous scope value at this seam (`TargetPlayer`,
+                // which `filter.rs` resolves to the FIRST player target of an
+                // unrelated slot) is refused inside
+                // `map_relative_player_scope`, so the seam needs no
+                // special-casing of its own.
+                enters_under: bind_control_clause(
+                    fold_control_clauses(&full_lower),
+                    name_entry_control_antecedent(None, ctx),
+                ),
                 reveal,
                 attach_host,
             })

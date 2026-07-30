@@ -61,6 +61,9 @@ use lower::{
 pub(crate) use self::token::parse_token_description;
 pub(crate) use self::token::try_parse_token;
 
+use crate::parser::oracle_nom::enters_under::{
+    bind_control_clause, fold_control_clauses, name_entry_control_antecedent,
+};
 use crate::parser::oracle_nom::error::{oracle_err, OracleError};
 use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
 #[cfg(test)]
@@ -15836,6 +15839,15 @@ fn try_parse_verb_and_target<'a>(
         };
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => {
+                // CR 110.2a (docs/MagicCompRules.txt:618) + CR 608.2c (:2793):
+                // bind the raw control clause BEFORE either struct literal —
+                // the `target,` field shorthand MOVES `target`, so a `&target`
+                // borrow inside the literal would not compile. `d.control` is
+                // `Copy`, so reading it here does not disturb `d`.
+                let enters_under = bind_control_clause(
+                    d.control,
+                    name_entry_control_antecedent(Some(&target), ctx),
+                );
                 // CR 400.7: Mass returns to the battlefield route to
                 // `ChangeZoneAll` regardless of `enter_with_counters`, threading
                 // the counters through (Shilgengar's finality counter, CR 122.1h).
@@ -15845,7 +15857,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: Zone::Battlefield,
-                            enters_under: d.enters_under,
+                            enters_under,
                             enter_tapped: d.enter_tapped,
                             enter_with_counters: d.enter_with_counters,
                         },
@@ -15879,7 +15891,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             enter_transformed: d.transformed,
-                            enters_under: d.enters_under,
+                            enters_under,
                             enter_tapped: d.enter_tapped,
                             enters_attacking: d.enters_attacking,
                             enter_with_counters: d.enter_with_counters,
@@ -15897,7 +15909,9 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: Zone::Hand,
-                            enters_under: None,
+                            // CR 110.1 (docs/MagicCompRules.txt:614): only
+                            // permanents have a controller.
+                            enters_under: EntersUnderSpec::Default,
                             enter_tapped: false,
                             enter_with_counters: vec![],
                         },
@@ -15932,7 +15946,9 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: d.zone,
-                            enters_under: None,
+                            // CR 110.1 (docs/MagicCompRules.txt:614): only
+                            // permanents have a controller.
+                            enters_under: EntersUnderSpec::Default,
                             enter_tapped: false,
                             enter_with_counters: vec![],
                         },
@@ -31555,10 +31571,14 @@ pub(crate) fn parse_effect_chain_ir(
                 // Compute intrinsic continuation for this SearchLibrary too —
                 // it needs its own SearchDestination.
                 let temp_def = AbilityDefinition::new(kind, clause.effect.clone());
+                // Pass `ctx` (which is `&mut chunk_ctx` reborrowed), NOT
+                // `&chunk_ctx` — a fresh shared borrow of `chunk_ctx` while the
+                // mutable reborrow is live would not compile.
                 let ic = parse_intrinsic_continuation_ast(
                     normalized_text,
                     intrinsic_continuation_effect(&temp_def),
                     full_text,
+                    ctx,
                 );
                 builder
                     .clause(
@@ -31796,6 +31816,7 @@ pub(crate) fn parse_effect_chain_ir(
             normalized_text,
             intrinsic_continuation_effect(&temp_def),
             full_text,
+            ctx,
         );
 
         // Phase 1.5: cascade-vs-AST structural diff.
@@ -32256,14 +32277,22 @@ fn tracked_anaphor_cause(before_lower: &str, is_dig_anaphor: bool) -> Option<Opt
 
 #[cfg(test)]
 fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
-    try_parse_put_zone_change_parts(lower, text, &ParseContext::default()).map(|(effect, _)| effect)
+    try_parse_put_zone_change_parts(lower, text, &ParseContext::default())
+        .map(|(effect, _, _)| effect)
 }
 
+/// The third tuple element is the CR 110.2a (docs/MagicCompRules.txt:618)
+/// battlefield-entry control spec. It is returned ALONGSIDE the `Effect` rather
+/// than folded into `Effect::ChangeZone.enters_under` because the `Effect` field
+/// is a collapsed `Option<ControllerRef>` with no room for the fail-closed
+/// `UnboundAnaphor` state; `parse_put_ast` stores the full spec on the IR and
+/// the lowering site decides between a bound controller and an honest
+/// `Effect::unimplemented`.
 fn try_parse_put_zone_change_parts(
     lower: &str,
     text: &str,
     ctx: &ParseContext,
-) -> Option<(Effect, Option<MultiTargetSpec>)> {
+) -> Option<(Effect, Option<MultiTargetSpec>, EntersUnderSpec)> {
     let tp = TextPair::new(text, lower);
     let (_, after_put_tp) = tp.split_at(4);
 
@@ -32440,9 +32469,19 @@ fn try_parse_put_zone_change_parts(
                 let origin_text = format!("{}{}", before.lower, after.lower);
                 infer_origin_zone(&origin_text)
             };
-            // CR 110.2a: "under your control" overrides the entering object's controller.
-            let enters_under = scan_contains_phrase(after_put_tp.lower, "under your control")
-                .then_some(ControllerRef::You);
+            // CR 110.2a (docs/MagicCompRules.txt:618): the SAME span as the
+            // single-literal `scan_contains_phrase(after_put_tp.lower, "under
+            // your control")` boolean this replaces — no reach change. The
+            // fold's `You`-wins priority makes it byte-for-byte non-regressive
+            // (both walk word boundaries over the identical span and both
+            // return `You` when that clause is present anywhere in it); the only
+            // delta is that a third-person anaphor is now bound (CR 608.2c @
+            // :2793) or failed closed instead of silently dropped.
+            let enters_under_spec = bind_control_clause(
+                fold_control_clauses(after_put_tp.lower),
+                name_entry_control_antecedent(Some(&target), ctx),
+            );
+            let enters_under = enters_under_spec.as_controller_ref();
             // CR 122.1 + CR 614.1c: Detect a trailing "with [N] [type] counter(s)
             // on it" clause and stamp it onto `enter_with_counters`. This covers
             // The Darkness Crystal's "with two additional +1/+1 counters on it"
@@ -32500,6 +32539,7 @@ fn try_parse_put_zone_change_parts(
                         random_order,
                     },
                     choice_count,
+                    enters_under_spec,
                 ));
             }
             return Some((
@@ -32519,6 +32559,7 @@ fn try_parse_put_zone_change_parts(
                     enters_modified_if: None,
                 },
                 choice_count,
+                enters_under_spec,
             ));
         }
     }
