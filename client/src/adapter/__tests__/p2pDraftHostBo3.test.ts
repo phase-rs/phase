@@ -42,6 +42,7 @@ describe("P2PDraftHost Bo3", () => {
       const privateHost = host as unknown as {
         bo3State: Map<string, unknown>;
         launchDigests: Map<string, Map<number, string>>;
+        matchDecks: Map<string, Map<number, { main_deck: string[]; sideboard: string[]; commander: string[] }>>;
         guestSessions: Map<number, { send: (message: DraftP2PMessage) => void }>;
         intergameCommands: { snapshot: () => DraftIntergameCommand[] };
       };
@@ -52,6 +53,10 @@ describe("P2PDraftHost Bo3", () => {
       const launch1 = draftIntergameDigest({ matchId: "bo3-1", seat: 1 });
       const launch2 = draftIntergameDigest({ matchId: "bo3-1", seat: 2 });
       privateHost.launchDigests.set("bo3-1", new Map([[1, launch1], [2, launch2]]));
+      privateHost.matchDecks.set("bo3-1", new Map([
+        [1, { main_deck: [], sideboard: [], commander: [] }],
+        [2, { main_deck: [], sideboard: [], commander: [] }],
+      ]));
       for (const seat of [1, 2]) {
         privateHost.guestSessions.set(seat, { send: (message) => sent.get(seat)!.push(message) });
       }
@@ -73,6 +78,7 @@ describe("P2PDraftHost Bo3", () => {
       const privateHost = host as unknown as {
         bo3State: Map<string, unknown>;
         launchDigests: Map<string, Map<number, string>>;
+        matchDecks: Map<string, Map<number, { main_deck: string[]; sideboard: string[]; commander: string[] }>>;
         intergameCommands: { snapshot: () => DraftIntergameCommand[] };
       };
       privateHost.bo3State.set("bo3-1", {
@@ -81,9 +87,52 @@ describe("P2PDraftHost Bo3", () => {
       });
       const launch1 = draftIntergameDigest({ matchId: "bo3-1", seat: 1 });
       privateHost.launchDigests.set("bo3-1", new Map([[1, launch1]]));
+      privateHost.matchDecks.set("bo3-1", new Map([
+        [1, { main_deck: [], sideboard: [], commander: [] }],
+      ]));
       host.submitAuthorized(1, { ...command(1, launch1), payloadDigest: "forged" });
       host.submitAuthorized(1, command(1, "stale"));
       expect(privateHost.intergameCommands.snapshot()).toEqual([]);
+    });
+
+    it("rejects a sideboard submission that changes the registered deck pool", () => {
+      const host = new P2PDraftHost(
+        { id: "host" } as never, () => () => {},
+        { type: "Set", data: { set_pool_json: "{}" } } as never,
+        "Traditional", 8, "Host", "Swiss", "Casual",
+      );
+      const sent: DraftP2PMessage[] = [];
+      const privateHost = host as unknown as {
+        bo3State: Map<string, unknown>;
+        launchDigests: Map<string, Map<number, string>>;
+        matchDecks: Map<string, Map<number, { main_deck: string[]; sideboard: string[]; commander: string[] }>>;
+        guestSessions: Map<number, { send: (message: DraftP2PMessage) => void }>;
+        intergameCommands: { snapshot: () => DraftIntergameCommand[] };
+      };
+      privateHost.bo3State.set("bo3-1", {
+        seatA: 1, seatB: 2, submittedA: false, submittedB: false,
+        loserSeat: 1, gameNumber: 2, score: { p0_wins: 0, p1_wins: 0, draws: 0 }, decks: [],
+      });
+      const launchDigest = draftIntergameDigest({ matchId: "bo3-1", seat: 1 });
+      privateHost.launchDigests.set("bo3-1", new Map([[1, launchDigest]]));
+      privateHost.matchDecks.set("bo3-1", new Map([
+        [1, { main_deck: ["Plains"], sideboard: ["Negate"], commander: [] }],
+      ]));
+      privateHost.guestSessions.set(1, { send: (message) => sent.push(message) });
+      const payload = {
+        type: "SubmitSideboard" as const,
+        main: [{ name: "Island", count: 1 }],
+        sideboard: [{ name: "Negate", count: 1 }],
+      };
+
+      host.submitAuthorized(1, {
+        ...command(1, launchDigest),
+        payload,
+        payloadDigest: draftIntergameDigest(payload),
+      });
+
+      expect(privateHost.intergameCommands.snapshot()).toEqual([]);
+      expect(sent).toEqual([{ type: "draft_error", reason: "Invalid sideboard submission" }]);
     });
   });
 

@@ -1702,7 +1702,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       objects: { 7: { name: "Hidden Card" } },
       waiting_for: { type: "GameOver", data: { winner: 0 } },
     } as unknown as GameState;
-    mockGetViewerSnapshot.mockResolvedValue({
+    (mockGetViewerSnapshot as unknown as { mockResolvedValue: (value: unknown) => void }).mockResolvedValue({
       state: terminalState,
       actions: [],
       autoPassRecommended: false,

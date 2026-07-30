@@ -569,17 +569,6 @@ impl GameDb {
         Ok(snapshots)
     }
 
-    /// Full-only stale-row cleanup. Retired tombstones are deliberately
-    /// preserved; a tombstone is the fence against a late background save.
-    pub fn delete_stale_full_sessions(&self, max_age_secs: u64) -> rusqlite::Result<usize> {
-        let cutoff = now_epoch().saturating_sub(max_age_secs);
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM game_sessions WHERE retired = 0 AND updated_at < ?1",
-            params![cutoff],
-        )
-    }
-
     /// Atomically records one immutable Full terminal artifact, creates one
     /// delivery row per occupied seat, and retires the matching active row.
     /// Replaying byte-identical artifact content is idempotent; any changed

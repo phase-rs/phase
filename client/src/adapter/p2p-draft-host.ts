@@ -145,6 +145,25 @@ function deckSubmission(deck: DraftDeckPayload): { main: DeckCardCount[]; sidebo
   };
 }
 
+/** Sideboarding may move cards between zones, but cannot change a player's pool. */
+function preservesDeckPool(
+  deck: DraftDeckPayload,
+  main: readonly DeckCardCount[],
+  sideboard: readonly DeckCardCount[],
+): boolean {
+  const submitted = new Map<string, number>();
+  for (const card of [...main, ...sideboard]) {
+    if (!Number.isSafeInteger(card.count) || card.count < 0) return false;
+    submitted.set(card.name, (submitted.get(card.name) ?? 0) + card.count);
+  }
+  const original = new Map<string, number>();
+  for (const name of [...deck.main_deck, ...deck.sideboard]) {
+    original.set(name, (original.get(name) ?? 0) + 1);
+  }
+  return submitted.size === original.size
+    && [...submitted].every(([name, count]) => original.get(name) === count);
+}
+
 function hashStringToSeed(value: string): number {
   let hash = 5381;
   for (let i = 0; i < value.length; i++) {
@@ -1402,6 +1421,19 @@ export class P2PDraftHost {
       || this.intergameCommands.snapshot().some((candidate) => candidate.commandId === command.commandId)) {
       return;
     }
+    if (command.payload.type === "SubmitSideboard") {
+      const deck = this.matchDecks.get(command.matchId)?.get(seat);
+      if (
+        (seat !== state.seatA && seat !== state.seatB)
+        || !deck
+        || !preservesDeckPool(deck, command.payload.main, command.payload.sideboard)
+      ) {
+        this.sendToSeat(seat, { type: "draft_error", reason: "Invalid sideboard submission" });
+        return;
+      }
+    } else if (state.loserSeat !== seat) {
+      return;
+    }
 
     const held = this.intergameCommands.hold({
       commandId: command.commandId,
@@ -1417,8 +1449,7 @@ export class P2PDraftHost {
     switch (held.payload.type) {
       case "SubmitSideboard":
         if (seat === state.seatA) state.submittedA = true;
-        else if (seat === state.seatB) state.submittedB = true;
-        else return;
+        else state.submittedB = true;
         if (state.submittedA && state.submittedB) {
           this.clearActiveTimer();
           for (const pending of this.intergameCommands.snapshot()) {
@@ -1433,7 +1464,6 @@ export class P2PDraftHost {
         }
         break;
       case "ChoosePlayDraw":
-        if (state.loserSeat !== seat) return;
         this.authorizeIntergameCommand(held);
         break;
     }
@@ -1502,18 +1532,17 @@ export class P2PDraftHost {
       ...(state.submittedA ? [state.seatA] : []),
       ...(state.submittedB ? [state.seatB] : []),
     ]);
-    const defaults = participants
-      .filter((seat) => !submitted.has(seat))
-      .map((seat) => ({ seat, deck: state.decks.find((candidate) => candidate.seat === seat) }));
-    if (defaults.some(({ deck }) => !deck)) {
-      this.emit({ type: "error", message: "Sideboard timer expired without a registered deck" });
-      return;
-    }
-    for (const { seat, deck } of defaults) {
+    for (const seat of participants) {
+      if (submitted.has(seat)) continue;
+      const deck = state.decks.find((candidate) => candidate.seat === seat);
+      if (!deck) {
+        this.emit({ type: "error", message: "Sideboard timer expired without a registered deck" });
+        continue;
+      }
       this.submitDefaultIntergameCommand(matchId, state, seat, {
         type: "SubmitSideboard",
-        main: deck!.main,
-        sideboard: deck!.sideboard,
+        main: deck.main,
+        sideboard: deck.sideboard,
       });
     }
   }
