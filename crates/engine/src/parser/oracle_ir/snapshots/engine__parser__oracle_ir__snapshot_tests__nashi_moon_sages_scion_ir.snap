@@ -139,6 +139,7 @@ expression: "&ir"
                     "prefix_delayed_condition": null,
                     "multi_target": null,
                     "where_x_expression": null,
+                    "where_x_scope": "TargetPlayer",
                     "unless_pay": null
                   },
                   {
@@ -193,6 +194,7 @@ expression: "&ir"
                     "prefix_delayed_condition": null,
                     "multi_target": null,
                     "where_x_expression": null,
+                    "where_x_scope": "TargetPlayer",
                     "unless_pay": null
                   },
                   {

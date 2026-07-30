@@ -11936,16 +11936,17 @@ mod where_x_tests {
         let bare =
             parse_where_x_quantity_expression("the number of artifacts that player controls");
         if let Some(QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCount { filter },
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(typed),
+                },
         }) = bare
         {
-            if let TargetFilter::Typed(typed) = filter {
-                assert_ne!(
-                    typed.controller,
-                    Some(ControllerRef::ScopedPlayer),
-                    "the scope-free wrapper must not force ScopedPlayer"
-                );
-            }
+            assert_ne!(
+                typed.controller,
+                Some(ControllerRef::ScopedPlayer),
+                "the scope-free wrapper must not force ScopedPlayer"
+            );
         }
     }
 
