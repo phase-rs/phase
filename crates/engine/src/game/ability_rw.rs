@@ -3409,6 +3409,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::RegisterBending { .. }
         | Effect::Cleanup { .. }
         | Effect::Learn
+        | Effect::NoteManaSpent
         | Effect::Forage
         | Effect::Harness
         | Effect::CollectEvidence { .. }
@@ -5654,6 +5655,7 @@ fn rw_effect(
         | Effect::Harness
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::RememberCard { .. }
+        | Effect::NoteManaSpent
         | Effect::ForEachCategory { .. }
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative

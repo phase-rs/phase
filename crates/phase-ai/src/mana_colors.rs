@@ -83,6 +83,7 @@ pub(crate) fn collect_mana_production_colors(
         }
         ManaProduction::Colorless { .. }
         | ManaProduction::ChosenColor { .. }
+        | ManaProduction::NotedType { .. }
         | ManaProduction::OpponentLandColors { .. }
         | ManaProduction::AnyTypeProduceableBy { .. }
         | ManaProduction::ChoiceAmongExiledColors { .. }

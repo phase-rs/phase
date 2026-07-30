@@ -935,3 +935,64 @@ fn brood_birthing_grant_static_unchanged_by_masking() {
         result.statics[0]
     );
 }
+
+/// Issue #6504: Jeweled Amulet's "note the type of mana spent to pay this
+/// activation cost" / "add one mana of this artifact's last noted type" pair
+/// must parse to the typed `Effect::NoteManaSpent` / `ManaProduction::NotedType`
+/// building block, not fall through to `Effect::Unimplemented`.
+#[test]
+fn jeweled_amulet_notes_and_reads_back_mana_type() {
+    use engine::types::ability::{ManaProduction, QuantityExpr};
+
+    let result = parse(
+        "{1}, {T}: Put a charge counter on this artifact. Note the type of mana \
+         spent to pay this activation cost. Activate only if there are no charge \
+         counters on this artifact.\n{T}, Remove a charge counter from this \
+         artifact: Add one mana of this artifact's last noted type.",
+        "Jeweled Amulet",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    assert_eq!(
+        result.abilities.len(),
+        2,
+        "Jeweled Amulet has two top-level activated abilities: {:#?}",
+        result.abilities
+    );
+
+    let note_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::PutCounter { .. }))
+        .unwrap_or_else(|| panic!("no PutCounter ability parsed: {:#?}", result.abilities));
+    let note_sub = note_ability
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("PutCounter has no note sub-ability: {note_ability:#?}"));
+    assert!(
+        matches!(&*note_sub.effect, Effect::NoteManaSpent),
+        "expected Effect::NoteManaSpent, got {:#?}",
+        note_sub.effect
+    );
+
+    let add_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::Mana { .. }))
+        .unwrap_or_else(|| panic!("no Mana ability parsed: {:#?}", result.abilities));
+    match &*add_ability.effect {
+        Effect::Mana { produced, .. } => match produced {
+            ManaProduction::NotedType { count } => {
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Fixed { value: 1 },
+                    "expected 'one mana' to parse as count=1"
+                );
+            }
+            other => panic!("expected ManaProduction::NotedType, got {other:#?}"),
+        },
+        other => unreachable!("filtered to Effect::Mana above, got {other:#?}"),
+    }
+}

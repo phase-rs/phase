@@ -311,6 +311,7 @@ fn rewrite_bound_x_in_mana_production(
         | ManaProduction::AnyCombination { count, .. }
         | ManaProduction::AnyCombinationOfObjectColors { count, .. }
         | ManaProduction::ChosenColor { count, .. }
+        | ManaProduction::NotedType { count }
         | ManaProduction::OpponentLandColors { count }
         | ManaProduction::AnyTypeProduceableBy { count, .. }
         | ManaProduction::AnyInCommandersColorIdentity { count, .. } => {

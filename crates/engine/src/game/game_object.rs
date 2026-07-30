@@ -21,7 +21,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use crate::types::keywords::{Keyword, KeywordKind};
-use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
+use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::stickers::AppliedSticker;
 use crate::types::zones::Zone;
@@ -1186,6 +1186,23 @@ pub struct GameObject {
     /// all rules queries. Defaults to `PhasedIn` for replay compatibility.
     #[serde(default)]
     pub phase_status: PhaseStatus,
+
+    /// CR 106.1b + CR 602.2b: Mana type(s) spent to pay this object's own
+    /// most recent activated-ability mana cost, stamped by
+    /// `pay_ability_mana_cost_with_choices_excluding_and_parent` at
+    /// activation-time payment. Bridges cost payment (activation) to
+    /// `Effect::NoteManaSpent` (resolution) for "note the type of mana spent
+    /// to pay this activation cost" (Jeweled Amulet, Ice Cauldron). Transient:
+    /// overwritten by the object's next ability-mana-cost payment, with no
+    /// other clearing logic — safe because every known card in this class
+    /// gates its "note" ability behind a `{T}` cost component, so the same
+    /// source cannot pay a second activation's mana cost before the first
+    /// resolves and consumes this latch. Mirrors `colors_spent_to_cast`'s
+    /// cast-side stamp-then-read idiom, adapted for ability activation, where
+    /// the resolving stack entry is a separate `ResolvedAbility` rather than
+    /// this same object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mana_spent_to_activate: Vec<ManaType>,
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
@@ -1345,6 +1362,12 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         mana_spent_source_snapshots: _,
         phase_status: _,
         protection_start_exempt_attachments: _,
+        // Activation-cost-payment latch — same omission class as
+        // `mana_spent_to_cast`/`colors_spent_to_cast` above: consumed
+        // synchronously by `Effect::NoteManaSpent` into the compared
+        // `chosen_attributes` accumulator, or overwritten by the object's
+        // next ability-mana-cost payment (§5.2c).
+        mana_spent_to_activate: _,
     } = o;
 }
 
@@ -2212,6 +2235,7 @@ impl GameObject {
             phyrexian_life_paid: 0,
             mana_spent_source_snapshots: Vec::new(),
             phase_status: PhaseStatus::PhasedIn,
+            mana_spent_to_activate: Vec::new(),
         }
     }
 
@@ -2655,6 +2679,16 @@ impl GameObject {
     pub fn chosen_color(&self) -> Option<ManaColor> {
         self.chosen_attributes.iter().find_map(|a| match a {
             ChosenAttribute::Color(c) => Some(*c),
+            _ => None,
+        })
+    }
+
+    /// CR 106.1b: Look up the mana type(s) noted by a past `Effect::NoteManaSpent`
+    /// resolution on this permanent's own ability ("this artifact's last noted
+    /// type" — Jeweled Amulet, Ice Cauldron). Read by `ManaProduction::NotedType`.
+    pub fn noted_mana_spent(&self) -> Option<&[ManaType]> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::NotedManaSpent(types) => Some(types.as_slice()),
             _ => None,
         })
     }

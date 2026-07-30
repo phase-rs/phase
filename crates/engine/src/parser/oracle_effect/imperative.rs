@@ -9720,6 +9720,42 @@ fn parse_behold_effect_ast(text: &str, lower: &str) -> Option<ImperativeFamilyAs
     Some(ImperativeFamilyAst::Behold(filter))
 }
 
+/// "Note [the] type of mana spent to pay this [activation] cost", composed
+/// from the instruction, subject, and cost-referent grammar axes. The
+/// type-and-amount wording remains unsupported because it needs a distinct
+/// durable value model.
+fn parse_note_mana_spent_clause(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            parse_note_instruction_prefix,
+            parse_noted_mana_subject,
+            parse_activation_cost_referent,
+        ),
+    )
+    .parse(input)
+}
+
+fn parse_note_instruction_prefix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        preceded(tag("note "), preceded(opt(tag("the ")), tag("type"))),
+    )
+    .parse(input)
+}
+
+fn parse_noted_mana_subject(input: &str) -> OracleResult<'_, ()> {
+    value((), tag(" of mana spent")).parse(input)
+}
+
+fn parse_activation_cost_referent(input: &str) -> OracleResult<'_, ()> {
+    preceded(
+        tag(" to pay this "),
+        value((), alt((tag("activation cost"), tag("cost")))),
+    )
+    .parse(input)
+}
+
 pub(super) fn parse_imperative_family_ast(
     text: &str,
     lower: &str,
@@ -10065,6 +10101,13 @@ pub(super) fn parse_imperative_family_ast(
     // `parse_oneshot_draw_replacement`; on failure it returns `None`.
     if let Some(effect) = crate::parser::oracle_replacement::parse_oneshot_draw_replacement(lower) {
         return Some(ImperativeFamilyAst::GainKeyword(effect));
+    }
+
+    if all_consuming(terminated(parse_note_mana_spent_clause, opt(tag("."))))
+        .parse(lower.trim())
+        .is_ok()
+    {
+        return Some(ImperativeFamilyAst::NoteManaSpent);
     }
 
     // NOTE: when adding verbs here, also add them to IMPERATIVE_EXTRA_VERBS
@@ -12661,6 +12704,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         },
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::Learn => Effect::Learn,
+        ImperativeFamilyAst::NoteManaSpent => Effect::NoteManaSpent,
         // CR 701.40a: Default subject is the controller ("you manifest..."). Subject
         // lowering for "its controller manifests..." routes through the dedicated
         // subject-predicate arm in `lower_subject_predicate_ast` below, which

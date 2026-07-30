@@ -1976,6 +1976,9 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
         ManaProduction::ChosenColor { count, .. } => {
             format!("{} of chosen color", fmt_quantity(count))
         }
+        ManaProduction::NotedType { count } => {
+            format!("{} of noted type", fmt_quantity(count))
+        }
         ManaProduction::OpponentLandColors { count } => {
             format!("{} of opponent land colors", fmt_quantity(count))
         }
@@ -3692,6 +3695,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Forage
         | Effect::Harness
         | Effect::Learn
+        | Effect::NoteManaSpent
         | Effect::SwitchPT { .. }
         | Effect::Myriad
         | Effect::Encore

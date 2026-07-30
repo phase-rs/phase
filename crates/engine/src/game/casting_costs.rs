@@ -11400,6 +11400,11 @@ pub(crate) fn production_override_for_option(
         }
         | crate::types::ability::ManaProduction::ChoiceAmongCombinations { .. }
         | crate::types::ability::ManaProduction::DistinctColorsAmongPermanents { .. }
+        // CR 106.1b + CR 106.5: like `ChosenColor { fixed_alternative: None }`,
+        // the produced type is fixed by engine-set state read at production
+        // time (`noted_mana_type_for`), not chosen per auto-tap option — no
+        // override needed, and CR 106.5 governs the no-noted-type case.
+        | crate::types::ability::ManaProduction::NotedType { .. }
         | crate::types::ability::ManaProduction::TriggerEventManaType => None,
     }
 }

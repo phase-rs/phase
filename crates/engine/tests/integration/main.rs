@@ -648,6 +648,7 @@ mod issue_6477_wandering_archaic_optional_payment;
 mod issue_6498_portent_of_calamity;
 mod issue_6499_flickering_ward_protection_exemption;
 mod issue_6500_loreseekers_stone_hand_cost;
+mod issue_6504_jeweled_amulet_noted_mana;
 mod issue_654_stridehangar_automaton;
 mod issue_6566_granted_leave_exile;
 mod issue_6634_aven_courier;

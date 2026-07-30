@@ -4999,6 +4999,14 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes {
         | ManaProduction::AnyInCommandersColorIdentity { count, .. } => {
             scan_quantity_expr(count, mode)
         }
+        // `NotedManaSpent` is mutable per-object state written by a companion
+        // `Effect::NoteManaSpent`, so sibling activations can affect its value.
+        ManaProduction::NotedType { count } => Axes {
+            event: false,
+            sibling: true,
+            projected: false,
+        }
+        .or(scan_quantity_expr(count, mode)),
         // SCOPED-OBJECT (Omnath, Locus of All): a SINGLE scoped object's colors,
         // NOT a board aggregate — the scope's own read surface is the sole sibling
         // source (CR 202.2c). NO own sibling literal.

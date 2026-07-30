@@ -15577,6 +15577,22 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
         parent,
     )?;
 
+    // CR 106.1b + CR 602.2b: stamp the mana type(s) just spent onto this ability's
+    // own source, mirroring `colors_spent_to_cast`'s cast-side stamp-then-read
+    // idiom. This is the single authority where an activated ability's mana
+    // sub-cost is paid (both the direct-activation and interactive/PendingCast
+    // routes funnel through here), so it is where a companion "note the type of
+    // mana spent to pay this activation cost" effect (Jeweled Amulet, Ice
+    // Cauldron) reads back what was spent — at that effect's OWN resolution,
+    // not here. Never cleared: overwritten by this source's next ability-mana-
+    // cost payment (see `GameObject::mana_spent_to_activate`).
+    let spent_units = match &payment {
+        ManaCostPayment::Paid(units) | ManaCostPayment::Paused { value: units, .. } => units,
+    };
+    if let Some(obj) = state.objects.get_mut(&source_id) {
+        obj.mana_spent_to_activate = spent_units.iter().map(|unit| unit.color).collect();
+    }
+
     Ok(match payment {
         ManaCostPayment::Paid(_) => ManaCostPayment::Paid(()),
         ManaCostPayment::Paused {

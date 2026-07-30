@@ -672,6 +672,11 @@ pub(crate) enum ImperativeFamilyAst {
     Behold(TargetFilter),
     /// CR 701.48a: Learn.
     Learn,
+    /// CR 106.1b + CR 602.2b: "note the type [and amount] of mana spent to pay
+    /// this activation cost" (Jeweled Amulet, Ice Cauldron). Field-less: there
+    /// is nothing to select — the payment already happened, so the effect is
+    /// a pure readback recorded at resolution.
+    NoteManaSpent,
     /// CR 701.40a: Manifest the top card(s) of library.
     Manifest {
         target: TargetFilter,

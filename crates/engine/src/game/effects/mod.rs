@@ -157,6 +157,7 @@ pub mod manifest_dread;
 pub mod mill;
 pub mod monstrosity;
 pub mod myriad;
+pub mod note_mana_spent;
 pub mod opponent_guess;
 pub mod overload;
 pub mod pair_with;
@@ -4410,6 +4411,7 @@ pub fn resolve_effect(
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
         Effect::RememberCard { .. } => remember_card::resolve(state, ability, events),
+        Effect::NoteManaSpent => note_mana_spent::resolve(state, ability, events),
         Effect::ForEachCategory { .. } => {
             choose_from_zone::resolve_for_each_category(state, ability, events)
         }
