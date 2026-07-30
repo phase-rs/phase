@@ -9,7 +9,9 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
 use crate::parser::oracle_ir::trigger::TriggerNodeIr;
 use crate::types::ability::MultiTargetSpec;
-use crate::types::ability::{Effect, TargetChoiceTiming, TriggerCondition};
+use crate::types::ability::{
+    AbilityCost, ActivationRestriction, Effect, TargetChoiceTiming, TriggerCondition,
+};
 use crate::types::game_state::DistributionUnit;
 
 fn ability_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
@@ -930,6 +932,61 @@ fn jace_the_mind_sculptor() {
     );
     insta::assert_json_snapshot!("jace_the_mind_sculptor_ir", &ir);
     insta::assert_json_snapshot!("jace_the_mind_sculptor_lowered", &lowered);
+}
+
+/// CR 606.3 + CR 606.5 + CR 107.3a: a `[−X]` loyalty header remains native
+/// document IR, preserving its chosen-X loyalty-counter cost and sorcery-speed
+/// activation envelope until the sole lowering seam.
+#[test]
+fn chandra_nalaar_minus_x_loyalty_is_ir_native() {
+    let (ir, lowered) = parse_two_layer(
+        "[−X]: Chandra Nalaar deals X damage to target creature.",
+        "Chandra Nalaar",
+        &["Planeswalker"],
+        &["Chandra Nalaar", "Chandra"],
+    );
+
+    assert_eq!(ir.items.len(), 1);
+    let OracleNodeIr::Spell(ability) = &ir.items[0].node else {
+        panic!(
+            "expected native loyalty spell IR, got {:?}",
+            ir.items[0].node
+        );
+    };
+    assert!(matches!(
+        ability.shell.cost.as_ref(),
+        Some(AbilityCost::RemoveCounter {
+            count: crate::types::ability::REMOVE_COUNTER_COST_X,
+            counter_type: crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Loyalty
+            ),
+            target: None,
+            ..
+        })
+    ));
+    assert_eq!(
+        ability.shell.description.as_deref(),
+        Some("[−X]: ~ deals X damage to target creature.")
+    );
+    assert_eq!(
+        ability.shell.activation_restrictions,
+        vec![ActivationRestriction::AsSorcery]
+    );
+    assert_eq!(lowered.abilities.len(), 1);
+    assert!(matches!(
+        lowered.abilities[0].cost.as_ref(),
+        Some(AbilityCost::RemoveCounter {
+            count: crate::types::ability::REMOVE_COUNTER_COST_X,
+            counter_type: crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Loyalty
+            ),
+            target: None,
+            ..
+        })
+    ));
+
+    insta::assert_json_snapshot!("chandra_nalaar_minus_x_loyalty_ir", &ir);
+    insta::assert_json_snapshot!("chandra_nalaar_minus_x_loyalty_lowered", &lowered);
 }
 
 // ---------------------------------------------------------------------------
