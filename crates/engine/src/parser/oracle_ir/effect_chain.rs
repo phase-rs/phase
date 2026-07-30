@@ -470,6 +470,15 @@ pub(crate) struct ClauseIr {
     pub(crate) multi_target: Option<MultiTargetSpec>,
     /// CR 107.3i: "where X is <expr>" binding.
     pub(crate) where_x_expression: Option<String>,
+    /// CR 109.5 + CR 608.2c: The player scope a third-person anaphor inside the
+    /// `where_x_expression` ("they control" / "that player controls") binds to.
+    /// Captured at parse time (the assembly walk that re-interprets the where-X
+    /// count is context-free), then rebuilt into a `ParseContext` and threaded to
+    /// `parse_where_x_quantity_expression_with_context` during lowering.
+    /// `ScopedPlayer` for an each-player phase trigger; `TargetPlayer` for a spell
+    /// whose clause targets a player; `None` = caster-relative legacy binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) where_x_scope: Option<ControllerRef>,
     /// CR 118.12: Resolution-time "unless [player] pays" modifier carried by
     /// this clause.
     pub(crate) unless_pay: Option<UnlessPayModifier>,
@@ -639,6 +648,7 @@ impl ClauseIrBuilder {
             prefix_delayed_condition: None,
             multi_target: None,
             where_x_expression: None,
+            where_x_scope: None,
             unless_pay: None,
             target_selection_mode: TargetSelectionMode::Chosen,
             target_chooser: None,
@@ -690,6 +700,7 @@ impl ClauseIrBuilder {
         .prefix_delayed_condition(c.prefix_delayed_condition)
         .multi_target(c.multi_target)
         .where_x_expression(c.where_x_expression)
+        .where_x_scope(c.where_x_scope)
         .unless_pay(c.unless_pay)
         .target_selection_mode(c.target_selection_mode)
         .target_chooser(c.target_chooser)
@@ -722,6 +733,7 @@ pub(crate) struct ClauseDraft<'a> {
     prefix_delayed_condition: Option<DelayedTriggerCondition>,
     multi_target: Option<MultiTargetSpec>,
     where_x_expression: Option<String>,
+    where_x_scope: Option<ControllerRef>,
     unless_pay: Option<UnlessPayModifier>,
     target_selection_mode: TargetSelectionMode,
     target_chooser: Option<TargetFilter>,
@@ -771,6 +783,10 @@ impl ClauseDraft<'_> {
         self.where_x_expression = v;
         self
     }
+    pub(crate) fn where_x_scope(mut self, v: Option<ControllerRef>) -> Self {
+        self.where_x_scope = v;
+        self
+    }
     pub(crate) fn unless_pay(mut self, v: Option<UnlessPayModifier>) -> Self {
         self.unless_pay = v;
         self
@@ -815,6 +831,7 @@ impl ClauseDraft<'_> {
             prefix_delayed_condition: self.prefix_delayed_condition,
             multi_target: self.multi_target,
             where_x_expression: self.where_x_expression,
+            where_x_scope: self.where_x_scope,
             unless_pay: self.unless_pay,
             target_selection_mode: self.target_selection_mode,
             target_chooser: self.target_chooser,

@@ -7987,8 +7987,8 @@ pub(crate) fn parse_pump_clause_with_context(
     // this pump clause does not lower — fail the parse rather than fabricate a
     // dead placeholder. The line then falls through to the gap path and is
     // reported honestly instead of resolving as a silent +0/+0 no-op.
-    let power = apply_where_x_expression(power, where_x_expression.as_deref())?;
-    let toughness = apply_where_x_expression(toughness, where_x_expression.as_deref())?;
+    let power = apply_where_x_expression(power, where_x_expression.as_deref(), ctx)?;
+    let toughness = apply_where_x_expression(toughness, where_x_expression.as_deref(), ctx)?;
 
     // CR 613.4c: Compose with "for each" quantity to produce dynamic PtValue.
     let (power, toughness) = if let Some(quantity) = for_each_qty {
@@ -8202,13 +8202,17 @@ pub(super) fn strip_leading_sequence_connector(text: &str) -> &str {
 /// resolved as a +0/+0 no-op — while the raw text still rendered as a supported
 /// dynamic quantity in the coverage report. The node was well-typed and
 /// completely dead. Honest failure is the only correct answer here.
-fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) -> Option<PtValue> {
+fn apply_where_x_expression(
+    value: PtValue,
+    where_x_expression: Option<&str>,
+    ctx: &ParseContext,
+) -> Option<PtValue> {
     match (value, where_x_expression) {
         (PtValue::Variable(alias), Some(expression)) if alias.eq_ignore_ascii_case("X") => {
-            parse_where_x_quantity_expression(expression).map(PtValue::Quantity)
+            parse_where_x_quantity_expression_with_context(expression, ctx).map(PtValue::Quantity)
         }
         (PtValue::Variable(alias), Some(expression)) if alias.eq_ignore_ascii_case("-X") => {
-            parse_where_x_quantity_expression(expression).map(|inner| {
+            parse_where_x_quantity_expression_with_context(expression, ctx).map(|inner| {
                 PtValue::Quantity(QuantityExpr::Multiply {
                     factor: -1,
                     inner: Box::new(inner),
@@ -8227,7 +8231,8 @@ fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) ->
         // depth it sits; `apply_where_x_quantity_expression` is a no-op on a slot that
         // holds no X, so a concrete P/T is left untouched.
         (PtValue::Quantity(quantity), Some(_)) => {
-            apply_where_x_quantity_expression(quantity, where_x_expression).map(PtValue::Quantity)
+            apply_where_x_quantity_expression(quantity, where_x_expression, ctx)
+                .map(PtValue::Quantity)
         }
         (value, _) => Some(value),
     }
@@ -8360,7 +8365,27 @@ fn parse_amount_of_mana_paid_this_way(input: &str) -> OracleResult<'_, ()> {
     Ok((input, ()))
 }
 
+/// Context-free entry point: bind a "where X is …" count with no player-anaphor
+/// scope in effect. Genuinely context-free probes (shape/`.is_some()` checks) and
+/// callers with no `ParseContext` in scope route here; the `None`-scope CDA arm
+/// takes the exact pre-#6508 `parse_cda_quantity` path, so their behavior is
+/// byte-identical to before the anaphor-context work.
 pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
+    parse_where_x_quantity_expression_with_context(where_x_expression, &ParseContext::default())
+}
+
+/// CR 109.5 + CR 608.2c + CR 603.2b: Context-aware "where X is …" count binding.
+/// A third-person player anaphor inside the definition ("they control", "that
+/// player controls") binds to `ctx.relative_player_scope`: `ScopedPlayer` for an
+/// each-player phase trigger (Citadel of Pain) and `TargetPlayer` for a spell
+/// whose clause targets a player (Jovial Evil, Pact of the Serpent, Inscription of
+/// Abundance). When no scope is stamped (`None`), the CDA arm falls to the exact
+/// pre-#6508 `parse_cda_quantity` path so caster-relative reads and probe callers
+/// are unchanged.
+pub(crate) fn parse_where_x_quantity_expression_with_context(
+    where_x_expression: &str,
+    ctx: &ParseContext,
+) -> Option<QuantityExpr> {
     let expression = where_x_expression.trim().trim_end_matches('.');
     let expression_lower = expression.to_ascii_lowercase();
     // CR 702.51c + CR 603.3: Knight-Errant of Eos reads the number of
@@ -8435,7 +8460,9 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
         .parse(expression_lower.as_str())
     {
         let consumed = expression_lower.len() - rest_lower.len();
-        if let Some(inner) = parse_where_x_quantity_expression(&expression[consumed..]) {
+        if let Some(inner) =
+            parse_where_x_quantity_expression_with_context(&expression[consumed..], ctx)
+        {
             let inner = if sign < 0 {
                 QuantityExpr::Multiply {
                     factor: -1,
@@ -8511,21 +8538,31 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     //
     // CR 109.5 + CR 608.2c + CR 603.2b/CR 102.1: third-person player anaphors
     // inside a where-X definition ("they control", "that player controls") bind
-    // to the contextually-scoped player, exactly as the sibling for-each
-    // interpreter does (parse_for_each_clause_with_context). `ScopedPlayer`
-    // degrades to the source's controller when no scope is stamped at runtime
-    // (scoped_player_or_controller / resolve_player_for_context_ref), so
-    // caster-relative reads are unchanged for spells, while each-player phase
-    // triggers (Citadel of Pain) read the phase player CR-correctly. "you
-    // control" is ctx-independent and unaffected.
-    let mut anaphor_ctx = crate::parser::oracle_quantity::for_each_anaphor_context(
-        &ParseContext::default(),
-        &ControllerRef::ScopedPlayer,
-    );
-    if let Some(expr) = crate::parser::oracle_quantity::parse_cda_quantity_with_context(
-        where_x_expression,
-        &mut anaphor_ctx,
-    ) {
+    // to the player scope threaded from the caller's context, exactly as the
+    // sibling for-each interpreter does (parse_for_each_clause_with_context).
+    // When the caller's `relative_player_scope` is stamped (`ScopedPlayer` for an
+    // each-player phase trigger — Citadel of Pain — via the trigger's scope; a
+    // per-opponent fanout iterand's `TargetPlayer`; etc.), install it as the
+    // anaphor context so "that player"/"they" reads the correct player. With no
+    // scope stamped (a plain targeted spell), take the exact pre-#6508
+    // `parse_cda_quantity` path — the anaphor keeps its legacy caster-relative
+    // (`You`) binding, byte-identical to before the anaphor work, and never a
+    // hardcoded `ScopedPlayer`. Binding a spell's cross-clause / shared-sibling
+    // "that player" (Curious Herd, Pact of the Serpent) to its chosen target needs
+    // target carry-forward and is a separate change. "you control" is
+    // ctx-independent and unaffected in either arm.
+    let cda = match ctx.relative_player_scope {
+        Some(ref they) => {
+            let mut anaphor_ctx =
+                crate::parser::oracle_quantity::for_each_anaphor_context(ctx, they);
+            crate::parser::oracle_quantity::parse_cda_quantity_with_context(
+                where_x_expression,
+                &mut anaphor_ctx,
+            )
+        }
+        None => crate::parser::oracle_quantity::parse_cda_quantity(where_x_expression),
+    };
+    if let Some(expr) = cda {
         return Some(expr);
     }
     // CR 107.3i + CR 115.1: Some where-X definitions spell the count as
@@ -8736,6 +8773,7 @@ fn parse_where_x_kicker_count(where_x_expression: &str) -> Option<QuantityExpr> 
 pub(super) fn apply_where_x_quantity_expression(
     value: QuantityExpr,
     where_x_expression: Option<&str>,
+    ctx: &ParseContext,
 ) -> Option<QuantityExpr> {
     Some(match value {
         // CR 107.3i: Generic "X is N or more" condition parsing defaults to
@@ -8746,26 +8784,29 @@ pub(super) fn apply_where_x_quantity_expression(
             qty: QuantityRef::CostXPaid,
         } if where_x_expression.is_some() => {
             let expression = where_x_expression.expect("checked is_some above");
-            parse_where_x_quantity_expression(expression)?
+            parse_where_x_quantity_expression_with_context(expression, ctx)?
         }
         QuantityExpr::Ref {
             qty: QuantityRef::Variable { name },
         } if where_x_expression.is_some() && name.eq_ignore_ascii_case("X") => {
             let expression = where_x_expression.expect("checked is_some above");
-            parse_where_x_quantity_expression(expression)?
+            parse_where_x_quantity_expression_with_context(expression, ctx)?
         }
         // CR 107.3i: "search ... for up to X ..., where X is …" wraps the X
         // count in `UpTo`. Recurse into `max` so the defining clause rewrites
         // the inner `Variable("X")` (Oreskos Explorer's "up to X Plains cards"
         // must bind X to the where-clause population, not stay at 0). `up_to`
         // re-asserts the non-nesting invariant.
-        QuantityExpr::UpTo { max } => {
-            QuantityExpr::up_to(apply_where_x_quantity_expression(*max, where_x_expression)?)
-        }
+        QuantityExpr::UpTo { max } => QuantityExpr::up_to(apply_where_x_quantity_expression(
+            *max,
+            where_x_expression,
+            ctx,
+        )?),
         QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
             inner: Box::new(apply_where_x_quantity_expression(
                 *inner,
                 where_x_expression,
+                ctx,
             )?),
             offset,
         },
@@ -8773,6 +8814,7 @@ pub(super) fn apply_where_x_quantity_expression(
             inner: Box::new(apply_where_x_quantity_expression(
                 *inner,
                 where_x_expression,
+                ctx,
             )?),
             minimum,
         },
@@ -8781,6 +8823,7 @@ pub(super) fn apply_where_x_quantity_expression(
             inner: Box::new(apply_where_x_quantity_expression(
                 *inner,
                 where_x_expression,
+                ctx,
             )?),
         },
         QuantityExpr::DivideRounded {
@@ -8791,6 +8834,7 @@ pub(super) fn apply_where_x_quantity_expression(
             inner: Box::new(apply_where_x_quantity_expression(
                 *inner,
                 where_x_expression,
+                ctx,
             )?),
             divisor,
             rounding,
@@ -8798,23 +8842,25 @@ pub(super) fn apply_where_x_quantity_expression(
         QuantityExpr::Sum { exprs } => QuantityExpr::Sum {
             exprs: exprs
                 .into_iter()
-                .map(|expr| apply_where_x_quantity_expression(expr, where_x_expression))
+                .map(|expr| apply_where_x_quantity_expression(expr, where_x_expression, ctx))
                 .collect::<Option<Vec<_>>>()?,
         },
         QuantityExpr::Max { exprs } => QuantityExpr::Max {
             exprs: exprs
                 .into_iter()
-                .map(|expr| apply_where_x_quantity_expression(expr, where_x_expression))
+                .map(|expr| apply_where_x_quantity_expression(expr, where_x_expression, ctx))
                 .collect::<Option<Vec<_>>>()?,
         },
         QuantityExpr::Difference { left, right } => QuantityExpr::Difference {
             left: Box::new(apply_where_x_quantity_expression(
                 *left,
                 where_x_expression,
+                ctx,
             )?),
             right: Box::new(apply_where_x_quantity_expression(
                 *right,
                 where_x_expression,
+                ctx,
             )?),
         },
         QuantityExpr::Power { base, exponent } => QuantityExpr::Power {
@@ -8822,6 +8868,7 @@ pub(super) fn apply_where_x_quantity_expression(
             exponent: Box::new(apply_where_x_quantity_expression(
                 *exponent,
                 where_x_expression,
+                ctx,
             )?),
         },
         other => other,
@@ -8840,8 +8887,9 @@ fn bind_where_x_quantity(
     slot: &mut QuantityExpr,
     where_x_expression: Option<&str>,
     unbound: &mut Option<String>,
+    ctx: &ParseContext,
 ) {
-    match apply_where_x_quantity_expression(slot.clone(), where_x_expression) {
+    match apply_where_x_quantity_expression(slot.clone(), where_x_expression, ctx) {
         Some(bound) => *slot = bound,
         None => *unbound = where_x_expression.map(str::to_string),
     }
@@ -8853,9 +8901,10 @@ fn bind_where_x_optional_quantity(
     slot: Option<&mut QuantityExpr>,
     where_x_expression: Option<&str>,
     unbound: &mut Option<String>,
+    ctx: &ParseContext,
 ) {
     if let Some(slot) = slot {
-        bind_where_x_quantity(slot, where_x_expression, unbound);
+        bind_where_x_quantity(slot, where_x_expression, unbound, ctx);
     }
 }
 
@@ -8869,9 +8918,10 @@ fn bind_where_x_enter_with_counters(
     entries: &mut [(CounterType, QuantityExpr)],
     where_x_expression: Option<&str>,
     unbound: &mut Option<String>,
+    ctx: &ParseContext,
 ) {
     for (_, count) in entries.iter_mut() {
-        bind_where_x_quantity(count, where_x_expression, unbound);
+        bind_where_x_quantity(count, where_x_expression, unbound, ctx);
     }
 }
 
@@ -8882,11 +8932,12 @@ fn bind_where_x_optional_pt(
     slot: &mut Option<PtValue>,
     where_x_expression: Option<&str>,
     unbound: &mut Option<String>,
+    ctx: &ParseContext,
 ) {
     let Some(value) = slot.as_ref() else {
         return;
     };
-    match apply_where_x_expression(value.clone(), where_x_expression) {
+    match apply_where_x_expression(value.clone(), where_x_expression, ctx) {
         Some(bound) => *slot = Some(bound),
         None => *unbound = where_x_expression.map(str::to_string),
     }
@@ -8895,6 +8946,7 @@ fn bind_where_x_optional_pt(
 pub(super) fn apply_where_x_effect_expression(
     effect: &mut Effect,
     where_x_expression: Option<&str>,
+    ctx: &ParseContext,
 ) {
     // CR 107.3c: set when the clause DEFINES X but the definition is not
     // representable. Recorded here and converted to a gap node after the match
@@ -8958,7 +9010,7 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::SkipNextStep { count: amount, .. }
         | Effect::SkipNextTurn { count: amount, .. }
         | Effect::Surveil { count: amount, .. } => {
-            bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x);
+            bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x, ctx);
         }
         // Multi-slot carriers: a where-X clause defines ONE X, and every slot that
         // references it must bind to the same expression (CR 107.3i: X has a single value
@@ -8969,25 +9021,26 @@ pub(super) fn apply_where_x_effect_expression(
             life_payment,
             ..
         } => {
-            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
-            bind_where_x_quantity(life_payment, where_x_expression, &mut unbound_where_x);
+            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x, ctx);
+            bind_where_x_quantity(life_payment, where_x_expression, &mut unbound_where_x, ctx);
         }
         Effect::CreateTokenCopyFromPool {
             mv_bound, count, ..
         } => {
-            bind_where_x_quantity(mv_bound, where_x_expression, &mut unbound_where_x);
-            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            bind_where_x_quantity(mv_bound, where_x_expression, &mut unbound_where_x, ctx);
+            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x, ctx);
         }
         Effect::PutSticker {
             count,
             max_ticket_cost,
             ..
         } => {
-            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x, ctx);
             bind_where_x_optional_quantity(
                 max_ticket_cost.as_mut(),
                 where_x_expression,
                 &mut unbound_where_x,
+                ctx,
             );
         }
         // The optional-count carriers: same single where-X slot, but absent by default
@@ -9000,6 +9053,7 @@ pub(super) fn apply_where_x_effect_expression(
                 count.as_mut(),
                 where_x_expression,
                 &mut unbound_where_x,
+                ctx,
             );
         }
         Effect::ChooseAndSacrificeRest {
@@ -9009,6 +9063,7 @@ pub(super) fn apply_where_x_effect_expression(
                 total_power_cap.as_mut(),
                 where_x_expression,
                 &mut unbound_where_x,
+                ctx,
             );
         }
         // CR 122.1: the mass-move counterpart of `ChangeZone`'s enters-with rider.
@@ -9017,11 +9072,12 @@ pub(super) fn apply_where_x_effect_expression(
             enter_with_counters,
             ..
         } => {
-            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x);
+            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x, ctx);
             bind_where_x_enter_with_counters(
                 enter_with_counters,
                 where_x_expression,
                 &mut unbound_where_x,
+                ctx,
             );
         }
         Effect::Token {
@@ -9031,7 +9087,7 @@ pub(super) fn apply_where_x_effect_expression(
             enter_with_counters,
             ..
         } => {
-            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x, ctx);
             // CR 122.1: the enters-with rider is a THIRD X site on a token, beside the
             // token count and its P/T. G'raha Tia, Scion Reborn creates a fixed 1/1 Hero
             // and puts X +1/+1 counters on it, so `count`/`power`/`toughness` are all
@@ -9041,10 +9097,11 @@ pub(super) fn apply_where_x_effect_expression(
                 enter_with_counters,
                 where_x_expression,
                 &mut unbound_where_x,
+                ctx,
             );
             match (
-                apply_where_x_expression(power.clone(), where_x_expression),
-                apply_where_x_expression(toughness.clone(), where_x_expression),
+                apply_where_x_expression(power.clone(), where_x_expression, ctx),
+                apply_where_x_expression(toughness.clone(), where_x_expression, ctx),
             ) {
                 (Some(bound_power), Some(bound_toughness)) => {
                     *power = bound_power;
@@ -9059,15 +9116,15 @@ pub(super) fn apply_where_x_effect_expression(
         Effect::Animate {
             power, toughness, ..
         } => {
-            bind_where_x_optional_pt(power, where_x_expression, &mut unbound_where_x);
-            bind_where_x_optional_pt(toughness, where_x_expression, &mut unbound_where_x);
+            bind_where_x_optional_pt(power, where_x_expression, &mut unbound_where_x, ctx);
+            bind_where_x_optional_pt(toughness, where_x_expression, &mut unbound_where_x, ctx);
         }
         // CR 107.3i + CR 109.4 + CR 109.5: "search/seek for up to X …, where X
         // is …" binds the search count (Oreskos Explorer). Eldritch Evolution
         // binds the filter's `Cmc` bound when X appears in the card filter.
         Effect::SearchLibrary { filter, count, .. } | Effect::Seek { filter, count, .. } => {
-            bind_where_x_filter(filter, where_x_expression, &mut unbound_where_x);
-            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            bind_where_x_filter(filter, where_x_expression, &mut unbound_where_x, ctx);
+            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x, ctx);
         }
         // CR 107.3i + CR 400.7: "return/put up to one target creature card with
         // mana value X or less ..., where X is <expression>" binds the
@@ -9083,29 +9140,31 @@ pub(super) fn apply_where_x_effect_expression(
             conditional_enter_with_counters,
             ..
         } => {
-            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x);
+            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x, ctx);
             // CR 122.1: same enters-with rider as `Token`/`ChangeZoneAll` — the moved
             // permanent's counter count is a where-X site of its own.
             bind_where_x_enter_with_counters(
                 enter_with_counters,
                 where_x_expression,
                 &mut unbound_where_x,
+                ctx,
             );
             for (_, _, count) in conditional_enter_with_counters.iter_mut() {
-                bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+                bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x, ctx);
             }
         }
         Effect::Destroy { target, .. } | Effect::Bounce { target, .. } => {
-            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x);
+            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x, ctx);
         }
         // `BounceAll` carries an optional count ("return X target creatures …") beside its
         // filter; the filter-only arm left that count a bare placeholder.
         Effect::BounceAll { target, count, .. } => {
-            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x);
+            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x, ctx);
             bind_where_x_optional_quantity(
                 count.as_mut(),
                 where_x_expression,
                 &mut unbound_where_x,
+                ctx,
             );
         }
         // CR 601.2e: a cast permission may be BOUNDED by X ("you may cast a spell with mana
@@ -9116,9 +9175,9 @@ pub(super) fn apply_where_x_effect_expression(
         Effect::CastFromZone {
             target, constraint, ..
         } => {
-            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x);
+            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x, ctx);
             if let Some(CastPermissionConstraint::ManaValue { value, .. }) = constraint.as_mut() {
-                bind_where_x_quantity(value, where_x_expression, &mut unbound_where_x);
+                bind_where_x_quantity(value, where_x_expression, &mut unbound_where_x, ctx);
             }
         }
         Effect::Dig {
@@ -9128,19 +9187,20 @@ pub(super) fn apply_where_x_effect_expression(
             filter,
             ..
         } => {
-            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x, ctx);
             // "look at the top N …, keep X of them" — the KEPT count is a second, distinct
             // quantity slot that the original arm did not bind.
             bind_where_x_optional_quantity(
                 keep_count_expr.as_mut(),
                 where_x_expression,
                 &mut unbound_where_x,
+                ctx,
             );
-            bind_where_x_filter(player, where_x_expression, &mut unbound_where_x);
-            bind_where_x_filter(filter, where_x_expression, &mut unbound_where_x);
+            bind_where_x_filter(player, where_x_expression, &mut unbound_where_x, ctx);
+            bind_where_x_filter(filter, where_x_expression, &mut unbound_where_x, ctx);
         }
         Effect::Scry { count, .. } => {
-            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x, ctx);
         }
         Effect::Pump {
             power, toughness, ..
@@ -9149,8 +9209,8 @@ pub(super) fn apply_where_x_effect_expression(
             power, toughness, ..
         } => {
             match (
-                apply_where_x_expression(power.clone(), where_x_expression),
-                apply_where_x_expression(toughness.clone(), where_x_expression),
+                apply_where_x_expression(power.clone(), where_x_expression, ctx),
+                apply_where_x_expression(toughness.clone(), where_x_expression, ctx),
             ) {
                 (Some(bound_power), Some(bound_toughness)) => {
                     *power = bound_power;
@@ -9173,7 +9233,7 @@ pub(super) fn apply_where_x_effect_expression(
                     crate::types::ability::PreventionAmount::All
                         | crate::types::ability::PreventionAmount::AllBut(_)
                 ) {
-                    *amount_dynamic = parse_where_x_quantity_expression(expr);
+                    *amount_dynamic = parse_where_x_quantity_expression_with_context(expr, ctx);
                 }
             }
         }
@@ -9189,9 +9249,9 @@ pub(super) fn apply_where_x_effect_expression(
             // CR 118.1 + CR 118.5: per-object scaled mana (`scale`) tracks the
             // surrounding where-X binding before the cost amount itself.
             if let Some(times) = scale {
-                bind_where_x_quantity(times, where_x_expression, &mut unbound_where_x);
+                bind_where_x_quantity(times, where_x_expression, &mut unbound_where_x, ctx);
             }
-            apply_where_x_to_ability_cost(cost, where_x_expression, &mut unbound_where_x);
+            apply_where_x_to_ability_cost(cost, where_x_expression, &mut unbound_where_x, ctx);
         }
         Effect::GenericEffect {
             static_abilities,
@@ -9219,6 +9279,7 @@ pub(super) fn apply_where_x_effect_expression(
                         condition,
                         where_x_expression,
                         &mut unbound_where_x,
+                        ctx,
                     );
                 }
                 // CR 107.3i + CR 611.2c: A continuous "gets +X/+X … where X is
@@ -9238,6 +9299,7 @@ pub(super) fn apply_where_x_effect_expression(
                         modification,
                         where_x_expression,
                         &mut unbound_where_x,
+                        ctx,
                     );
                     if rebind_target_anaphor {
                         rebind_target_anaphor_continuous_modification(modification);
@@ -9371,6 +9433,7 @@ fn apply_where_x_continuous_modification(
     modification: &mut ContinuousModification,
     where_x_expression: Option<&str>,
     unbound: &mut Option<String>,
+    ctx: &ParseContext,
 ) {
     match modification {
         ContinuousModification::SetDynamicPower { value, .. }
@@ -9379,10 +9442,10 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::SetToughnessDynamic { value, .. }
         | ContinuousModification::AddDynamicPower { value, .. }
         | ContinuousModification::AddDynamicToughness { value, .. } => {
-            bind_where_x_quantity(value, where_x_expression, unbound);
+            bind_where_x_quantity(value, where_x_expression, unbound, ctx);
         }
         ContinuousModification::AddDynamicKeyword { value, .. } => {
-            bind_where_x_quantity(value, where_x_expression, unbound);
+            bind_where_x_quantity(value, where_x_expression, unbound, ctx);
             // CR 613.4c + CR 702: a GRANTED keyword's "where X is its
             // power/toughness/mana value" refers to the keyword's RECIPIENT (the
             // creature that has the keyword), not the grant's source object. The
@@ -9400,7 +9463,11 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::SetStartingLoyalty { .. } => {}
         ContinuousModification::GrantTrigger { trigger } => {
             if let Some(execute) = trigger.execute.as_mut() {
-                apply_where_x_ability_expression(execute, where_x_expression);
+                apply_where_x_ability_expression(
+                    execute,
+                    where_x_expression,
+                    ctx.relative_player_scope.as_ref(),
+                );
             }
         }
         // Non-dynamic modifications carry fixed integers, enum payloads, or
@@ -9612,26 +9679,27 @@ fn apply_where_x_to_ability_cost(
     cost: &mut AbilityCost,
     where_x_expression: Option<&str>,
     unbound: &mut Option<String>,
+    ctx: &ParseContext,
 ) {
     match cost {
         AbilityCost::PayLife { amount }
         | AbilityCost::PaySpeed { amount }
         | AbilityCost::PayEnergy { amount }
         | AbilityCost::ManaDynamic { quantity: amount } => {
-            bind_where_x_quantity(amount, where_x_expression, unbound);
+            bind_where_x_quantity(amount, where_x_expression, unbound, ctx);
         }
         // CR 701.9: "discard X cards, where X is …" — the discard count is a
         // `QuantityExpr` and must track the same where-X binding.
         AbilityCost::Discard { count, .. } => {
-            bind_where_x_quantity(count, where_x_expression, unbound);
+            bind_where_x_quantity(count, where_x_expression, unbound, ctx);
         }
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
             for sub in costs.iter_mut() {
-                apply_where_x_to_ability_cost(sub, where_x_expression, unbound);
+                apply_where_x_to_ability_cost(sub, where_x_expression, unbound, ctx);
             }
         }
         AbilityCost::PerCounter { base, .. } => {
-            apply_where_x_to_ability_cost(base, where_x_expression, unbound);
+            apply_where_x_to_ability_cost(base, where_x_expression, unbound, ctx);
         }
         // CR 107.3i + CR 118.1: An effect performed as a cost nests an `Effect`
         // (e.g. `PutCounter { count: QuantityExpr }`), whose own quantity can
@@ -9640,7 +9708,7 @@ fn apply_where_x_to_ability_cost(
         // flows into the nested effect's count exactly as it does for the
         // sub-ability's effects — never re-implement the per-effect quantity walk.
         AbilityCost::EffectCost { effect } => {
-            apply_where_x_effect_expression(effect, where_x_expression);
+            apply_where_x_effect_expression(effect, where_x_expression, ctx);
         }
         // (the nested effect reports its own unrepresentable where-X binding by
         // rewriting itself to `Effect::unimplemented`, so no `unbound` plumbing
@@ -9683,9 +9751,10 @@ fn apply_where_x_to_ability_cost(
 pub(super) fn apply_where_x_to_latest_def(
     defs: &mut [AbilityDefinition],
     where_x_expression: Option<&str>,
+    where_x_scope: Option<&ControllerRef>,
 ) {
     if let Some(def) = defs.last_mut() {
-        apply_where_x_ability_expression(def, where_x_expression);
+        apply_where_x_ability_expression(def, where_x_expression, where_x_scope);
     }
 }
 
@@ -9696,8 +9765,9 @@ fn bind_where_x_filter(
     slot: &mut TargetFilter,
     where_x_expression: Option<&str>,
     unbound: &mut Option<String>,
+    ctx: &ParseContext,
 ) {
-    match apply_where_x_to_filter(slot.clone(), where_x_expression) {
+    match apply_where_x_to_filter(slot.clone(), where_x_expression, ctx) {
         Some(bound) => *slot = bound,
         None => *unbound = where_x_expression.map(str::to_string),
     }
@@ -9722,6 +9792,7 @@ fn bind_where_x_filter(
 pub(crate) fn apply_where_x_to_filter(
     filter: TargetFilter,
     where_x_expression: Option<&str>,
+    ctx: &ParseContext,
 ) -> Option<TargetFilter> {
     if where_x_expression.is_none() {
         return Some(filter);
@@ -9731,24 +9802,24 @@ pub(crate) fn apply_where_x_to_filter(
             typed.properties = typed
                 .properties
                 .into_iter()
-                .map(|prop| apply_where_x_to_filter_prop(prop, where_x_expression))
+                .map(|prop| apply_where_x_to_filter_prop(prop, where_x_expression, ctx))
                 .collect::<Option<Vec<_>>>()?;
             TargetFilter::Typed(typed)
         }
         TargetFilter::And { filters } => TargetFilter::And {
             filters: filters
                 .into_iter()
-                .map(|filter| apply_where_x_to_filter(filter, where_x_expression))
+                .map(|filter| apply_where_x_to_filter(filter, where_x_expression, ctx))
                 .collect::<Option<Vec<_>>>()?,
         },
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters
                 .into_iter()
-                .map(|filter| apply_where_x_to_filter(filter, where_x_expression))
+                .map(|filter| apply_where_x_to_filter(filter, where_x_expression, ctx))
                 .collect::<Option<Vec<_>>>()?,
         },
         TargetFilter::Not { filter } => TargetFilter::Not {
-            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression)?),
+            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression, ctx)?),
         },
         TargetFilter::TrackedSetFiltered {
             id,
@@ -9756,7 +9827,7 @@ pub(crate) fn apply_where_x_to_filter(
             caused_by,
         } => TargetFilter::TrackedSetFiltered {
             id,
-            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression)?),
+            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression, ctx)?),
             caused_by,
         },
         other => other,
@@ -9773,20 +9844,22 @@ fn apply_where_x_to_target_constraint(
     constraint: &mut TargetSelectionConstraint,
     where_x_expression: Option<&str>,
     unbound: &mut Option<String>,
+    ctx: &ParseContext,
 ) {
     if let TargetSelectionConstraint::TotalManaValue { value, .. } = constraint {
-        bind_where_x_quantity(value, where_x_expression, unbound);
+        bind_where_x_quantity(value, where_x_expression, unbound, ctx);
     }
 }
 
 fn apply_where_x_to_filter_prop(
     prop: FilterProp,
     where_x_expression: Option<&str>,
+    ctx: &ParseContext,
 ) -> Option<FilterProp> {
     Some(match prop {
         FilterProp::Cmc { comparator, value } => FilterProp::Cmc {
             comparator,
-            value: apply_where_x_quantity_expression(value, where_x_expression)?,
+            value: apply_where_x_quantity_expression(value, where_x_expression, ctx)?,
         },
         FilterProp::Counters {
             counters,
@@ -9795,7 +9868,7 @@ fn apply_where_x_to_filter_prop(
         } => FilterProp::Counters {
             counters,
             comparator,
-            count: apply_where_x_quantity_expression(count, where_x_expression)?,
+            count: apply_where_x_quantity_expression(count, where_x_expression, ctx)?,
         },
         FilterProp::PtComparison {
             stat,
@@ -9806,13 +9879,13 @@ fn apply_where_x_to_filter_prop(
             stat,
             scope,
             comparator,
-            value: apply_where_x_quantity_expression(value, where_x_expression)?,
+            value: apply_where_x_quantity_expression(value, where_x_expression, ctx)?,
         },
         FilterProp::CanEnchant { target } => FilterProp::CanEnchant {
-            target: Box::new(apply_where_x_to_filter(*target, where_x_expression)?),
+            target: Box::new(apply_where_x_to_filter(*target, where_x_expression, ctx)?),
         },
         FilterProp::DifferentNameFrom { filter } => FilterProp::DifferentNameFrom {
-            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression)?),
+            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression, ctx)?),
         },
         FilterProp::SharesQuality {
             quality,
@@ -9824,27 +9897,32 @@ fn apply_where_x_to_filter_prop(
                 Some(filter) => Some(Box::new(apply_where_x_to_filter(
                     *filter,
                     where_x_expression,
+                    ctx,
                 )?)),
                 None => None,
             },
             relation,
         },
         FilterProp::TargetsOnly { filter } => FilterProp::TargetsOnly {
-            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression)?),
+            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression, ctx)?),
         },
         FilterProp::Targets { filter } => FilterProp::Targets {
-            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression)?),
+            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression, ctx)?),
         },
         FilterProp::AnyOf { props } => FilterProp::AnyOf {
             props: props
                 .into_iter()
-                .map(|p| apply_where_x_to_filter_prop(p, where_x_expression))
+                .map(|p| apply_where_x_to_filter_prop(p, where_x_expression, ctx))
                 .collect::<Option<Vec<_>>>()?,
         },
         // CR 608.2c: Descend into the negated inner prop so X-substitution
         // reaches it (mirrors the AnyOf transform).
         FilterProp::Not { prop } => FilterProp::Not {
-            prop: Box::new(apply_where_x_to_filter_prop(*prop, where_x_expression)?),
+            prop: Box::new(apply_where_x_to_filter_prop(
+                *prop,
+                where_x_expression,
+                ctx,
+            )?),
         },
         other => other,
     })
@@ -9950,7 +10028,18 @@ fn strip_announce_lock(expression: &str) -> Option<&str> {
 pub(super) fn apply_where_x_ability_expression(
     def: &mut AbilityDefinition,
     where_x_expression: Option<&str>,
+    where_x_scope: Option<&ControllerRef>,
 ) {
+    // CR 109.5 + CR 608.2c: rebuild the parse-time player-anaphor scope captured on
+    // the clause into a `ParseContext` so every `parse_where_x_quantity_expression`
+    // reached from this def's rewrite walk reads "that player"/"they" against the
+    // correct player (`ScopedPlayer` phase player / `TargetPlayer` spell target).
+    // The context-free assembly walk lost the original `ParseContext`, so this is
+    // where it is reconstituted before threading down.
+    let wx_ctx = ParseContext {
+        relative_player_scope: where_x_scope.cloned(),
+        ..Default::default()
+    };
     // CR 601.2b + CR 602.2b: an announce-time-locked "where X is …" clause defines X
     // as a count MEASURED AT ANNOUNCEMENT, overriding CR 107.3c's default that a
     // text-defined X "may change while that spell or ability is on the stack". Park
@@ -9963,7 +10052,7 @@ pub(super) fn apply_where_x_ability_expression(
     // happens to be read (resolution, for a damage amount or a draw count), which is
     // precisely the behaviour the printed qualifier exists to forbid.
     if let Some(locked) = where_x_expression.and_then(strip_announce_lock) {
-        match parse_where_x_quantity_expression(locked) {
+        match parse_where_x_quantity_expression_with_context(locked, &wx_ctx) {
             Some(expr) => {
                 def.announced_x = Some(expr);
                 return;
@@ -9995,10 +10084,10 @@ pub(super) fn apply_where_x_ability_expression(
     // rewrites below hold mutable borrows of `def`'s fields).
     let mut unbound_where_x: Option<String> = None;
     if let Some(cond) = def.condition.as_mut() {
-        apply_where_x_ability_condition(cond, where_x_expression, &mut unbound_where_x);
+        apply_where_x_ability_condition(cond, where_x_expression, &mut unbound_where_x, &wx_ctx);
     }
     if let Some(repeat_for) = def.repeat_for.take() {
-        match apply_where_x_quantity_expression(repeat_for, where_x_expression) {
+        match apply_where_x_quantity_expression(repeat_for, where_x_expression, &wx_ctx) {
             Some(bound) => def.repeat_for = Some(bound),
             None => unbound_where_x = where_x_expression.map(str::to_string),
         }
@@ -10009,7 +10098,7 @@ pub(super) fn apply_where_x_ability_expression(
         // rather than fabricating one.
         spec.map_quantities(|expr| {
             let mut slot = expr;
-            bind_where_x_quantity(&mut slot, where_x_expression, &mut unbound_where_x);
+            bind_where_x_quantity(&mut slot, where_x_expression, &mut unbound_where_x, &wx_ctx);
             slot
         });
     }
@@ -10019,9 +10108,14 @@ pub(super) fn apply_where_x_ability_expression(
     // inherits `Variable("X")` with no defining expression and the cap is
     // effectively unbounded.
     for constraint in def.target_constraints.iter_mut() {
-        apply_where_x_to_target_constraint(constraint, where_x_expression, &mut unbound_where_x);
+        apply_where_x_to_target_constraint(
+            constraint,
+            where_x_expression,
+            &mut unbound_where_x,
+            &wx_ctx,
+        );
     }
-    apply_where_x_effect_expression(def.effect.as_mut(), where_x_expression);
+    apply_where_x_effect_expression(def.effect.as_mut(), where_x_expression, &wx_ctx);
     // CR 107.3c: the clause defines X, but we cannot represent that definition.
     // Report the gap instead of keeping a raw-text placeholder that resolves to
     // 0 while still reading as a supported dynamic quantity.
@@ -10029,13 +10123,13 @@ pub(super) fn apply_where_x_ability_expression(
         *def.effect = Effect::unimplemented("where_x_binding", format!("where X is {expression}"));
     }
     if let Some(sub) = def.sub_ability.as_mut() {
-        apply_where_x_ability_expression(sub, where_x_expression);
+        apply_where_x_ability_expression(sub, where_x_expression, where_x_scope);
     }
     if let Some(else_ability) = def.else_ability.as_mut() {
-        apply_where_x_ability_expression(else_ability, where_x_expression);
+        apply_where_x_ability_expression(else_ability, where_x_expression, where_x_scope);
     }
     for mode_ability in &mut def.mode_abilities {
-        apply_where_x_ability_expression(mode_ability, where_x_expression);
+        apply_where_x_ability_expression(mode_ability, where_x_expression, where_x_scope);
     }
 }
 
@@ -10048,22 +10142,23 @@ fn apply_where_x_ability_condition(
     cond: &mut AbilityCondition,
     where_x_expression: Option<&str>,
     unbound: &mut Option<String>,
+    ctx: &ParseContext,
 ) {
     match cond {
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
-            bind_where_x_quantity(lhs, where_x_expression, unbound);
-            bind_where_x_quantity(rhs, where_x_expression, unbound);
+            bind_where_x_quantity(lhs, where_x_expression, unbound, ctx);
+            bind_where_x_quantity(rhs, where_x_expression, unbound, ctx);
         }
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             for c in conditions.iter_mut() {
-                apply_where_x_ability_condition(c, where_x_expression, unbound);
+                apply_where_x_ability_condition(c, where_x_expression, unbound, ctx);
             }
         }
         AbilityCondition::Not { condition } => {
-            apply_where_x_ability_condition(condition, where_x_expression, unbound);
+            apply_where_x_ability_condition(condition, where_x_expression, unbound, ctx);
         }
         AbilityCondition::ConditionInstead { inner } => {
-            apply_where_x_ability_condition(inner, where_x_expression, unbound);
+            apply_where_x_ability_condition(inner, where_x_expression, unbound, ctx);
         }
         _ => {}
     }
@@ -10073,19 +10168,20 @@ fn apply_where_x_static_condition(
     condition: &mut StaticCondition,
     where_x_expression: Option<&str>,
     unbound: &mut Option<String>,
+    ctx: &ParseContext,
 ) {
     match condition {
         StaticCondition::QuantityComparison { lhs, rhs, .. } => {
-            bind_where_x_quantity(lhs, where_x_expression, unbound);
-            bind_where_x_quantity(rhs, where_x_expression, unbound);
+            bind_where_x_quantity(lhs, where_x_expression, unbound, ctx);
+            bind_where_x_quantity(rhs, where_x_expression, unbound, ctx);
         }
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             for condition in conditions {
-                apply_where_x_static_condition(condition, where_x_expression, unbound);
+                apply_where_x_static_condition(condition, where_x_expression, unbound, ctx);
             }
         }
         StaticCondition::Not { condition } => {
-            apply_where_x_static_condition(condition, where_x_expression, unbound);
+            apply_where_x_static_condition(condition, where_x_expression, unbound, ctx);
         }
         _ => {}
     }
@@ -11392,7 +11488,10 @@ mod tests {
 }
 #[cfg(test)]
 mod where_x_tests {
-    use super::parse_where_x_quantity_expression;
+    use super::{
+        parse_where_x_quantity_expression, parse_where_x_quantity_expression_with_context,
+    };
+    use crate::parser::oracle_ir::context::ParseContext;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
         DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtValue, QuantityExpr,
@@ -11722,15 +11821,78 @@ mod where_x_tests {
         );
     }
 
-    /// Issue #6508: a where-X filter-controller anaphor ("they control") inside a
-    /// trigger body must bind to the scoped player, mirroring the sibling
-    /// for-each interpreter (CR 608.2c). `parse_where_x_quantity_expression` now
-    /// carries the `ScopedPlayer` anaphor context into the CDA-quantity delegate,
-    /// so Citadel of Pain's "the number of untapped lands they control" counts
-    /// the phase player's untapped lands.
+    /// Issue #6564 review: the ANAPHORIC "that player controls" where-X count must
+    /// bind to whatever player scope the caller threads through the context — never
+    /// a hardcoded `ScopedPlayer`. Given a `TargetPlayer`-scoped context (what a
+    /// caller supplies when "that player" is a chosen target), the count controller
+    /// is `TargetPlayer`; given the scope-free default wrapper it must NOT be forced
+    /// to `ScopedPlayer` (it keeps the legacy `You`). This is the exact case the
+    /// earlier hardcoded install regressed and the maintainer asked to cover.
+    /// CR 109.4 + CR 608.2c.
+    #[test]
+    fn where_x_that_player_controls_binds_caller_scope_not_scoped_player() {
+        // Context-aware entry point with a TargetPlayer scope → TargetPlayer.
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        let parsed = parse_where_x_quantity_expression_with_context(
+            "the number of artifacts that player controls",
+            &ctx,
+        );
+        let Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        }) = parsed
+        else {
+            panic!("expected an object count, got {parsed:?}");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a typed object-count filter, got {filter:?}");
+        };
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::TargetPlayer),
+            "the caller's TargetPlayer scope must thread into the anaphor"
+        );
+
+        // The scope-free default wrapper must NOT rebind the anaphor to
+        // ScopedPlayer (the regression). Legacy caster-relative binding is fine.
+        let bare =
+            parse_where_x_quantity_expression("the number of artifacts that player controls");
+        if let Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        }) = bare
+        {
+            if let TargetFilter::Typed(typed) = filter {
+                assert_ne!(
+                    typed.controller,
+                    Some(ControllerRef::ScopedPlayer),
+                    "the scope-free wrapper must not force ScopedPlayer"
+                );
+            }
+        }
+    }
+
+    /// Issue #6508: a where-X filter-controller anaphor ("they control") inside an
+    /// each-player phase trigger must bind to the scoped player, mirroring the
+    /// sibling for-each interpreter (CR 608.2c). The each-player phase context
+    /// (Citadel of Pain) carries `relative_player_scope = ScopedPlayer`, which the
+    /// assembly path threads into `parse_where_x_quantity_expression_with_context`
+    /// so "the number of untapped lands they control" counts the phase player's
+    /// untapped lands. (#6564 review: this scope is threaded from the caller's
+    /// context, NOT hardcoded — the scope-free default wrapper leaves the legacy
+    /// caster-relative binding untouched; see
+    /// `where_x_that_player_controls_binds_caller_scope_not_scoped_player`.)
     #[test]
     fn where_x_they_control_binds_scoped_player() {
-        let parsed = parse_where_x_quantity_expression("the number of untapped lands they control");
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        let parsed = parse_where_x_quantity_expression_with_context(
+            "the number of untapped lands they control",
+            &ctx,
+        );
         let Some(QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         }) = parsed
@@ -11743,7 +11905,7 @@ mod where_x_tests {
         assert_eq!(
             typed.controller,
             Some(ControllerRef::ScopedPlayer),
-            "\"they control\" must bind to the scoped player"
+            "\"they control\" must bind to the scoped player under a ScopedPlayer context"
         );
         assert!(
             typed.type_filters.contains(&TypeFilter::Land),
@@ -11824,6 +11986,7 @@ mod where_x_tests {
             &mut constraint,
             Some("the result"),
             &mut unbound,
+            &ParseContext::default(),
         );
         assert_eq!(
             unbound, None,
@@ -11879,6 +12042,7 @@ mod where_x_tests {
             &mut constraint,
             Some("the result"),
             &mut unbound,
+            &ParseContext::default(),
         );
         assert_eq!(
             constraint,
@@ -11912,8 +12076,12 @@ mod where_x_tests {
             ],
         };
 
-        let rewritten = super::apply_where_x_quantity_expression(expression, Some("the result"))
-            .expect("\"the result\" is representable, so the bind must succeed");
+        let rewritten = super::apply_where_x_quantity_expression(
+            expression,
+            Some("the result"),
+            &ParseContext::default(),
+        )
+        .expect("\"the result\" is representable, so the bind must succeed");
         let QuantityExpr::Sum { exprs } = rewritten else {
             panic!("expected Sum");
         };
@@ -11973,7 +12141,11 @@ mod where_x_tests {
             enter_with_counters: vec![],
         };
 
-        super::apply_where_x_effect_expression(&mut effect, Some("that spell's mana value"));
+        super::apply_where_x_effect_expression(
+            &mut effect,
+            Some("that spell's mana value"),
+            &ParseContext::default(),
+        );
 
         let expected = QuantityExpr::Ref {
             qty: QuantityRef::ObjectManaValue {
@@ -12044,7 +12216,11 @@ mod where_x_tests {
             target: None,
         };
 
-        super::apply_where_x_effect_expression(&mut effect, Some("its power"));
+        super::apply_where_x_effect_expression(
+            &mut effect,
+            Some("its power"),
+            &ParseContext::default(),
+        );
 
         let Effect::GenericEffect {
             static_abilities, ..

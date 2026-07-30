@@ -25,8 +25,8 @@ pub(super) use lower::{
     apply_where_x_to_filter, extract_bounded_target_multi_target,
     extract_exact_target_multi_target, extract_optional_target_multi_target,
     parse_dynamic_counter_suffix_body, parse_multi_target_count_expr,
-    parse_where_x_quantity_expression, strip_exact_target_prefix, strip_optional_target_prefix,
-    try_parse_pump,
+    parse_where_x_quantity_expression, parse_where_x_quantity_expression_with_context,
+    strip_exact_target_prefix, strip_optional_target_prefix, try_parse_pump,
 };
 // Test-only re-exports from lower module.
 #[cfg(test)]
@@ -11549,7 +11549,11 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         let (_, filter_text) = parse_reveal_until_active_filter_text(after_count_lower).ok()?;
         let filter = build_reveal_until_filter(filter_text);
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-        let count = apply_where_x_quantity_expression(raw_count, where_x_expression.as_deref())?;
+        let count = apply_where_x_quantity_expression(
+            raw_count,
+            where_x_expression.as_deref(),
+            &ParseContext::default(),
+        )?;
         return Some(parsed_clause(Effect::RevealUntil {
             player,
             filter,
@@ -14116,6 +14120,28 @@ fn is_player_filter(filter: &TargetFilter) -> bool {
                 ..
             }) if type_filters.is_empty()
         )
+}
+
+/// CR 109.5 + CR 608.2c: True when this clause's own effect targets a PLAYER, so a
+/// CR 109.5 + CR 608.2c: Capture the player scope that a trailing where-X anaphor
+/// ("they control" / "that player controls") must bind to for this clause. The
+/// scope is exactly the `relative_player_scope` a trigger / for-each / fanout
+/// setter stamped onto the parse context — `ScopedPlayer` for Citadel of Pain's
+/// each-player phase count, `TargetPlayer` for a per-opponent fanout iterand, etc.
+/// `None` leaves the legacy caster-relative (`You`) binding untouched, exactly as
+/// on `main`; the context-aware entry point rebinds only when a scope is present.
+///
+/// This deliberately does NOT auto-derive `TargetPlayer` from a spell clause's own
+/// player target: a spell's "that player" anaphor is frequently CROSS-CLAUSE
+/// ("Choose target opponent. You create X … artifacts that player controls" —
+/// Curious Herd) or shared across sibling sub-effects ("target player draws X and
+/// loses X …" — Pact of the Serpent), which the assembly-time single-clause view
+/// cannot bind consistently (the shared-X siblings would diverge). Carrying a
+/// chosen target forward to a later clause's anaphor is a separate change; here we
+/// only ensure a stamped scope threads through and a hardcoded `ScopedPlayer` no
+/// longer overrides it.
+fn derive_where_x_scope(chunk_ctx: &ParseContext) -> Option<ControllerRef> {
+    chunk_ctx.relative_player_scope.clone()
 }
 
 /// CR 109.5: True when a `TargetFilter` denotes players (a controller-/player-
@@ -28269,6 +28295,7 @@ pub(crate) fn parse_effect_chain_ir(
                 prev_clause.map(|c| AbilityDefinition::new(kind, c.parsed.effect.clone()));
             let inherited_where_x_expression =
                 prev_clause.and_then(|c| c.where_x_expression.clone());
+            let inherited_where_x_scope = prev_clause.and_then(|c| c.where_x_scope.clone());
             if let Some(alt_def) =
                 try_parse_dig_instead_alternative(normalized_text, prev_temp.as_ref(), kind, ctx)
             {
@@ -28287,6 +28314,7 @@ pub(crate) fn parse_effect_chain_ir(
                             },
                         )
                         .where_x_expression(inherited_where_x_expression)
+                        .where_x_scope(inherited_where_x_scope)
                         .push();
                     continue;
                 }
@@ -29308,6 +29336,7 @@ pub(crate) fn parse_effect_chain_ir(
         if let Some(prefix_condition) = prefix_delayed {
             let (inner_text, inner_multi_target) = strip_any_number_quantifier(text_after_prefix);
             let inner_clause = parse_effect_clause(&inner_text, ctx);
+            let inner_where_x_scope = derive_where_x_scope(ctx);
             let mut inner_def = AbilityDefinition::new(kind, inner_clause.effect);
             if let Some(spec) = inner_multi_target.or(inner_clause.multi_target) {
                 inner_def = inner_def.multi_target(spec);
@@ -29329,7 +29358,11 @@ pub(crate) fn parse_effect_chain_ir(
             if let Some(up) = unless_pay.take() {
                 inner_def.unless_pay = Some(up);
             }
-            apply_where_x_ability_expression(&mut inner_def, where_x_expression.as_deref());
+            apply_where_x_ability_expression(
+                &mut inner_def,
+                where_x_expression.as_deref(),
+                inner_where_x_scope.as_ref(),
+            );
             let delayed_effect = Effect::CreateDelayedTrigger {
                 condition: prefix_condition.clone(),
                 effect: Box::new(inner_def),
@@ -29362,10 +29395,12 @@ pub(crate) fn parse_effect_chain_ir(
                     ctx.push_diagnostic(d);
                 }
             }
+            let delayed_clause = parsed_clause(delayed_effect);
+            let where_x_scope = derive_where_x_scope(&chunk_ctx);
             builder
                 .clause(
                     normalized_text,
-                    parsed_clause(delayed_effect),
+                    delayed_clause,
                     chunk.boundary_after,
                     ClauseDisposition::Emit {
                         followup: None,
@@ -29380,6 +29415,7 @@ pub(crate) fn parse_effect_chain_ir(
                 .starting_with(starting_with.clone())
                 .prefix_delayed_condition(Some(prefix_condition))
                 .where_x_expression(where_x_expression.clone())
+                .where_x_scope(where_x_scope)
                 .target_selection_mode(chunk_ctx.target_selection_mode)
                 .target_chooser(chunk_ctx.target_chooser.clone())
                 .push();
@@ -29396,6 +29432,7 @@ pub(crate) fn parse_effect_chain_ir(
             ctx.relative_player_scope = Some(chosen_scope.clone());
             chain_chosen_player_count = ctx.chosen_player_count;
             chain_chosen_player_scope = Some(chosen_scope);
+            let where_x_scope = derive_where_x_scope(&chunk_ctx);
             builder
                 .clause(
                     normalized_text,
@@ -29413,6 +29450,7 @@ pub(crate) fn parse_effect_chain_ir(
                 .player_scope(player_scope)
                 .starting_with(starting_with.clone())
                 .where_x_expression(where_x_expression.clone())
+                .where_x_scope(where_x_scope)
                 .push();
             continue;
         }
@@ -30041,6 +30079,7 @@ pub(crate) fn parse_effect_chain_ir(
             if let Some(ref cond) = condition {
                 instead_def = instead_def.condition(cond.clone());
             }
+            let where_x_scope = derive_where_x_scope(&chunk_ctx);
             builder
                 .clause(
                     normalized_text,
@@ -30058,6 +30097,7 @@ pub(crate) fn parse_effect_chain_ir(
                 .starting_with(starting_with.clone())
                 .multi_target(multi_target)
                 .where_x_expression(where_x_expression)
+                .where_x_scope(where_x_scope)
                 .push();
             continue;
         }
@@ -30101,6 +30141,7 @@ pub(crate) fn parse_effect_chain_ir(
                     intrinsic_continuation_effect(&temp_def),
                     full_text,
                 );
+                let where_x_scope = derive_where_x_scope(&chunk_ctx);
                 builder
                     .clause(
                         normalized_text,
@@ -30116,6 +30157,7 @@ pub(crate) fn parse_effect_chain_ir(
                     .starting_with(starting_with.clone())
                     .multi_target(multi_target)
                     .where_x_expression(where_x_expression)
+                    .where_x_scope(where_x_scope)
                     .push();
                 continue;
             }
@@ -30403,6 +30445,7 @@ pub(crate) fn parse_effect_chain_ir(
             // Store the followup continuation — it applies to the previous clause.
             // We handle this by pushing an absorbed marker clause.
             if let Some(continuation) = followup_continuation {
+                let where_x_scope = derive_where_x_scope(&chunk_ctx);
                 builder
                     .clause(
                         normalized_text,
@@ -30420,6 +30463,7 @@ pub(crate) fn parse_effect_chain_ir(
                     .starting_with(starting_with.clone())
                     .multi_target(multi_target)
                     .where_x_expression(where_x_expression)
+                    .where_x_scope(where_x_scope)
                     .target_selection_mode(chunk_ctx.target_selection_mode)
                     .target_chooser(chunk_ctx.target_chooser.clone())
                     .push();
@@ -30494,6 +30538,7 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 115.1 + CR 701.9b: `target_selection_mode` snapshots the parser's
         // per-chunk selection mode. Set to `Random` by `parse_target_with_ctx`
         // when "random " was stripped from this chunk's target phrase.
+        let where_x_scope = derive_where_x_scope(&chunk_ctx);
         builder
             .clause(
                 normalized_text,
@@ -30513,6 +30558,7 @@ pub(crate) fn parse_effect_chain_ir(
             .delayed_condition(delayed_condition)
             .multi_target(multi_target)
             .where_x_expression(where_x_expression)
+            .where_x_scope(where_x_scope)
             .unless_pay(unless_pay)
             .target_selection_mode(chunk_ctx.target_selection_mode)
             .target_chooser(chunk_ctx.target_chooser.clone())
@@ -30861,7 +30907,13 @@ fn try_parse_put_zone_change_parts(
             // `parse_where_x_quantity_expression` building block.
             let where_x_expression = strip_trailing_where_x(after_put_tp).1;
             // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-            let target = apply_where_x_to_filter(target, where_x_expression.as_deref())?;
+            // Filter `Cmc`/counter bounds carry no player anaphor, so the default
+            // (scope-free) context is correct here.
+            let target = apply_where_x_to_filter(
+                target,
+                where_x_expression.as_deref(),
+                &ParseContext::default(),
+            )?;
             // CR 608.2c: Restrict the target to objects affected by the
             // preceding effect when a "this way" result phrase appears in the
             // target text. The relevant resolvers publish `state.tracked_object_sets`

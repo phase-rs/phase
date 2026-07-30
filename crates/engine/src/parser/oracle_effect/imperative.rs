@@ -13,7 +13,8 @@ use super::counter::{
 };
 use super::lower::{
     parse_for_each_multiplier_prefix, parse_multi_target_count_expr,
-    parse_where_x_quantity_expression, strip_leading_quantifier, strip_trailing_where_x,
+    parse_where_x_quantity_expression, parse_where_x_quantity_expression_with_context,
+    strip_leading_quantifier, strip_trailing_where_x,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
@@ -8745,7 +8746,11 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     // the spell phrase to the stack through the shared target parser. Keep this
     // path on that building block and only apply the trailing X definition.
     // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-    let target = super::apply_where_x_to_filter(target, where_x_expression.as_deref())?;
+    let target = super::apply_where_x_to_filter(
+        target,
+        where_x_expression.as_deref(),
+        &ParseContext::default(),
+    )?;
     // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
     let unless_pay = parse_counter_unless_pay(rest)?;
     Some(ZoneCounterImperativeAst::Counter {
@@ -10064,7 +10069,7 @@ pub(super) fn parse_imperative_family_ast(
                 .map(|(r, _)| r)
                 .unwrap_or("");
             let amount = if let Some(expr) = where_x {
-                parse_where_x_quantity_expression(&expr)
+                parse_where_x_quantity_expression_with_context(&expr, ctx)
                     .unwrap_or(QuantityExpr::Fixed { value: 0 })
             } else {
                 let count = nom_primitives::parse_number_or_x

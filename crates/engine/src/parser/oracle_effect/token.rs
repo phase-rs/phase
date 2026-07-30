@@ -115,7 +115,8 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
                 // still rendered as a supported dynamic quantity. This mirrors the
                 // sibling non-copy token path below.
                 count =
-                    super::parse_where_x_quantity_expression(&where_expression).or_else(|| {
+                    super::parse_where_x_quantity_expression_with_context(&where_expression, ctx)
+                        .or_else(|| {
                         crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
                     })?;
             }
@@ -680,9 +681,10 @@ fn parse_token_description_with_context(
             // rendered as a supported dynamic quantity in the coverage report —
             // a fabricated green. Honest failure is the only correct answer.
             let bound =
-                super::parse_where_x_quantity_expression(&where_expression).or_else(|| {
-                    crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
-                })?;
+                super::parse_where_x_quantity_expression_with_context(&where_expression, ctx)
+                    .or_else(|| {
+                        crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
+                    })?;
             if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
             {
                 count = bound.clone();
@@ -724,7 +726,9 @@ fn parse_token_description_with_context(
                 .or_else(|| {
                     crate::parser::oracle_quantity::parse_event_context_quantity(&count_expression)
                 })
-                .or_else(|| super::parse_where_x_quantity_expression(&count_expression))
+                .or_else(|| {
+                    super::parse_where_x_quantity_expression_with_context(&count_expression, ctx)
+                })
                 .or_else(|| {
                     // CR 608.2c: bare anaphoric "the difference" — the two operands
                     // live on the enclosing ability's condition, not this clause

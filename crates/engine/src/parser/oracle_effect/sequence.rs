@@ -5423,7 +5423,11 @@ pub(super) fn parse_dig_from_among(
 
         let filter = parse_dig_from_among_filter(filter_text, ctx);
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref())?;
+        let filter = apply_where_x_to_filter(
+            filter,
+            where_x_expression.as_deref(),
+            &ParseContext::default(),
+        )?;
 
         // CR 110.2a: "... under your control" routes the kept cards to the
         // ability controller. Scan the FULL clause — the controller phrase
@@ -5516,7 +5520,11 @@ pub(super) fn parse_dig_from_among(
         // CR 202.3 + CR 107.3i: Bind the literal `X` in the filter's `Cmc` bound
         // with the stripped "where X is <expression>" defining clause.
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref())?;
+        let filter = apply_where_x_to_filter(
+            filter,
+            where_x_expression.as_deref(),
+            &ParseContext::default(),
+        )?;
 
         // CR 110.2a + CR 708.2a/708.3: detect "under your control" / "face down" on
         // the full clause for the from-among put-step.
