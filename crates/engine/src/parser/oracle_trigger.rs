@@ -9,7 +9,7 @@ use nom::Parser;
 
 use super::oracle_effect::conditions::source_saddled_filter;
 use super::oracle_effect::{
-    attach_die_result_branches_before_finalization, condition_text_is_rehomeable,
+    attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
     lower_effect_chain_ir, parse_effect_chain_ir, try_parse_reanimator_aura_etb_effect_ir,
     try_parse_reanimator_aura_grant_etb_effect_ir,
 };
@@ -1540,7 +1540,7 @@ fn lower_trigger_effect_chain(
     die_results: &[DieResultBranchIr],
 ) -> AbilityDefinition {
     let mut ability = lower_effect_chain_ir(chain_ir);
-    attach_die_result_branches_before_finalization(&mut ability, die_results);
+    attach_terminal_die_result_branches_before_finalization(&mut ability, die_results);
     crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
     if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
         && matches!(

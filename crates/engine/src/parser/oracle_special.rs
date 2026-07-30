@@ -219,6 +219,17 @@ pub(crate) fn find_terminal_roll_die(def: &mut AbilityDefinition) -> Option<&mut
     None
 }
 
+/// CR 706.3b: A results table belongs to the first die-roll instruction in its
+/// paragraph even when later instructions remain in that ability's chain.
+pub(crate) fn find_result_table_roll_die(def: &mut AbilityDefinition) -> Option<&mut Effect> {
+    if matches!(&*def.effect, Effect::RollDie { results, .. } if results.is_empty()) {
+        return Some(&mut *def.effect);
+    }
+    def.sub_ability
+        .as_deref_mut()
+        .and_then(find_result_table_roll_die)
+}
+
 /// CR 706.3b: Parse contiguous result-table rows into typed branch IR.
 ///
 /// A non-table first line is not consumed, so the ordinary document dispatcher

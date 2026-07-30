@@ -1608,6 +1608,104 @@ fn assert_unbindable_override(def: &crate::types::ability::AbilityDefinition) {
     assert!(def.else_ability.is_none());
 }
 
+fn roll_die_result_count(def: &crate::types::ability::AbilityDefinition) -> Option<usize> {
+    match def.effect.as_ref() {
+        Effect::RollDie { results, .. } => Some(results.len()),
+        _ => def
+            .sub_ability
+            .as_deref()
+            .and_then(roll_die_result_count)
+            .or_else(|| def.else_ability.as_deref().and_then(roll_die_result_count)),
+    }
+}
+
+/// CR 706.3b: recognized contiguous result branches stay with an inline roll
+/// even when the ability's paragraph has instructions both before and after it.
+fn assert_inline_die_table(
+    oracle_text: &str,
+    card_name: &str,
+    types: &[&str],
+    expected_recognized_results: usize,
+) {
+    let (_, lowered) = parse_two_layer(oracle_text, card_name, types, &[]);
+    assert_eq!(
+        lowered.abilities.len(),
+        1,
+        "{card_name} must retain its result rows on the printed ability"
+    );
+    assert_eq!(
+        roll_die_result_count(&lowered.abilities[0]),
+        Some(expected_recognized_results),
+        "{card_name} must retain its recognized result branches on the inline roll"
+    );
+}
+
+#[test]
+fn laezels_acrobatics_inline_die_table_is_owned_by_nonterminal_roll() {
+    assert_inline_die_table(
+        "Exile all nontoken creatures you control, then roll a d20.\n1—9 | Return those cards to the battlefield under their owner's control at the beginning of the next end step.\n10—20 | Return those cards to the battlefield under their owner's control, then exile them again. Return those cards to the battlefield under their owner's control at the beginning of the next end step.",
+        "Lae'zel's Acrobatics",
+        &["Instant"],
+        1,
+    );
+}
+
+#[test]
+fn overwhelming_encounter_inline_die_table_is_owned_by_nonterminal_roll() {
+    assert_inline_die_table(
+        "Creatures you control gain vigilance and trample until end of turn. Roll a d20.\n1—9 | Creatures you control get +2/+2 until end of turn.\n10—19 | Put two +1/+1 counters on each creature you control.\n20 | Put four +1/+1 counters on each creature you control.",
+        "Overwhelming Encounter",
+        &["Sorcery"],
+        2,
+    );
+}
+
+#[test]
+fn deck_of_many_things_inline_die_table_is_owned_by_modified_roll() {
+    assert_inline_die_table(
+        "{2}, {T}: Roll a d20 and subtract the number of cards in your hand. If the result is 0 or less, discard your hand.\n1—9 | Return a card at random from your graveyard to your hand.\n10—19 | Draw two cards.\n20 | Put a creature card from any graveyard onto the battlefield under your control. When that creature dies, its owner loses the game.",
+        "The Deck of Many Things",
+        &["Artifact"],
+        3,
+    );
+}
+
+#[test]
+fn wand_of_wonder_inline_die_table_is_owned_by_roll_with_later_instructions() {
+    assert_inline_die_table(
+        "{4}, {T}: Roll a d20. Each opponent exiles cards from the top of their library until they exile an instant or sorcery card, then shuffles the rest into their library. You may cast up to X instant and/or sorcery spells from among cards exiled this way without paying their mana costs.\n1—9 | X is one.\n10—19 | X is two.\n20 | X is three.",
+        "Wand of Wonder",
+        &["Artifact"],
+        3,
+    );
+}
+
+#[test]
+fn inline_roll_without_immediate_result_row_does_not_consume_following_text() {
+    let (ir, lowered) = parse_two_layer(
+        "Draw a card, then roll a d20.\nFlying\n1—20 | Draw two cards.",
+        "Inline Roll Without Table Fixture",
+        &["Sorcery"],
+        &[],
+    );
+    assert!(!ir.items.is_empty());
+    assert!(!lowered.abilities.is_empty());
+    assert_eq!(roll_die_result_count(&lowered.abilities[0]), Some(0));
+}
+
+#[test]
+fn roll_text_without_typed_roll_die_does_not_consume_result_rows() {
+    let (ir, lowered) = parse_two_layer(
+        "Draw a card, then roll a dword.\n1—20 | Draw two cards.",
+        "Unparsed Roll Text Fixture",
+        &["Sorcery"],
+        &[],
+    );
+    assert_eq!(ir.items.len(), 2);
+    assert_eq!(lowered.abilities.len(), 2);
+    assert_eq!(roll_die_result_count(&lowered.abilities[0]), None);
+}
+
 /// CR 614.6 + CR 614.15: the native override floor retains the root clause's
 /// resolution metadata while making the unsupported replacement explicit.
 #[test]

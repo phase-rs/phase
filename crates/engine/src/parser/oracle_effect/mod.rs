@@ -27077,12 +27077,37 @@ pub(crate) fn attach_die_result_branches_before_finalization(
     def: &mut AbilityDefinition,
     die_results: &[DieResultBranchIr],
 ) {
+    attach_die_result_branches_to_roll_before_finalization(
+        def,
+        die_results,
+        super::oracle_special::find_result_table_roll_die,
+    );
+}
+
+/// CR 706.3b: Trigger result tables retain their established terminal-roll
+/// ownership. Trigger IR only captures tables for terminal rolls.
+pub(crate) fn attach_terminal_die_result_branches_before_finalization(
+    def: &mut AbilityDefinition,
+    die_results: &[DieResultBranchIr],
+) {
+    attach_die_result_branches_to_roll_before_finalization(
+        def,
+        die_results,
+        super::oracle_special::find_terminal_roll_die,
+    );
+}
+
+/// CR 706.3b: Lower typed result branches through the single ability-IR
+/// authority before assigning them to their selected roll instruction.
+fn attach_die_result_branches_to_roll_before_finalization(
+    def: &mut AbilityDefinition,
+    die_results: &[DieResultBranchIr],
+    find_roll_die: for<'a> fn(&'a mut AbilityDefinition) -> Option<&'a mut Effect>,
+) {
     if die_results.is_empty() {
         return;
     }
-    if let Some(Effect::RollDie { results, .. }) =
-        super::oracle_special::find_terminal_roll_die(def)
-    {
+    if let Some(Effect::RollDie { results, .. }) = find_roll_die(def) {
         *results = die_results
             .iter()
             .map(|DieResultBranchIr { min, max, effect }| DieResultBranch {

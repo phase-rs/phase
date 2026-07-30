@@ -117,6 +117,33 @@ impl EffectChainIr {
     }
 }
 
+impl AbilityIr {
+    /// CR 706.3b: Whether the raw body contains an unassigned die roll that can
+    /// own an immediately following results table. This collection gate scans
+    /// source-ordered direct clauses and their pre-lowered sequential
+    /// sub-ability chains. The P4/P9 roll producers emit ordinary clauses;
+    /// duplicating full `ClauseDisposition` assembly here would create a second
+    /// reachability authority. Post-assembly attachment remains authoritative.
+    pub(crate) fn has_result_table_roll_die(&self) -> bool {
+        self.body.clauses.iter().any(|clause| {
+            matches!(&clause.parsed.effect, crate::types::ability::Effect::RollDie { results, .. } if results.is_empty())
+                || clause
+                    .parsed
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(ability_definition_has_result_table_roll_die)
+        })
+    }
+}
+
+fn ability_definition_has_result_table_roll_die(def: &AbilityDefinition) -> bool {
+    matches!(def.effect.as_ref(), crate::types::ability::Effect::RollDie { results, .. } if results.is_empty())
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_definition_has_result_table_roll_die)
+}
+
 /// Root-level `AbilityDefinition` metadata that no `ClauseIr` can express.
 ///
 /// The shell is the typed replacement for the `AbilityDefinition` escape hatch:

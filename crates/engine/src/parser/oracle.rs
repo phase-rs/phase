@@ -97,9 +97,9 @@ use super::oracle_replacement::{
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
 use super::oracle_special::{
-    find_terminal_roll_die, normalize_self_refs_for_static, parse_cumulative_upkeep_keyword,
-    parse_defiler_cost_reduction, parse_die_result_branches_ir, parse_harmonize_keyword,
-    parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
+    normalize_self_refs_for_static, parse_cumulative_upkeep_keyword, parse_defiler_cost_reduction,
+    parse_die_result_branches_ir, parse_harmonize_keyword, parse_mayhem_keyword,
+    parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
@@ -5067,7 +5067,7 @@ pub(crate) fn parse_oracle_ir(
             // path serves both forms) to gate this ability.
             let aw_condition = strip_ability_word_with_name(cost_text)
                 .and_then(|(aw_name, _)| ability_word_to_condition(&aw_name));
-            let (mut ir, effect_text) = parse_activated_ability_ir(
+            let (mut ir, _effect_text) = parse_activated_ability_ir(
                 cost_text,
                 effect_text,
                 &line,
@@ -5093,17 +5093,16 @@ pub(crate) fn parse_oracle_ir(
             }
             ir.shell.min_x_value = ir.shell.min_x_value.max(min_x_value);
             i += 1;
-            // CR 706.3b: consume a following table only when the same native IR
-            // lowers to a terminal empty roll. Textual roll markers alone do not
-            // own subsequent lines.
-            let mut lowered_for_die_guard = lower_ability_ir(&ir);
-            if has_roll_die_pattern(&effect_text.to_lowercase())
-                && find_terminal_roll_die(&mut lowered_for_die_guard).is_some()
-            {
+            // CR 706.3b: An immediately following valid results table belongs to
+            // this ability's die roll, even when later instructions remain in
+            // the same activated-ability chain.
+            if ir.has_result_table_roll_die() {
                 let (branches, next_line) =
                     parse_die_result_branches_ir(&lines, i, AbilityKind::Spell);
-                ir.die_results = branches;
-                i = next_line;
+                if !branches.is_empty() {
+                    ir.die_results = branches;
+                    i = next_line;
+                }
             }
             emitter.ability_ir_at(item_line, ir);
             continue;
@@ -6368,12 +6367,10 @@ pub(crate) fn parse_oracle_ir(
                     .push(AbilityRootTransform::AppendCondition(instead_condition));
             }
             i = next_i;
-            // CR 706: If the parsed chain ends with "roll a dN", consume
-            // subsequent d20 table lines and attach them as die result branches.
-            let mut lowered_for_die_guard = lower_ability_ir(&ability_ir);
-            if has_roll_die_pattern(&lower)
-                && find_terminal_roll_die(&mut lowered_for_die_guard).is_some()
-            {
+            // CR 706.3b: An immediately following valid results table belongs to
+            // this paragraph's die roll, even when the same ability has later
+            // instructions based on that result.
+            if ability_ir.has_result_table_roll_die() {
                 let (branches, next_i) =
                     parse_die_result_branches_ir(&lines, i, AbilityKind::Spell);
                 if !branches.is_empty() {
