@@ -1006,12 +1006,10 @@ describe("scryfall-fetch mv-failure recovery (PR #6775 review)", () => {
   // of SCRYFALL_CURL) is required: SCRYFALL_CURL's real curl invocation is
   // array-expanded ("${SCRYFALL_CURL[@]}" -o "$tmp" "$url"), so a stub must be
   // a same-named function to intercept it, not a value substituted in for the
-  // array's first word. `mv -f "$tmp" "$file" 2>/dev/null` in the real source
-  // (scryfall-fetch.sh:63) redirects stderr to /dev/null around the whole
-  // call, including a shadowing function's own writes to fd 2 — so the
-  // anti-vacuity marker for mv is recorded through a shell variable
-  // (MV_CALLED, invisible to that redirection because it isn't a stream)
-  // rather than stderr text. The validator is different: the real source
+  // array's first word. The shared finalizer captures mv stderr while it
+  // decides whether another writer produced a valid destination, so the
+  // anti-vacuity marker for mv is recorded through a shell variable rather
+  // than stderr text. The validator is different: the real source
   // deliberately runs it inside a subshell (`( "$validator" "$file" )`, see
   // scryfall_download's header comment) to keep a caller-supplied
   // validator's shell-variable writes from leaking back into this library's
@@ -1028,10 +1026,16 @@ describe("scryfall-fetch mv-failure recovery (PR #6775 review)", () => {
       curlPayload?: string;
       mvSucceeds?: boolean;
     },
-  ): { out: string; dest: string; validatorCalls: number } {
+  ): {
+    out: string;
+    dest: string;
+    stderr: string;
+    validatorCalls: number;
+  } {
     const dest = path.join(dir, "dest.json").replace(/\\/g, "/");
     const payload = path.join(dir, "fixture-payload.json").replace(/\\/g, "/");
     const marker = path.join(dir, "validator-called").replace(/\\/g, "/");
+    const stderr = path.join(dir, "scryfall.stderr").replace(/\\/g, "/");
     writeFileSync(payload, opts.curlPayload ?? JSON.stringify({ ok: true }));
     if (opts.destContent !== undefined) {
       writeFileSync(dest, opts.destContent);
@@ -1064,7 +1068,7 @@ curl() {
   done
   cp "${payload}" "$out"
 }
-${mvDef}${validatorDef}scryfall_download "https://example.invalid/data.json" "${dest}"${validatorArg}
+${mvDef}${validatorDef}scryfall_download "https://example.invalid/data.json" "${dest}"${validatorArg} 2> "${stderr}"
 echo "RC=$?"
 echo "MV_CALLED=\${MV_CALLED:-0}"
 echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l)"
@@ -1078,7 +1082,12 @@ echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l)"
     const validatorCalls = existsSync(marker)
       ? readFileSync(marker, "utf8").trim().split("\n").length
       : 0;
-    return { out, dest, validatorCalls };
+    return {
+      out,
+      dest,
+      stderr: readFileSync(stderr, "utf8"),
+      validatorCalls,
+    };
   }
 
   it("case 1: mv fails, destination exists and passes the default validator -> rc 0, tmp cleaned, destination byte-identical to before", () => {
@@ -1095,11 +1104,12 @@ echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l)"
 
   it("case 2: mv fails, destination absent -> rc 1, tmp cleaned", () => {
     withTempDir((dir) => {
-      const { out, dest } = runMvFailureScript(dir, {});
+      const { out, dest, stderr } = runMvFailureScript(dir, {});
 
       expect(out).toContain("MV_CALLED=1");
       expect(out).toContain("RC=1");
       expect(out).toMatch(/TMP_COUNT=0/);
+      expect(stderr).toContain("scryfall: could not rename");
       expect(() => readFileSync(dest, "utf8")).toThrow();
     });
   });
@@ -1107,11 +1117,14 @@ echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l)"
   it("case 3: mv fails, destination is invalid JSON -> rc 1, tmp cleaned", () => {
     withTempDir((dir) => {
       const before = "not-json{";
-      const { out, dest } = runMvFailureScript(dir, { destContent: before });
+      const { out, dest, stderr } = runMvFailureScript(dir, {
+        destContent: before,
+      });
 
       expect(out).toContain("MV_CALLED=1");
       expect(out).toContain("RC=1");
       expect(out).toMatch(/TMP_COUNT=0/);
+      expect(stderr).toContain("scryfall: could not rename");
       // Untouched: the recovery path must never overwrite a bad destination
       // with the freshly-downloaded (but un-mv'd) tmp content either.
       expect(readFileSync(dest, "utf8")).toBe(before);
