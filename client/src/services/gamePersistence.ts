@@ -223,7 +223,8 @@ export async function loadP2PHostSession(
       P2P_HOST_KEY_PREFIX + gameId,
       getGameStore(),
     );
-    return s ?? null;
+    if (!s || typeof s.sessionKey !== "string" || s.sessionKey.length === 0) return null;
+    return s;
   } catch {
     return null;
   }

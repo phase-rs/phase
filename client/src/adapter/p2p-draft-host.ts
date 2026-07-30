@@ -1011,6 +1011,11 @@ export class P2PDraftHost {
     if (receipt) {
       if (receipt.receiptId === settlement.receiptId) {
         void this.sendSettlementAck(submittingSeat, binding.matchId, receipt);
+      } else {
+        this.sendToSeat(submittingSeat, {
+          type: "draft_error",
+          reason: "Match already settled",
+        });
       }
       return;
     }
@@ -1834,13 +1839,16 @@ export class P2PDraftHost {
       digests.set(seat, digest);
     }
     for (const { matchId, seat, launch } of session.matchLaunches ?? []) {
+      const binding = launch.binding ?? this.matchBindings.get(matchId);
+      if (!binding || binding.matchId !== matchId) continue;
+      const recoveredLaunch = launch.binding ? launch : { ...launch, binding } as DraftMatchLaunch;
       let launches = this.matchLaunches.get(matchId);
       if (!launches) {
         launches = new Map();
         this.matchLaunches.set(matchId, launches);
       }
-      launches.set(seat, launch);
-      this.rememberMatchDecks(launch);
+      launches.set(seat, recoveredLaunch);
+      this.rememberMatchDecks(recoveredLaunch);
     }
 
     if (session.draftSessionJson) {
