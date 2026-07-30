@@ -1567,14 +1567,25 @@ mod tests {
     /// F4: the positional `cards_path` scan must not be poisoned by the
     /// *value* of any preceding `--flag value` pair (e.g. `--seed 42
     /// some/path` must resolve `cards_path` to `"some/path"`, not `"42"`).
-    /// Table-driven over every flag that takes a value.
+    /// Table-driven over every flag that takes a value — including
+    /// `--games-file` (whose value is a real temp file, since `parse_cli`
+    /// validates the batch up front), `--watch-cards`, and the seat-override
+    /// form `--difficulty-p<N>`.
     #[test]
     fn parse_cli_positional_cards_path_survives_preceding_flag_value() {
+        let games_path = temp_games_file_path("positional_survival_games");
+        let _guard = TempFileGuard(games_path.clone());
+        std::fs::write(&games_path, "1009,Easy\n").unwrap();
+        let games_path = games_path.to_str().unwrap();
+
         let rows: &[&[&str]] = &[
             &["--seed", "42", "some/path"],
             &["--feed", "x.json", "some/path"],
             &["--action-cap", "5", "some/path"],
             &["--difficulty", "Easy", "some/path"],
+            &["--games-file", games_path, "some/path"],
+            &["--watch-cards", "Sol Ring,Arcane Signet", "some/path"],
+            &["--difficulty-p0", "Easy", "some/path"],
         ];
         for row in rows {
             let mut args = vec!["ai-commander".to_string()];
@@ -1585,6 +1596,55 @@ mod tests {
                 "row {row:?}: positional cards_path must survive a preceding --flag value pair (F4)"
             );
         }
+    }
+
+    /// F4 value-consumption pin: the `--watch-cards` value must reach the
+    /// consuming set — split on commas, trimmed — and must not disturb the
+    /// positional `cards_path`. Guards the arm at the consuming loop directly
+    /// (a row in the positional table alone can't catch the value being
+    /// dropped or mis-split).
+    #[test]
+    fn parse_cli_watch_cards_value_reaches_the_consuming_set() {
+        let args: Vec<String> = [
+            "ai-commander",
+            "--watch-cards",
+            "Sol Ring, Arcane Signet",
+            "some/path",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let cli = parse_cli(&args, false).expect("watch-cards invocation must parse");
+        let expected: HashSet<String> = ["Sol Ring", "Arcane Signet"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(cli.watch_cards, expected);
+        assert_eq!(cli.cards_path, "some/path");
+    }
+
+    /// F4 value-consumption pin: the `--games-file` value must reach
+    /// `CliArgs.games_file` and its parsed batch (validated up front), and
+    /// must not disturb the positional `cards_path`.
+    #[test]
+    fn parse_cli_games_file_value_reaches_the_consuming_option() {
+        let path = temp_games_file_path("games_file_value_consumption");
+        let _guard = TempFileGuard(path.clone());
+        std::fs::write(&path, "1009,Easy\n").unwrap();
+        let path = path.to_str().unwrap();
+
+        let args: Vec<String> = ["ai-commander", "--games-file", path, "some/path"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let cli = parse_cli(&args, false).expect("games-file invocation must parse");
+        assert_eq!(cli.games_file.as_deref(), Some(path));
+        assert_eq!(
+            cli.batch_games,
+            Some(vec![(1009, AiDifficulty::Easy)]),
+            "the games-file value must reach the up-front-validated batch"
+        );
+        assert_eq!(cli.cards_path, "some/path");
     }
 
     /// F4 companion (green today, and a real pin): an *unknown* bare flag

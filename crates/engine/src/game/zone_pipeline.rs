@@ -4346,4 +4346,76 @@ mod layers_incremental_flush_tests {
             state.layers_dirty
         );
     }
+
+    /// F5 discrimination companion (maintainer, PR #6777 round 2): the sibling
+    /// test's watcher static is live on the battlefield BEFORE the transition,
+    /// and `move_object` ORs `static_dependency_before || static_dependency_after`
+    /// — so that test alone cannot catch the post-entry arm being dropped.
+    /// Here the zone-reading static rides ON the entering object itself: while
+    /// it sits in the Graveyard it is not a static-effect source (only
+    /// battlefield/command objects generate continuous effects), so the
+    /// before-check is false, and only the post-entry re-check
+    /// (`static_dependency_after`) can see the now-live static and force
+    /// `Full`. Removing the after arm turns this mark into the cheap
+    /// `EnteredObjects` path and fails this test.
+    #[test]
+    fn battlefield_entry_whose_own_zone_reading_static_marks_full_post_entry() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80044),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let entering_watcher = create_object(
+            &mut state,
+            CardId(80045),
+            PlayerId(0),
+            "Entering Graveyard Watcher".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&entering_watcher).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::Continuous).affected(TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Creature)
+                        .properties(vec![FilterProp::InAnyZone {
+                            zones: vec![Zone::Graveyard],
+                        }]),
+                )),
+            );
+        }
+        reset_clean(&mut state);
+
+        // Precondition for discrimination: with the watcher still in the
+        // Graveyard, no battlefield/command object reads zone membership, so
+        // the pre-transition check must come up empty and the post-entry arm
+        // is the only guard under test.
+        assert!(
+            !crate::game::layers::static_layer_dependency_for_zone_transition(
+                &state,
+                Zone::Graveyard,
+                Zone::Battlefield
+            ),
+            "fixture invalid: a pre-transition static dependency would let the before arm mask the after arm"
+        );
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entering_watcher, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&entering_watcher].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "an entering object that itself carries a zone-membership-reading static must force a full re-evaluation via static_dependency_after (the before check is provably false here), got {:?}",
+            state.layers_dirty
+        );
+    }
 }
