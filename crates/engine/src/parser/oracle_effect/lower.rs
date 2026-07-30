@@ -12674,6 +12674,30 @@ mod dq_d_player_set_lift_tests {
             ))
         );
 
+        // Cells 1b / 2b — the SECOND `BOUNDED_TARGET_CARDINALITIES` member.
+        // `parse_bounded_target_cardinality` composes its noun off that shared
+        // const, so both entries must be exercised or the second can regress (or
+        // be shadowed by the exact arm) without a matrix failure. Same ordering
+        // guard as cell 1: `fixed(1, 3)`, never `exact(1)` with a stranded
+        // remainder.
+        assert_eq!(
+            parse_each_of_target_distribution("one, two, or three targets"),
+            Some((
+                MultiTargetSpec::fixed(1, 3),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            )),
+            "the three-target bounded stem must win over the exact arm's leading \"one\""
+        );
+        assert_eq!(
+            parse_each_of_target_distribution("one, two, or three target creatures"),
+            Some((
+                MultiTargetSpec::fixed(1, 3),
+                EachOfTargetNoun::Typed,
+                "target creatures"
+            ))
+        );
+
         // Cell 3 — optional × bare plural (new leaf). NEW: Shower of Coals,
         // Jaya's Immolating Inferno, Myojin of Roaring Blades.
         assert_eq!(

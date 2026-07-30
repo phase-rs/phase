@@ -50281,30 +50281,19 @@ fn each_of_count_head_does_not_leak_onto_a_later_sibling_clause() {
             )
         })
         .expect("reach-guard: sentence 1's `each of two target creatures` head must parse");
-    // Reach-guard (b): this fixture is consumed by the bare-damage CHAIN
-    // recognizer (`try_parse_multi_target_damage_chain`), which returns out of
-    // `lower_imperative_clause` ahead of the `take()` + DealDamage fixup and
-    // builds its segments without threading the announced count. So the count is
-    // dropped here, and that is the observable signature of the early-return
-    // path.
-    //
-    // KNOWN GAP (documented, not silently accepted): a chained "… to each of ⟨N⟩
-    // target ⟨type⟩ and ⟨M⟩ damage to …" head loses its CR 601.2c count and
-    // degrades to one mandatory target. No PRINTED card has this shape: the only
-    // `AtomicCards.json` entries pairing an "each of ⟨N⟩" head with a following
-    // "and" (Nahiri's Wrath, Spinning Wheel Kick, Volcanic Salvo, Dire-Strain
-    // Anarchist) all use "and/or" INSIDE the target phrase rather than a second
-    // damage clause, and each parses with its count intact. Nothing regresses.
-    // Threading the count through the chain segment builder is a separate change
-    // against that recognizer, not this seam. The sibling
-    // `try_split_damage_compound` tail DOES carry the count (it saves the primary
-    // spec across the continuation's nested clause parse and attaches it to the
-    // returned clause).
+    // CR 601.2c — the chain-head regression. This fixture is consumed by the
+    // bare-damage CHAIN recognizer (`try_parse_multi_target_damage_chain`),
+    // which returns its own clause out of `lower_imperative_clause` ahead of the
+    // `take()` + DealDamage fixup. It therefore captures the primary segment's
+    // announced count immediately after parsing the head and attaches it to that
+    // clause; without that, a chain headed by "each of ⟨N⟩ target ⟨type⟩" would
+    // lower as ONE mandatory target, contrary to the announced-target
+    // requirement. The sibling `try_split_damage_compound` tail does the same.
     assert_eq!(
-        each_of_clause.multi_target, None,
-        "reach-guard: the chain early-return path drops the count (known gap, see above); \
-         if this becomes Some, the chain recognizer learned to thread it and this test \
-         should assert exact(2) instead"
+        each_of_clause.multi_target,
+        Some(MultiTargetSpec::exact(fixed_qty(2))),
+        "the chain's primary head must retain its CR 601.2c announced count \
+         across the continuation segments' shared-context parse"
     );
 
     // The assertion under test: sentence 2 must not inherit the dangling count.

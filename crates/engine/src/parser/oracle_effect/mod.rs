@@ -16855,6 +16855,12 @@ fn try_parse_multi_target_damage_chain_inner(
     // Each segment parses through the shared context, so retain the primary
     // segment's announcer before a continuation can overwrite it.
     let primary_target_chooser = ctx.target_chooser.clone();
+    // CR 601.2c: same for the primary segment's announced target count. This
+    // function returns its own `ParsedEffectClause` straight out of
+    // `lower_imperative_clause`, ahead of the `take()` + DealDamage fixup, so
+    // the count has to be captured here and attached below or a chain headed by
+    // "each of ⟨N⟩ target ⟨type⟩" silently degrades to one mandatory target.
+    let primary_damage_multi_target = ctx.pending_damage_multi_target.take();
     let trimmed = remainder.trim_start();
     let trimmed_lower = trimmed.to_lowercase();
     // A comma-delimited list ("..., M damage to T2, and K ...") or a bare
@@ -16934,7 +16940,9 @@ fn try_parse_multi_target_damage_chain_inner(
         duration: None,
         sub_ability: chain_tail,
         distribute: None,
-        multi_target: None,
+        // CR 601.2c: the primary segment's announced target count, captured
+        // before the continuation segments reused the shared context.
+        multi_target: primary_damage_multi_target,
         condition: None,
         optional: false,
         unless_pay: None,
