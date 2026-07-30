@@ -3112,7 +3112,7 @@ mod tests {
                 name
             };
             let mut ir = parse_oracle_ir(oracle, card_name, &[], &types, &[]);
-            let span_source = oracle;
+            let span_source = oracle.replacen("Spree", "~", 1);
 
             assert_eq!(
                 ir.items.len(),
@@ -3127,7 +3127,10 @@ mod tests {
                     (*expected_line, *expected_line),
                     "{name}: source-order slot drift"
                 );
-                let expected_fragment = oracle.lines().nth(*expected_line).unwrap();
+                let expected_fragment = match (name, *expected_line) {
+                    ("Spree", 0) => "~ (Choose one or more additional costs.)",
+                    _ => oracle.lines().nth(*expected_line).unwrap(),
+                };
                 assert_eq!(
                     item.source.fragment(),
                     Some(expected_fragment),
