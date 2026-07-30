@@ -42506,7 +42506,7 @@ fn add_impulse_exiled_card(
             frequency: crate::types::statics::CastFrequency::Unlimited,
             source_id: Some(source_id),
             invalidation: None,
-            exiled_by_ability_controller: Some(player),
+            exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: Some(TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::AnyOf(vec![
@@ -42835,9 +42835,8 @@ fn add_exiled_land_with_oracle(
         &[],
     );
     let obj = state.objects.get_mut(&land).unwrap();
-    obj.replacement_definitions
-        .extend(parsed.replacements.clone());
-    Arc::make_mut(&mut obj.base_replacement_definitions).extend(parsed.replacements);
+    obj.replacement_definitions = parsed.replacements.clone().into();
+    obj.base_replacement_definitions = Arc::new(parsed.replacements);
     land
 }
 
@@ -43337,9 +43336,10 @@ fn bounded_static_exile_land_play_records_exile_cast_before_delivery_tail_choice
         ExileCardPool::Persistent,
         ExileCastTiming::YourTurnOnly,
     );
+    let counter_source_card_id = CardId(state.next_object_id);
     let counter_source = create_object(
         &mut state,
-        CardId(state.next_object_id),
+        counter_source_card_id,
         player,
         "Entry Counter Source".to_string(),
         Zone::Battlefield,
@@ -43368,9 +43368,10 @@ fn bounded_static_exile_land_play_records_exile_cast_before_delivery_tail_choice
             crate::types::ability::QuantityModification::Plus { value: 1 },
         ),
     ] {
+        let source_card_id = CardId(state.next_object_id);
         let source = create_object(
             &mut state,
-            CardId(state.next_object_id),
+            source_card_id,
             player,
             name.to_string(),
             Zone::Battlefield,
