@@ -4453,35 +4453,7 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // Priority 0: Semicolon-separated keyword lines (e.g., "Defender; reach").
-        // Oracle text uses semicolons exclusively to separate keywords on a single line.
-        // The colon guard prevents splitting activated ability lines like "{T}: Draw a card".
-        if line.contains(';') && !line.contains(':') {
-            let parts: Vec<&str> = line
-                .split(';')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .collect();
-            // Consume-on-success: EVERY part must parse completely as keywords. The
-            // permissive form accepted a part carrying a semantic clause ("cycling
-            // {2} if you control an artifact"), consumed the whole line, and dropped
-            // that clause with no keyword and no diagnostic.
-            if parts.len() > 1 {
-                let routed: Option<Vec<Vec<Keyword>>> = parts
-                    .iter()
-                    .map(|part| parse_router_keyword_list(part, mtgjson_keyword_names))
-                    .collect();
-                if let Some(routed) = routed {
-                    for keyword in routed.into_iter().flatten() {
-                        emitter.keyword_at(item_line, keyword);
-                    }
-                    i += 1;
-                    continue;
-                }
-            }
-        }
-
-        // Priority 1: Modal block (standard "Choose one —" + modes, or Spree + modes).
+        // Priority 0: Modal block (standard "Choose one —" + modes, or Spree + modes).
         // Must run before keyword extraction so "Spree" header + follow-on `+` lines
         // are consumed as a modal block, not swallowed as a keyword-only line.
         if let Some((block, next_i)) = parse_oracle_block(&lines, i) {
@@ -4529,6 +4501,34 @@ pub(crate) fn parse_oracle_ir(
             }
             i = next_i;
             continue;
+        }
+
+        // Priority 1: Semicolon-separated keyword lines (e.g., "Defender; reach").
+        // Oracle text uses semicolons exclusively to separate keywords on a single line.
+        // The colon guard prevents splitting activated ability lines like "{T}: Draw a card".
+        if line.contains(';') && !line.contains(':') {
+            let parts: Vec<&str> = line
+                .split(';')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            // Consume-on-success: EVERY part must parse completely as keywords. The
+            // permissive form accepted a part carrying a semantic clause ("cycling
+            // {2} if you control an artifact"), consumed the whole line, and dropped
+            // that clause with no keyword and no diagnostic.
+            if parts.len() > 1 {
+                let routed: Option<Vec<Vec<Keyword>>> = parts
+                    .iter()
+                    .map(|part| parse_router_keyword_list(part, mtgjson_keyword_names))
+                    .collect();
+                if let Some(routed) = routed {
+                    for keyword in routed.into_iter().flatten() {
+                        emitter.keyword_at(item_line, keyword);
+                    }
+                    i += 1;
+                    continue;
+                }
+            }
         }
 
         // Pre-keyword activated ability: "Equip {cost}" / "Equip — {cost}"
