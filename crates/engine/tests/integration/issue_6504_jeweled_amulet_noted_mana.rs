@@ -278,3 +278,207 @@ fn jeweled_amulet_bounced_mid_stack_does_not_note_on_new_incarnation() {
          incarnation's payment as a noted type"
     );
 }
+
+/// CR 608.2c: an ability's instructions are followed only when it RESOLVES,
+/// not when it's activated/paid for. Activating ability 0 and leaving it
+/// sitting unresolved on the stack must not produce a durable
+/// `ChosenAttribute::NotedManaSpent` yet — the write happens inside
+/// `Effect::NoteManaSpent`'s resolution, never at payment time. (A countered
+/// ability never reaches this resolution step at all, so this is also the
+/// discriminating half of the "a countered ability never notes anything"
+/// claim in `note_mana_spent.rs`'s doc comment.)
+#[test]
+fn jeweled_amulet_notes_nothing_before_resolution() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let amulet = scenario
+        .add_creature_from_oracle(P0, "Jeweled Amulet", 0, 0, JEWELED_AMULET_ORACLE)
+        .as_artifact()
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: amulet,
+            ability_index: 0,
+        })
+        .expect("activating ability 0 must succeed");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach-guard: the note ability must be sitting on the stack, unresolved"
+    );
+
+    assert!(
+        runner.state().objects[&amulet].noted_mana_spent().is_none(),
+        "an unresolved activation must not have written a durable note yet"
+    );
+}
+
+/// "The last noted type" (singular) must REPLACE, not append: two note
+/// cycles on the SAME object, each fully resolved before the next begins,
+/// must leave exactly one `ChosenAttribute::NotedManaSpent` reflecting only
+/// the most recent payment.
+#[test]
+fn jeweled_amulet_second_note_replaces_not_appends() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let amulet = scenario
+        .add_creature_from_oracle(P0, "Jeweled Amulet", 0, 0, JEWELED_AMULET_ORACLE)
+        .as_artifact()
+        .id();
+    let mut runner = scenario.build();
+
+    // First note cycle: pay red, resolve fully.
+    activate_note_ability(&mut runner, amulet, ManaType::Red);
+    assert_eq!(
+        runner.state().objects[&amulet].noted_mana_spent(),
+        Some([ManaType::Red].as_slice()),
+        "reach-guard: the first cycle must have noted red"
+    );
+
+    // Remove the charge counter (ability 1) so ability 0 is activatable
+    // again, and drain the mana it produces so it doesn't interfere with
+    // the pool assertions below.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: amulet,
+            ability_index: 1,
+        })
+        .expect("removing the charge counter must succeed");
+    runner.state_mut().players[P0.0 as usize]
+        .mana_pool
+        .mana
+        .clear();
+    // Ability 1 taps the amulet as part of its own {T} cost; untap it so the
+    // second `activate_note_ability` call can pay ability 0's own {T} cost.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&amulet)
+        .expect("amulet must exist")
+        .tapped = false;
+    assert_eq!(
+        charge_counters(&runner, amulet),
+        0,
+        "reach-guard: ability 0 must be activatable again"
+    );
+
+    // Second note cycle: pay green, resolve fully.
+    activate_note_ability(&mut runner, amulet, ManaType::Green);
+
+    let noted = runner.state().objects[&amulet].noted_mana_spent();
+    assert_eq!(
+        noted,
+        Some([ManaType::Green].as_slice()),
+        "the second note must REPLACE the first, not append to it \
+         (got {noted:?})"
+    );
+}
+
+/// Issue #6504 review: the payment latch this effect reads must be captured
+/// PER ACTIVATION, not as a single mutable per-object field a later
+/// activation can overwrite. Sequence (all legal under CR 602.5: "Activate
+/// only if there are no charge counters" is checked at ACTIVATION time, and
+/// no charge counter exists yet while the first note ability is still
+/// unresolved on the stack):
+///
+///   1. Activate ability 0 paying RED. It goes on the stack, unresolved.
+///   2. Something untaps the amulet (simulated directly — CR-correctness of
+///      the untap effect itself is not what this test is about).
+///   3. Activate ability 0 AGAIN, paying GREEN. LIFO: this sits ABOVE the
+///      first activation.
+///   4. Resolve the top (green activation) first — notes green, first
+///      charge counter placed.
+///   5. Resolve the remaining (red activation) second — must note RED, its
+///      OWN payment, not a bled-through read of the green activation's
+///      (later, and by then long-overwritten) payment.
+///
+/// Revert-probe: reading a shared `GameObject`-level mutable latch at
+/// resolution time (rather than a per-activation `ResolvedAbility` snapshot)
+/// makes step 5 observe green instead of red, since both activations' cost
+/// payments write through the SAME field and the red activation resolves
+/// after the field was already overwritten by the green activation's
+/// payment.
+#[test]
+fn jeweled_amulet_lifo_stacked_activations_each_note_their_own_payment() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let amulet = scenario
+        .add_creature_from_oracle(P0, "Jeweled Amulet", 0, 0, JEWELED_AMULET_ORACLE)
+        .as_artifact()
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+
+    // (1) Activate paying red. On the stack, unresolved.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: amulet,
+            ability_index: 0,
+        })
+        .expect("first activation (red) must succeed");
+    assert_eq!(runner.state().stack.len(), 1);
+
+    // (2) Simulate an external untap effect (e.g. Puppet Strings) resolving
+    // in response — CR-correctness of untapping itself is out of scope here.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&amulet)
+        .expect("amulet must exist")
+        .tapped = false;
+
+    // (3) Activate again, paying green. LIFO: stacks ABOVE the red one.
+    runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: amulet,
+            ability_index: 0,
+        })
+        .expect("second activation (green), still no charge counter yet, must succeed");
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "reach-guard: both note activations must be on the stack at once"
+    );
+
+    // (4) Resolve the top (green) first.
+    runner.resolve_top();
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(
+        runner.state().objects[&amulet].noted_mana_spent(),
+        Some([ManaType::Green].as_slice()),
+        "the green activation must note its own (green) payment"
+    );
+    assert_eq!(
+        charge_counters(&runner, amulet),
+        1,
+        "reach-guard: the green activation's PutCounter must have resolved"
+    );
+
+    // (5) Resolve the remaining (red) activation second.
+    runner.resolve_top();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().objects[&amulet].noted_mana_spent(),
+        Some([ManaType::Red].as_slice()),
+        "the red activation must note ITS OWN (red) payment, not the \
+         green activation's — a shared mutable per-object latch would leak \
+         green into this resolution instead"
+    );
+}

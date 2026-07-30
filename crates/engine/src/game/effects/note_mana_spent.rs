@@ -11,13 +11,18 @@ use crate::types::game_state::GameState;
 /// does not model — that text is intentionally left unmatched by the parser
 /// and still reports `Effect::unimplemented`.
 ///
-/// Composable building block: cost payment stays in the mana-payment funnel
-/// (`pay_ability_mana_cost_with_choices_excluding_and_parent`, which stamps the
-/// transient `GameObject::mana_spent_to_activate` latch); this effect is the
-/// persistent writer, read back by `ManaProduction::NotedType`. Doing the write
-/// at resolution — not at payment time — means a countered or otherwise
-/// removed-from-stack ability never notes anything (CR 608.2c: instructions are
-/// followed only on resolution).
+/// Composable building block: cost payment stays in the mana-payment funnel;
+/// `push_ability_entry` (the single authority where an activated ability
+/// reaches the stack) snapshots what was spent, paired with the source's
+/// incarnation at that moment, directly onto THIS activation's own
+/// `ResolvedAbility::noted_mana_payment` (issue #6504) — never a per-object
+/// mutable field, so a permanent untapped and reactivated with a different
+/// payment while this ability still sits unresolved on the stack cannot
+/// corrupt what this instance observed. This effect is the persistent writer,
+/// read back by `ManaProduction::NotedType`. Doing the write at resolution —
+/// not at payment time — means a countered or otherwise removed-from-stack
+/// ability never notes anything (CR 608.2c: instructions are followed only on
+/// resolution).
 ///
 /// "The last noted type" is singular per card, so this replaces any prior
 /// `ChosenAttribute::NotedManaSpent` before pushing (replace-on-rechoose).
@@ -26,8 +31,7 @@ use crate::types::game_state::GameState;
 /// SAME activation is still unresolved on the stack becomes a new object at
 /// the same storage id — a new incarnation with no memory of the old
 /// payment. Refuses to write unless the object's current incarnation still
-/// matches the one captured when `mana_spent_to_activate` was stamped (see
-/// `GameObject::mana_spent_to_activate_incarnation`), mirroring the engine's
+/// matches `noted_mana_payment.source_incarnation`, mirroring the engine's
 /// existing incarnation-pairing idiom (`ResolvedAbility::source_is_current`,
 /// `TargetFilter::SelfRef` resolution).
 pub fn resolve(
@@ -39,17 +43,23 @@ pub fn resolve(
         return Ok(());
     };
 
+    let Some(payment) = ability.noted_mana_payment.as_ref() else {
+        // Nothing was captured at activation (e.g. the cost had no mana
+        // component to observe) — nothing to note.
+        return Ok(());
+    };
+
     let Some(src) = state.objects.get(&ability.source_id) else {
         // CR 608.2c: the source has left the zone it was in — nothing to note.
         return Ok(());
     };
-    if src.mana_spent_to_activate_incarnation != src.incarnation {
-        // CR 400.7: the payment was stamped on a prior incarnation of this
-        // object (bounced/flickered since). This incarnation never paid
-        // anything itself — nothing to note.
+    if src.incarnation != payment.source_incarnation {
+        // CR 400.7: this activation's payment was captured on a prior
+        // incarnation of this object (bounced/flickered since). The CURRENT
+        // incarnation never paid anything itself — nothing to note.
         return Ok(());
     }
-    let spent_types = src.mana_spent_to_activate.clone();
+    let spent_types = payment.types.clone();
 
     let Some(src) = state.objects.get_mut(&ability.source_id) else {
         return Ok(());

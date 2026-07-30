@@ -6714,6 +6714,20 @@ pub struct CostPaidObjectSnapshot {
     pub lki: LKISnapshot,
 }
 
+/// CR 106.1b + CR 400.7 + CR 602.2b (issue #6504): The mana type(s) spent to
+/// pay one activated ability's own mana sub-cost, snapshotted onto
+/// `ResolvedAbility::noted_mana_payment` at the moment that specific
+/// activation reached the stack. `source_incarnation` is the source's
+/// `GameObject::incarnation` at that same moment — a companion "note the
+/// type of mana spent to pay this activation cost" effect (Jeweled Amulet)
+/// must refuse to act if the object's live incarnation no longer matches
+/// (CR 400.7: bounced/flickered since).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotedManaPayment {
+    pub types: Vec<ManaType>,
+    pub source_incarnation: u64,
+}
+
 /// CR 102.1 + CR 103.1: Seating direction relative to a player. The game's
 /// default turn order proceeds clockwise (CR 103.1); the next player in turn
 /// order is seated to the active player's left (CR 101.4). Thus walking
@@ -23370,6 +23384,23 @@ pub struct ResolvedAbility {
     /// inherently single-object even when the cost consumed several.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_paid_object: Option<CostPaidObjectSnapshot>,
+    /// CR 106.1b + CR 400.7 + CR 602.2b (issue #6504): The mana type(s) spent
+    /// to pay THIS resolving ability's own mana sub-cost, plus the source's
+    /// incarnation at the moment this activation reached the stack. Captured
+    /// exactly once, synchronously, by `push_ability_entry` (the single
+    /// authority where an activated ability reaches the stack) immediately
+    /// after cost payment completes — before any later activation of the
+    /// SAME permanent could occur. Unlike a per-object mutable latch, this
+    /// snapshot travels with THIS activation instance, so a permanent
+    /// untapped and reactivated (with a different payment) while this
+    /// ability still sits unresolved on the stack cannot corrupt what this
+    /// instance observed. Read by `Effect::NoteManaSpent` ("note the type of
+    /// mana spent to pay this activation cost" — Jeweled Amulet), which also
+    /// compares `source_incarnation` against the object's live incarnation
+    /// before writing (CR 400.7: a bounced/flickered source is a new object
+    /// with no memory of this activation's payment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noted_mana_payment: Option<NotedManaPayment>,
     /// CR 601.2h + CR 602.2b (issue #4948): EVERY object paid as
     /// part of this resolving ability's own cost — unlike `cost_paid_object`
     /// above, not just the first. This engine pays non-self
@@ -23523,6 +23554,7 @@ impl ResolvedAbility {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            noted_mana_payment: None,
             cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
@@ -24050,6 +24082,25 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_cost_paid_object_recursive(snapshot);
+        }
+    }
+
+    /// CR 106.1b + CR 400.7 + CR 602.2b (issue #6504): Stamp this activation's
+    /// noted-mana-payment snapshot across this ability and every sub/else
+    /// branch — mirrors `set_cost_paid_object_recursive`. Necessary because
+    /// `Effect::NoteManaSpent` is typically chained as a `sub_ability` (e.g.
+    /// Jeweled Amulet: `PutCounter { sub_ability: NoteManaSpent }`), which
+    /// resolves as its OWN separate `ResolvedAbility` node distinct from the
+    /// top-level ability `push_ability_entry` captured the payment onto;
+    /// without this recursive stamp the sub-ability would read the field's
+    /// `None` default and silently note nothing.
+    pub fn set_noted_mana_payment_recursive(&mut self, payment: NotedManaPayment) {
+        self.noted_mana_payment = Some(payment.clone());
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_noted_mana_payment_recursive(payment.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_noted_mana_payment_recursive(payment);
         }
     }
 

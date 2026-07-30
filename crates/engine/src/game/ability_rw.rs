@@ -3744,6 +3744,7 @@ fn walk_ability(
         distribution: _,
         chosen_x: _,
         cost_paid_object: _,
+        noted_mana_payment: _, // concrete captured payment snapshot, no read/write effect
         cost_paid_object_ids: _,
         effect_context_object: _,
         amassed_army_object: _,

@@ -1187,35 +1187,24 @@ pub struct GameObject {
     #[serde(default)]
     pub phase_status: PhaseStatus,
 
-    /// CR 106.1b + CR 602.2b: Mana type(s) spent to pay this object's own
-    /// most recent activated-ability mana cost, stamped by
+    /// CR 106.1b + CR 602.2b (issue #6504): Mana type(s) spent to pay this
+    /// object's own activated-ability mana cost, stamped by
     /// `pay_ability_mana_cost_with_choices_excluding_and_parent` at
-    /// activation-time payment. Bridges cost payment (activation) to
-    /// `Effect::NoteManaSpent` (resolution) for "note the type of mana spent
-    /// to pay this activation cost" (Jeweled Amulet). Transient:
-    /// overwritten by the object's next ability-mana-cost payment, with no
-    /// other clearing logic — safe because every known card in this class
-    /// gates its "note" ability behind a `{T}` cost component, so the same
-    /// source cannot pay a second activation's mana cost before the first
-    /// resolves and consumes this latch. Mirrors `colors_spent_to_cast`'s
-    /// cast-side stamp-then-read idiom, adapted for ability activation, where
-    /// the resolving stack entry is a separate `ResolvedAbility` rather than
-    /// this same object.
-    ///
-    /// Paired with `mana_spent_to_activate_incarnation` (CR 400.7): a source
-    /// that leaves and returns (bounce/flicker) while its OWN ability is
-    /// still unresolved on the stack becomes a new object at this same
-    /// storage id (see `GameObject::incarnation`). `Effect::NoteManaSpent`
-    /// must not promote this latch to durable `ChosenAttribute::
-    /// NotedManaSpent` state unless the object's current incarnation still
-    /// matches the one captured here — otherwise the new incarnation would
-    /// silently inherit a payment it never made.
+    /// activation-time payment. PURELY A BRIDGE: `push_ability_entry` (the
+    /// single authority where an activated ability reaches the stack)
+    /// synchronously drains this field — via `std::mem::take` — into that
+    /// specific activation's own `ResolvedAbility::noted_mana_payment`
+    /// (paired with the source's live incarnation at that same moment)
+    /// immediately after cost payment completes, before any later activation
+    /// of this permanent could occur. Nothing reads this field at resolution
+    /// time; `Effect::NoteManaSpent` reads the per-activation snapshot
+    /// instead, so a permanent untapped and reactivated with a different
+    /// payment while an earlier activation still sits unresolved on the
+    /// stack cannot corrupt what that earlier instance observed. Always
+    /// empty except transiently between the payment stamp and the very next
+    /// `push_ability_entry` call for the same source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mana_spent_to_activate: Vec<ManaType>,
-    /// See `mana_spent_to_activate`. The object's `incarnation` at the moment
-    /// that latch was stamped.
-    #[serde(default)]
-    pub mana_spent_to_activate_incarnation: u64,
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
@@ -1376,13 +1365,10 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         phase_status: _,
         protection_start_exempt_attachments: _,
         // Activation-cost-payment latch — same omission class as
-        // `mana_spent_to_cast`/`colors_spent_to_cast` above: consumed
-        // synchronously by `Effect::NoteManaSpent` into the compared
-        // `chosen_attributes` accumulator, or overwritten by the object's
-        // next ability-mana-cost payment (§5.2c).
+        // `mana_spent_to_cast`/`colors_spent_to_cast` above: drained
+        // synchronously by `push_ability_entry` into the resolving
+        // `ResolvedAbility`'s own `noted_mana_payment` snapshot (§5.2c).
         mana_spent_to_activate: _,
-        // Paired with `mana_spent_to_activate` above — same omission class.
-        mana_spent_to_activate_incarnation: _,
     } = o;
 }
 
@@ -2251,7 +2237,6 @@ impl GameObject {
             mana_spent_source_snapshots: Vec::new(),
             phase_status: PhaseStatus::PhasedIn,
             mana_spent_to_activate: Vec::new(),
-            mana_spent_to_activate_incarnation: 0,
         }
     }
 

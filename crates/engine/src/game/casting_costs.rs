@@ -5,8 +5,8 @@ use crate::types::ability::{
     is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
     AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, AggregateFunction,
     BeholdCostAction, CastTimingPermission, Comparator, CostPaidObjectSnapshot,
-    CounterCostSelection, Effect, KickerVariant, ObjectProperty, QuantityExpr, QuantityRef,
-    ReplacementDefinition, ResolvedAbility, SacrificeCost, SacrificeRequirement,
+    CounterCostSelection, Effect, KickerVariant, NotedManaPayment, ObjectProperty, QuantityExpr,
+    QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost, SacrificeRequirement,
     SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement, StaticCondition,
     TapCreaturesAggregate, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, EXILE_COST_X,
 };
@@ -5405,6 +5405,30 @@ pub(super) fn push_ability_entry(
     // trigger's `chosen_x`. An activation with no announced X publishes `None`, which
     // also clears any stale value.
     state.announced_source_x = resolved.chosen_x.map(|x| (source_id, x));
+
+    // CR 106.1b + CR 400.7 + CR 602.2b (issue #6504): consume the source's
+    // transient mana-spent-to-activate latch into THIS activation's own
+    // `ResolvedAbility` snapshot (and every sub/else branch — `Effect::
+    // NoteManaSpent` is typically a `sub_ability`, which resolves as its own
+    // separate node, so the stamp must recurse; see
+    // `set_noted_mana_payment_recursive`), paired with the source's
+    // incarnation at this exact moment. Since `push_ability_entry` is the
+    // single authority where an activated ability reaches the stack, this
+    // capture happens synchronously, immediately after cost payment
+    // completed and before any later activation of the same permanent could
+    // occur — so a permanent untapped and reactivated while this ability
+    // still sits unresolved on the stack cannot corrupt what THIS instance
+    // observed. The latch is cleared immediately after, so it never appears
+    // to hold a stale value between activations.
+    if let Some(obj) = state.objects.get_mut(&source_id) {
+        if !obj.mana_spent_to_activate.is_empty() {
+            let payment = NotedManaPayment {
+                types: std::mem::take(&mut obj.mana_spent_to_activate),
+                source_incarnation: obj.incarnation,
+            };
+            resolved.set_noted_mana_payment_recursive(payment);
+        }
+    }
 
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
     resolved.ability_index = Some(ability_index);

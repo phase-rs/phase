@@ -3023,6 +3023,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         starting_with,
         chosen_x,
         cost_paid_object,
+        noted_mana_payment,
         cost_paid_object_ids,
         effect_context_object,
         amassed_army_object,
@@ -3084,6 +3085,13 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && starting_with.is_none()
         && chosen_x.is_none()
         && cost_paid_object.is_none()
+        // Issue #6504: a batched ability must not carry a per-activation
+        // noted-mana-payment snapshot either — two sibling copies of a
+        // "note the type of mana spent..." ability can carry DIFFERENT
+        // payments (that's the whole point of threading it per-activation
+        // rather than through a shared mutable latch), so they are never
+        // safe to merge into one batched resolution.
+        && noted_mana_payment.is_none()
         // CR 117.1 (issue #4948): a batched triggered ability must not carry
         // per-instance cost-paid-object state either — mirrors the
         // `cost_paid_object` gate above. Always empty for triggered
@@ -3226,6 +3234,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         starting_with,
         chosen_x,
         cost_paid_object,
+        noted_mana_payment,
         cost_paid_object_ids,
         effect_context_object,
         amassed_army_object,
@@ -3278,6 +3287,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && starting_with.is_none()
         && chosen_x.is_none()
         && cost_paid_object.is_none()
+        && noted_mana_payment.is_none()
         && cost_paid_object_ids.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
@@ -3414,6 +3424,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         starting_with,
         chosen_x,
         cost_paid_object,
+        noted_mana_payment,
         cost_paid_object_ids,
         effect_context_object,
         amassed_army_object,
@@ -3466,6 +3477,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         && starting_with.is_none()
         && chosen_x.is_none()
         && cost_paid_object.is_none()
+        && noted_mana_payment.is_none()
         && cost_paid_object_ids.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
@@ -4050,6 +4062,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         starting_with: a_starting_with,
         chosen_x: a_chosen_x,
         cost_paid_object: a_cost_paid_object,
+        noted_mana_payment: a_noted_mana_payment,
         cost_paid_object_ids: a_cost_paid_object_ids,
         effect_context_object: a_effect_context_object,
         amassed_army_object: a_amassed_army_object,
@@ -4103,6 +4116,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         starting_with: b_starting_with,
         chosen_x: b_chosen_x,
         cost_paid_object: b_cost_paid_object,
+        noted_mana_payment: b_noted_mana_payment,
         cost_paid_object_ids: b_cost_paid_object_ids,
         effect_context_object: b_effect_context_object,
         amassed_army_object: b_amassed_army_object,
@@ -4162,6 +4176,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_starting_with == b_starting_with
         && a_chosen_x == b_chosen_x
         && a_cost_paid_object == b_cost_paid_object
+        && a_noted_mana_payment == b_noted_mana_payment
         && a_cost_paid_object_ids == b_cost_paid_object_ids
         && a_effect_context_object == b_effect_context_object
         && a_amassed_army_object == b_amassed_army_object

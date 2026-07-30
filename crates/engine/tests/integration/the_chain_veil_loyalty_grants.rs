@@ -176,6 +176,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         starting_with: None,
         chosen_x: None,
         cost_paid_object: None,
+        noted_mana_payment: None,
         cost_paid_object_ids: Vec::new(),
         effect_context_object: None,
         amassed_army_object: None,
