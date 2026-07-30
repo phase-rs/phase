@@ -1,8 +1,15 @@
 {
   "concedeDialog": {
     "title": "Concedere la partita?",
-    "message": "Il tuo avversario sarà dichiarato vincitore.",
-    "concede": "Concedi"
+    "game": {
+      "label": "Concedi questa partita",
+      "ordinaryMessage": "Il tuo avversario vince questa partita.",
+      "matchMessage": "Concedi solo la partita attuale. Se il match non è deciso, seguiranno sideboard o partita successiva."
+    },
+    "match": {
+      "label": "Concedi l'intero match",
+      "message": "Concedi il match. Il tuo avversario vince il match e non verranno giocate altre partite."
+    }
   },
   "takebackDialog": {
     "requestedTitle": "{{name}} richiede un ripristino",

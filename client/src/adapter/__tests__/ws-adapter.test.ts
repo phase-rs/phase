@@ -5,7 +5,7 @@ import {
   PROTOCOL_VERSION,
   WebSocketAdapter,
 } from "../ws-adapter";
-import { AdapterError } from "../types";
+import { AdapterError, supportsMatchConcede } from "../types";
 import type { GameState } from "../types";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
 
@@ -143,6 +143,14 @@ describe("WebSocketAdapter", () => {
     await initPromise;
   });
 
+  it("sends the payload-free authenticated whole-match concession intent", () => {
+    expect(supportsMatchConcede(adapter)).toBe(true);
+
+    adapter.sendMatchConcede();
+
+    expect(ws.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "ConcedeMatch" }));
+  });
+
   describe("native AI transport", () => {
     const nativeAiOptions = (socketFactory: () => PhaseSocketTransport) => ({
       nativeAi: {
@@ -253,7 +261,7 @@ describe("WebSocketAdapter", () => {
         "message",
         JSON.stringify({
           type: "GameCreated",
-          data: { game_code: "ABCD", player_token: "tok" },
+          data: { game_code: "ABCD", player_token: "tok", full_key: { game_code: "ABCD", generation: 1 } },
         }),
       );
       nativeSocket.dispatchSynthetic(
@@ -313,7 +321,7 @@ describe("WebSocketAdapter", () => {
         "message",
         JSON.stringify({
           type: "SessionAttached",
-          data: { game_code: "WXYZ", player_id: 0, player_token: "tok" },
+          data: { game_code: "WXYZ", player_id: 0, player_token: "tok", full_key: { game_code: "WXYZ", generation: 1 } },
         }),
       );
       await attached;
@@ -364,6 +372,39 @@ describe("WebSocketAdapter", () => {
   });
 
   describe("native P2P pregame transport", () => {
+    it("rejects a native seat attachment without a Full session key", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "SessionAttached",
+          data: { game_code: "NATIVE", player_id: 0, player_token: "host-token" },
+        }),
+      );
+
+      await expect(attached).rejects.toMatchObject({ message: "Server omitted a valid Full session identity" });
+      nativeAdapter.dispose();
+    });
+
     it("waits for the server-issued seat attachment and slot confirmation", async () => {
       const nativeAdapter = new WebSocketAdapter(
         "native-engine",
@@ -393,13 +434,14 @@ describe("WebSocketAdapter", () => {
         "message",
         JSON.stringify({
           type: "SessionAttached",
-          data: { game_code: "NATIVE", player_id: 0, player_token: "host-token" },
+          data: { game_code: "NATIVE", player_id: 0, player_token: "host-token", full_key: { game_code: "NATIVE", generation: 1 } },
         }),
       );
       await expect(attached).resolves.toEqual({
         gameCode: "NATIVE",
         playerId: 0,
         playerToken: "host-token",
+        fullKey: { game_code: "NATIVE", generation: 1 },
       });
 
       const confirmed = nativeAdapter.sendSeatMutation({ type: "Start" });
@@ -429,6 +471,7 @@ describe("WebSocketAdapter", () => {
             gameCode: "NATIVE",
             playerId: 1,
             playerToken: "guest-token",
+            fullKey: { game_code: "NATIVE", generation: 1 },
           },
         },
       );
@@ -438,7 +481,11 @@ describe("WebSocketAdapter", () => {
       expect(nativeSocket.send).toHaveBeenLastCalledWith(
         JSON.stringify({
           type: "Reconnect",
-          data: { game_code: "NATIVE", player_token: "guest-token" },
+          data: {
+            game_code: "NATIVE",
+            player_token: "guest-token",
+            full_key: { game_code: "NATIVE", generation: 1 },
+          },
         }),
       );
       nativeSocket.dispatchSynthetic(
@@ -452,6 +499,7 @@ describe("WebSocketAdapter", () => {
         gameCode: "NATIVE",
         playerId: 1,
         playerToken: "guest-token",
+        fullKey: { game_code: "NATIVE", generation: 1 },
       });
     });
 
@@ -679,6 +727,7 @@ describe("WebSocketAdapter", () => {
             state: createMockState(),
             your_player: 1,
             player_token: "player-token",
+            full_key: { game_code: "ABC123", generation: 1 },
           },
         }),
       );
@@ -701,6 +750,7 @@ describe("WebSocketAdapter", () => {
             data: {
               game_code: "ABC123",
               player_token: "player-token",
+              full_key: { game_code: "ABC123", generation: 1 },
             },
           }),
         );

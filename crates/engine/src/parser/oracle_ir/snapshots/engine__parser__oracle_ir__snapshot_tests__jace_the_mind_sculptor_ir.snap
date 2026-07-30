@@ -22,69 +22,156 @@ expression: "&ir"
         "fragment": "[+2]: Look at the top card of target player's library. You may put that card on the bottom of that player's library."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Dig",
-            "player": {
-              "type": "Player"
-            },
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "destination": null,
-            "keep_count": 0,
-            "up_to": false,
-            "filter": {
-              "type": "Any"
-            },
-            "rest_destination": null,
-            "reveal": false,
-            "enter_tapped": false
-          },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 2
-          },
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "PutAtLibraryPosition",
-              "target": {
-                "type": "ParentTarget"
+        "Spell": {
+          "source_text": "Look at the top card of target player's library. You may put that card on the bottom of that player's library.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 47,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Look at the top card of target player's library"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Dig",
+                    "player": {
+                      "type": "Player"
+                    },
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "destination": null,
+                    "keep_count": null,
+                    "up_to": false,
+                    "filter": {
+                      "type": "Any"
+                    },
+                    "rest_destination": null,
+                    "reveal": false,
+                    "enter_tapped": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               },
-              "count": {
-                "type": "Fixed",
-                "value": 1
-              },
-              "position": {
-                "type": "Bottom"
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 49,
+                    "end_byte": 109,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "You may put that card on the bottom of that player's library"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "PutAtLibraryPosition",
+                    "target": {
+                      "type": "ParentTarget"
+                    },
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "position": {
+                      "type": "Bottom"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": true,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": true,
-            "forward_result": false,
-            "sub_link": "SequentialSibling"
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": null,
-          "description": "[+2]: Look at the top card of target player's library. You may put that card on the bottom of that player's library.",
-          "target_prompt": null,
-          "activation_restrictions": [
-            {
-              "type": "AsSorcery"
-            }
-          ],
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Loyalty",
+              "amount": 2
+            },
+            "activation_restrictions": [
+              {
+                "type": "AsSorcery"
+              }
+            ],
+            "description": "[+2]: Look at the top card of target player's library. You may put that card on the bottom of that player's library."
+          },
+          "die_results": [],
+          "root_transforms": []
         }
       }
     },
@@ -106,69 +193,157 @@ expression: "&ir"
         "fragment": "[0]: Draw three cards, then put two cards from your hand on top of your library in any order."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Draw",
-            "count": {
-              "type": "Fixed",
-              "value": 3
-            },
-            "target": {
-              "type": "Controller"
-            }
-          },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 0
-          },
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "PutAtLibraryPosition",
-              "target": {
-                "type": "Typed",
-                "type_filters": [
-                  "Card"
-                ],
-                "controller": "You",
-                "properties": [
-                  {
-                    "type": "InZone",
-                    "zone": "Hand"
+        "Spell": {
+          "source_text": "Draw three cards, then put two cards from your hand on top of your library in any order.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 16,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Draw three cards"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
                   }
-                ]
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Draw",
+                    "count": {
+                      "type": "Fixed",
+                      "value": 3
+                    },
+                    "target": {
+                      "type": "Controller"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Then",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               },
-              "count": {
-                "type": "Fixed",
-                "value": 2
-              },
-              "position": {
-                "type": "Top"
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 23,
+                    "end_byte": 87,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "put two cards from your hand on top of your library in any order"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "PutAtLibraryPosition",
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Card"
+                      ],
+                      "controller": "You",
+                      "properties": [
+                        {
+                          "type": "InZone",
+                          "zone": "Hand"
+                        }
+                      ]
+                    },
+                    "count": {
+                      "type": "Fixed",
+                      "value": 2
+                    },
+                    "position": {
+                      "type": "Top"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": null,
-          "description": "[0]: Draw three cards, then put two cards from your hand on top of your library in any order.",
-          "target_prompt": null,
-          "activation_restrictions": [
-            {
-              "type": "AsSorcery"
-            }
-          ],
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Loyalty",
+              "amount": 0
+            },
+            "activation_restrictions": [
+              {
+                "type": "AsSorcery"
+              }
+            ],
+            "description": "[0]: Draw three cards, then put two cards from your hand on top of your library in any order."
+          },
+          "die_results": [],
+          "root_transforms": []
         }
       }
     },
@@ -190,37 +365,91 @@ expression: "&ir"
         "fragment": "[−1]: Return target creature to its owner's hand."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Bounce",
-            "target": {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": null,
-              "properties": []
+        "Spell": {
+          "source_text": "Return target creature to its owner's hand.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 42,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Return target creature to its owner's hand"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Bounce",
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": null,
+                      "properties": []
+                    },
+                    "destination": null
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Loyalty",
+              "amount": -1
             },
-            "destination": null
+            "activation_restrictions": [
+              {
+                "type": "AsSorcery"
+              }
+            ],
+            "description": "[−1]: Return target creature to its owner's hand."
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -1
-          },
-          "sub_ability": null,
-          "duration": null,
-          "description": "[−1]: Return target creature to its owner's hand.",
-          "target_prompt": null,
-          "activation_restrictions": [
-            {
-              "type": "AsSorcery"
-            }
-          ],
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": [],
+          "root_transforms": []
         }
       }
     },
@@ -242,83 +471,171 @@ expression: "&ir"
         "fragment": "[−12]: Exile all cards from target player's library, then that player shuffles their hand into their library."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZoneAll",
-            "origin": "Library",
-            "destination": "Exile",
-            "target": {
-              "type": "Typed",
-              "type_filters": [
-                "Card"
-              ],
-              "controller": null,
-              "properties": [
-                {
-                  "type": "Owned",
-                  "controller": "TargetPlayer"
+        "Spell": {
+          "source_text": "Exile all cards from target player's library, then that player shuffles their hand into their library.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 44,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Exile all cards from target player's library"
                 },
-                {
-                  "type": "InZone",
-                  "zone": "Library"
-                }
-              ]
-            }
-          },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -12
-          },
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "ChangeZoneAll",
-              "origin": "Hand",
-              "destination": "Library",
-              "target": {
-                "type": "ParentTargetController"
-              }
-            },
-            "cost": null,
-            "sub_ability": {
-              "kind": "Spell",
-              "effect": {
-                "type": "Shuffle",
-                "target": {
-                  "type": "ParentTargetController"
-                }
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "ChangeZoneAll",
+                    "origin": "Library",
+                    "destination": "Exile",
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Card"
+                      ],
+                      "controller": null,
+                      "properties": [
+                        {
+                          "type": "Owned",
+                          "controller": "TargetPlayer"
+                        },
+                        {
+                          "type": "InZone",
+                          "zone": "Library"
+                        }
+                      ]
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Then",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               },
-              "cost": null,
-              "sub_ability": null,
-              "duration": null,
-              "description": null,
-              "target_prompt": null,
-              "condition": null,
-              "optional_targeting": false,
-              "optional": false,
-              "forward_result": false
-            },
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 51,
+                    "end_byte": 101,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "that player shuffles their hand into their library"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "ChangeZoneAll",
+                    "origin": "Hand",
+                    "destination": "Library",
+                    "target": {
+                      "type": "ParentTargetController"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": {
+                    "kind": "Spell",
+                    "effect": {
+                      "type": "Shuffle",
+                      "target": {
+                        "type": "ParentTargetController"
+                      }
+                    },
+                    "cost": null,
+                    "sub_ability": null,
+                    "duration": null,
+                    "description": null,
+                    "target_prompt": null,
+                    "condition": null,
+                    "optional_targeting": false,
+                    "optional": false,
+                    "forward_result": false
+                  },
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": null,
-          "description": "[−12]: Exile all cards from target player's library, then that player shuffles their hand into their library.",
-          "target_prompt": null,
-          "activation_restrictions": [
-            {
-              "type": "AsSorcery"
-            }
-          ],
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Loyalty",
+              "amount": -12
+            },
+            "activation_restrictions": [
+              {
+                "type": "AsSorcery"
+              }
+            ],
+            "description": "[−12]: Exile all cards from target player's library, then that player shuffles their hand into their library."
+          },
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

@@ -225,6 +225,8 @@ fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::MulliganDecision { .. }
         | GameAction::ReorderHand { .. }
         | GameAction::TapLandForMana { .. }
+        | GameAction::ActivateManaSource { .. }
+        | GameAction::BackToManaPayment
         | GameAction::UntapLandForMana { .. }
         | GameAction::SpendPoolMana { .. }
         | GameAction::UnspendPoolMana { .. }

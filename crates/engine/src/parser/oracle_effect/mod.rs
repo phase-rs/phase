@@ -1653,14 +1653,20 @@ fn try_parse_copy_next_spell_when_cast(tp: TextPair) -> Option<ParsedEffectClaus
 pub(crate) fn try_parse_temporal_delayed_trigger_ability(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+) -> Option<AbilityIr> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let clause = try_parse_whenever_this_turn(tp)
         .or_else(|| try_parse_when_next_event(tp))
         .or_else(|| try_parse_copy_next_spell_when_cast(tp))
         .or_else(|| try_parse_at_next_phase_delayed_trigger(text, kind))?;
-    Some(ability_definition_from_clause(kind, clause))
+    Some(AbilityIr {
+        source_text: text.to_string(),
+        body: EffectChainIr::single_clause(text, kind, clause, None, None, false),
+        shell: AbilityShellIr::default(),
+        die_results: vec![],
+        root_transforms: vec![],
+    })
 }
 
 /// CR 603.7a: Pact-cycle instants ("At the beginning of your next upkeep, pay
@@ -30745,6 +30751,14 @@ pub(crate) fn parse_effect_chain_ir(
         // which is exactly why a head-only rewrite corrupts the chain.
         let is_distributed_chunk = text_is_compound_subject_distribution(&text);
         // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
+        // CR 608.2c: untouched — its `!builder.is_empty()` gate is intentionally broad
+        // (many antecedent shapes reach this without a `target_filter()`, e.g. a typed
+        // trigger subject rebind chain), and narrowing it here regressed dozens of
+        // unrelated cards (Feather, the Redeemed's exile-return rider; Managorger
+        // Phoenix; dropped/added parent-target bindings across PutCounter/Pump/grant/
+        // ChangeZone/DealDamage/Destroy/GainControl) that a full parse-diff against
+        // main surfaced. See the Sacrifice-specific fixup immediately below instead,
+        // which is scoped to exactly the reported bug class.
         if condition.is_some()
             && !is_distributed_chunk
             && !condition.as_ref().is_some_and(condition_refs_source_object)
@@ -30759,6 +30773,56 @@ pub(crate) fn parse_effect_chain_ir(
             )
         {
             replace_target_with_parent(&mut clause.effect);
+        }
+        // CR 608.2c (issue #6507): the sacrifice imperative parser
+        // (`parse_targeted_action_ast`) defaults a bare "it"/"them" pronoun with no
+        // trigger subject to `ParentTarget`, on the assumption that SOME earlier
+        // clause chose a real target for it to inherit — the common case
+        // (`bare_it_without_trigger_subject_preserves_parent_target`). That assumption
+        // is false, and the fallback must not fire, when ANY of the established
+        // antecedent authorities finds a referent:
+        //   - `parent_target_available` (computed above) — a chosen typed target
+        //     anywhere in this chain, an `if you do` object anchor, OR an outer
+        //     chain's referent inherited into a recursively-parsed `Otherwise`
+        //     else-branch via `ctx.parent_target_available` (Brilliance Unleashed's
+        //     class). Omitting this last case would let an else-branch whose own
+        //     internal clauses are targetless rebind a valid OUTER `ParentTarget` to
+        //     `SelfRef`, sacrificing the ability's source instead of the object
+        //     selected before the paired conditional.
+        //   - `chain_prior_referent_is_created_token` — a token/copy publisher
+        //     (`Effect::Populate` has no `target` field but DOES publish a
+        //     created-token referent; `Token`/`CopyTokenOf` are covered by
+        //     `parent_target_available`'s typed-referent scan for free since both DO
+        //     have a `target_filter()`).
+        //   - the nearest non-`Continue` clause (an absorbed rider carries no
+        //     independent referent, so it must not be mistaken for a targetless
+        //     antecedent — mirrors `if_you_do_object_anchor`'s same lookback)
+        //     exposing SOME target concept (`target_filter().is_some()`).
+        // With none of those present, there is nothing for `ParentTarget` to resolve
+        // to, so a conditional "sacrifice it" tail (Gemstone Mine's "{T}, Remove a
+        // mining counter: Add one mana of any color. If there are no mining counters
+        // on this land, sacrifice it.") silently never sacrifices anything. Rebind it
+        // to the ability's own source, the only object "it" can plausibly name here.
+        //
+        // Deliberately scoped to `Effect::Sacrifice` only (not folded into the
+        // Kicker-clause rewrite's gate above): that gate is shared by every
+        // `replace_target_with_parent`-eligible effect kind, and narrowing it there
+        // regressed unrelated cards — see the comment above.
+        let nearest_semantic_clause = builder
+            .clauses()
+            .iter()
+            .rev()
+            .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }));
+        let prior_clause_has_no_target_concept = !parent_target_available
+            && !chain_prior_referent_is_created_token(builder.clauses())
+            && nearest_semantic_clause
+                .is_some_and(|prev| prev.parsed.effect.target_filter().is_none());
+        if condition.is_some() && !is_distributed_chunk && prior_clause_has_no_target_concept {
+            if let Effect::Sacrifice { target, .. } = &mut clause.effect {
+                if matches!(target, TargetFilter::ParentTarget) {
+                    *target = TargetFilter::SelfRef;
+                }
+            }
         }
         // CR 608.2c: Pronoun clause following a conditional targeted effect.
         if condition.is_none()

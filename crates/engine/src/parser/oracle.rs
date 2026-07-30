@@ -63,6 +63,7 @@ use super::oracle_effect::{
     parse_effect_chain_with_context, rewrite_condition_keyword,
     try_parse_temporal_delayed_trigger_ability,
 };
+use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
@@ -71,7 +72,8 @@ use super::oracle_ir::doc::{
     PrintedAbilityIndex, PrintedTriggerIndex, SpellPayloadIr, UnsupportedAbilityIr,
 };
 use super::oracle_ir::effect_chain::{
-    AbilityIr, AbilityRootTransform, AbilityShellIr, ResidualConditionPolicy, ShellStage,
+    AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr, ResidualConditionPolicy,
+    ShellStage,
 };
 use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
@@ -4558,7 +4560,7 @@ pub(crate) fn parse_oracle_ir(
         // ability and still needs the synthesized activation body.
         if lower_starts_with(&lower, "equip") && !lower_starts_with(&lower, "equipped") {
             if let Some(ability) = try_parse_equip(&line) {
-                emitter.ability_at(item_line, ability);
+                emitter.ability_ir_at(item_line, ability);
                 i += 1;
                 continue;
             }
@@ -4725,14 +4727,14 @@ pub(crate) fn parse_oracle_ir(
                 .trim_start_matches(" \u{2014} ")
                 .trim_start_matches(" - ");
             if let Some(ability) = try_parse_equip(equip_part) {
-                emitter.ability_at(item_line, ability);
+                emitter.ability_ir_at(item_line, ability);
                 i += 1;
                 continue;
             }
         }
         // Priority 11: Planeswalker loyalty abilities: +N:, −N:, 0:, [+N]:, [−N]:, [0]:
         if let Some(ability) = try_parse_loyalty_line(&line, &mut ctx) {
-            emitter.ability_at(item_line, ability);
+            emitter.ability_ir_at(item_line, ability);
             i += 1;
             continue;
         }
@@ -5160,9 +5162,10 @@ pub(crate) fn parse_oracle_ir(
         // trigger-shaped temporal text through the effect parser before generic
         // trigger dispatch.
         if is_spell && has_trigger_prefix(&lower) {
-            if let Some(def) = try_parse_temporal_delayed_trigger_ability(&line, AbilityKind::Spell)
+            if let Some(ability) =
+                try_parse_temporal_delayed_trigger_ability(&line, AbilityKind::Spell)
             {
-                emitter.ability_at(item_line, def);
+                emitter.ability_ir_at(item_line, ability);
                 i += 1;
                 continue;
             }
@@ -7065,7 +7068,7 @@ fn scrub_replacement_descriptions(rep: &mut ReplacementDefinition) {
 /// "Equipment you control have equip {0}" (Puresteel Paladin granted-equip
 /// pattern) does not slice off the first 5 bytes of "Equipment" and parse the
 /// remainder ("ment you control...") as a malformed activated ability cost.
-pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
+pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityIr> {
     let (activation_line, cost_reduction) = split_trailing_self_cost_reduction(line);
     // Caller already verified lower.starts_with("equip") — strip 5-char prefix.
     // "equip" is always ASCII so byte length == char length.
@@ -7095,26 +7098,42 @@ pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     let (cost_text, constraints) = strip_activated_constraints(cost_text);
     let target = parse_equip_target_filter(&cost_text)?;
     let cost = parse_equip_cost(&cost_text);
-    let mut ability = AbilityDefinition::new(
-        AbilityKind::Activated,
-        Effect::Attach {
-            attachment: crate::types::ability::TargetFilter::SelfRef,
-            target,
-        },
-    )
-    .cost(cost)
-    .description(line.to_string())
-    .sorcery_speed();
-    if !constraints.restrictions.is_empty() {
-        for restriction in constraints.restrictions {
-            if !ability.activation_restrictions.contains(&restriction) {
-                ability.activation_restrictions.push(restriction);
-            }
+    let mut activation_restrictions = vec![ActivationRestriction::AsSorcery];
+    for restriction in constraints.restrictions {
+        if !activation_restrictions.contains(&restriction) {
+            activation_restrictions.push(restriction);
         }
     }
-    ability.cost_reduction = cost_reduction;
-    ability.ability_tag = Some(AbilityTag::Equip);
-    Some(ability)
+
+    Some(AbilityIr {
+        source_text: line.to_string(),
+        body: EffectChainIr::single_clause(
+            line,
+            AbilityKind::Activated,
+            parsed_clause(Effect::Attach {
+                attachment: crate::types::ability::TargetFilter::SelfRef,
+                target,
+            }),
+            None,
+            None,
+            false,
+        ),
+        shell: AbilityShellIr {
+            cost: Some(cost),
+            cost_reduction,
+            activation_restrictions,
+            ability_tag: Some(AbilityTag::Equip),
+            description: Some(line.to_string()),
+            ..AbilityShellIr::default()
+        },
+        die_results: vec![],
+        root_transforms: vec![],
+    })
+}
+
+/// Lower native Equip IR for grant/token consumers that are not document emitters.
+pub(crate) fn try_parse_equip_lowered(line: &str) -> Option<AbilityDefinition> {
+    try_parse_equip(line).map(|ir| lower_ability_ir(&ir))
 }
 
 fn parse_equip_target_filter(cost_text: &str) -> Option<TargetFilter> {
@@ -7275,7 +7294,7 @@ fn minus_x_loyalty_cost() -> AbilityCost {
 }
 
 /// Try to parse a planeswalker loyalty line: "+N:", "−N:", "0:", "[+N]:", "[−N]:", "[0]:", "[−X]:"
-fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityDefinition> {
+fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityIr> {
     let trimmed = line.trim();
 
     // Try bracket format first: [+2]: ..., [−1]: ..., [0]: ..., [−X]: ...
@@ -7287,26 +7306,20 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
                 // feeds the effect via `cost_x_paid`. Checked before
                 // `parse_loyalty_number`, which only handles fixed amounts.
                 if is_minus_x_loyalty(inner) {
-                    let effect_text = effect_text.trim();
-                    ctx.subject = None;
-                    ctx.actor = None;
-                    let mut def =
-                        parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
-                    def.cost = Some(minus_x_loyalty_cost());
-                    def.description = Some(trimmed.to_string());
-                    apply_loyalty_restrictions(&mut def);
-                    return Some(def);
+                    return Some(parse_loyalty_ability_ir(
+                        effect_text.trim(),
+                        trimmed,
+                        minus_x_loyalty_cost(),
+                        ctx,
+                    ));
                 }
                 if let Some(amount) = parse_loyalty_number(inner) {
-                    let effect_text = effect_text.trim();
-                    ctx.subject = None;
-                    ctx.actor = None;
-                    let mut def =
-                        parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
-                    def.cost = Some(AbilityCost::Loyalty { amount });
-                    def.description = Some(trimmed.to_string());
-                    apply_loyalty_restrictions(&mut def);
-                    return Some(def);
+                    return Some(parse_loyalty_ability_ir(
+                        effect_text.trim(),
+                        trimmed,
+                        AbilityCost::Loyalty { amount },
+                        ctx,
+                    ));
                 }
             }
         }
@@ -7318,14 +7331,12 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
         // bracket branch). `parse_loyalty_number` rejects "X", so this must be
         // checked first.
         if is_minus_x_loyalty(prefix) {
-            let effect_text = effect_text.trim();
-            ctx.subject = None;
-            ctx.actor = None;
-            let mut def = parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
-            def.cost = Some(minus_x_loyalty_cost());
-            def.description = Some(trimmed.to_string());
-            apply_loyalty_restrictions(&mut def);
-            return Some(def);
+            return Some(parse_loyalty_ability_ir(
+                effect_text.trim(),
+                trimmed,
+                minus_x_loyalty_cost(),
+                ctx,
+            ));
         }
         if let Some(amount) = parse_loyalty_number(prefix) {
             // Verify it looks like a loyalty prefix (starts with +, −, –, -, or is "0")
@@ -7336,20 +7347,34 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
                 || first_char == '-'
                 || prefix.trim() == "0"
             {
-                let effect_text = effect_text.trim();
-                ctx.subject = None;
-                ctx.actor = None;
-                let mut def =
-                    parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
-                def.cost = Some(AbilityCost::Loyalty { amount });
-                def.description = Some(trimmed.to_string());
-                apply_loyalty_restrictions(&mut def);
-                return Some(def);
+                return Some(parse_loyalty_ability_ir(
+                    effect_text.trim(),
+                    trimmed,
+                    AbilityCost::Loyalty { amount },
+                    ctx,
+                ));
             }
         }
     }
 
     None
+}
+
+/// Build native IR for an already-recognized loyalty header. The context reset
+/// remains immediately before body parsing, matching the prior lowered route.
+fn parse_loyalty_ability_ir(
+    effect_text: &str,
+    description: &str,
+    cost: AbilityCost,
+    ctx: &mut ParseContext,
+) -> AbilityIr {
+    ctx.subject = None;
+    ctx.actor = None;
+    let mut ir = parse_ability_ir_with_context(effect_text, AbilityKind::Activated, ctx);
+    ir.shell.cost = Some(cost);
+    ir.shell.description = Some(description.to_string());
+    apply_loyalty_restrictions(&mut ir.shell);
+    ir
 }
 
 /// CR 606.3: A player may activate a loyalty ability only during a main phase
@@ -7365,13 +7390,14 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
 /// a -1 on the same planeswalker in one turn and (b) block The Chain Veil's
 /// "as though none of its loyalty abilities have been activated this turn"
 /// cap-raise from ever taking effect.
-fn apply_loyalty_restrictions(def: &mut AbilityDefinition) {
+fn apply_loyalty_restrictions(shell: &mut AbilityShellIr) {
     // CR 606.3: "...only during a main phase of their turn when the stack is empty..."
-    if !def
+    if !shell
         .activation_restrictions
         .contains(&ActivationRestriction::AsSorcery)
     {
-        def.activation_restrictions
+        shell
+            .activation_restrictions
             .push(ActivationRestriction::AsSorcery);
     }
 }

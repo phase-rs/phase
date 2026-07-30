@@ -5,6 +5,7 @@
     "cantActivateDuring": "No puede activarse ahora",
     "prohibited": "Activar esta habilidad está prohibido"
   },
+  "manaSourceSelection": { "title": "Elige una fuente de maná", "description": "Esta habilidad de maná requiere sacrificar un permanente.", "sacrifice": "Sacrificar", "back": "Volver al pago de maná", "unknownSource": "Fuente de maná" },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",

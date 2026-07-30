@@ -5,6 +5,7 @@
     "cantActivateDuring": "Kann derzeit nicht aktiviert werden",
     "prohibited": "Das Aktivieren dieser Fähigkeit ist verboten"
   },
+  "manaSourceSelection": { "title": "Manaquelle wählen", "description": "Diese Manafähigkeit erfordert das Opfern einer bleibenden Karte.", "sacrifice": "Opfern", "back": "Zurück zur Manabezahlung", "unknownSource": "Manaquelle" },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",

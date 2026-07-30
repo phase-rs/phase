@@ -8290,6 +8290,50 @@ fn mox_pearl_mana_ability() {
     assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
 }
 
+/// Issue #6507: Gemstone Mine's mana ability is targetless ("Add one mana of
+/// any color" chooses no target), so the trailing "If there are no mining
+/// counters on this land, sacrifice it" conditional has no parent target to
+/// inherit. The bare "it" pronoun must bind to the ability's own source
+/// (`TargetFilter::SelfRef`), not `ParentTarget` — `ParentTarget` resolves to
+/// nothing here and the land was never sacrificed. This is the
+/// depletion-land class, not a one-off: any targetless activated ability
+/// whose trailing conditional says "sacrifice it" shares the exposure.
+#[test]
+fn gemstone_mine_conditional_sacrifice_binds_to_self_ref() {
+    let r = parse(
+        "This land enters with three mining counters on it.\n\
+         {T}, Remove a mining counter from this land: Add one mana of any color. \
+         If there are no mining counters on this land, sacrifice it.",
+        "Gemstone Mine",
+        &[],
+        &["Land"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1);
+    let ability = &r.abilities[0];
+    assert!(
+        matches!(*ability.effect, Effect::Mana { .. }),
+        "expected Effect::Mana, got {:?}",
+        ability.effect
+    );
+    let sub_ability = ability
+        .sub_ability
+        .as_ref()
+        .expect("expected a conditional sub_ability for the trailing sacrifice sentence");
+    assert!(
+        sub_ability.condition.is_some(),
+        "expected the 'if there are no mining counters' gate to survive as a condition"
+    );
+    let Effect::Sacrifice { target, .. } = &*sub_ability.effect else {
+        panic!("expected Effect::Sacrifice, got {:?}", sub_ability.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::SelfRef,
+        "sacrifice target must bind to the source land, not an unestablished ParentTarget"
+    );
+}
+
 #[test]
 fn parses_return_forest_cost_untap_activated_ability() {
     let r = parse(
@@ -20543,7 +20587,7 @@ fn restricted_equip_costs_use_embedded_mana_cost() {
         ("Equip legendary creature {3}", 3),
         ("Equip commander {3}", 3),
     ] {
-        let ability = super::try_parse_equip(line).expect("restricted equip should parse");
+        let ability = super::try_parse_equip_lowered(line).expect("restricted equip should parse");
         assert!(
             matches!(
                 ability.cost,
@@ -20558,7 +20602,7 @@ fn restricted_equip_costs_use_embedded_mana_cost() {
 
     // CR 118.12a: "Equip {2} or {B}" is a disjunctive cost — OneOf([Mana({2}), Mana({B})]).
     let ability =
-        super::try_parse_equip("Equip {2} or {B}").expect("disjunctive equip should parse");
+        super::try_parse_equip_lowered("Equip {2} or {B}").expect("disjunctive equip should parse");
     match ability.cost {
         Some(AbilityCost::OneOf { ref costs }) => {
             assert_eq!(costs.len(), 2, "expected 2 alternatives, got {:?}", costs);
@@ -20584,7 +20628,7 @@ fn restricted_equip_costs_use_embedded_mana_cost() {
 
 #[test]
 fn restricted_equip_costs_preserve_target_requirement() {
-    let legendary = super::try_parse_equip("Equip legendary creature {1}")
+    let legendary = super::try_parse_equip_lowered("Equip legendary creature {1}")
         .expect("legendary equip should parse");
     let Effect::Attach { target, .. } = *legendary.effect else {
         panic!("expected Attach, got {:?}", legendary.effect);
@@ -20598,8 +20642,8 @@ fn restricted_equip_costs_preserve_target_requirement() {
         value: crate::types::card_type::Supertype::Legendary,
     }));
 
-    let commander =
-        super::try_parse_equip("Equip commander {3}").expect("commander equip should parse");
+    let commander = super::try_parse_equip_lowered("Equip commander {3}")
+        .expect("commander equip should parse");
     let Effect::Attach { target, .. } = *commander.effect else {
         panic!("expected Attach, got {:?}", commander.effect);
     };
@@ -20623,7 +20667,7 @@ fn restricted_equip_costs_cover_observed_target_classes() {
         "Equip Pirate {1}",
         "Equip Soldier {W}",
     ] {
-        let ability = super::try_parse_equip(line).expect("subtype equip should parse");
+        let ability = super::try_parse_equip_lowered(line).expect("subtype equip should parse");
         let Effect::Attach { target, .. } = *ability.effect else {
             panic!("expected Attach, got {:?}", ability.effect);
         };
@@ -20640,7 +20684,7 @@ fn restricted_equip_costs_cover_observed_target_classes() {
         );
     }
 
-    let class_union = super::try_parse_equip("Equip Shaman, Warlock, or Wizard {1}")
+    let class_union = super::try_parse_equip_lowered("Equip Shaman, Warlock, or Wizard {1}")
         .expect("multi-subtype equip should parse");
     let Effect::Attach { target, .. } = *class_union.effect else {
         panic!("expected Attach, got {:?}", class_union.effect);
@@ -20661,7 +20705,7 @@ fn restricted_equip_costs_cover_observed_target_classes() {
         )));
     }
 
-    let token = super::try_parse_equip("Equip creature token {1}")
+    let token = super::try_parse_equip_lowered("Equip creature token {1}")
         .expect("creature-token equip should parse");
     let Effect::Attach { target, .. } = *token.effect else {
         panic!("expected Attach, got {:?}", token.effect);
@@ -20673,8 +20717,8 @@ fn restricted_equip_costs_cover_observed_target_classes() {
     assert!(tf.type_filters.contains(&TypeFilter::Creature));
     assert!(tf.properties.contains(&FilterProp::Token));
 
-    let planeswalker =
-        super::try_parse_equip("Equip planeswalker {1}").expect("planeswalker equip should parse");
+    let planeswalker = super::try_parse_equip_lowered("Equip planeswalker {1}")
+        .expect("planeswalker equip should parse");
     let Effect::Attach { target, .. } = *planeswalker.effect else {
         panic!("expected Attach, got {:?}", planeswalker.effect);
     };
@@ -20685,8 +20729,9 @@ fn restricted_equip_costs_cover_observed_target_classes() {
     assert!(tf.type_filters.contains(&TypeFilter::Planeswalker));
     assert!(!tf.type_filters.contains(&TypeFilter::Creature));
 
-    let creature_or_planeswalker = super::try_parse_equip("Equip creature or planeswalker {3}")
-        .expect("creature-or-planeswalker equip should parse");
+    let creature_or_planeswalker =
+        super::try_parse_equip_lowered("Equip creature or planeswalker {3}")
+            .expect("creature-or-planeswalker equip should parse");
     let Effect::Attach { target, .. } = *creature_or_planeswalker.effect else {
         panic!("expected Attach, got {:?}", creature_or_planeswalker.effect);
     };
@@ -20722,7 +20767,7 @@ fn equip_cost_modifier_lines_are_not_equip_abilities() {
 
 #[test]
 fn equip_once_per_turn_constraint_strips_from_cost() {
-    let ability = super::try_parse_equip("Equip {0}. Activate only once each turn.")
+    let ability = super::try_parse_equip_lowered("Equip {0}. Activate only once each turn.")
         .expect("equip should parse");
     assert_eq!(
         ability.cost,

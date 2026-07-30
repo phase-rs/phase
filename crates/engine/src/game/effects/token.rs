@@ -6012,13 +6012,13 @@ mod tests {
 
     #[test]
     fn apply_create_token_materializes_intrinsic_equip_ability() {
-        use crate::parser::oracle::try_parse_equip;
+        use crate::parser::oracle::try_parse_equip_lowered;
         use crate::types::ability::{ContinuousModification, StaticDefinition};
         use crate::types::card_type::CoreType;
         use crate::types::proposed_event::TokenSpec;
         use std::collections::HashSet;
 
-        let equip = try_parse_equip("Equip {0}").expect("equip static");
+        let equip = try_parse_equip_lowered("Equip {0}").expect("equip static");
         let equip_static = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .modifications(vec![ContinuousModification::GrantAbility {
@@ -6079,13 +6079,13 @@ mod tests {
 
     #[test]
     fn apply_create_token_does_not_materialize_conditional_grant_ability() {
-        use crate::parser::oracle::try_parse_equip;
+        use crate::parser::oracle::try_parse_equip_lowered;
         use crate::types::ability::{ContinuousModification, StaticCondition, StaticDefinition};
         use crate::types::card_type::CoreType;
         use crate::types::proposed_event::TokenSpec;
         use std::collections::HashSet;
 
-        let equip = try_parse_equip("Equip {0}").expect("equip static");
+        let equip = try_parse_equip_lowered("Equip {0}").expect("equip static");
         let conditional_equip = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .condition(StaticCondition::IsPresent { filter: None })

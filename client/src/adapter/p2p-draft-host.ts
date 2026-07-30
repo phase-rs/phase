@@ -20,13 +20,28 @@ import {
   type DraftPeerSession,
 } from "../network/draftPeerSession";
 import { DRAFT_PROTOCOL_VERSION, DraftPauseReason } from "../network/draftProtocol";
-import type { DraftDeckPayload, DraftMatchDeckPayload, DraftMatchLaunch, DraftP2PMessage } from "../network/draftProtocol";
-import type { MatchConfig, MatchScore } from "./types";
+import type {
+  DraftDeckPayload,
+  DraftMatchBinding,
+  DraftMatchDeckPayload,
+  DraftMatchLaunch,
+  DraftMatchSettlement,
+  DraftP2PMessage,
+} from "../network/draftProtocol";
+import type { DeckCardCount, MatchConfig, MatchScore } from "./types";
 import {
   saveDraftHostSession,
   clearDraftHostSession,
   type PersistedDraftHostSession,
 } from "../services/draftPersistence";
+import {
+  commandAcknowledgement,
+  draftIntergameDigest,
+  IntergameCommandController,
+  matchesCommandAcknowledgement,
+  type DraftIntergameCommand,
+  type DraftIntergameCommandAck,
+} from "../services/intergameCommandLedger";
 import { assignAvatarForSeat } from "../services/playerAvatars";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -40,6 +55,7 @@ interface Bo3MatchState {
   loserSeat: number | null;
   gameNumber: number;
   score: MatchScore;
+  decks: Array<{ seat: number; main: DeckCardCount[]; sideboard: DeckCardCount[] }>;
 }
 
 export type DraftHostEvent =
@@ -82,7 +98,8 @@ export type DraftHostEvent =
   | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
   | { type: "bo3SideboardPromptSent"; matchId: string }
   | { type: "bo3BothSideboardsSubmitted"; matchId: string }
-  | { type: "bo3GameStarted"; matchId: string; gameNumber: number };
+  | { type: "bo3GameStarted"; matchId: string; gameNumber: number }
+  | { type: "bo3AuthorizedCommand"; command: DraftIntergameCommand; acknowledgement: DraftIntergameCommandAck };
 
 type DraftHostEventListener = (event: DraftHostEvent) => void;
 
@@ -113,6 +130,38 @@ interface ExportedDraftSession {
 
 function deckPayload(mainDeck: string[], sideboard: string[]): DraftDeckPayload {
   return { main_deck: mainDeck, sideboard, commander: [] };
+}
+
+function deckCardCounts(cards: readonly string[]): DeckCardCount[] {
+  const counts = new Map<string, number>();
+  for (const card of cards) counts.set(card, (counts.get(card) ?? 0) + 1);
+  return [...counts].map(([name, count]) => ({ name, count }));
+}
+
+function deckSubmission(deck: DraftDeckPayload): { main: DeckCardCount[]; sideboard: DeckCardCount[] } {
+  return {
+    main: deckCardCounts(deck.main_deck),
+    sideboard: deckCardCounts(deck.sideboard),
+  };
+}
+
+/** Sideboarding may move cards between zones, but cannot change a player's pool. */
+function preservesDeckPool(
+  deck: DraftDeckPayload,
+  main: readonly DeckCardCount[],
+  sideboard: readonly DeckCardCount[],
+): boolean {
+  const submitted = new Map<string, number>();
+  for (const card of [...main, ...sideboard]) {
+    if (!Number.isSafeInteger(card.count) || card.count < 0) return false;
+    submitted.set(card.name, (submitted.get(card.name) ?? 0) + card.count);
+  }
+  const original = new Map<string, number>();
+  for (const name of [...deck.main_deck, ...deck.sideboard]) {
+    original.set(name, (original.get(name) ?? 0) + 1);
+  }
+  return submitted.size === original.size
+    && [...submitted].every(([name, count]) => original.get(name) === count);
 }
 
 function hashStringToSeed(value: string): number {
@@ -170,6 +219,21 @@ export class P2PDraftHost {
   private timerEndAt = 0;
   private timerContext: "pick" | "sideboard" | "playdraw" | null = null;
   private bo3State = new Map<string, Bo3MatchState>();
+  /** Registered decks are captured at match launch and become the first
+   * authority-owned default for an unchanged sideboard submission. */
+  private matchDecks = new Map<string, Map<number, DraftDeckPayload>>();
+  /** Full launch records let the host mint a timeout command under the same
+   * immutable launch digest the participant originally received. */
+  private matchLaunches = new Map<string, Map<number, DraftMatchLaunch>>();
+  /** Private issuer for the durable Pending → Authorized → Executing → Receipted ledger. */
+  private intergameCommands = new IntergameCommandController();
+  private launchDigests = new Map<string, Map<number, string>>();
+  /** Durable pod-issued authority records, keyed by match ID. */
+  private matchBindings = new Map<string, DraftMatchBinding>();
+  /** Write-ahead settlement records; retained until the reducer accepts them. */
+  private settlementOutbox = new Map<string, DraftMatchSettlement>();
+  /** Immutable receipt per match makes retries idempotent. */
+  private settlementReceipts = new Map<string, { receiptId: string; revision: number }>();
 
   // Server backup upload state (D-08)
   private backupEndpoint: string | null = null;
@@ -415,25 +479,17 @@ export class P2PDraftHost {
         break;
       }
       case "draft_match_result": {
-        const hostView = await this.adapter.getViewForSeat(0);
-        const pairing = hostView.pairings.find(
-          (p) => p.match_id === msg.matchId && p.round === hostView.current_round,
-        );
-        if (!pairing) {
-          this.guestSessions.get(seat)?.send({
-            type: "draft_error",
-            reason: "Unknown match",
-          });
-          return;
-        }
-        if (pairing.seat_a !== seat && pairing.seat_b !== seat) {
-          this.guestSessions.get(seat)?.send({
-            type: "draft_error",
-            reason: "Not a participant in this match",
-          });
-          return;
-        }
-        await this.reportMatchResult(msg.matchId, msg.winnerSeat);
+        // A raw match ID is forgeable by any connected seat. Keep the legacy
+        // shape decodable for an in-flight old client, but never settle it.
+        this.guestSessions.get(seat)?.send({ type: "draft_error", reason: "Unbound match result" });
+        break;
+      }
+      case "draft_match_settlement": {
+        await this.acceptMatchSettlement(seat, msg.settlement);
+        break;
+      }
+      case "draft_bo3_between_games": {
+        await this.handleGuestBetweenGames(seat, msg);
         break;
       }
       case "draft_request_advance": {
@@ -441,11 +497,19 @@ export class P2PDraftHost {
         break;
       }
       case "draft_bo3_sideboard_submit": {
-        this.handleSideboardSubmit(seat, msg.matchId, msg.mainDeck, msg.sideboard);
+        this.guestSessions.get(seat)?.send({ type: "draft_error", reason: "Unbound intergame command" });
         break;
       }
       case "draft_bo3_play_draw_choice": {
-        this.handlePlayDrawChosen(seat, msg.matchId, msg.playFirst);
+        this.guestSessions.get(seat)?.send({ type: "draft_error", reason: "Unbound intergame command" });
+        break;
+      }
+      case "draft_bo3_intergame_command": {
+        this.holdIntergameCommand(seat, msg.command);
+        break;
+      }
+      case "draft_bo3_intergame_receipt": {
+        this.receiptIntergameCommand(seat, msg.acknowledgement, msg.receiptId);
         break;
       }
       default:
@@ -799,8 +863,7 @@ export class P2PDraftHost {
       this.broadcastToGuests({ type: "draft_timer_sync", remainingMs: this.timerRemainingMs });
       if (this.timerRemainingMs <= 0) {
         this.clearActiveTimer();
-        // Auto-choose "play" on expiry
-        this.resolvePlayDrawChoice(matchId, true);
+        this.autoChoosePlayDraw(matchId);
       }
     }, 1_000);
   }
@@ -919,12 +982,108 @@ export class P2PDraftHost {
     }
   }
 
+  private matchBindingFor(pairing: PairingView): DraftMatchBinding {
+    const existing = this.matchBindings.get(pairing.match_id);
+    if (existing && existing.round === pairing.round) return existing;
+
+    const binding: DraftMatchBinding = {
+      podId: this.draftCode,
+      matchId: pairing.match_id,
+      round: pairing.round,
+      sessionKey: crypto.randomUUID(),
+      lease: crypto.randomUUID(),
+      nonce: crypto.randomUUID(),
+      revision: 0,
+      matchAuthoritySeat: Math.min(pairing.seat_a, pairing.seat_b),
+    };
+    this.matchBindings.set(pairing.match_id, binding);
+    this.persistSession();
+    return binding;
+  }
+
+  private async acceptMatchSettlement(
+    submittingSeat: number,
+    settlement: DraftMatchSettlement,
+  ): Promise<void> {
+    const binding = this.matchBindings.get(settlement.binding.matchId);
+    if (!binding || !this.sameBinding(binding, settlement.binding)) {
+      this.guestSessions.get(submittingSeat)?.send({ type: "draft_error", reason: "Invalid match binding" });
+      return;
+    }
+    const view = await this.adapter.getViewForSeat(0);
+    const pairing = view.pairings.find(
+      (candidate) => candidate.match_id === binding.matchId && candidate.round === binding.round,
+    );
+    if (
+      !pairing ||
+      view.current_round !== binding.round ||
+      submittingSeat !== binding.matchAuthoritySeat ||
+      (settlement.winnerSeat !== null &&
+        settlement.winnerSeat !== pairing.seat_a &&
+        settlement.winnerSeat !== pairing.seat_b)
+    ) {
+      this.guestSessions.get(submittingSeat)?.send({ type: "draft_error", reason: "Unauthorized match settlement" });
+      return;
+    }
+
+    const receipt = this.settlementReceipts.get(binding.matchId);
+    if (receipt) {
+      if (receipt.receiptId === settlement.receiptId) {
+        void this.sendSettlementAck(submittingSeat, binding.matchId, receipt);
+      } else {
+        this.sendToSeat(submittingSeat, {
+          type: "draft_error",
+          reason: "Match already settled",
+        });
+      }
+      return;
+    }
+
+    // Persist the intent before invoking the draft reducer. A recovered pod
+    // can retry this record without applying a second result.
+    this.settlementOutbox.set(settlement.receiptId, settlement);
+    this.persistSession();
+    await this.reportMatchResult(binding.matchId, settlement.winnerSeat);
+    const accepted = { receiptId: settlement.receiptId, revision: binding.revision };
+    this.settlementReceipts.set(binding.matchId, accepted);
+    this.settlementOutbox.delete(settlement.receiptId);
+    this.persistSession();
+    void this.sendSettlementAck(submittingSeat, binding.matchId, accepted);
+  }
+
+  private sameBinding(left: DraftMatchBinding, right: DraftMatchBinding): boolean {
+    return left.podId === right.podId
+      && left.matchId === right.matchId
+      && left.round === right.round
+      && left.sessionKey === right.sessionKey
+      && left.lease === right.lease
+      && left.nonce === right.nonce
+      && left.revision === right.revision
+      && left.matchAuthoritySeat === right.matchAuthoritySeat;
+  }
+
+  private async sendSettlementAck(
+    seat: number,
+    matchId: string,
+    receipt: { receiptId: string; revision: number },
+  ): Promise<void> {
+    const message: DraftP2PMessage = {
+      type: "draft_match_settlement_ack",
+      matchId,
+      receiptId: receipt.receiptId,
+      revision: receipt.revision,
+    };
+    if (seat === 0) return;
+    await this.guestSessions.get(seat)?.send(message);
+  }
+
   private async dispatchMatchLaunch(pairing: PairingView, view: DraftPlayerView): Promise<void> {
     const seatA = pairing.seat_a;
     const seatB = pairing.seat_b;
     const seatAIsBot = this.isBotSeatFromView(view, seatA);
     const seatBIsBot = this.isBotSeatFromView(view, seatB);
     const session = await this.exportDraftSession();
+    const binding = this.matchBindingFor(pairing);
 
     if (seatAIsBot && seatBIsBot) {
       await this.reportMatchResult(pairing.match_id, Math.min(seatA, seatB));
@@ -943,9 +1102,7 @@ export class P2PDraftHost {
         ai_decks: [],
       };
 
-      this.sendToSeat(humanSeat, {
-        type: "draft_match_start",
-        launch: {
+      this.sendMatchLaunch(humanSeat, {
           type: "Bot",
           matchId: pairing.match_id,
           round: pairing.round,
@@ -954,7 +1111,7 @@ export class P2PDraftHost {
           botName,
           deckPayload,
           matchConfig: this.matchConfig(),
-        },
+          binding,
       });
       return;
     }
@@ -972,9 +1129,7 @@ export class P2PDraftHost {
       ai_decks: [],
     };
 
-    this.sendToSeat(matchHostSeat, {
-      type: "draft_match_start",
-      launch: {
+    this.sendMatchLaunch(matchHostSeat, {
         type: "HumanHost",
         matchId: pairing.match_id,
         matchRoomCode,
@@ -985,11 +1140,9 @@ export class P2PDraftHost {
         matchHostPeerId: matchRoomCode,
         deckPayload,
         matchConfig: this.matchConfig(),
-      },
+        binding,
     });
-    this.sendToSeat(guestSeat, {
-      type: "draft_match_start",
-      launch: {
+    this.sendMatchLaunch(guestSeat, {
         type: "HumanGuest",
         matchId: pairing.match_id,
         matchRoomCode,
@@ -1000,8 +1153,47 @@ export class P2PDraftHost {
         matchHostPeerId: matchRoomCode,
         localDeck: guestDeck,
         matchConfig: this.matchConfig(),
-      },
+        binding,
     });
+  }
+
+  private sendMatchLaunch(seat: number, launch: DraftMatchLaunch): void {
+    this.rememberMatchDecks(launch);
+    let launches = this.matchLaunches.get(launch.matchId);
+    if (!launches) {
+      launches = new Map();
+      this.matchLaunches.set(launch.matchId, launches);
+    }
+    launches.set(seat, launch);
+    let digests = this.launchDigests.get(launch.matchId);
+    if (!digests) {
+      digests = new Map();
+      this.launchDigests.set(launch.matchId, digests);
+    }
+    digests.set(seat, draftIntergameDigest(launch));
+    this.persistSession();
+    this.sendToSeat(seat, { type: "draft_match_start", launch });
+  }
+
+  private rememberMatchDecks(launch: DraftMatchLaunch): void {
+    let decks = this.matchDecks.get(launch.matchId);
+    if (!decks) {
+      decks = new Map();
+      this.matchDecks.set(launch.matchId, decks);
+    }
+    switch (launch.type) {
+      case "HumanHost":
+        decks.set(launch.localSeat, launch.deckPayload.player);
+        decks.set(launch.opponentSeat, launch.deckPayload.opponent);
+        break;
+      case "HumanGuest":
+        decks.set(launch.localSeat, launch.localDeck);
+        break;
+      case "Bot":
+        decks.set(launch.localSeat, launch.deckPayload.player);
+        decks.set(launch.botSeat, launch.deckPayload.opponent);
+        break;
+    }
   }
 
   private async dispatchMatchLaunchesForSeat(view: DraftPlayerView, seat: number): Promise<void> {
@@ -1078,7 +1270,13 @@ export class P2PDraftHost {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[P2PDraftHost] reportMatchResult failed:`, message);
+      throw err;
     }
+  }
+
+  /** Seat 0 uses the same authenticated settlement gate as remote match hosts. */
+  async submitHostMatchSettlement(settlement: DraftMatchSettlement): Promise<void> {
+    await this.acceptMatchSettlement(0, settlement);
   }
 
   /**
@@ -1133,10 +1331,15 @@ export class P2PDraftHost {
     seatA: number,
     seatB: number,
   ): void {
+    const decks = this.matchDecks.get(matchId);
     this.bo3State.set(matchId, {
       seatA, seatB,
       submittedA: false, submittedB: false,
       loserSeat, gameNumber, score,
+      decks: [seatA, seatB].flatMap((seat) => {
+        const deck = decks?.get(seat);
+        return deck ? [{ seat, ...deckSubmission(deck) }] : [];
+      }),
     });
 
     const timerMs = this.podPolicy === "Competitive" ? 60_000 : 0;
@@ -1164,50 +1367,220 @@ export class P2PDraftHost {
     this.emit({ type: "bo3SideboardPromptSent", matchId });
   }
 
-  /**
-   * Handle a sideboard submission from a player in a Bo3 match.
-   * T-58-01: validates seat matches seatA or seatB.
-   */
-  handleSideboardSubmit(
+  private async handleGuestBetweenGames(
     seat: number,
-    matchId: string,
-    _mainDeck: string[],
-    _sideboard: Array<{ name: string; count: number }>,
-  ): void {
-    const state = this.bo3State.get(matchId);
-    if (!state) return;
+    message: Extract<DraftP2PMessage, { type: "draft_bo3_between_games" }>,
+  ): Promise<void> {
+    const binding = this.matchBindings.get(message.matchId);
+    const view = await this.adapter.getViewForSeat(0);
+    const pairing = view.pairings.find(
+      (candidate) => candidate.match_id === message.matchId && candidate.round === binding?.round,
+    );
+    if (
+      !binding
+      || binding.matchAuthoritySeat !== seat
+      || view.current_round !== binding.round
+      || !pairing
+      || (pairing.status !== "Pending" && pairing.status !== "InProgress")
+    ) {
+      this.guestSessions.get(seat)?.send({ type: "draft_error", reason: "Unauthorized between-games report" });
+      return;
+    }
+    if (this.bo3State.get(message.matchId)?.gameNumber === message.gameNumber) return;
 
-    // T-58-01: validate sending seat belongs to this pairing
-    if (seat === state.seatA) state.submittedA = true;
-    else if (seat === state.seatB) state.submittedB = true;
-    else return;
+    this.handleMatchBetweenGames(
+      message.matchId,
+      message.gameNumber,
+      message.score,
+      message.loserSeat,
+      pairing.seat_a,
+      pairing.seat_b,
+    );
+  }
 
-    // Check both-submitted gate
-    if (state.submittedA && state.submittedB) {
-      this.clearActiveTimer();
-      this.emit({ type: "bo3BothSideboardsSubmitted", matchId });
-      this.transitionToPlayDraw(matchId, state);
+  /** The sole command ingress for host UI and authenticated guest sessions. */
+  submitAuthorized(seat: number, command: DraftIntergameCommand): void {
+    if (command.status === "Receipted" && command.receiptId) {
+      this.receiptIntergameCommand(seat, commandAcknowledgement(command), command.receiptId);
+      return;
+    }
+    this.holdIntergameCommand(seat, command);
+  }
+
+  private holdIntergameCommand(seat: number, command: DraftIntergameCommand): void {
+    const state = this.bo3State.get(command.matchId);
+    const launchDigest = this.launchDigests.get(command.matchId)?.get(seat);
+    if (!state
+      || command.status !== "Pending"
+      || command.seat !== seat
+      || command.gameNumber !== state.gameNumber
+      || !launchDigest
+      || command.launchDigest !== launchDigest
+      || draftIntergameDigest(command.launchPayload) !== command.launchDigest
+      || command.payloadDigest !== draftIntergameDigest(command.payload)
+      || this.intergameCommands.snapshot().some((candidate) => candidate.commandId === command.commandId)) {
+      return;
+    }
+    if (command.payload.type === "SubmitSideboard") {
+      const deck = this.matchDecks.get(command.matchId)?.get(seat);
+      if (
+        (seat !== state.seatA && seat !== state.seatB)
+        || !deck
+        || !preservesDeckPool(deck, command.payload.main, command.payload.sideboard)
+      ) {
+        this.sendToSeat(seat, { type: "draft_error", reason: "Invalid sideboard submission" });
+        return;
+      }
+    } else if (state.loserSeat !== seat) {
+      return;
+    }
+
+    const held = this.intergameCommands.hold({
+      commandId: command.commandId,
+      matchId: command.matchId,
+      gameNumber: command.gameNumber,
+      seat,
+      payload: command.payload,
+      launchPayload: command.launchPayload,
+      launchDigest: command.launchDigest,
+    });
+    this.persistSession();
+
+    switch (held.payload.type) {
+      case "SubmitSideboard":
+        if (seat === state.seatA) state.submittedA = true;
+        else state.submittedB = true;
+        if (state.submittedA && state.submittedB) {
+          this.clearActiveTimer();
+          for (const pending of this.intergameCommands.snapshot()) {
+            if (pending.matchId === held.matchId
+              && pending.gameNumber === held.gameNumber
+              && pending.status === "Pending"
+              && pending.payload.type === "SubmitSideboard") {
+              this.authorizeIntergameCommand(pending);
+            }
+          }
+          this.emit({ type: "bo3BothSideboardsSubmitted", matchId: held.matchId });
+        }
+        break;
+      case "ChoosePlayDraw":
+        this.authorizeIntergameCommand(held);
+        break;
     }
   }
 
-  /**
-   * Handle play/draw choice from the losing player.
-   * T-58-04: validates seat matches loserSeat.
-   */
-  handlePlayDrawChosen(seat: number, matchId: string, playFirst: boolean): void {
-    const state = this.bo3State.get(matchId);
-    if (!state || state.loserSeat !== seat) return;
-    this.resolvePlayDrawChoice(matchId, playFirst);
+  private authorizeIntergameCommand(command: DraftIntergameCommand): void {
+    const acknowledgement = commandAcknowledgement(command);
+    const authorized = this.intergameCommands.authorize(command.commandId, acknowledgement);
+    if (!authorized) return;
+    const permit = this.intergameCommands.begin(command.commandId, acknowledgement);
+    if (!permit) return;
+    // The controller, not a caller supplied flag, owns the Executing state.
+    // This deliberate no-op consumption proves the issuer created the permit;
+    // the participant performs the same pre-execution check with its own issuer.
+    void permit;
+    this.persistSession();
+    this.sendToSeat(command.seat, {
+      type: "draft_bo3_intergame_authorized",
+      command: authorized,
+      acknowledgement,
+    });
+  }
+
+  private receiptIntergameCommand(
+    seat: number,
+    acknowledgement: DraftIntergameCommandAck,
+    receiptId: string,
+  ): void {
+    const command = this.intergameCommands.snapshot().find(
+      (candidate) => candidate.commandId === acknowledgement.commandId,
+    );
+    if (!command || command.seat !== seat || !matchesCommandAcknowledgement(command, acknowledgement)) return;
+    const receipted = this.intergameCommands.receipt(command.commandId, acknowledgement, receiptId);
+    if (!receipted) return;
+    this.persistSession();
+    switch (receipted.payload.type) {
+      case "SubmitSideboard": {
+        const state = this.bo3State.get(receipted.matchId);
+        const deck = state?.decks.find((candidate) => candidate.seat === seat);
+        if (deck) {
+          deck.main = receipted.payload.main;
+          deck.sideboard = receipted.payload.sideboard;
+        }
+        const complete = state && [state.seatA, state.seatB].every((participant) =>
+          this.intergameCommands.snapshot().some((candidate) =>
+            candidate.matchId === receipted.matchId
+              && candidate.gameNumber === receipted.gameNumber
+              && candidate.seat === participant
+              && candidate.payload.type === "SubmitSideboard"
+              && candidate.status === "Receipted"),
+        );
+        if (complete && state) this.transitionToPlayDraw(receipted.matchId, state);
+        break;
+      }
+      case "ChoosePlayDraw":
+        this.resolvePlayDrawChoice(receipted.matchId, receipted.payload.playFirst);
+        break;
+    }
   }
 
   private autoSubmitSideboards(matchId: string): void {
     const state = this.bo3State.get(matchId);
     if (!state) return;
-    // Mark both as submitted (they keep their current decks)
-    state.submittedA = true;
-    state.submittedB = true;
-    this.emit({ type: "bo3BothSideboardsSubmitted", matchId });
-    this.transitionToPlayDraw(matchId, state);
+    const participants = [state.seatA, state.seatB];
+    const submitted = new Set([
+      ...(state.submittedA ? [state.seatA] : []),
+      ...(state.submittedB ? [state.seatB] : []),
+    ]);
+    for (const seat of participants) {
+      if (submitted.has(seat)) continue;
+      const deck = state.decks.find((candidate) => candidate.seat === seat);
+      if (!deck) {
+        this.emit({ type: "error", message: "Sideboard timer expired without a registered deck" });
+        continue;
+      }
+      this.submitDefaultIntergameCommand(matchId, state, seat, {
+        type: "SubmitSideboard",
+        main: deck.main,
+        sideboard: deck.sideboard,
+      });
+    }
+  }
+
+  private autoChoosePlayDraw(matchId: string): void {
+    const state = this.bo3State.get(matchId);
+    if (!state || state.loserSeat === null) return;
+    this.submitDefaultIntergameCommand(matchId, state, state.loserSeat, {
+      type: "ChoosePlayDraw",
+      playFirst: true,
+    });
+  }
+
+  /** Timeout defaults enter the same signed launch/ledger path as a player
+   * submission, so they cannot bypass authorization or the execution receipt. */
+  private submitDefaultIntergameCommand(
+    matchId: string,
+    state: Bo3MatchState,
+    seat: number,
+    payload: DraftIntergameCommand["payload"],
+  ): void {
+    const launch = this.matchLaunches.get(matchId)?.get(seat);
+    const launchDigest = this.launchDigests.get(matchId)?.get(seat);
+    if (!launch || !launchDigest) {
+      this.emit({ type: "error", message: "Intergame timeout lacks launch authority" });
+      return;
+    }
+    this.holdIntergameCommand(seat, {
+      commandId: crypto.randomUUID(),
+      matchId,
+      gameNumber: state.gameNumber,
+      seat,
+      payload,
+      launchPayload: launch,
+      launchDigest,
+      payloadDigest: draftIntergameDigest(payload),
+      status: "Pending",
+    });
   }
 
   private transitionToPlayDraw(matchId: string, state: Bo3MatchState): void {
@@ -1282,6 +1655,13 @@ export class P2PDraftHost {
             matchId: msg.matchId,
             gameNumber: msg.gameNumber,
             firstPlayerSeat: msg.firstPlayerSeat,
+          });
+          break;
+        case "draft_bo3_intergame_authorized":
+          this.emit({
+            type: "bo3AuthorizedCommand",
+            command: msg.command,
+            acknowledgement: msg.acknowledgement,
           });
           break;
         default:
@@ -1378,6 +1758,19 @@ export class P2PDraftHost {
           draftCode: this.draftCode,
           draftSessionJson: sessionJson,
           poolInput: this.poolInput,
+          matchBindings: [...this.matchBindings.values()],
+          settlementOutbox: [...this.settlementOutbox.values()],
+          settlementReceipts: [...this.settlementReceipts.entries()].map(
+            ([matchId, receipt]) => ({ matchId, ...receipt }),
+          ),
+          intergameCommands: this.intergameCommands.snapshot(),
+          bo3State: [...this.bo3State.entries()].map(([matchId, state]) => ({ matchId, ...state })),
+          launchDigests: [...this.launchDigests.entries()].flatMap(([matchId, digests]) =>
+            [...digests.entries()].map(([seat, digest]) => ({ matchId, seat, digest })),
+          ),
+          matchLaunches: [...this.matchLaunches.entries()].flatMap(([matchId, launches]) =>
+            [...launches.entries()].map(([seat, launch]) => ({ matchId, seat, launch })),
+          ),
         };
 
         await saveDraftHostSession(this.persistenceId!, snapshot);
@@ -1448,9 +1841,48 @@ export class P2PDraftHost {
     this.draftStarted = session.draftStarted;
     this.draftCode = session.draftCode;
     this.draftSeed = hashStringToSeed(session.draftCode || this.roomCode || "draft");
+    for (const binding of session.matchBindings ?? []) {
+      this.matchBindings.set(binding.matchId, binding);
+    }
+    for (const settlement of session.settlementOutbox ?? []) {
+      this.settlementOutbox.set(settlement.receiptId, settlement);
+    }
+    for (const receipt of session.settlementReceipts ?? []) {
+      this.settlementReceipts.set(receipt.matchId, {
+        receiptId: receipt.receiptId,
+        revision: receipt.revision,
+      });
+    }
+    this.intergameCommands = new IntergameCommandController(session.intergameCommands ?? []);
+    this.intergameCommands.recover();
+    for (const state of session.bo3State ?? []) {
+      const { matchId, ...rest } = state;
+      this.bo3State.set(matchId, { ...rest, decks: rest.decks ?? [] });
+    }
+    for (const { matchId, seat, digest } of session.launchDigests ?? []) {
+      let digests = this.launchDigests.get(matchId);
+      if (!digests) {
+        digests = new Map();
+        this.launchDigests.set(matchId, digests);
+      }
+      digests.set(seat, digest);
+    }
+    for (const { matchId, seat, launch } of session.matchLaunches ?? []) {
+      const binding = launch.binding ?? this.matchBindings.get(matchId);
+      if (!binding || binding.matchId !== matchId) continue;
+      const recoveredLaunch = launch.binding ? launch : { ...launch, binding } as DraftMatchLaunch;
+      let launches = this.matchLaunches.get(matchId);
+      if (!launches) {
+        launches = new Map();
+        this.matchLaunches.set(matchId, launches);
+      }
+      launches.set(seat, recoveredLaunch);
+      this.rememberMatchDecks(recoveredLaunch);
+    }
 
     if (session.draftSessionJson) {
       const view = await this.adapter.importSession(session.draftSessionJson, 2);
+      await this.recoverSettlementOutbox(view);
 
       // Arm grace windows for all guest seats
       for (const seatStr of Object.keys(session.seatTokens)) {
@@ -1484,6 +1916,26 @@ export class P2PDraftHost {
     return null;
   }
 
+  /** Replays only write-ahead settlements that the restored draft still lacks. */
+  private async recoverSettlementOutbox(view: DraftPlayerView): Promise<void> {
+    for (const settlement of [...this.settlementOutbox.values()]) {
+      const binding = this.matchBindings.get(settlement.binding.matchId);
+      const pairing = view.pairings.find(
+        (candidate) => candidate.match_id === settlement.binding.matchId,
+      );
+      if (!binding || !this.sameBinding(binding, settlement.binding) || !pairing) continue;
+      if (pairing.status === "Pending" || pairing.status === "InProgress") {
+        await this.reportMatchResult(settlement.binding.matchId, settlement.winnerSeat);
+      }
+      this.settlementReceipts.set(settlement.binding.matchId, {
+        receiptId: settlement.receiptId,
+        revision: settlement.binding.revision,
+      });
+      this.settlementOutbox.delete(settlement.receiptId);
+    }
+    this.persistSession();
+  }
+
   // ── Cleanup ────────────────────────────────────────────────────────
 
   dispose(): void {
@@ -1494,6 +1946,8 @@ export class P2PDraftHost {
     }
     this.disconnectedSeats.clear();
     this.bo3State.clear();
+    this.matchDecks.clear();
+    this.matchLaunches.clear();
     for (const session of this.guestSessions.values()) {
       session.close();
     }

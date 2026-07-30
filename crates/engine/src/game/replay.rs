@@ -212,7 +212,7 @@ mod tests {
     use crate::types::game_state::{ProductionOverride, WaitingFor};
     use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use crate::types::mana::{
-        ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+        ManaSourceOutput, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use crate::types::match_config::MatchConfig;
 
@@ -267,6 +267,7 @@ mod tests {
                 source,
                 ability_index: None,
                 mana_type: ManaType::Green,
+                output: crate::types::mana::ManaSourceOutput::Concrete(ManaType::Green),
                 atomic_combination: None,
                 restrictions: Vec::new(),
                 penalty: ManaSourcePenalty::None,
@@ -289,6 +290,34 @@ mod tests {
         assert_eq!(restored.format_version, Some(REPLAY_FORMAT_VERSION));
         assert_eq!(restored.actions.len(), 1);
         assert_eq!(restored.actions[0].action, action);
+    }
+
+    #[test]
+    fn legacy_colored_tap_land_action_preserves_its_selected_output() {
+        let action: GameAction = serde_json::from_value(serde_json::json!({
+            "type": "TapLandForMana",
+            "data": {
+                "selection": {
+                    "source": { "object_id": 7, "incarnation": 3 },
+                    "ability_index": null,
+                    "mana_type": "Green",
+                    "atomic_combination": null,
+                    "restrictions": [],
+                    "penalty": "None",
+                    "taps_for_mana": []
+                }
+            }
+        }))
+        .expect("pre-output replay actions should deserialize");
+
+        let GameAction::TapLandForMana { selection } = action else {
+            panic!("legacy action must retain its TapLandForMana shape");
+        };
+        assert_eq!(
+            selection.output,
+            ManaSourceOutput::Concrete(ManaType::Green),
+            "a legacy colored row selected its mana_type, not colorless mana"
+        );
     }
 
     #[test]

@@ -1179,7 +1179,7 @@ fn append_unquoted_equip_grants(text: &str, out: &mut Vec<StaticDefinition>) {
             .get(start..start + clause_lower.len())
             .unwrap_or(clause_lower)
             .trim();
-        if let Some(ability) = super::super::oracle::try_parse_equip(clause_orig) {
+        if let Some(ability) = super::super::oracle::try_parse_equip_lowered(clause_orig) {
             out.push(
                 StaticDefinition::continuous()
                     .affected(TargetFilter::SelfRef)
