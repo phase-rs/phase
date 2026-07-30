@@ -9,7 +9,6 @@ use super::ability_utils::{
     record_modal_mode_choices, selected_mode_labels, target_constraints_from_modal,
     validate_modal_indices,
 };
-use super::effects;
 use super::engine::EngineError;
 use super::engine_stack;
 use super::triggers;

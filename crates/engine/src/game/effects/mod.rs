@@ -5794,7 +5794,6 @@ fn is_synchronous_mana_pay_cost(effect: &Effect) -> bool {
 fn drive_repeated_optional_payment(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     // CR 700.2d: the "up to N" payment budget.
     let n = match &ability.repeat_for {
@@ -8829,7 +8828,7 @@ fn resolve_chain_body(
     // generic `repeat_for` loop (which would re-resolve the reflexive per
     // payment).
     if is_repeated_optional_payment(ability) {
-        return drive_repeated_optional_payment(state, ability, events);
+        return drive_repeated_optional_payment(state, ability);
     }
 
     // CR 118.12 + CR 118.12a: "Effect unless [player] pays {cost}" —
