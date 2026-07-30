@@ -13,6 +13,8 @@ use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
+use crate::session::FullSessionKey;
+
 /// Full game wire protocol version. Kept numerically aligned with the lobby
 /// broker while state/action messages share the same WebSocket protocol enum.
 pub const PROTOCOL_VERSION: u32 = lobby_broker::PROTOCOL_VERSION;
@@ -86,6 +88,48 @@ pub struct RankedPlayerResult {
     pub rating_delta: i32,
 }
 
+/// Recipient-safe presentation of an immutable Full terminal result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalMatchDisplay {
+    pub winner: Option<PlayerId>,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranked_result: Option<Vec<RankedPlayerResult>>,
+}
+
+/// Opaque identifier for one recipient's terminal delivery ledger row.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TerminalDeliveryId(pub String);
+
+/// Opaque capability for reading and acknowledging a terminal result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TerminalCredential(pub String);
+
+/// Immutable terminal access tuple issued only to the matching recipient.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentTerminalDelivery {
+    pub key: FullSessionKey,
+    pub terminal_revision: u64,
+    pub delivery_id: TerminalDeliveryId,
+    pub credential: TerminalCredential,
+    pub display: TerminalMatchDisplay,
+}
+
+/// Bootstrap proof held by a reconnecting player before the regular Full
+/// session is attached. The request id makes retrying this terminal-only
+/// exchange idempotent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalBootstrapRequest {
+    pub key: FullSessionKey,
+    pub player_token: String,
+    pub request_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
@@ -116,6 +160,9 @@ pub enum ClientMessage {
     Reconnect {
         game_code: String,
         player_token: String,
+        /// Server-issued Full session identity. Clients retain this exact key;
+        /// they must never reconstruct a generation from the game code.
+        full_key: FullSessionKey,
     },
     /// Permanently removes a full-mode game. The server authorizes this from
     /// the host's authenticated session; it is used to clean up a host-local
@@ -181,6 +228,24 @@ pub enum ClientMessage {
         release_reservation_token: Option<String>,
     },
     Concede,
+    /// Authenticated request to concede the entire current best-of-three
+    /// match. The requester, winner, and trusted cause are deliberately not
+    /// wire fields; the server binds them from the attached session.
+    ConcedeMatch,
+    /// Terminal-only recovery. This deliberately cannot attach a Full game
+    /// session or fall through to ordinary reconnect handling.
+    BootstrapTerminalDelivery {
+        request: TerminalBootstrapRequest,
+    },
+    /// Reads an already-issued recipient delivery using its opaque capability.
+    ReadTerminalResult {
+        credential: TerminalCredential,
+    },
+    /// Idempotently acknowledges an already-issued recipient delivery.
+    AckTerminalDelivery {
+        delivery_id: TerminalDeliveryId,
+        credential: TerminalCredential,
+    },
     Emote {
         emote: String,
     },
@@ -286,6 +351,10 @@ pub enum ServerMessage {
     GameCreated {
         game_code: String,
         player_token: String,
+        /// Present only for Full authoritative sessions. Lobby-only brokers do
+        /// not create a Full runtime and therefore cannot issue this key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
     },
     /// Confirms the authenticated server seat for one connection before a
     /// pregame room has started. A host-side P2P bridge binds this identity to
@@ -295,6 +364,8 @@ pub enum ServerMessage {
         game_code: String,
         player_id: PlayerId,
         player_token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
     },
     GameStarted {
         /// Monotonic server-authored snapshot revision. Every viewer of this
@@ -335,6 +406,10 @@ pub enum ServerMessage {
         /// Omitted (None) for hosts (who get it via GameCreated) and reconnects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         player_token: Option<String>,
+        /// The exact Full identity associated with this state stream. It is
+        /// omitted only for wire-compatible non-Full producers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
         /// Engine events produced by `start_game` — currently the d20
         /// first-player contest (`StartingPlayerContest`) event. Populated ONLY
         /// on the initial post-start broadcast; empty for late joiners and
@@ -414,6 +489,22 @@ pub enum ServerMessage {
         /// rating changes for both seats.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ranked_result: Option<Vec<RankedPlayerResult>>,
+    },
+    /// Terminal-only bootstrap response. `None` means the exact keyed Full
+    /// session has no prepared terminal artifact, so the caller may attempt
+    /// its ordinary reconnect path on a separate socket.
+    TerminalBootstrapResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<CurrentTerminalDelivery>,
+    },
+    /// Terminal-only capability read response.
+    TerminalResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<CurrentTerminalDelivery>,
+    },
+    /// Terminal-only acknowledgement receipt.
+    TerminalDeliveryAcknowledged {
+        delivery_id: TerminalDeliveryId,
     },
     Error {
         message: String,
@@ -739,6 +830,7 @@ mod tests {
         let msg = ServerMessage::GameCreated {
             game_code: "XYZ789".to_string(),
             player_token: "abc123def456".to_string(),
+            full_key: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -772,6 +864,62 @@ mod tests {
                 assert_eq!(winner, Some(PlayerId(1)));
                 assert_eq!(reason, "opponent conceded");
                 assert!(ranked_result.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn terminal_bootstrap_request_roundtrips_with_exact_full_key() {
+        let msg = ClientMessage::BootstrapTerminalDelivery {
+            request: TerminalBootstrapRequest {
+                key: FullSessionKey {
+                    game_code: "TERM01".to_string(),
+                    generation: 4,
+                },
+                player_token: "pre-terminal-token".to_string(),
+                request_id: "retry-1".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::BootstrapTerminalDelivery { request } => {
+                assert_eq!(request.key.game_code, "TERM01");
+                assert_eq!(request.key.generation, 4);
+                assert_eq!(request.request_id, "retry-1");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn terminal_delivery_response_roundtrips() {
+        let msg = ServerMessage::TerminalBootstrapResult {
+            delivery: Some(CurrentTerminalDelivery {
+                key: FullSessionKey {
+                    game_code: "TERM01".to_string(),
+                    generation: 4,
+                },
+                terminal_revision: 9,
+                delivery_id: TerminalDeliveryId("delivery-0".to_string()),
+                credential: TerminalCredential("credential".to_string()),
+                display: TerminalMatchDisplay {
+                    winner: Some(PlayerId(1)),
+                    reason: "Match conceded".to_string(),
+                    ranked_result: None,
+                },
+            }),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::TerminalBootstrapResult {
+                delivery: Some(delivery),
+            } => {
+                assert_eq!(delivery.key.generation, 4);
+                assert_eq!(delivery.terminal_revision, 9);
+                assert_eq!(delivery.delivery_id.0, "delivery-0");
             }
             _ => panic!("wrong variant"),
         }
@@ -939,6 +1087,14 @@ mod tests {
     }
 
     #[test]
+    fn client_message_concede_match_roundtrips_without_authority_payload() {
+        let json = serde_json::to_string(&ClientMessage::ConcedeMatch).unwrap();
+        assert_eq!(json, r#"{"type":"ConcedeMatch"}"#);
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ClientMessage::ConcedeMatch));
+    }
+
+    #[test]
     fn client_message_abandon_game_roundtrips() {
         let json = serde_json::to_string(&ClientMessage::AbandonGame).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -951,6 +1107,7 @@ mod tests {
             game_code: "ABC123".to_string(),
             player_id: PlayerId(1),
             player_token: "token".to_string(),
+            full_key: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1032,6 +1189,7 @@ mod tests {
             derived: Default::default(),
             viewer_interaction: viewer_interaction.clone(),
             player_token: None,
+            full_key: None,
             events: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -1085,6 +1243,7 @@ mod tests {
                 PlayerId(1),
             ),
             player_token: None,
+            full_key: None,
             events: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();

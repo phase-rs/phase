@@ -12,8 +12,8 @@ vi.mock("idb-keyval", () => ({
   set: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { get as idbGet, set as idbSet } from "idb-keyval";
-import { loadGame, saveAuthoritativeGame } from "../gamePersistence";
+import { del as idbDel, get as idbGet, set as idbSet } from "idb-keyval";
+import { loadGame, saveAuthoritativeGame, saveGame } from "../gamePersistence";
 
 function fixtureState(): GameState {
   return buildGameState({
@@ -50,5 +50,15 @@ describe("game persistence", () => {
     const restored = await loadGame("trusted-local");
     expect(restored).toEqual(envelope);
     expect(persistedGameStateView(restored!)).toEqual(state);
+  });
+
+  it("does not clear resumable storage for a terminal state before GameOver delivery", async () => {
+    const state = fixtureState();
+    state.match_phase = "Completed";
+
+    await saveGame("terminal-pending", state);
+
+    expect(idbSet).not.toHaveBeenCalled();
+    expect(idbDel).not.toHaveBeenCalled();
   });
 });

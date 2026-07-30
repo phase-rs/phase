@@ -3584,3 +3584,23 @@ export interface EngineAdapter {
    */
   estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
 }
+
+/**
+ * Optional transport capability for a whole-match concession. This is a
+ * capability rather than a route-mode policy: the UI may offer it only when
+ * the installed adapter explicitly vouches that it can bind the request to an
+ * authenticated match session. P2P installs it only for a pod-issued draft
+ * match binding; ordinary P2P rooms intentionally do not expose it.
+ */
+export interface MatchConcedeCapability {
+  readonly supportsMatchConcede: true;
+  sendMatchConcede(): void;
+}
+
+export function supportsMatchConcede(
+  adapter: EngineAdapter | null,
+): adapter is EngineAdapter & MatchConcedeCapability {
+  return adapter !== null
+    && (adapter as Partial<MatchConcedeCapability>).supportsMatchConcede === true
+    && typeof (adapter as Partial<MatchConcedeCapability>).sendMatchConcede === "function";
+}

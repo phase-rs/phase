@@ -12208,6 +12208,10 @@ pub struct GameState {
     pub match_phase: MatchPhase,
     #[serde(default)]
     pub match_score: MatchScore,
+    /// A trusted transport-level match forfeit. Public game actions cannot
+    /// construct this result; see `match_flow::apply_trusted_match_forfeit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_forfeit_result: Option<MatchForfeitResult>,
     #[serde(default = "default_game_number")]
     pub game_number: u8,
     #[serde(default)]
@@ -16729,6 +16733,7 @@ impl GameState {
             match_config: MatchConfig::default(),
             match_phase: MatchPhase::InGame,
             match_score: MatchScore::default(),
+            match_forfeit_result: None,
             game_number: default_game_number(),
             current_starting_player: starting_player,
             next_game_chooser: None,
@@ -18187,6 +18192,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         match_config: _,
         match_phase: _,
         match_score: _,
+        match_forfeit_result: _,
         game_number: _,
         current_starting_player: _,
         next_game_chooser: _,
@@ -18476,6 +18482,7 @@ impl PartialEq for GameState {
             && self.match_config == other.match_config
             && self.match_phase == other.match_phase
             && self.match_score == other.match_score
+            && self.match_forfeit_result == other.match_forfeit_result
             && self.game_number == other.game_number
             && self.current_starting_player == other.current_starting_player
             && self.next_game_chooser == other.next_game_chooser

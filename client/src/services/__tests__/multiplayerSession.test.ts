@@ -50,6 +50,7 @@ describe("multiplayer WebSocket session persistence", () => {
     const session = {
       gameCode: "ABCDE",
       playerToken: "token",
+      fullKey: { game_code: "ABCDE", generation: 1 },
       serverUrl: "wss://play.example/ws",
       timestamp: Date.now(),
     };
@@ -65,8 +66,24 @@ describe("multiplayer WebSocket session persistence", () => {
       JSON.stringify({
         gameCode: "ABCDE",
         playerToken: "token",
+        fullKey: { game_code: "ABCDE", generation: 1 },
         serverUrl: "wss://play.example/ws",
         timestamp: 0,
+      }),
+    );
+
+    expect(loadWsSession()).toBeNull();
+    expect(localStorage.getItem(WS_SESSION_STORAGE_KEY)).toBeNull();
+  });
+
+  it("migrates legacy reconnect records by invalidating records without a Full session key", () => {
+    localStorage.setItem(
+      WS_SESSION_STORAGE_KEY,
+      JSON.stringify({
+        gameCode: "ABCDE",
+        playerToken: "legacy-token",
+        serverUrl: "wss://play.example/ws",
+        timestamp: Date.now(),
       }),
     );
 
@@ -96,6 +113,7 @@ describe("multiplayer WebSocket session persistence", () => {
       saveWsSession({
         gameCode: "ABCDE",
         playerToken: "token",
+        fullKey: { game_code: "ABCDE", generation: 1 },
         serverUrl: "wss://play.example/ws",
         timestamp: Date.now(),
       });

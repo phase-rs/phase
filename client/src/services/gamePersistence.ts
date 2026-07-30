@@ -9,6 +9,8 @@ import type {
   PlayerId,
 } from "../adapter/types";
 import type { SeatState } from "../multiplayer/seatTypes";
+import type { FullSessionKey } from "./multiplayerSession";
+import type { P2PSessionKey } from "./p2pSession";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
 
 /** Snapshot of an AI seat's configuration at game-start time. The per-seat
@@ -36,6 +38,7 @@ export interface NativeSoloSession {
   gameCode: string;
   playerId: PlayerId;
   playerToken: string;
+  fullKey: FullSessionKey;
 }
 
 export interface ActiveGameMeta {
@@ -80,6 +83,8 @@ export interface PersistedP2PHostSession {
   gameId: string;
   /** Bare 5-char room code; the PeerJS prefix is reattached by `hostRoom`. */
   roomCode: string;
+  /** Stable authority identity. A resumed host claims a fresh incarnation. */
+  sessionKey: P2PSessionKey;
   brokerGameCode?: string;
   useBroker: boolean;
   /** PlayerId.0 → token. PlayerId 0 is the host's own slot. */
@@ -109,6 +114,7 @@ export interface PersistedP2PHostSession {
 
 export interface NativeP2PServerSession {
   gameCode: string;
+  fullKey: FullSessionKey;
   /** Native player token keyed by the matching P2P player id. */
   playerTokens: Record<number, string>;
 }
@@ -144,7 +150,9 @@ export async function saveGame(gameId: string, state: PersistedGameState): Promi
     publicState.match_phase === "Completed"
     || (!publicState.match_phase && publicState.waiting_for.type === "GameOver")
   ) {
-    await clearGame(gameId);
+    // A terminal StateUpdate can arrive before its recipient-specific GameOver
+    // envelope. The latter carries the terminal access record, so this path
+    // must not clear resumable state before that record has been committed.
     return;
   }
   try {

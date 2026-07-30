@@ -109,19 +109,21 @@ export function export_replay_log(): string;
 export function getFormatRegistry(): any;
 
 /**
- * Engine-owned AI escape action for the current waiting state.
- * Same deadlock-safe fallback the search path uses when scoring cannot choose.
- * Returns null when no legal escape exists.
- */
-export function get_ai_fallback_action(): any;
-
-/**
  * Get the AI's chosen action for the current game state.
  * `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard",
  * "CEDH" (case-insensitive; see `AiDifficulty::from_label`).
  * `player_id` is the seat index of the AI player (0-based).
  */
 export function get_ai_action(difficulty: string, player_id: number): any;
+
+/**
+ * Engine-owned AI escape action for the current waiting state.
+ *
+ * Returns the same deadlock-safe `fallback_action` the search path uses when
+ * scoring cannot choose — never invents from legal-action list order. Null
+ * when no legal escape exists (#6393).
+ */
+export function get_ai_fallback_action(): any;
 
 /**
  * Score all candidate actions and return `[GameAction, score]` tuples.
@@ -456,6 +458,12 @@ export function signatureSpellSelectionPolicy(request: any): any;
  * applying the action as another player.
  */
 export function submit_action(actor: number, action: any): any;
+
+/**
+ * Submit one opaque, engine-authored interaction response. The browser never
+ * materializes a `GameAction`; only a successful engine reducer result exposes
+ * the exact action to the replay recorder.
+ */
 export function submit_interaction_js(actor: number, submission: any): any;
 
 /**

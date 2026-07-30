@@ -12,9 +12,10 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView } from "../p2p-adapter";
-import type { FormatConfig, GameAction, GameEvent, GameLogEntry, GameState } from "../types";
+import { supportsMatchConcede, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
+import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
 
 // `vi.mock` is hoisted above imports, so the factory can't reference module
 // scope. Inline the wire-format stub. See `./protocolTestStub.ts` for the
@@ -40,10 +41,23 @@ vi.mock("../../network/protocol", async (orig) => {
   };
 });
 
+vi.mock("../../services/p2pTerminalResult", async (orig) => {
+  const actual = await orig<typeof import("../../services/p2pTerminalResult")>();
+  return {
+    ...actual,
+    clearP2PTerminalResult: vi.fn(async () => undefined),
+    commitP2PTerminalResult: vi.fn(async () => true),
+  };
+});
+
 // ── Mock the WasmAdapter so we don't need an actual WASM build ─────────────
 // `vi.hoisted` lets us share these refs with the hoisted vi.mock factory.
 const mocks = vi.hoisted(() => {
-  const getState = vi.fn(async () => ({ players: [], objects: {} }));
+  const getState = vi.fn(async () => ({
+    players: [],
+    objects: {},
+    waiting_for: { type: "Priority", data: { player: 0 } },
+  }));
   const getLegalActions = vi.fn(async () => ({
     actions: [],
     autoPassRecommended: false,
@@ -415,6 +429,79 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     expect(mockInitialize).toHaveBeenCalledTimes(1);
     expect(mockSetMultiplayerMode).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences a stale host when a same-session resume claims a new incarnation", async () => {
+    const persistedSession = {
+      gameId: "lease-game",
+      roomCode: "ABCDE",
+      sessionKey: "stable-p2p-session",
+      useBroker: false,
+      playerTokens: {},
+      guestDecks: {},
+      kickedTokens: [],
+      eliminatedSeats: [],
+      playerCount: 2,
+      hostDeckData: {
+        player: { main_deck: ["Mountain"], sideboard: [] },
+        opponent: { main_deck: ["Forest"], sideboard: [] },
+        ai_decks: [],
+      },
+      gameStarted: false,
+    };
+    const stalePeer = createFakePeer();
+    const currentPeer = createFakePeer();
+    const stale = new P2PHostAdapter(
+      persistedSession.hostDeckData,
+      stalePeer.peer as unknown as Peer,
+      stalePeer.onGuestConnected,
+      2,
+      undefined,
+      undefined,
+      5_000,
+      undefined,
+      true,
+      undefined,
+      { gameId: "lease-game", roomCode: "ABCDE", resumeData: { session: persistedSession } },
+    );
+    await stale.initialize();
+
+    const current = new P2PHostAdapter(
+      persistedSession.hostDeckData,
+      currentPeer.peer as unknown as Peer,
+      currentPeer.onGuestConnected,
+      2,
+      undefined,
+      undefined,
+      5_000,
+      undefined,
+      true,
+      undefined,
+      { gameId: "lease-game", roomCode: "ABCDE", resumeData: { session: persistedSession } },
+    );
+    await current.initialize();
+
+    const staleGuest = new FakeOpenableConnection();
+    stalePeer.emitConnection(staleGuest as unknown as DataConnection);
+    staleGuest.fireOpen();
+    await flushPromises();
+    expect(await staleGuest.getSentMessages()).toContainEqual({
+      type: "reconnect_rejected",
+      reason: "Host session superseded",
+    });
+
+    const currentGuest = await joinGuest(currentPeer.emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    await flushPromises();
+    expect(current.getPlayerSlots()[1]?.kind.type).toBe("JoinedHuman");
+    expect((await currentGuest.getSentMessages()).some(
+      (message) => (message as { authority?: { sessionKey?: string } }).authority?.sessionKey === "stable-p2p-session",
+    )).toBe(true);
+
+    stale.dispose();
+    current.dispose();
   });
 
   it("retries failed initialization without duplicating guest connections", async () => {
@@ -1546,5 +1633,140 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     // Strictly increasing stamps let the store's gate order these commits.
     expect(second.seq).toBeGreaterThan(first.seq);
+  });
+
+  it("commits each terminal result to the recipient's filtered final state", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const hostState = {
+      players: [],
+      objects: { 7: { name: "Secret Hand Card" } },
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    } as unknown as GameState;
+    const guestState = {
+      players: [],
+      objects: { 7: { name: "Hidden Card" } },
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    } as unknown as GameState;
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (implementation: (playerId: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (playerId: number) => ({
+      state: playerId === 1 ? guestState : hostState,
+      actions: [],
+      autoPassRecommended: false,
+    }));
+
+    await (adapter as unknown as {
+      commitTerminalIfComplete: (snapshot: unknown, revision: number) => Promise<void>;
+    }).commitTerminalIfComplete({
+      state: hostState,
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 42,
+    }, 42);
+
+    const terminal = (await guest.getSentMessages()).find(
+      (message) => (message as { type?: string }).type === "terminal_result",
+    ) as { type: "terminal_result"; result: { recipient: number; finalStateCommitment: string } } | undefined;
+    expect(terminal?.result.recipient).toBe(1);
+    expect(terminal?.result.finalStateCommitment).toBe(
+      await p2pFinalStateCommitment(guestState),
+    );
+    expect(terminal?.result.finalStateCommitment).not.toBe(
+      await p2pFinalStateCommitment(hostState),
+    );
+    adapter.dispose();
+  });
+});
+
+describe("P2PHostAdapter — bound draft match concession", () => {
+  it("installs the capability only when a pod binding supplies its forwarder", async () => {
+    const { peer, onGuestConnected } = createFakePeer();
+    const onConcede = vi.fn();
+    const adapter = new P2PHostAdapter(
+      { player: { main_deck: [], sideboard: [] }, opponent: { main_deck: [], sideboard: [] }, ai_decks: [] },
+      peer as unknown as Peer,
+      onGuestConnected,
+      2,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { onConcede },
+    );
+
+    expect(supportsMatchConcede(adapter)).toBe(true);
+    await adapter.initialize();
+    (adapter as unknown as { gameStarted: boolean }).gameStarted = true;
+    adapter.sendMatchConcede();
+    adapter.sendMatchConcede();
+    expect(onConcede).toHaveBeenCalledTimes(1);
+    expect(onConcede).toHaveBeenCalledWith(0);
+    adapter.dispose();
+  });
+
+  it("routes a bound guest request to match settlement without conceding the engine game", async () => {
+    const { peer, onGuestConnected, emitConnection } = createFakePeer();
+    const onConcede = vi.fn();
+    const adapter = new P2PHostAdapter(
+      { player: { main_deck: [], sideboard: [] }, opponent: { main_deck: [], sideboard: [] }, ai_decks: [] },
+      peer as unknown as Peer,
+      onGuestConnected,
+      2,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { onConcede },
+    );
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    mockSubmitAction.mockClear();
+
+    await guest.simulateData({ type: "match_concede" });
+
+    expect(onConcede).toHaveBeenCalledTimes(1);
+    expect(onConcede).toHaveBeenCalledWith(1);
+    expect(mockSubmitAction).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "Concede" }),
+      expect.anything(),
+    );
+    adapter.dispose();
+  });
+
+  it("rejects a protected match request when no draft binding was installed", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    guest.sent.length = 0;
+
+    await guest.simulateData({ type: "match_concede" });
+
+    expect(await guest.getSentMessages()).toContainEqual(expect.objectContaining({
+      type: "action_rejected",
+      reason: "Whole-match concession is unavailable for this game",
+    }));
+    adapter.dispose();
   });
 });

@@ -16,6 +16,9 @@ import { WasmAdapter, getSharedAdapter } from "../adapter/wasm-adapter";
 import {
   NativeEngineVersionMismatchError,
   WebSocketAdapter,
+  acknowledgeFullTerminalDelivery,
+  bootstrapFullTerminalDelivery,
+  readFullTerminalResult,
 } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
 import type { DeckData, NativeAiSeat, WsAdapterEvent } from "../adapter/ws-adapter";
@@ -39,12 +42,19 @@ import { useGameplayPreferencesSync } from "../hooks/useGameplayPreferencesSync"
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
+import { loadP2PTerminalResult } from "../services/p2pTerminalResult";
 import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { loadDraftRun } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
+import {
+  commitFullTerminalDelivery,
+  loadFullTerminalDelivery,
+  replaceFullTerminalDelivery,
+  type FullTerminalDelivery,
+} from "../services/fullTerminalResult";
 import { detectServerUrl } from "../services/serverDetection";
 import {
   canAttemptNativeEngine,
@@ -802,6 +812,15 @@ export function GameProvider({
             ]);
             signal.throwIfAborted();
 
+            if (savedSession) {
+              const terminal = await loadP2PTerminalResult(savedSession.sessionKey);
+              signal.throwIfAborted();
+              if (terminal) {
+                onP2PEventRef.current?.({ type: "terminalResult", result: terminal });
+                return;
+              }
+            }
+
             const isNativeResume = savedSession?.nativeSession !== undefined;
             const isWasmResume =
               !isNativeResume
@@ -950,16 +969,7 @@ export function GameProvider({
           } else {
             // p2p-join
             const code = joinCode!;
-            const { conn, peer } = await joinRoom(code, signal, 10_000);
-            hostPeerHandle = peer;
-            signal.throwIfAborted();
-
             // Two deliberately-decoupled identifiers:
-            //  - dial target: `conn.peer` — the *actual* host peer id we just
-            //    connected to (= `phase2-<code>`). Auto-reconnect re-dials
-            //    this, so it must be the live id the host registered under;
-            //    reconstructing a literal prefix here is how the dial silently
-            //    broke after the PEER_ID_PREFIX bump.
             //  - sessionKey: the IndexedDB key for the persisted reconnect
             //    token, held on the legacy `phase-` prefix so tokens saved
             //    before the bump still resolve. IndexedDB (not sessionStorage)
@@ -967,6 +977,19 @@ export function GameProvider({
             //    their original seat.
             const sessionKey = `phase-${code}`;
             const existing = await loadP2PSession(sessionKey);
+            signal.throwIfAborted();
+            if (existing) {
+              const terminal = await loadP2PTerminalResult(existing.authority.sessionKey);
+              signal.throwIfAborted();
+              if (terminal) {
+                onP2PEventRef.current?.({ type: "terminalResult", result: terminal });
+                return;
+              }
+            }
+            // Dial target: `conn.peer` is the actual current host peer id;
+            // reconnect reuses it rather than reconstructing a prefix.
+            const { conn, peer } = await joinRoom(code, signal, 10_000);
+            hostPeerHandle = peer;
             signal.throwIfAborted();
             const adapter = new P2PGuestAdapter(
               deckList,
@@ -977,6 +1000,7 @@ export function GameProvider({
               useMultiplayerStore.getState().displayName || undefined,
               undefined,
               sessionKey,
+              existing?.authority,
             );
             p2pAdapter = adapter;
             hostPeerHandle = null;
@@ -1093,6 +1117,85 @@ export function GameProvider({
       // Use smart server detection for initial connection
       const setupWs = async () => {
         if (cancelled) return;
+        const reconnectSession = isReconnect ? loadWsSession() : null;
+        if (reconnectSession) {
+          const terminalDelivery = await loadFullTerminalDelivery(reconnectSession.fullKey);
+          if (cancelled) return;
+
+          if (terminalDelivery) {
+            // A retained terminal capability is read only through the small raw
+            // socket helper. This branch intentionally returns before any
+            // playable adapter, controller, deck, or reconnect setup exists.
+            try {
+              const refreshed = await readFullTerminalResult(
+                reconnectSession.serverUrl,
+                terminalDelivery.credential,
+              );
+              if (cancelled) return;
+              if (refreshed && !(await replaceFullTerminalDelivery(refreshed))) {
+                throw new Error("Failed to retain terminal delivery");
+              }
+              const display = refreshed ?? terminalDelivery;
+              void acknowledgeFullTerminalDelivery(
+                reconnectSession.serverUrl,
+                display.delivery_id,
+                display.credential,
+              ).catch(() => {});
+              clearWsSession();
+              onWsEventRef.current?.({
+                type: "terminalDelivery",
+                delivery: display,
+              });
+            } catch (error) {
+              if (!cancelled) {
+                useMultiplayerStore.getState().setConnectionStatus("disconnected");
+                onWsEventRef.current?.({
+                  type: "terminalUnavailable",
+                  message: error instanceof Error ? error.message : "Terminal result is unavailable",
+                });
+              }
+            }
+            return;
+          }
+
+          let bootstrap: FullTerminalDelivery | null;
+          try {
+            bootstrap = await bootstrapFullTerminalDelivery(
+              reconnectSession.serverUrl,
+              reconnectSession.fullKey,
+              reconnectSession.playerToken,
+              crypto.randomUUID(),
+            );
+          } catch (error) {
+            if (!cancelled) {
+              useMultiplayerStore.getState().setConnectionStatus("disconnected");
+              onWsEventRef.current?.({
+                type: "terminalUnavailable",
+                message: error instanceof Error ? error.message : "Terminal result is unavailable",
+              });
+            }
+            return;
+          }
+          if (cancelled) return;
+          if (bootstrap) {
+            if (!(await commitFullTerminalDelivery(bootstrap))) {
+              useMultiplayerStore.getState().setConnectionStatus("disconnected");
+              onWsEventRef.current?.({
+                type: "terminalUnavailable",
+                message: "Failed to retain terminal delivery",
+              });
+              return;
+            }
+            void acknowledgeFullTerminalDelivery(
+              reconnectSession.serverUrl,
+              bootstrap.delivery_id,
+              bootstrap.credential,
+            ).catch(() => {});
+            clearWsSession();
+            onWsEventRef.current?.({ type: "terminalDelivery", delivery: bootstrap });
+            return;
+          }
+        }
         const serverUrl = import.meta.env.VITE_WS_URL ?? await detectServerUrl();
         if (cancelled) return;
 
@@ -1551,6 +1654,7 @@ export function GameProvider({
                     gameCode: nativeResume.gameCode,
                     playerId: nativeResume.playerId,
                     playerToken: nativeResume.playerToken,
+                    fullKey: nativeResume.fullKey,
                     socketFactory: () => new NativeEngineSocket(),
                     expectedServerVersion,
                   },
