@@ -36,7 +36,7 @@ use super::oracle_quantity::parse_cda_quantity;
 #[cfg(test)]
 use super::oracle_static::parse_static_line;
 use super::oracle_static::{parse_pt_mod, parse_static_line_ir};
-use super::oracle_trigger::parse_trigger_lines_at_index_ir;
+use super::oracle_trigger::{parse_trigger_lines, parse_trigger_lines_at_index_ir};
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
 use crate::parser::oracle_ir::ast::{
     parsed_clause, ModalHeaderAst, ModalOptionality, ModeAst, OracleBlockAst,
@@ -3116,7 +3116,7 @@ mod tests {
                     OracleNodeIr::Spell(ability)
                         if ability.modal.is_none()
                             && !matches!(
-                                ability.body.clauses[0].parsed.effect.as_ref(),
+                                &ability.body.clauses[0].parsed.effect,
                                 Effect::Unimplemented { .. }
                             )
                 )),
@@ -3608,7 +3608,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             panic!("unsupported anchor bullet must not disappear or pre-lower");
         };
         assert!(matches!(
-            residual.body.clauses[0].parsed.effect.as_ref(),
+            &residual.body.clauses[0].parsed.effect,
             Effect::Unimplemented { .. }
         ));
         assert_eq!(
@@ -3664,10 +3664,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             panic!("completed-scry modal must retain its nested mode payload");
         };
         assert!(matches!(
-            modal.modes[0].ability.body.clauses[0]
-                .parsed
-                .effect
-                .as_ref(),
+            &modal.modes[0].ability.body.clauses[0].parsed.effect,
             Effect::ExileTop {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::TriggeringScryBottomCount,
@@ -3676,10 +3673,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             }
         ));
         assert!(matches!(
-            modal.modes[1].ability.body.clauses[0]
-                .parsed
-                .effect
-                .as_ref(),
+            &modal.modes[1].ability.body.clauses[0].parsed.effect,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
@@ -3714,17 +3708,14 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             panic!("damage modal must retain nested mode payload");
         };
         assert!(matches!(
-            modal.modes[0].ability.body.clauses[0]
-                .parsed
-                .effect
-                .as_ref(),
+            &modal.modes[0].ability.body.clauses[0].parsed.effect,
             Effect::Draw {
                 target: TargetFilter::Controller,
                 ..
             }
         ));
         assert!(matches!(
-            modal.modes[1].ability.body.clauses[0].parsed.effect.as_ref(),
+            &modal.modes[1].ability.body.clauses[0].parsed.effect,
             Effect::Destroy {
                 target: TargetFilter::Typed(filter),
                 ..
@@ -3775,7 +3766,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             &actor_ir.items[1].node,
             OracleNodeIr::Spell(ability)
                 if matches!(
-                    ability.body.clauses[0].parsed.effect.as_ref(),
+                    &ability.body.clauses[0].parsed.effect,
                     Effect::Sacrifice {
                         target: TargetFilter::Typed(filter),
                         ..
@@ -3786,7 +3777,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             &actor_ir.items[2].node,
             OracleNodeIr::Spell(ability)
                 if matches!(
-                    ability.body.clauses[0].parsed.effect.as_ref(),
+                    &ability.body.clauses[0].parsed.effect,
                     Effect::Sacrifice {
                         target: TargetFilter::Typed(filter),
                         ..
@@ -4163,7 +4154,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         );
         assert!(
             modal.modes.iter().all(|mode| !matches!(
-                mode.ability.body.clauses[0].parsed.effect.as_ref(),
+                &mode.ability.body.clauses[0].parsed.effect,
                 Effect::Unimplemented { .. }
             )),
             "every native Caesar mode must remain lowerable"
