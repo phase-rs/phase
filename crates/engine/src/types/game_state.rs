@@ -7719,6 +7719,16 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         convoke_mode: Option<ConvokeMode>,
     },
+    /// CR 601.2g-h + CR 605.3b: automatic payment reached a mana source that
+    /// sacrifices a permanent. The options are the frozen, engine-authored
+    /// semantic capability snapshot; submission revalidates one exact current
+    /// candidate before it can mutate the payment.
+    ManaSourceSelection {
+        player: PlayerId,
+        options: Vec<crate::types::mana::ManaSourceSelection>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        convoke_mode: Option<ConvokeMode>,
+    },
     /// CR 702.132a: Assist — when casting a spell with assist whose locked total
     /// cost has a generic component, before the caster pays they MAY choose
     /// another player to help pay the generic mana. The CASTER acts on this step

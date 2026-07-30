@@ -2752,6 +2752,18 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
                 convoke_mode,
             },
         )),
+        ManaAbilityResume::ManaSourceSelection {
+            player,
+            options,
+            convoke_mode,
+        } => Ok(resume_waiting_for(
+            player,
+            ManaAbilityResume::ManaSourceSelection {
+                player,
+                options,
+                convoke_mode,
+            },
+        )),
         ManaAbilityResume::UnlessPayment {
             outer_player,
             cost,
@@ -4150,6 +4162,15 @@ pub(crate) fn resume_waiting_for(
             convoke_mode,
         } => WaitingFor::ManaPayment {
             player: outer_player.unwrap_or(mana_source_controller),
+            convoke_mode,
+        },
+        ManaAbilityResume::ManaSourceSelection {
+            player,
+            options,
+            convoke_mode,
+        } => WaitingFor::ManaSourceSelection {
+            player,
+            options,
             convoke_mode,
         },
         ManaAbilityResume::UnlessPayment {

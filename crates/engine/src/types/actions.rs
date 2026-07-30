@@ -1599,6 +1599,7 @@ impl GameAction {
             | GameAction::ChooseReplacement { .. }
             | GameAction::OrderTriggers { .. }
             | GameAction::CancelCast
+            | GameAction::BackToManaPayment
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }

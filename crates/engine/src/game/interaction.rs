@@ -4165,6 +4165,7 @@ fn project_action_payload(
     match action {
         GameAction::PassPriority
         | GameAction::CancelCast
+        | GameAction::BackToManaPayment
         | GameAction::KeepAllCopyTargets
         | GameAction::RollPlanarDie
         | GameAction::CompanionToHand

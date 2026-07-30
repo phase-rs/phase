@@ -444,6 +444,15 @@ fn classify_deferred_life_root(
                     PaymentContinuationUnsupported::PayerMismatch,
                 )
             }
+            ManaAbilityResume::ManaSourceSelection {
+                player: selection_player,
+                ..
+            } if selection_player == player => classify_global_root(state, *player),
+            ManaAbilityResume::ManaSourceSelection { .. } => {
+                PaymentContinuationState::UnsupportedAffiliated(
+                    PaymentContinuationUnsupported::PayerMismatch,
+                )
+            }
             ManaAbilityResume::PhyrexianCastPayment { .. }
             | ManaAbilityResume::FinalizePendingManaPayment { .. } => {
                 PaymentContinuationState::UnsupportedAffiliated(
@@ -534,6 +543,9 @@ fn record_root_from_resume(
         ManaAbilityResume::ManaPayment {
             outer_player: None, ..
         } => return Err(PaymentContinuationUnsupported::MissingOuterPayer),
+        ManaAbilityResume::ManaSourceSelection { player, .. } => {
+            Some(root_from_global(state, *player)?)
+        }
         ManaAbilityResume::PhyrexianCastPayment { caster, .. } => {
             Some(root_from_global(state, *caster)?)
         }

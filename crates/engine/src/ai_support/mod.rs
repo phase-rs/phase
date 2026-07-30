@@ -1106,6 +1106,8 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::MulliganDecision { .. }
         | GameAction::ReorderHand { .. }
         | GameAction::TapLandForMana { .. }
+        | GameAction::ActivateManaSource { .. }
+        | GameAction::BackToManaPayment
         | GameAction::UntapLandForMana { .. }
         | GameAction::SpendPoolMana { .. }
         | GameAction::UnspendPoolMana { .. }
