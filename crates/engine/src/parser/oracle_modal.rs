@@ -36,7 +36,9 @@ use super::oracle_quantity::parse_cda_quantity;
 #[cfg(test)]
 use super::oracle_static::parse_static_line;
 use super::oracle_static::{parse_pt_mod, parse_static_line_ir};
-use super::oracle_trigger::{parse_trigger_lines, parse_trigger_lines_at_index_ir};
+#[cfg(test)]
+use super::oracle_trigger::parse_trigger_lines;
+use super::oracle_trigger::parse_trigger_lines_at_index_ir;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
 use crate::parser::oracle_ir::ast::{
     parsed_clause, ModalHeaderAst, ModalOptionality, ModeAst, OracleBlockAst,
@@ -1042,12 +1044,12 @@ pub(crate) enum OracleBlockIr {
 }
 
 pub(crate) enum AnchorModeIr {
-    Trigger(TriggerIr),
-    Static(StaticIr),
+    Trigger(Box<TriggerIr>),
+    Static(Box<StaticIr>),
     /// The bullet is still a first-class document item when no native trigger
     /// or static grammar accepts it. This preserves its printed slot and exact
     /// source line instead of silently dropping the label's semantics.
-    Unsupported(AbilityIr),
+    Unsupported(Box<AbilityIr>),
 }
 
 pub(crate) fn lower_oracle_block_ir(
@@ -1262,7 +1264,7 @@ fn anchor_mode_irs(
                     unsupported_anchor_mode_ir(mode, base_ctx)
                 } else {
                     attach_chosen_label_to_trigger_ir(&mut trigger, label);
-                    AnchorModeIr::Trigger(trigger)
+                    AnchorModeIr::Trigger(Box::new(trigger))
                 }
             })
             .collect();
@@ -1271,7 +1273,7 @@ fn anchor_mode_irs(
     match parse_static_line_ir(body) {
         Some(mut static_ir) => {
             attach_chosen_label_to_static_ir(&mut static_ir, label);
-            (line, vec![AnchorModeIr::Static(static_ir)])
+            (line, vec![AnchorModeIr::Static(Box::new(static_ir))])
         }
         None => (line, vec![unsupported_anchor_mode_ir(mode, base_ctx)]),
     }
@@ -1279,7 +1281,7 @@ fn anchor_mode_irs(
 
 fn unsupported_anchor_mode_ir(mode: &ModeAst, ctx: &ParseContext) -> AnchorModeIr {
     let source = mode.source_text.clone();
-    AnchorModeIr::Unsupported(AbilityIr {
+    AnchorModeIr::Unsupported(Box::new(AbilityIr {
         source_text: source.clone(),
         body: EffectChainIr::single_clause(
             &source,
@@ -1293,7 +1295,7 @@ fn unsupported_anchor_mode_ir(mode: &ModeAst, ctx: &ParseContext) -> AnchorModeI
         die_results: vec![],
         root_transforms: vec![],
         modal: None,
-    })
+    }))
 }
 
 #[cfg(test)]

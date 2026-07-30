@@ -4513,13 +4513,14 @@ pub(crate) fn parse_oracle_ir(
                     for (line, children) in children {
                         for child in children {
                             match child {
-                                AnchorModeIr::Trigger(trigger) => emitter
-                                    .trigger_ir_at(line, TriggerNodeIr::Parsed(Box::new(trigger))),
+                                AnchorModeIr::Trigger(trigger) => {
+                                    emitter.trigger_ir_at(line, TriggerNodeIr::Parsed(trigger))
+                                }
                                 AnchorModeIr::Static(static_ir) => {
-                                    emitter.static_ir_at(line, static_ir)
+                                    emitter.static_ir_at(line, *static_ir)
                                 }
                                 AnchorModeIr::Unsupported(ability) => {
-                                    emitter.ability_ir_at(line, ability);
+                                    emitter.ability_ir_at(line, *ability);
                                 }
                             }
                         }
