@@ -30691,35 +30691,49 @@ pub(crate) fn parse_effect_chain_ir(
         {
             replace_target_with_parent(&mut clause.effect);
         }
-        // CR 608.2c + CR 122.1 (issue #6507): the sacrifice imperative parser
+        // CR 608.2c (issue #6507): the sacrifice imperative parser
         // (`parse_targeted_action_ast`) defaults a bare "it"/"them" pronoun with no
         // trigger subject to `ParentTarget`, on the assumption that SOME earlier
-        // clause in the chain chose a real target for it to inherit — the common case
+        // clause chose a real target for it to inherit — the common case
         // (`bare_it_without_trigger_subject_preserves_parent_target`). That assumption
-        // is false when the immediately preceding clause exposes no target concept at
-        // all (`target_filter().is_none()`), publishes no created-token referent
-        // (`chain_prior_referent_is_created_token` — Populate has no `target` field but
-        // DOES publish one; Token/CopyTokenOf are excluded for free since both DO have
-        // a `target_filter()`), and there is no "if you do" object anchor
-        // (`if_you_do_object_anchor`, computed above — a GenericEffect referent
-        // surfaced only through its granted static's `affected` field, not its own
-        // `target`). With none of those three antecedents present, there is nothing
-        // for `ParentTarget` to resolve to, so a conditional "sacrifice it" tail
-        // (Gemstone Mine's "{T}, Remove a mining counter: Add one mana of any color. If
-        // there are no mining counters on this land, sacrifice it.") silently never
-        // sacrifices anything. Rebind it to the ability's own source, the only object
-        // "it" can plausibly name here.
+        // is false, and the fallback must not fire, when ANY of the established
+        // antecedent authorities finds a referent:
+        //   - `parent_target_available` (computed above) — a chosen typed target
+        //     anywhere in this chain, an `if you do` object anchor, OR an outer
+        //     chain's referent inherited into a recursively-parsed `Otherwise`
+        //     else-branch via `ctx.parent_target_available` (Brilliance Unleashed's
+        //     class). Omitting this last case would let an else-branch whose own
+        //     internal clauses are targetless rebind a valid OUTER `ParentTarget` to
+        //     `SelfRef`, sacrificing the ability's source instead of the object
+        //     selected before the paired conditional.
+        //   - `chain_prior_referent_is_created_token` — a token/copy publisher
+        //     (`Effect::Populate` has no `target` field but DOES publish a
+        //     created-token referent; `Token`/`CopyTokenOf` are covered by
+        //     `parent_target_available`'s typed-referent scan for free since both DO
+        //     have a `target_filter()`).
+        //   - the nearest non-`Continue` clause (an absorbed rider carries no
+        //     independent referent, so it must not be mistaken for a targetless
+        //     antecedent — mirrors `if_you_do_object_anchor`'s same lookback)
+        //     exposing SOME target concept (`target_filter().is_some()`).
+        // With none of those present, there is nothing for `ParentTarget` to resolve
+        // to, so a conditional "sacrifice it" tail (Gemstone Mine's "{T}, Remove a
+        // mining counter: Add one mana of any color. If there are no mining counters
+        // on this land, sacrifice it.") silently never sacrifices anything. Rebind it
+        // to the ability's own source, the only object "it" can plausibly name here.
         //
         // Deliberately scoped to `Effect::Sacrifice` only (not folded into the
         // Kicker-clause rewrite's gate above): that gate is shared by every
         // `replace_target_with_parent`-eligible effect kind, and narrowing it there
         // regressed unrelated cards — see the comment above.
-        let prior_clause_has_no_target_concept = builder
+        let nearest_semantic_clause = builder
             .clauses()
-            .last()
-            .is_some_and(|prev| prev.parsed.effect.target_filter().is_none())
+            .iter()
+            .rev()
+            .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }));
+        let prior_clause_has_no_target_concept = !parent_target_available
             && !chain_prior_referent_is_created_token(builder.clauses())
-            && if_you_do_anchor.is_none();
+            && nearest_semantic_clause
+                .is_some_and(|prev| prev.parsed.effect.target_filter().is_none());
         if condition.is_some() && !is_distributed_chunk && prior_clause_has_no_target_concept {
             if let Effect::Sacrifice { target, .. } = &mut clause.effect {
                 if matches!(target, TargetFilter::ParentTarget) {
