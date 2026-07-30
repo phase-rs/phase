@@ -1253,7 +1253,7 @@ fn anchor_mode_irs(
     {
         let mut mode_ctx = base_ctx.clone();
         mode_ctx.diagnostics.clear();
-        let mut triggers = parse_trigger_lines_at_index_ir(body, card_name, None, &mut mode_ctx);
+        let triggers = parse_trigger_lines_at_index_ir(body, card_name, None, &mut mode_ctx);
         base_ctx.diagnostics.extend(mode_ctx.diagnostics);
         let children = triggers
             .into_iter()
@@ -1982,10 +1982,10 @@ fn guard_unsupported_mode_qualifiers_ir(
     };
     let source = clause.source.fragment().unwrap_or(&ability.source_text);
     let lower = source.to_lowercase();
-    let dig_with_total_mv = matches!(&*clause.parsed.effect, Effect::Dig { .. })
+    let dig_with_total_mv = matches!(&clause.parsed.effect, Effect::Dig { .. })
         && nom_primitives::scan_contains(&lower, "with total mana value");
     let put_counter_with_thats_a = matches!(
-        &*clause.parsed.effect,
+        &clause.parsed.effect,
         Effect::PutCounterAll { .. } | Effect::PutCounter { .. }
     ) && nom_primitives::scan_contains(&lower, "that's a ");
 

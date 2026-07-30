@@ -4538,7 +4538,9 @@ pub(crate) fn parse_oracle_ir(
         if let Some((block, next_i)) = parse_oracle_block(&lines, i) {
             match lower_oracle_block_ir(block, card_name, ctx.host_self_reference.clone(), &mut ctx)
             {
-                OracleBlockIr::Activated(ability) => emitter.ability_ir_at(item_line, ability),
+                OracleBlockIr::Activated(ability) => {
+                    emitter.ability_ir_at(item_line, ability);
+                }
                 OracleBlockIr::Modal { choice, modes } => {
                     for mode in modes {
                         emitter.ability_ir_at(
@@ -4568,7 +4570,7 @@ pub(crate) fn parse_oracle_ir(
                                     emitter.static_ir_at(line, static_ir)
                                 }
                                 AnchorModeIr::Unsupported(ability) => {
-                                    emitter.ability_ir_at(line, ability)
+                                    emitter.ability_ir_at(line, ability);
                                 }
                             }
                         }
