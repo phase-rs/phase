@@ -96,7 +96,8 @@ fn modal_cap(state: &GameState) -> Option<(usize, usize)> {
 
 #[test]
 fn parser_preserves_the_dynamic_reflexive_modal_cap() {
-    let trigger = parse_hawkeye()
+    let hawkeye = parse_hawkeye();
+    let trigger = hawkeye
         .triggers
         .iter()
         .find(|trigger| trigger.mode == TriggerMode::Taps)
@@ -149,8 +150,8 @@ fn tranquil_frillback_uses_the_sequential_payment_flow() {
         execute
             .sub_ability
             .as_deref()
-            .map(|reflexive| reflexive.condition),
-        Some(Some(AbilityCondition::WhenYouDo))
+            .and_then(|reflexive| reflexive.condition.as_ref()),
+        Some(&AbilityCondition::WhenYouDo)
     );
     resolve_ability_chain(
         runner.state_mut(),
