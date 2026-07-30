@@ -5480,20 +5480,19 @@ async fn handle_client_message(
                         } else {
                             // Persist updated session (now has the new player, not yet started)
                             persist_full_session_async(game_db, session);
-                            Ok(JoinOutcome::Waiting {
-                                player_token,
-                                joiner,
-                                full_key: session
-                                    .full_runtime
-                                    .as_ref()
-                                    .map(|runtime| runtime.key.clone())
-                                    .expect("Full sessions are issued a key before join"),
-                                slot_info: session.player_slot_info(),
-                                current_count: session.current_player_count(),
-                                raw_state: Box::new(session.state.clone()),
-                                filtered_state: Box::new(filtered_state),
-                                state_revision: session.state_revision,
-                            })
+                            match session.full_runtime.as_ref() {
+                                Some(runtime) => Ok(JoinOutcome::Waiting {
+                                    player_token,
+                                    joiner,
+                                    full_key: runtime.key.clone(),
+                                    slot_info: session.player_slot_info(),
+                                    current_count: session.current_player_count(),
+                                    raw_state: Box::new(session.state.clone()),
+                                    filtered_state: Box::new(filtered_state),
+                                    state_revision: session.state_revision,
+                                }),
+                                None => Err("Full session runtime is unavailable".to_string()),
+                            }
                         }
                     }
                     Err(e) => Err(e),
