@@ -1971,31 +1971,31 @@ fn guard_unsupported_mode_qualifiers(
     parsed
 }
 
-/// IR-native qualifier guard for the modal migration.  It inspects exactly one
-/// parsed clause and its own source fragment; it never lowers an `AbilityIr`
-/// merely to decide whether a restrictive qualifier was swallowed.
+/// IR-native qualifier guard for the modal migration. It inspects every parsed
+/// clause and its own source fragment; it never lowers an `AbilityIr` merely to
+/// decide whether a restrictive qualifier was swallowed.
 fn guard_unsupported_mode_qualifiers_ir(
     ability: &mut AbilityIr,
     kind: AbilityKind,
     ctx: &ParseContext,
 ) {
-    let [clause] = ability.body.clauses.as_slice() else {
-        return;
-    };
-    let source = clause.source.fragment().unwrap_or(&ability.source_text);
-    let lower = source.to_lowercase();
-    let dig_with_total_mv = matches!(&clause.parsed.effect, Effect::Dig { .. })
-        && nom_primitives::scan_contains(&lower, "with total mana value");
-    let put_counter_with_thats_a = matches!(
-        &clause.parsed.effect,
-        Effect::PutCounterAll { .. } | Effect::PutCounter { .. }
-    ) && nom_primitives::scan_contains(&lower, "that's a ");
+    let has_unsupported_qualifier = ability.body.clauses.iter().any(|clause| {
+        let source = clause.source.fragment().unwrap_or(&ability.source_text);
+        let lower = source.to_lowercase();
+        let dig_with_total_mv = matches!(&clause.parsed.effect, Effect::Dig { .. })
+            && nom_primitives::scan_contains(&lower, "with total mana value");
+        let put_counter_with_thats_a = matches!(
+            &clause.parsed.effect,
+            Effect::PutCounterAll { .. } | Effect::PutCounter { .. }
+        ) && nom_primitives::scan_contains(&lower, "that's a ");
+        dig_with_total_mv || put_counter_with_thats_a
+    });
 
-    if !(dig_with_total_mv || put_counter_with_thats_a) {
+    if !has_unsupported_qualifier {
         return;
     }
 
-    let source = source.to_string();
+    let source = ability.source_text.clone();
     ability.body = EffectChainIr::single_clause(
         &source,
         kind,
@@ -3073,7 +3073,8 @@ mod tests {
 
         for (name, oracle, expected_lines, expected_mode_count) in cases {
             let types = vec!["Instant".to_string()];
-            let mut ir = parse_oracle_ir(oracle, name, &[], &types, &[]);
+            let card_name = format!("Test {name} Modal");
+            let mut ir = parse_oracle_ir(oracle, &card_name, &[], &types, &[]);
 
             assert_eq!(
                 ir.items.len(),
@@ -3204,7 +3205,7 @@ mod tests {
         assert_eq!(triggered_ir.items[0].source.span().first_line, 0);
         assert_eq!(
             triggered_ir.items[0].source.fragment(),
-            Some("Whenever Nested Trigger enters, choose one —")
+            Some("Whenever ~ enters, choose one —")
         );
         let triggered = lower_oracle_ir(&mut triggered_ir);
         assert_eq!(triggered.triggers.len(), 1);
@@ -3572,7 +3573,10 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             );
             assert_eq!(
                 item.source.fragment(),
-                Some(FROSTCLIFF_SIEGE_ORACLE.lines().nth(line).unwrap())
+                Some(match line {
+                    0 => "As ~ enters, choose Jeskai or Temur.",
+                    _ => FROSTCLIFF_SIEGE_ORACLE.lines().nth(line).unwrap(),
+                })
             );
         }
 
@@ -3644,7 +3648,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             .expect("triggered modal execute")
             .mode_abilities[0];
         match first_mode.effect.as_ref() {
-            Effect::ChangeZone { target, .. } => assert_eq!(
+            Effect::Bounce { target, .. } => assert_eq!(
                 target,
                 &TargetFilter::TriggeringSource,
                 "spell-cast 'it' must remain the triggering spell, not a parent target"
@@ -3751,7 +3755,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         assert!(matches!(
             cast_modes.as_slice(),
             [first, second]
-                if matches!(first.effect.as_ref(), Effect::ChangeZone {
+                if matches!(first.effect.as_ref(), Effect::Bounce {
                     target: TargetFilter::TriggeringSource,
                     ..
                 }) && matches!(second.effect.as_ref(), Effect::ChangeZone {
@@ -4150,7 +4154,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             vec![
                 (Some(1), "• Create two 1/1 red and white Soldier creature tokens with haste that are tapped and attacking."),
                 (Some(2), "• You draw a card and you lose 1 life."),
-                (Some(3), "• Caesar deals damage equal to the number of creature tokens you control to target opponent."),
+                (Some(3), "• ~ deals damage equal to the number of creature tokens you control to target opponent."),
             ],
             "Caesar's bullet provenance stays nested under the sole trigger item"
         );

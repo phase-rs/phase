@@ -442,6 +442,7 @@ pub(crate) struct AbilityIr {
     /// An empty list is a lowering no-op.
     pub(crate) root_transforms: Vec<AbilityRootTransform>,
     /// Modal metadata attached to this ability root and lowered with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) modal: Option<ModalPayloadIr>,
 }
 
