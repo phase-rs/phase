@@ -6,12 +6,15 @@
 //! and the second ability produced no mana at all regardless of what was
 //! noted.
 
+use engine::game::effects::bounce;
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::ability::{BounceSelection, Effect, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const JEWELED_AMULET_ORACLE: &str = "{1}, {T}: Put a charge counter on this artifact. \
 Note the type of mana spent to pay this activation cost. Activate only if there are no \
@@ -194,5 +197,84 @@ fn jeweled_amulet_produces_no_mana_with_nothing_noted() {
         charge_counters(&runner, amulet),
         0,
         "the charge counter is still removed even though no mana was produced"
+    );
+}
+
+/// CR 400.7: a source that leaves and returns while its OWN activation is
+/// still unresolved on the stack becomes a new object at the same storage id
+/// (see `GameObject::incarnation`). Bouncing Jeweled Amulet in response to
+/// its own first ability — before that ability resolves — must NOT let the
+/// note land on the new incarnation: that incarnation never paid anything
+/// itself. Without the incarnation guard in `Effect::NoteManaSpent`, the
+/// stale `mana_spent_to_activate` latch from the departed incarnation would
+/// be promoted onto the returned card's `chosen_attributes` anyway.
+#[test]
+fn jeweled_amulet_bounced_mid_stack_does_not_note_on_new_incarnation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let amulet = scenario
+        .add_creature_from_oracle(P0, "Jeweled Amulet", 0, 0, JEWELED_AMULET_ORACLE)
+        .as_artifact()
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+
+    // (1) Activate ability 0. The {1} cost auto-pays from the single floating
+    // red unit with no ambiguity, so one action step lands the ability on the
+    // stack, unresolved, at the post-announcement Priority window.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: amulet,
+            ability_index: 0,
+        })
+        .expect("activating ability 0 must succeed");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach-guard: the note ability must be sitting on the stack, unresolved"
+    );
+    let incarnation_before = runner.state().objects[&amulet].incarnation;
+
+    // (2) Interject: bounce the amulet through the real bounce resolver
+    // (not a raw zone-field flip) before its own ability resolves.
+    let bounce_ability = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: None,
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(amulet)],
+        ObjectId(999),
+        P0,
+    );
+    let mut events = Vec::new();
+    bounce::resolve(runner.state_mut(), &bounce_ability, &mut events)
+        .expect("bouncing the amulet must succeed");
+    assert_eq!(
+        runner.state().objects[&amulet].zone,
+        Zone::Hand,
+        "reach-guard: the amulet must actually be in hand now"
+    );
+    assert!(
+        runner.state().objects[&amulet].incarnation > incarnation_before,
+        "reach-guard: the zone change must have bumped the object's incarnation"
+    );
+
+    // (3) CR 112.7a: the ability is independent of its departed source and
+    // still resolves.
+    runner.resolve_top();
+    assert!(
+        runner.state().stack.is_empty(),
+        "the note ability must have resolved off the stack"
+    );
+
+    // (4) The new incarnation, sitting in hand, must have nothing noted.
+    assert!(
+        runner.state().objects[&amulet].noted_mana_spent().is_none(),
+        "a bounced-and-returned amulet must not inherit the departed \
+         incarnation's payment as a noted type"
     );
 }

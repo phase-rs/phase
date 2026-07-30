@@ -1192,7 +1192,7 @@ pub struct GameObject {
     /// `pay_ability_mana_cost_with_choices_excluding_and_parent` at
     /// activation-time payment. Bridges cost payment (activation) to
     /// `Effect::NoteManaSpent` (resolution) for "note the type of mana spent
-    /// to pay this activation cost" (Jeweled Amulet, Ice Cauldron). Transient:
+    /// to pay this activation cost" (Jeweled Amulet). Transient:
     /// overwritten by the object's next ability-mana-cost payment, with no
     /// other clearing logic — safe because every known card in this class
     /// gates its "note" ability behind a `{T}` cost component, so the same
@@ -1201,8 +1201,21 @@ pub struct GameObject {
     /// cast-side stamp-then-read idiom, adapted for ability activation, where
     /// the resolving stack entry is a separate `ResolvedAbility` rather than
     /// this same object.
+    ///
+    /// Paired with `mana_spent_to_activate_incarnation` (CR 400.7): a source
+    /// that leaves and returns (bounce/flicker) while its OWN ability is
+    /// still unresolved on the stack becomes a new object at this same
+    /// storage id (see `GameObject::incarnation`). `Effect::NoteManaSpent`
+    /// must not promote this latch to durable `ChosenAttribute::
+    /// NotedManaSpent` state unless the object's current incarnation still
+    /// matches the one captured here — otherwise the new incarnation would
+    /// silently inherit a payment it never made.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mana_spent_to_activate: Vec<ManaType>,
+    /// See `mana_spent_to_activate`. The object's `incarnation` at the moment
+    /// that latch was stamped.
+    #[serde(default)]
+    pub mana_spent_to_activate_incarnation: u64,
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
@@ -1368,6 +1381,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         // `chosen_attributes` accumulator, or overwritten by the object's
         // next ability-mana-cost payment (§5.2c).
         mana_spent_to_activate: _,
+        // Paired with `mana_spent_to_activate` above — same omission class.
+        mana_spent_to_activate_incarnation: _,
     } = o;
 }
 
@@ -2236,6 +2251,7 @@ impl GameObject {
             mana_spent_source_snapshots: Vec::new(),
             phase_status: PhaseStatus::PhasedIn,
             mana_spent_to_activate: Vec::new(),
+            mana_spent_to_activate_incarnation: 0,
         }
     }
 
@@ -2685,7 +2701,7 @@ impl GameObject {
 
     /// CR 106.1b: Look up the mana type(s) noted by a past `Effect::NoteManaSpent`
     /// resolution on this permanent's own ability ("this artifact's last noted
-    /// type" — Jeweled Amulet, Ice Cauldron). Read by `ManaProduction::NotedType`.
+    /// type" — Jeweled Amulet). Read by `ManaProduction::NotedType`.
     pub fn noted_mana_spent(&self) -> Option<&[ManaType]> {
         self.chosen_attributes.iter().find_map(|a| match a {
             ChosenAttribute::NotedManaSpent(types) => Some(types.as_slice()),

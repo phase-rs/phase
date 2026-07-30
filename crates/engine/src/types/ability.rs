@@ -1470,7 +1470,7 @@ pub enum ChosenAttribute {
     CopiableSnapshot(Box<LatchedCopiableSnapshot>),
     /// CR 106.1b + CR 400.7: The mana type(s) spent to pay a past activation of
     /// this permanent's own ability ("Note the type of mana spent to pay this
-    /// activation cost" — Jeweled Amulet, Ice Cauldron). Like `Card` and
+    /// activation cost" — Jeweled Amulet). Like `Card` and
     /// `TributeOutcome`, this is ENGINE-SET (written by `Effect::NoteManaSpent`
     /// from the source's transient `mana_spent_to_activate` payment latch, not
     /// produced through `ChoiceType`/`from_choice`) — it is never a
@@ -12961,7 +12961,7 @@ pub enum Effect {
     /// CR 106.1b + CR 602.2b + CR 608.2c: Record the mana type(s) spent to pay
     /// this resolving ability's OWN activation cost onto its source as
     /// `ChosenAttribute::NotedManaSpent` ("Note the type of mana spent to pay
-    /// this activation cost" — Jeweled Amulet, Ice Cauldron). Reads the
+    /// this activation cost" — Jeweled Amulet). Reads the
     /// source's transient `mana_spent_to_activate` latch, which
     /// `pay_ability_mana_cost_with_choices_excluding_and_parent` stamps at
     /// activation-time payment (CR 602.2b: costs are paid before the ability
