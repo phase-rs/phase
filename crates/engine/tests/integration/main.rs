@@ -119,6 +119,7 @@ mod cross_line_instead_override_branch;
 mod crossway_troublemakers_attacking_keywords;
 mod culling_scales_lowest_mana_value_target;
 mod cultivate_split_destination;
+mod culvert_ambusher_turn_face_up_force_block;
 mod cumber_stone_opponent_debuff;
 mod cunning_rhetoric_attacks_you_scope_4736;
 mod curse_attack_triggers;

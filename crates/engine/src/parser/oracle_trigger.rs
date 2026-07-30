@@ -820,6 +820,12 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
     // because the second clause begins with "a creature card". That produces two
     // separate triggers that can both fire on the same zone-change event, doubling
     // the damage (issue #3299).
+    //
+    // Dispatch-order dependency (load-bearing): this gate runs BEFORE Pattern 2 and
+    // would pre-empt the disjunctive state-change/passive head split entirely if it
+    // claimed the line. It declines because `parse_zone_change_clause` must succeed
+    // for EVERY clause, and "is turned face up" / "becomes tapped" /
+    // "becomes monstrous" / "is dealt damage" are not zone changes.
     if parse_disjunctive_zone_change_condition(&condition).is_some() {
         return vec![parse_trigger_line_with_index_ir(
             text,
@@ -7511,8 +7517,14 @@ fn is_enters_or_haunted_creature_dies_compound(cond_lower: &str) -> bool {
 /// trigger line per event, with the subject shared across all of them. This is
 /// the single entry point for the whole class: the N-way serial form
 /// ("Whenever ~ A, B, or C") and the 2-way "or" form ("Whenever ~ A or B") are
-/// its two branches. CR 603.1: each listed event is an independent trigger
-/// condition. Dedicated 2-way compound `TriggerMode` variants (AttacksOrBlocks,
+/// its two branches. CR 603.1 + CR 603.2: each listed event is an independent
+/// trigger condition, matched independently against game events. Whether a single
+/// game event can fire more than one arm is NOT settled by CR 603.2c (which governs
+/// one condition matching one event) — it is a property of the admitted head
+/// lexicons, whose complements overwhelmingly denote mutually exclusive events. The
+/// one measured overlap is "attacks" + "becomes tapped" (CR 508.1f), which is
+/// rules-correct and pinned by `attacks_or_becomes_tapped_pins_both_arms`.
+/// Dedicated 2-way compound `TriggerMode` variants (AttacksOrBlocks,
 /// EntersOrAttacks, EntersOrHauntedCreatureDies) are intentionally left unsplit
 /// by `split_or_event_compound`.
 ///
@@ -7550,6 +7562,19 @@ fn split_cross_subject_event_compound(cond_lower: &str, condition: &str) -> Opti
     // extensions ("attacks you or a planeswalker you control") are mis-split
     // because "a planeswalker you control" starts with an article but has no
     // event verb — it extends the attack target, not the trigger event.
+    //
+    // CR 508.3a + CR 603.2: this gate stays on the NARROW active-voice lexicon
+    // (`parse_event_verb_start`), NOT `parse_event_head_start`. It SCANS (rather
+    // than matching at position 0) after an article, so the state-change head
+    // family would make it split SUBJECT disjunctions as if they were EVENT
+    // disjunctions. Measured over the whole card corpus, widening this one gate
+    // breaks exactly:
+    //   Donna Noble  "Whenever ~ or a creature it's paired with is dealt damage, …"
+    //     -> Unknown("Whenever ~") + Unknown("Whenever a creature it's paired with …")
+    //   The Bus Runner's granted token ability
+    //     "Whenever this token or a Gamer you control becomes tapped, …"
+    //     -> Unknown("Whenever ~") + Taps   (correct today: ONE Taps with an Or subject)
+    // Both yield a bogus first half with no event at all.
     scan_preceded(after_trimmed, |i| parse_event_verb_start(i))?;
 
     let (_, keyword) = parse_trigger_keyword_prefix(cond_lower).ok()?;
@@ -7592,6 +7617,28 @@ fn parse_trigger_keyword_prefix(input: &str) -> OracleResult<'_, &'static str> {
 ///
 /// Example: "Whenever ~ attacks, blocks, or becomes the target of a spell"
 /// becomes three trigger conditions, each reusing the same subject.
+///
+/// LEXICON SCOPE — measured; do not "restore" narrowness here.
+///
+/// * The three TRAILING-leg gates in this function's body stay on the NARROW
+///   `parse_event_verb_start`. Zero corpus trigger lines have a ", or " serial list
+///   with a state-change/passive leg, and widening them would be dead code anyway:
+///   `find_effect_boundary` truncates the condition at the first ", " unless
+///   `continues_serial_event_condition` recognises the trailing leg, and that
+///   predicate deliberately stays narrow (see its own doc comment). Measured:
+///   widening all six sites together changes ZERO cards over the whole corpus, and
+///   "Whenever ~ enters, attacks, or becomes tapped" still yields one trigger with
+///   an `Effect::Unimplemented` — honestly red.
+/// * The LEADING leg is NOT gated here. It is only the `first_original` span, and
+///   its subject span is taken by the shared `extract_keyword_and_subject` ->
+///   `extract_subject_text`, which IS wide. That asymmetry is deliberate and
+///   is a real improvement: with a narrow terminator the leading event leaked into
+///   the shared subject span, so "Whenever ~ becomes tapped, attacks, or dies"
+///   reconstructed as ["Whenever ~ becomes tapped", "Whenever ~ becomes tapped
+///   attacks", "Whenever ~ becomes tapped dies"] — THREE duplicate `Taps` arms all
+///   firing on one tap event, a CR 603.2c hazard. With the wide terminator it is
+///   [Taps, Attacks, ChangesZone]. Pinned by
+///   `serial_list_leading_state_change_leg_reconstructs_every_leg`.
 fn split_serial_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
     use super::oracle_nom::primitives::split_once_on;
 
@@ -7618,7 +7665,8 @@ fn split_serial_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<
     let Ok((_, (first_original, rest_events_original))) = split_once_on(before_or, ", ") else {
         return None;
     };
-    let keyword_and_subject = extract_keyword_and_subject(first_lower.trim());
+    let keyword_and_subject =
+        extract_keyword_and_subject(TextPair::new(first_original.trim(), first_lower.trim()));
     let mut results = vec![first_original.trim().to_string()];
 
     let mut remaining_lower = rest_events_lower;
@@ -7660,6 +7708,14 @@ fn split_serial_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<
 /// is sacrificed, is exiled, leaves). Does NOT match "or" between subjects (e.g.,
 /// "a creature or artifact enters").
 ///
+/// CR 603.1 + CR 603.2: each half becomes an independent trigger condition, matched
+/// independently against game events. (One event firing at most one arm is a property
+/// of the head lexicons, not of CR 603.2c — see `split_shared_subject_event_list`.)
+/// The head lexicon consulted here is the WIDE
+/// `parse_event_head_start` — the active-voice verbs plus the CR 603.2e
+/// state-change/passive head family ("becomes tapped"/"becomes monstrous"/
+/// "is turned face up"/"is dealt damage").
+///
 /// Examples:
 /// - "Whenever ~ enters or deals combat damage to a player" → ["Whenever ~ enters", "Whenever ~ deals combat damage to a player"]
 /// - "Whenever ~ deals combat damage to a player or dies" → ["Whenever ~ deals combat damage to a player", "Whenever ~ dies"]
@@ -7672,12 +7728,27 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
     // discards a permanent card, ..."). Each branch then routes to the
     // existing `try_parse_sacrifice_trigger` / `try_parse_discard_trigger`
     // handlers via the per-half re-parse loop.
-    fn is_event_verb_start(text: &str) -> bool {
-        parse_event_verb_start(text).is_ok()
+    // Renamed from `is_event_verb_start`: it now answers "does an event HEAD start
+    // here", covering the active-voice verbs AND the state-change/passive voices.
+    // 2 of the 9 `parse_event_verb_start` call sites are widened (this one and
+    // `extract_subject_text`); 7 stay narrow (`split_cross_subject_event_compound`;
+    // the three trailing-leg gates in `split_serial_event_compound`; the three in
+    // `continues_serial_event_condition`).
+    fn is_event_head_start(text: &str) -> bool {
+        parse_event_head_start(text).is_ok()
     }
 
     // Patterns already handled as dedicated compound TriggerMode variants
     // (EntersOrAttacks, AttacksOrBlocks, EntersOrHauntedCreatureDies) — do not split these.
+    //
+    // CR 509.1h: "blocks or becomes blocked" (the fused BlocksOrBecomesBlocked mode,
+    // 53 corpus trigger lines) needs NO entry in this list. It is already held one
+    // function away by `parse_state_change_event_start`'s closed allow-list, which does
+    // not admit `blocked` — pinned by `state_change_event_head_allow_list_is_closed`,
+    // `blocks_or_becomes_blocked_stays_fused_not_split` and
+    // `neyith_fight_or_become_blocked_not_split`, i.e. at exactly the seam a future
+    // widener would edit. A duplicate guard here reds zero tests when removed and costs
+    // a `scan_contains` phrase walk on every " or " trigger line.
     fn is_existing_compound_mode(cond_lower: &str) -> bool {
         is_enters_or_haunted_creature_dies_compound(cond_lower)
             || scan_contains(cond_lower, "enters or attacks")
@@ -7691,31 +7762,51 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
         return None;
     }
 
-    // Scan for " or " occurrences using split_once_on, checking if what follows is an event verb.
+    // Scan for " or " occurrences using split_once_on, checking if what follows is an
+    // event head.
+    //
+    // The two views of the condition are carried by a `TextPair`, so the offset is
+    // applied to BOTH views at once and `TextPair::new` debug-asserts byte-length
+    // parity. Note the honest limit of that: unlike `split_serial_event_compound` —
+    // which avoids cross-case offsets entirely by splitting both forms on the same
+    // delimiter — this site still DERIVES the offset from the lowercase view, which is
+    // safe only because `to_lowercase` is length-preserving for this corpus (no Oracle
+    // text contains `İ`/`ẞ`-class characters that change byte length). The `TextPair`
+    // is still a strict improvement over the raw `condition[..pos]` slicing it
+    // replaced: the offset can no longer be applied to one view only, and the
+    // debug assert fires in test builds if the parity assumption is ever violated.
     use super::oracle_nom::primitives::split_once_on;
+    const OR_SEP: &str = " or ";
+    let cond = TextPair::new(condition, cond_lower);
     let mut search_start = 0;
-    while let Ok((_, (before, after))) = split_once_on(&cond_lower[search_start..], " or ") {
+    while let Ok((_, (before, after_lower))) = split_once_on(&cond_lower[search_start..], OR_SEP) {
         let pos = search_start + before.len();
-        if is_event_verb_start(after) {
+        if is_event_head_start(after_lower) {
+            let (first_half, or_and_second) = cond.split_at(pos);
+            let second_half = or_and_second.split_at(OR_SEP.len()).1;
             // Found a compound event "or". Extract the trigger keyword and subject
             // from the first half to reconstruct the second trigger line.
-
-            // Extract the trigger keyword ("When"/"Whenever") and subject from the first condition.
-            // The subject is everything between the keyword and the first event verb.
-            let keyword_and_subject = extract_keyword_and_subject(&cond_lower[..pos]);
-            let first_lower = cond_lower[..pos].trim();
-            let second_event = condition[pos + 4..].trim();
+            //
+            // The subject is everything between the keyword and the first event head.
+            // CR 603.2: the subject terminator is the WIDE lexicon
+            // (`parse_event_head_start`, via `extract_subject_text`). Cryoshatter —
+            // "When enchanted creature becomes tapped or is dealt damage, destroy it." —
+            // is the card that requires it: its FIRST half's head is itself new-family,
+            // so a narrow terminator reconstructs "…becomes tapped is dealt damage" and
+            // the second half's mode AND `valid_card` are both corrupted.
+            let keyword_and_subject = extract_keyword_and_subject(first_half);
+            let second_event = second_half.original.trim();
             let second = format!("{keyword_and_subject} {second_event}");
             let first = append_shared_object_if_bare_event(
-                condition[..pos].trim(),
-                first_lower,
-                after,
+                first_half.original.trim(),
+                first_half.lower.trim(),
+                second_half.lower,
                 second_event,
             );
 
             return Some(vec![first, second]);
         }
-        search_start = pos + 4;
+        search_start = pos + OR_SEP.len();
     }
     None
 }
@@ -7835,6 +7926,153 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
     alt((combat_or_zone, player_actions, simple_event_verbs)).parse(input)
 }
 
+/// CR 603.2e: the intransitive state-change / passive trigger-event head family —
+/// the "becomes …" and "is/are …" voices.
+///
+/// A SCOPE-LIMITED sibling of `parse_event_verb_start`, not a voice-disjoint one.
+/// That combinator already carries passive and copular heads of its own
+/// (`passive_player_actions`' "is/are sacrificed" and "is/are exiled";
+/// `simple_event_verbs`' "becomes the target of …"), so "active voice lives there,
+/// passive voice lives here" would be a false rule and would send the next
+/// contributor to the wrong lexicon. The reason this is a separate combinator is
+/// CALL-SITE SCOPE: the head lexicon has nine consumers, seven of which must stay
+/// narrow (see `parse_event_head_start`), so the new heads are composed at exactly
+/// the two that need them rather than widened into the shared one — which is left
+/// byte-identical.
+///
+/// CR 603.2e is the AUTHORIZING rule: it names "becomes" as a trigger-event word
+/// (its own examples are "becomes attached" and "becomes blocked") and draws the
+/// event-vs-state line this allow-list encodes.
+///
+/// TWO productions, one per grammatical voice — NOT a head x complement product.
+/// The voices have DISJOINT complement sets: "is monstrous" and "is tapped" are
+/// STATES, not events (CR 603.2e), and "is tapped for mana" is a different event
+/// entirely (CR 106.12a — 33 corpus cards). A product would match all three.
+///
+/// CLOSED ALLOW-LIST, not an open `becomes <participle>` head. Every complement
+/// has a probe-verified standalone single-event `TriggerMode`, so each half of a
+/// split lands on fully supported ground:
+///   becomes/become monstrous -> TriggerMode::BecomeMonstrous (CR 701.37a-b)
+///   becomes/become tapped    -> TriggerMode::Taps            (CR 701.26a + CR 603.2e)
+///   is/are turned face up    -> TriggerMode::TurnFaceUp      (CR 116.2b + CR 708.7)
+///   is/are dealt damage      -> TriggerMode::DamageReceived  (CR 120.1)
+///
+/// OWED REFACTOR (not this change): this allow-list is a DETECTION list, so an
+/// unadmitted complement makes the second branch VANISH with no
+/// `Effect::Unimplemented` at all — measured, "enters or is turned face down" yields
+/// one trigger and the card reports as supported, which is the same silent-wrong
+/// signature as the bug this family fixes. The stronger long-term seam is to detect
+/// the OPEN head shape (`becomes|is|are <participle>`) and route unadmitted
+/// complements to `Effect::unimplemented`, demoting this list from "what we
+/// recognize" to "what we support". That is a better consolidation trigger than the
+/// lexicon-count trigger recorded on `parse_event_head_start`.
+///
+/// DELIBERATE EXCLUSIONS. Stated by REASON, not by a raw corpus line count: counts
+/// here proved method-sensitive (whether reminder text is stripped, whether a card or
+/// a line is the unit) and three measurements of "is/are tied for" disagreed, so they
+/// are not carried. Note the two reasons are NOT interchangeable — some of these are
+/// excluded because they never reach this seam, and others because they DO reach it
+/// and admitting them would break a card that is correct today:
+///   - "becomes blocked" / "become blocked" — CR 509.1h, the fused
+///     `BlocksOrBecomesBlocked` mode. Admitting it would split that whole class,
+///     plus Neyith's plural "fight or become blocked". This is the load-bearing
+///     exclusion; `blocks_or_becomes_blocked_stays_fused_not_split`,
+///     `neyith_fight_or_become_blocked_not_split`, and
+///     `state_change_event_head_allow_list_is_closed` all red if it is admitted.
+///   - "is/are tapped for mana" — CR 106.12a, a distinct event with its own
+///     `TapsForMana` mode.
+///   - "becomes untapped" — UNREACHABLE. The disjunctive shape does occur (Giant
+///     Oyster, Merieke Ri Berit, Tawnos's Coffin with the head second; The Pandorica
+///     and Coffin Queen with it first), but in every case inside an ACTIVATED-ability
+///     line, which routes to `parse_self_disjunctive_event_trigger` rather than here.
+///     Zero reach this seam.
+///   - "becomes attached/crewed/plotted/saddled/renowned", "is/are turned face down"
+///     — no disjunctive occurrence found.
+///   - "becomes the target of …" — already covered by `parse_event_verb_start`.
+///   - "is monstrous" / "is tapped" — states, not events (CR 603.2e).
+///   - "is/are tied for …" — REACHABLE AND LOAD-BEARING, so excluded on the
+///     categorical ground rather than on reachability: it is a comparison predicate,
+///     not an event. `Preacher of the Schism` ("Whenever this creature attacks while
+///     you have the most life or are tied for most life, …") does reach
+///     `split_or_event_compound` and parses correctly TODAY as one
+///     `TriggerMode::Attacks`; admitting the head would split its intervening-if
+///     condition into a bogus second arm. `Call to Arms` reaches the seam too.
+///     `state_change_event_head_allow_list_is_closed` pins the rejection.
+fn parse_state_change_event_start(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        preceded(
+            alt((tag("becomes "), tag("become "))),
+            parse_becomes_state_complement,
+        ),
+        preceded(
+            alt((tag("is "), tag("are "))),
+            parse_passive_event_complement,
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 701.37a-b (monstrosity) + CR 701.26a + CR 603.2e (tap): copular "becomes"
+/// followed by a designation/status the permanent ENTERS — the entering is the
+/// event, per CR 603.2e.
+///
+/// The complement is VOICE-SCOPED: it is only ever reached after `becomes `/
+/// `become `, so the "is/are tapped for mana" exclusion (CR 106.12a) is enforced
+/// by `parse_passive_event_complement`'s allow-list, not here. The printed wording
+/// CR 106.12a names is `is/are tapped for mana`; `becomes tapped for mana` appears
+/// on 0 printed cards, and the fact that such a hypothetical line would map to
+/// `Taps` is a PRE-EXISTING gap in the single-event mode parser, not this
+/// allow-list's concern. The `tapped` complement's boundary is therefore
+/// deliberately space-permissive (`parse_event_word` peeks eof/space/`,`/`.`):
+/// that permissiveness is load-bearing at `extract_subject_text`, where it
+/// is what lets "When this creature becomes tapped during your turn or is dealt
+/// damage, destroy it." split correctly into [Taps, DamageReceived] — a qualifier
+/// may sit between the head and the `or`. The load-bearing part is `space1` in
+/// `parse_event_boundary`: dropping that arm (not adding a `for `-negative-lookahead,
+/// which would only reject "tapped for mana") is what would reintroduce the
+/// Cryoshatter-class garbage reconstruction, where a narrow subject terminator
+/// rebuilds "When enchanted creature becomes tapped is dealt damage".
+/// `state_change_head_terminates_subject_span` pins the qualifier case.
+fn parse_becomes_state_complement(input: &str) -> OracleResult<'_, ()> {
+    alt((parse_event_word("monstrous"), parse_event_word("tapped"))).parse(input)
+}
+
+/// Passive-participle heads. CR 116.2b + CR 708.7: turning a face-down permanent
+/// face up is a special action, hence an event. CR 120.1: an object deals damage to
+/// a battle, creature, planeswalker or player — that dealing is the event the
+/// "is/are dealt damage" head names.
+fn parse_passive_event_complement(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        parse_event_word("turned face up"),
+        parse_event_word("dealt damage"),
+    ))
+    .parse(input)
+}
+
+/// CR 603.1b + CR 603.2e: the FULL trigger-event head lexicon — active-voice
+/// verbs plus the state-change/passive voices.
+///
+/// Composed at exactly TWO of the nine `parse_event_verb_start` call sites: the
+/// 2-way or-split gate (`is_event_head_start`, inside `split_or_event_compound`) and
+/// the subject-span terminator (`extract_subject_text`). The other SEVEN stay
+/// NARROW — `split_cross_subject_event_compound`'s gate, the three serial
+/// TRAILING-leg gates in `split_serial_event_compound`, and the three in
+/// `continues_serial_event_condition` — each with a named counterexample or a
+/// measured zero-demand justification at its own site.
+///
+/// This file now hosts FIVE event-head lexicons: `parse_event_verb_start`,
+/// `parse_bare_shared_event_verb`, `parse_shared_object_verb_head`,
+/// `parse_cross_subject_phrase_start`, and this family — each scoped to one
+/// question and reached from a named consumer set. Consolidation into a single
+/// parameterized combinator becomes OWED when either (a) a sixth lexicon is
+/// proposed in this file, or (b) any one of them acquires a second consumer gate.
+/// At that point the scoping axis is real shared structure and must become a
+/// parameter (a voice/scope enum), not another sibling function; until then each is
+/// a leaf answering exactly one question.
+fn parse_event_head_start(input: &str) -> OracleResult<'_, ()> {
+    alt((parse_event_verb_start, parse_state_change_event_start)).parse(input)
+}
+
 fn parse_bare_shared_event_verb(input: &str) -> OracleResult<'_, ()> {
     alt((
         parse_event_word("creates"),
@@ -7917,29 +8155,64 @@ fn append_shared_object_if_bare_event(
     first.to_string()
 }
 
-/// Extract the trigger keyword + subject from a condition prefix.
+/// Extract the trigger keyword + subject from a condition prefix, preserving the
+/// ORIGINAL casing of the subject noun phrase.
 /// E.g., "whenever ~ enters" → "Whenever ~" (strips the event verb).
 /// E.g., "whenever ~ deals combat damage to a player" → "Whenever ~".
-fn extract_keyword_and_subject(cond_lower: &str) -> String {
-    // Strip trigger keyword
-    let (keyword, after_keyword) = if let Ok((rest, ())) =
-        value((), tag::<_, _, OracleError<'_>>("whenever ")).parse(cond_lower)
-    {
-        ("Whenever", rest)
-    } else if let Ok((rest, ())) =
-        value((), tag::<_, _, OracleError<'_>>("when ")).parse(cond_lower)
-    {
-        ("When", rest)
-    } else {
-        // Fallback: return as-is with capitalized first letter
-        return capitalize_first(cond_lower);
+///
+/// `cond` carries the same span in original and lowercase form. The subject span is
+/// located on the lowercase view (the event-head lexicon is lowercase-only) and
+/// `TextPair` maps it back onto the original case at the same position. Without
+/// that, `split_or_event_compound`'s reconstructed second half renders subtypes and
+/// proper nouns in lower case — "Whenever a detective you control is turned face
+/// up" — and `TriggerDefinition.description` is engine-authored display text that
+/// flows into `card-data.json` `parse_details` and the coverage overlay, so the
+/// frontend (display-only) cannot repair it.
+///
+/// Reachability of the fallback: `parse_oracle_text` is the ability-word stripping
+/// authority, so no line reaching here through THAT entry point can miss the
+/// "when "/"whenever " prefix. `parse_trigger_lines` is `pub` and its other
+/// production callers (granted-keyword abilities, modal modes, nested effect lines,
+/// condition extraction) do NOT strip ability words, so the fallback IS reachable in
+/// principle from them — an "Ability Word — Whenever …" line routed directly there
+/// reconstructs an unparseable condition. No corpus granted/modal ability carries an
+/// ability-word prefix, so nothing exercises it today. It still returns
+/// `cond.original`, not `cond.lower`: this function must never be the path that
+/// re-lowercases display text, which is the whole point of taking a `TextPair`.
+fn extract_keyword_and_subject(cond: TextPair<'_>) -> String {
+    // Strip the trigger keyword. `parse_trigger_keyword_prefix` yields the display
+    // form, trailing space included ("Whenever " / "When ").
+    let Ok((after_keyword_lower, keyword)) = parse_trigger_keyword_prefix(cond.lower) else {
+        // Fallback: return as-is with capitalized first letter. `original`, not
+        // `lower` — see the reachability note above.
+        return capitalize_first(cond.original);
     };
 
     // Parse the subject using the existing subject parser — it returns (subject, rest_after_subject).
     // We need the text span of the subject, not the parsed filter.
-    // Reconstruct by taking everything from after_keyword up to where the event verb starts.
-    let subject_text = extract_subject_text(after_keyword);
-    format!("{keyword} {subject_text}")
+    // Reconstruct by taking everything from after_keyword up to where the event head starts.
+    // `trim_start` first: `extract_subject_text` trims what it returns, so its span
+    // begins at offset 0 of the text it was given only when that text has no leading
+    // whitespace — which is what makes its length a valid prefix length for the pair.
+    let after_keyword = cond
+        .split_at(cond.len() - after_keyword_lower.len())
+        .1
+        .trim_start();
+    let subject_text = extract_subject_text(after_keyword.lower);
+    // The length is used as a PREFIX length, so the span must start at offset 0.
+    // `extract_subject_text` satisfies this today (every return is either
+    // `&text[..offset]` from `scan_split_at_phrase` or a `trim`ped whole string, and
+    // the input was `trim_start`ed above), but the `&str` return type cannot express
+    // it: a future edit returning an INTERIOR span would silently truncate the
+    // subject on both halves instead of failing. Assert the contract here.
+    debug_assert!(
+        after_keyword.lower.starts_with(subject_text),
+        "extract_subject_text must return a prefix span, got {subject_text:?} for \
+         {:?}",
+        after_keyword.lower
+    );
+    let subject = after_keyword.split_at(subject_text.len()).0;
+    format!("{keyword}{}", subject.original)
 }
 
 /// Extract the subject text span from the beginning of condition text (after keyword).
@@ -7948,7 +8221,7 @@ fn extract_subject_text(text: &str) -> &str {
     // Known event verb starts that end the subject span.
     // scan_split_at_phrase tries the combinator at each word boundary,
     // returning (prefix, matched_start) on the first hit.
-    if let Some((prefix, _)) = scan_split_at_phrase(text, parse_event_verb_start) {
+    if let Some((prefix, _)) = scan_split_at_phrase(text, parse_event_head_start) {
         if !prefix.is_empty() {
             return prefix.trim_end();
         }
@@ -8070,6 +8343,18 @@ fn continues_disjunctive_zone_change_condition(after_comma: &str) -> bool {
     parse_zone_change_clause(&subject, verb).is_some()
 }
 
+/// CR 603.2: stays on the NARROW active-voice lexicon at all three
+/// `parse_event_verb_start` call sites in its body. This feeds
+/// `find_effect_boundary` — i.e. the
+/// condition/effect boundary for EVERY trigger line containing ", ". A false
+/// positive here does not merely mis-split: it moves the boundary LATER, swallowing
+/// effect text into the condition. Corpus demand for the state-change/passive head
+/// family here is measured ZERO, and widening it plus the three serial trailing-leg
+/// gates was measured to change zero cards over the whole corpus. Widening the
+/// highest-blast-radius consumer for no card is exactly the unevidenced lexicon
+/// growth that produced the defect this family fixes. Note the leading-leg
+/// improvement documented at `split_serial_event_compound` does NOT depend on this
+/// predicate. No test pins this narrowness — that would encode a non-requirement.
 fn continues_serial_event_condition(after_comma: &str) -> bool {
     use super::oracle_nom::primitives::split_once_on;
 

@@ -21693,6 +21693,364 @@ fn compound_or_cast_or_cycle_self() {
     assert!(triggers[1].trigger_zones.contains(&Zone::Graveyard));
 }
 
+// --- Disjunctive state-change / passive trigger-event head family ---
+
+#[test]
+fn compound_or_enters_or_turned_face_up_culvert_ambusher() {
+    let triggers = parse_trigger_lines(
+        "When this creature enters or is turned face up, target creature blocks this turn if able.",
+        "Culvert Ambusher",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
+    assert_eq!(triggers[0].destination, Some(Zone::Battlefield));
+    assert_eq!(triggers[0].valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(triggers[1].mode, TriggerMode::TurnFaceUp);
+    assert_eq!(triggers[1].valid_card, Some(TargetFilter::SelfRef));
+    assert!(triggers[0].execute.is_some());
+    assert!(triggers[1].execute.is_some());
+}
+
+#[test]
+fn compound_or_becomes_tapped_or_is_dealt_damage_cryoshatter() {
+    let triggers = parse_trigger_lines(
+        "When enchanted creature becomes tapped or is dealt damage, destroy it.",
+        "Cryoshatter",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers[0].mode, TriggerMode::Taps);
+    assert_eq!(triggers[0].valid_card, Some(TargetFilter::AttachedTo));
+    assert_eq!(triggers[1].mode, TriggerMode::DamageReceived);
+    assert_eq!(triggers[1].valid_card, Some(TargetFilter::AttachedTo));
+}
+
+#[test]
+fn compound_or_subject_filter_propagates_pilfered_proof() {
+    let triggers = parse_trigger_lines(
+        "Whenever a Detective you control enters or is turned face up, put a +1/+1 counter on it.",
+        "Case of the Pilfered Proof",
+    );
+    assert_eq!(triggers.len(), 2);
+    let expected = Some(TargetFilter::Typed(
+        TypedFilter::new(TypeFilter::Subtype("Detective".to_string()))
+            .controller(ControllerRef::You),
+    ));
+    assert_eq!(triggers[0].valid_card, expected);
+    assert_eq!(triggers[1].valid_card, expected);
+    assert_eq!(triggers[1].mode, TriggerMode::TurnFaceUp);
+    assert_eq!(
+        triggers[1].description.as_deref(),
+        Some("Whenever a Detective you control is turned face up, put a +1/+1 counter on it.")
+    );
+}
+
+#[test]
+fn compound_or_enters_or_becomes_monstrous_alpha_deathclaw() {
+    let triggers = parse_trigger_lines(
+        "When this creature enters or becomes monstrous, destroy target permanent.",
+        "Alpha Deathclaw",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
+    assert_eq!(triggers[1].mode, TriggerMode::BecomeMonstrous);
+}
+
+#[test]
+fn compound_or_enters_or_becomes_tapped_champions_of_the_shoal() {
+    let triggers = parse_trigger_lines(
+        "Whenever this creature enters or becomes tapped, tap up to one target creature and put a stun counter on it.",
+        "Champions of the Shoal",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
+    assert_eq!(triggers[1].mode, TriggerMode::Taps);
+}
+
+/// CR 508.1f: declaring a creature as an attacker taps it ("attacking simply causes
+/// creatures to become tapped"), so BOTH arms of "attacks or becomes tapped" match
+/// one declare-attackers event. That is rules-correct, and it is why Wizards prints
+/// explicit riders on the becomes-tapped side (Rhoda, Geist Avenger and Verity Circle
+/// both say "if it isn't being declared as an attacker") — without a rider the
+/// becomes-tapped trigger genuinely fires on attack declaration.
+///
+/// This is the one measured event overlap the head family creates. Zero corpus cards
+/// combine these two heads in one trigger line, so it is unreachable today; this
+/// assertion pins the intended two-arm shape so a future printing cannot silently
+/// change it. Before this family the line yielded ONE trigger (`[Attacks]`) with the
+/// "or becomes tapped" leg silently dropped.
+#[test]
+fn attacks_or_becomes_tapped_pins_both_arms() {
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks or becomes tapped, draw a card.",
+        "Attacks Or Becomes Tapped Fixture",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    assert_eq!(triggers[1].mode, TriggerMode::Taps);
+    for t in &triggers {
+        assert_eq!(t.valid_card, Some(TargetFilter::SelfRef));
+        assert!(t.execute.is_some());
+    }
+}
+
+#[test]
+fn blocks_or_becomes_blocked_stays_fused_not_split() {
+    for (text, name) in [
+        (
+            "Whenever this creature blocks or becomes blocked, it gets +2/-2 until end of turn.",
+            "Dromosaur",
+        ),
+        (
+            "Whenever enchanted creature blocks or becomes blocked, it gets +0/+3 until end of turn and you gain 1 life.",
+            "Gift of the Woods",
+        ),
+        (
+            "Whenever enchanted creature blocks or becomes blocked by a creature, the other creature gains first strike until end of turn.",
+            "Mammoth Harness",
+        ),
+    ] {
+        let triggers = parse_trigger_lines(text, name);
+        assert_eq!(triggers.len(), 1, "{name} must not split");
+        assert_eq!(triggers[0].mode, TriggerMode::BlocksOrBecomesBlocked, "{name}");
+    }
+}
+
+#[test]
+fn neyith_fight_or_become_blocked_not_split() {
+    let triggers = parse_trigger_lines(
+        "Whenever one or more creatures you control fight or become blocked, draw a card.",
+        "Neyith of the Dire Hunt",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::Fight);
+}
+
+#[test]
+fn state_change_event_head_allow_list_is_closed() {
+    for ok in [
+        "becomes tapped, draw a card",
+        "become tapped this turn",
+        "becomes monstrous, destroy target permanent",
+        "becomes monstrous",
+        "is turned face up, draw a card",
+        "are turned face up",
+        "is dealt damage, destroy it",
+        "are dealt damage",
+    ] {
+        assert!(
+            parse_state_change_event_start(ok).is_ok(),
+            "must accept {ok:?}"
+        );
+    }
+    for bad in [
+        "becomes blocked by a creature",
+        "become blocked, draw a card",
+        "becomes attached to a creature",
+        "becomes untapped",
+        "becomes crewed",
+        "is tapped for mana",
+        "is tapped",
+        "is monstrous",
+        "are tied for most life",
+        "is tied for most common",
+        "monstrously large",
+        "tapped",
+        "enters",
+    ] {
+        assert!(
+            parse_state_change_event_start(bad).is_err(),
+            "must reject {bad:?}"
+        );
+    }
+}
+
+#[test]
+fn state_change_head_terminates_subject_span() {
+    assert_eq!(
+        extract_subject_text("enchanted creature becomes tapped"),
+        "enchanted creature"
+    );
+    assert_eq!(
+        extract_subject_text("a detective you control is turned face up"),
+        "a detective you control"
+    );
+    assert_eq!(
+        extract_subject_text("this creature becomes monstrous"),
+        "this creature"
+    );
+    // Negative: not an admissible head, so the span is returned unchanged.
+    assert_eq!(
+        extract_subject_text("enchanted forest is tapped for mana"),
+        "enchanted forest is tapped for mana"
+    );
+    // Non-movement: still terminates at the OLD lexicon's "blocks", not at "becomes".
+    assert_eq!(extract_subject_text("~ blocks or becomes blocked"), "~");
+    // A QUALIFIER may sit between the head and the " or ". This is what the
+    // space-permissive `tapped` boundary buys (`space1` in `parse_event_boundary`);
+    // dropping that arm would rebuild "…becomes tapped is dealt damage" instead.
+    assert_eq!(
+        extract_subject_text("this creature becomes tapped during your turn"),
+        "this creature"
+    );
+    let triggers = parse_trigger_lines(
+        "When this creature becomes tapped during your turn or is dealt damage, destroy it.",
+        "~",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers[0].mode, TriggerMode::Taps);
+    assert_eq!(triggers[1].mode, TriggerMode::DamageReceived);
+}
+
+#[test]
+fn cross_subject_state_change_or_not_split() {
+    let triggers = parse_trigger_lines(
+        "Whenever Donna Noble or a creature it's paired with is dealt damage, Donna Noble deals that much damage to target opponent.",
+        "Donna Noble",
+    );
+    assert_eq!(triggers.len(), 1);
+
+    let triggers = parse_trigger_lines(
+        "Whenever this token or a Gamer you control becomes tapped, remove an hour counter from this token.",
+        "The Bus Runner",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::Taps);
+}
+
+#[test]
+fn subject_disjunction_turn_face_up_stays_single() {
+    for (text, name) in [
+        (
+            "Whenever this creature or another creature you control is turned face up, untap that creature.",
+            "Pine Walker",
+        ),
+        (
+            "Whenever this creature or another creature you control is turned face up, put +1/+1 counters on that creature equal to its power.",
+            "Experiment Twelve",
+        ),
+        (
+            "Whenever this creature or another permanent is turned face up, you may scry 2.",
+            "Unblinking Bleb",
+        ),
+    ] {
+        let triggers = parse_trigger_lines(text, name);
+        assert_eq!(triggers.len(), 1, "{name}");
+        assert_eq!(triggers[0].mode, TriggerMode::TurnFaceUp, "{name}");
+        match triggers[0].valid_card {
+            Some(TargetFilter::Or { ref filters }) => {
+                assert_eq!(filters.len(), 2, "{name}");
+                assert_eq!(filters[0], TargetFilter::SelfRef, "{name}");
+            }
+            ref other => panic!("{name}: expected an Or subject filter, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn and_when_precedence_unchanged_projektor_inspector() {
+    let triggers = parse_trigger_lines(
+        "Whenever this creature or another Detective you control enters and whenever a Detective you control is turned face up, you may draw a card. If you do, discard a card.",
+        "Projektor Inspector",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
+    assert!(matches!(
+        triggers[0].valid_card,
+        Some(TargetFilter::Or { .. })
+    ));
+    assert_eq!(triggers[1].mode, TriggerMode::TurnFaceUp);
+}
+
+#[test]
+fn as_enters_or_face_up_stays_replacement_not_trigger() {
+    let parsed = parse_oracle_text(
+        "As this creature enters or is turned face up, it becomes your choice of 5/1 or 1/5.\nMorph {2}{U}",
+        "Aquamorph Entity",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(parsed.triggers.is_empty());
+    assert_eq!(parsed.replacements.len(), 1);
+
+    let parsed = parse_oracle_text(
+        "As this creature enters or is turned face up, put X +1/+1 counters on it, where X is the number of other creatures you control.",
+        "Crowd-Control Warden",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(parsed.triggers.is_empty());
+    assert_eq!(parsed.replacements.len(), 2);
+    assert_eq!(parsed.replacements[0].event, ReplacementEvent::Moved);
+    assert_eq!(parsed.replacements[1].event, ReplacementEvent::TurnFaceUp);
+}
+
+/// The `enters or becomes tapped` wording is the ALCHEMY rebalance
+/// `A-Radha, Coalition Warlord`; paper Radha reads "Domain — Whenever Radha becomes
+/// tapped, …" with no disjunction. The fixture therefore passes the real production
+/// pair: the `A-` card name, with the un-prefixed name inside the text, exactly as
+/// MTGJSON supplies it.
+#[test]
+fn domain_ability_word_enters_or_becomes_tapped_splits() {
+    let parsed = parse_oracle_text(
+        "Domain — Whenever Radha, Coalition Warlord enters or becomes tapped, another target creature you control gets +X/+X until end of turn, where X is the number of basic land types among lands you control.",
+        "A-Radha, Coalition Warlord",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 2);
+    assert_eq!(parsed.triggers[0].mode, TriggerMode::ChangesZone);
+    assert_eq!(parsed.triggers[1].mode, TriggerMode::Taps);
+    for t in &parsed.triggers {
+        assert!(
+            !t.description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Domain"),
+            "the ability word must be stripped upstream of the splitter"
+        );
+    }
+}
+
+#[test]
+fn serial_list_leading_state_change_leg_reconstructs_every_leg() {
+    // The serial branch gates only its TRAILING legs, so a LEADING state-change /
+    // passive leg reaches `extract_subject_text` directly. With the narrow
+    // terminator the subject span swallowed the leading event
+    // ("~ becomes tapped"), and every reconstructed leg re-parsed as a duplicate
+    // Taps ("Whenever ~ becomes tapped attacks") — three arms firing on one tap
+    // event (CR 603.2c). The wide terminator recovers one arm per leg.
+    let triggers = parse_trigger_lines(
+        "Whenever this creature becomes tapped, attacks, or dies, draw a card.",
+        "Serial Leading Leg Fixture",
+    );
+    assert_eq!(triggers.len(), 3);
+    assert_eq!(triggers[0].mode, TriggerMode::Taps);
+    assert_eq!(triggers[1].mode, TriggerMode::Attacks);
+    assert_eq!(triggers[2].mode, TriggerMode::ChangesZone);
+    assert_eq!(triggers[2].destination, Some(Zone::Graveyard));
+    for t in &triggers {
+        assert_eq!(t.valid_card, Some(TargetFilter::SelfRef));
+        let desc = t.description.as_deref().unwrap_or_default();
+        assert!(
+            !desc.contains("becomes tapped attacks") && !desc.contains("becomes tapped dies"),
+            "leading leg must not leak into the shared subject span: {desc:?}"
+        );
+    }
+
+    // Same shape in the passive voice.
+    let triggers = parse_trigger_lines(
+        "Whenever this creature is turned face up, attacks, or dies, draw a card.",
+        "Serial Leading Leg Fixture",
+    );
+    assert_eq!(triggers.len(), 3);
+    assert_eq!(triggers[0].mode, TriggerMode::TurnFaceUp);
+    assert_eq!(triggers[1].mode, TriggerMode::Attacks);
+    assert_eq!(triggers[2].mode, TriggerMode::ChangesZone);
+}
+
 #[test]
 fn non_compound_trigger_returns_single() {
     // Normal trigger should produce exactly 1 result
