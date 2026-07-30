@@ -306,9 +306,8 @@ fn counter_move_distribution_candidates(
 /// CR 107.1c: Coarse candidates for a `RemoveCountersChoice` prompt — the two
 /// extremal legal answers: "remove none" (empty selection) and "remove all"
 /// (every available counter of every type). The full legal space (any per-type
-/// subset) is combinatorial; the server bypasses its enumeration gate for human
-/// submissions (`accepts_freeform_counter_removal`), so the AI only needs enough
-/// variety to never wedge.
+/// subset) is combinatorial, so the AI only needs enough variety to never
+/// wedge. The engine validates every submitted selection directly.
 // ponytail: two extremal candidates; add per-type partials if a policy ever
 // wants finer counter-shedding control.
 fn counter_removal_candidates(
@@ -1760,7 +1759,7 @@ pub fn candidate_actions_broad_with_probe(
             } else if modal.mode_costs.is_empty() {
                 actions
             } else {
-                // CR 702.172b: For Spree spells, filter out mode combinations the player
+                // CR 702.172a: For Spree spells, filter out mode combinations the player
                 // cannot afford. Each mode has an additional cost that sums with the base cost.
                 let local_probe = casting::PriorityCastProbe::new(state, *player);
                 actions
@@ -2128,7 +2127,7 @@ pub fn candidate_actions_broad_with_probe(
                     *player,
                     pending_cast.object_id,
                     cost,
-                    pending_cast.ability.context.ability_tag,
+                    pending_cast.activation_ability_index,
                 )
             })
             .map(|(i, _)| {
@@ -4029,6 +4028,28 @@ pub(crate) fn priority_actions_with_probe(
         ));
     }
 
+    // CR 116.2c: pay a continuous effect's printed cost to end it ("You may pay
+    // {W} to end this effect"). No timing gate — the rule grants the action "any
+    // time they have priority, unless that effect specifies another timing
+    // restriction", and no card in this class states one, so unlike
+    // `CompanionToHand` above there is no sorcery-speed window to check.
+    //
+    // This enumeration is the ONLY offering path: `engine.rs`'s dispatcher ends
+    // in a catch-all, so a missing entry here leaves the action legal but
+    // undiscoverable rather than producing a compile error.
+    for offer in crate::game::end_continuous_effect::end_continuous_effect_candidates(state, player)
+    {
+        actions.push(candidate(
+            GameAction::EndContinuousEffect {
+                group: offer.group,
+                source_name: offer.source_name,
+                cost: offer.cost,
+            },
+            TacticalClass::Ability,
+            Some(player),
+        ));
+    }
+
     // CR 702.49: Offer Ninjutsu-family activations during combat
     // CR 702.61a: Ninjutsu is an activated ability — blocked by split second.
     if !split_second_active && state.active_player == player {
@@ -4042,6 +4063,7 @@ pub(crate) fn priority_actions_with_probe(
                     state,
                     player,
                     *ninjutsu_object_id,
+                    None,
                     cost,
                 );
                 if !can_afford {
@@ -5141,6 +5163,7 @@ fn combinations_generic<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::game_state::TargetEffectDetail;
     use std::sync::Arc;
 
     use super::*;
@@ -5205,6 +5228,7 @@ mod tests {
             power: None,
             toughness: None,
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types,
             mana_cost,
@@ -5838,6 +5862,8 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -6272,6 +6298,8 @@ mod tests {
             player: PlayerId(0),
             game_number: 2,
             score: Default::default(),
+            min_main_deck_size: 0,
+            max_sideboard_size: None,
         };
 
         let actions = candidate_actions(&state);

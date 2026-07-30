@@ -129,7 +129,7 @@ fn resolve_double_counters(
 /// If life < 0: lose life equal to |current total| (new total = 2x negative).
 /// If life == 0: no change.
 ///
-/// Routes the gain/loss through `apply_life_gain` / `apply_damage_life_loss`
+/// Routes the gain/loss through `apply_life_gain` / `apply_life_loss`
 /// so the same replacement-pipeline and can't-gain / can't-lose short-circuits
 /// that govern all other life-change events apply here too (CR 119.7 + 119.8).
 fn resolve_double_life(
@@ -149,20 +149,28 @@ fn resolve_double_life(
 
     if current_life > 0 {
         // CR 701.10d: Gain life equal to current total.
-        let _ = crate::game::effects::life::apply_life_gain(
+        if crate::game::effects::life::apply_life_gain(
             state,
             player_id,
             current_life as u32,
             events,
-        );
+        )
+        .is_err()
+        {
+            return Ok(());
+        }
     } else if current_life < 0 {
         // CR 701.10d: Lose |current_life| additional life so the new total is 2x.
-        let _ = crate::game::effects::life::apply_damage_life_loss(
+        if crate::game::effects::life::apply_life_loss(
             state,
             player_id,
             (-current_life) as u32,
             events,
-        );
+        )
+        .is_err()
+        {
+            return Ok(());
+        }
     }
     // life == 0: no change.
 

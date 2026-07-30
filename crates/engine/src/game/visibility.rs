@@ -79,6 +79,16 @@ pub(crate) fn capture_library_search_card_view(
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
+    // Pending activation trigger collection retains source contexts and the
+    // uncommitted event journal solely for rules execution. The pending ability
+    // itself remains public, but this implementation carrier is never part of a
+    // viewer projection — including the activating player's projection.
+    if let Some(pending) = filtered.pending_cast.as_mut() {
+        pending.activation_trigger_collection = None;
+    }
+    if let Some(pending) = filtered.waiting_for.pending_cast_mut() {
+        pending.activation_trigger_collection = None;
+    }
     // Interaction capability authority is trusted persistence state. Viewer
     // projections expose only the actor-scoped opaque opportunity IDs produced
     // by `game::interaction`, never the session/serial/slot minting ledger.
@@ -89,6 +99,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // The replacement-resume cursor is server authority and can retain private
     // object IDs and last-known snapshots from a cost payment.
     filtered.pending_cost_move_resume = None;
+    // Deferred life-cost owners can embed a complete PendingCast, including
+    // hidden card and target context. The projected WaitingFor is the only
+    // viewer-facing interaction surface.
+    filtered.pending_deferred_life_cost_resume = None;
     // Resolution frames are server-authoritative continuations. They can carry
     // private object identities, trigger source contexts, and resolved ability
     // payloads; the separately projected `WaitingFor` prompt is the complete
@@ -1803,6 +1817,7 @@ mod tests {
         continue_replacement, replace_event, replacement_choice_waiting_for, ReplacementResult,
     };
     use crate::game::zones::create_object;
+    use crate::types::ability::EffectKind;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot, Effect,
         ReplacementDefinition, ResolvedAbility, TargetFilter,
@@ -1817,6 +1832,7 @@ mod tests {
         ManaAbilityResume, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingBeginGameAbility,
         PendingCast, PendingCostMoveCompletion, PendingCostMoveResume, PendingManaAbility,
         PendingScopedLibrarySearch, PendingSearchFoundBatch, PreparedScopedLibrarySearchChoice,
+        TargetEffectDetail,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -1857,7 +1873,7 @@ mod tests {
         Box::new(PendingCast {
             object_id,
             card_id,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "Dummy".to_string(),
                     description: None,
@@ -1865,8 +1881,9 @@ mod tests {
                 vec![],
                 object_id,
                 caster,
-            ),
+            )),
             cost: ManaCost::NoCost,
+            prepaid_actual_mana_spent: None,
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
@@ -1898,7 +1915,9 @@ mod tests {
             activation_residual: crate::types::game_state::ActivationResidual::None,
             activation_target_selection:
                 crate::types::game_state::ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
+            activation_trigger_collection: None,
         })
     }
 
@@ -1909,7 +1928,7 @@ mod tests {
         Box::new(PendingManaAbility {
             player,
             source_id,
-            ability_index: 0,
+            ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
@@ -3231,7 +3250,7 @@ mod tests {
         state
             .pending_begin_game_abilities
             .push(PendingBeginGameAbility {
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     Effect::Unimplemented {
                         name: "Hidden Begin Game Ability".to_string(),
                         description: None,
@@ -3239,7 +3258,7 @@ mod tests {
                     vec![],
                     source,
                     PlayerId(0),
-                ),
+                )),
             });
         state.resolving_begin_game_abilities = true;
 
@@ -3947,6 +3966,8 @@ mod tests {
                 legal_targets: vec![crate::types::ability::TargetRef::Object(ObjectId(20))],
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -5081,6 +5102,7 @@ mod tests {
             pending: Box::new(pending),
             cursor: ManaAbilityCostCursor {
                 remaining: Vec::new(),
+                remaining_life_payments: Vec::new(),
                 resolution_mode: ManaAbilityCostResolutionMode::Interactive,
                 excluded_sources: Vec::new(),
                 sub_cost_demand: None,
@@ -5116,6 +5138,13 @@ mod tests {
             },
             mana_resume,
         ];
+        state.pending_deferred_life_cost_resume =
+            Some(crate::types::game_state::DeferredLifeCostResume::Cast {
+                player: PlayerId(0),
+                pending: Some(dummy_pending_cast(hidden, CardId(70_001), PlayerId(0))),
+                remaining_life_payments: vec![2],
+                resume_at_resolution_depth: 0,
+            });
 
         for resume in resumes {
             state.pending_cost_move_resume = Some(resume);
@@ -5140,11 +5169,17 @@ mod tests {
                 opponent_view.pending_cost_move_resume.is_none(),
                 "a non-acting opponent must not receive a paused cost continuation"
             );
+            assert!(
+                opponent_view.pending_deferred_life_cost_resume.is_none(),
+                "a viewer must not receive a deferred life-cost continuation"
+            );
             let wire = serde_json::to_string(&opponent_view)
                 .expect("the filtered multiplayer snapshot serializes");
             assert!(
                 !wire.contains("\"pendingCostMoveResume\":{\"type\"")
-                    && !wire.contains("\"pending_cost_move_resume\":{\"type\""),
+                    && !wire.contains("\"pending_cost_move_resume\":{\"type\"")
+                    && !wire.contains("\"pendingDeferredLifeCostResume\":{\"type\"")
+                    && !wire.contains("\"pending_deferred_life_cost_resume\":{\"type\""),
                 "the viewer snapshot must not serialize a paused continuation's IDs or LKI"
             );
         }
@@ -5152,6 +5187,10 @@ mod tests {
         assert!(
             state.pending_cost_move_resume.is_some(),
             "filtering must not alter the authoritative server continuation"
+        );
+        assert!(
+            state.pending_deferred_life_cost_resume.is_some(),
+            "filtering must not alter the authoritative deferred life-cost continuation"
         );
     }
 

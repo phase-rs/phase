@@ -24,6 +24,128 @@ use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
 
+#[test]
+fn extract_hand_cast_battlefield_threshold_leaves_effect_text() {
+    let (cleaned, condition) = extract_if_condition(
+        "if you cast it from your hand and there are five or more other creatures on the battlefield, destroy all other creatures",
+    );
+    assert_eq!(cleaned, "destroy all other creatures");
+
+    let TriggerCondition::And { conditions } = condition.expect("expected conjunction") else {
+        panic!("expected cast-and-threshold trigger condition");
+    };
+    assert_eq!(conditions.len(), 2);
+    assert!(matches!(
+        &conditions[0],
+        TriggerCondition::WasCast {
+            zone: Some(crate::types::zones::Zone::Hand),
+            controller: Some(ControllerRef::You),
+            owner: Some(ControllerRef::You),
+        }
+    ));
+    let TriggerCondition::QuantityComparison {
+        lhs:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(filter),
+                    },
+            },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 5 },
+    } = &conditions[1]
+    else {
+        panic!("expected other-creature threshold, got {:?}", conditions[1]);
+    };
+    assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+    assert!(filter
+        .properties
+        .contains(&FilterProp::OtherThanTriggerObject));
+    assert!(filter.properties.contains(&FilterProp::InZone {
+        zone: crate::types::zones::Zone::Battlefield,
+    }));
+}
+
+/// The zoned cast-and-condition parser shares its condition branch across all
+/// supported origin zones. These focused extractor cases prove the graveyard
+/// owner scope and shared-exile owner scope without inventing a runtime card.
+#[test]
+fn extract_zoned_cast_and_threshold_preserves_graveyard_and_exile_scopes() {
+    for (origin, expected_zone, expected_owner) in [
+        ("your graveyard", Zone::Graveyard, Some(ControllerRef::You)),
+        ("exile", Zone::Exile, None),
+    ] {
+        let input = format!(
+            "if you cast it from {origin} and there are five or more other creatures on the battlefield, destroy all other creatures"
+        );
+        let (cleaned, condition) = extract_if_condition(&input);
+        assert_eq!(cleaned, "destroy all other creatures");
+
+        let Some(TriggerCondition::And { conditions }) = condition else {
+            panic!("expected {origin} cast-and-threshold conjunction, got {condition:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        match &conditions[0] {
+            TriggerCondition::WasCast {
+                zone: Some(zone),
+                controller: Some(ControllerRef::You),
+                owner,
+            } => {
+                assert_eq!(zone, &expected_zone, "unexpected origin zone for {origin}");
+                assert_eq!(
+                    owner, &expected_owner,
+                    "unexpected owner scope for {origin}"
+                );
+            }
+            other => panic!("expected scoped WasCast for {origin}, got {other:?}"),
+        }
+        assert!(matches!(
+            &conditions[1],
+            TriggerCondition::QuantityComparison {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn extract_cast_and_condition_keeps_condition_internal_commas() {
+    let (cleaned, condition) = extract_if_condition(
+        "if you cast it and ~ is in your graveyard, in your hand, or in exile, draw a card",
+    );
+    assert_eq!(cleaned, "draw a card");
+    let Some(TriggerCondition::And { conditions }) = condition else {
+        panic!("expected cast-and-zone-list conjunction, got {condition:?}");
+    };
+    assert!(matches!(conditions[0], TriggerCondition::WasCast { .. }));
+    assert!(matches!(
+        &conditions[1],
+        TriggerCondition::Or { conditions: zones } if zones.len() == 3
+    ));
+}
+
+#[test]
+fn extract_cast_and_condition_keeps_grouped_number() {
+    let (cleaned, condition) = extract_if_condition(
+        "if you cast it and there are 1,000 or more other creatures on the battlefield, destroy all other creatures",
+    );
+    assert_eq!(cleaned, "destroy all other creatures");
+    let Some(TriggerCondition::And { conditions }) = condition else {
+        panic!("expected cast-and-threshold conjunction, got {condition:?}");
+    };
+    assert!(matches!(conditions[0], TriggerCondition::WasCast { .. }));
+    assert!(matches!(
+        &conditions[1],
+        TriggerCondition::QuantityComparison {
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1000 },
+            ..
+        }
+    ));
+}
+
 // --- Fix B: damage-recipient qualifier (player axis preserved + object axis added) ---
 
 #[test]
@@ -1682,6 +1804,7 @@ fn trigger_life_of_the_party_etb_goads_created_tokens() {
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             assert_eq!(*target, Some(TargetFilter::LastCreated));
             assert_eq!(*duration, Some(Duration::Permanent));
@@ -2998,6 +3121,7 @@ fn trigger_combat_damage_look_then_exile_face_down_grants_impulse_play() {
             Effect::ExileTop {
                 player: TargetFilter::TriggeringPlayer,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: true,
             }
         ),
@@ -3289,6 +3413,7 @@ fn opponent_attacks_that_player_library_binds_to_triggering_player() {
             Effect::ExileTop {
                 player: TargetFilter::TriggeringPlayer,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -3350,6 +3475,7 @@ fn trigger_maralen_etb_exile_top_two_of_target_opponents_library() {
         Effect::ExileTop {
             player,
             count,
+            position: crate::types::ability::LibraryPosition::Top,
             face_down,
         } => {
             assert_eq!(
@@ -3367,6 +3493,49 @@ fn trigger_maralen_etb_exile_top_two_of_target_opponents_library() {
         }
         other => panic!("Expected ExileTop, got {other:?}"),
     }
+}
+
+/// CR 701.22a + CR 603.2: A completed-scry condition is parsed from its
+/// keyword, controller, threshold, library edge/owner, and scry-action axes;
+/// its typed bottom-count provenance reaches the following effect body.
+#[test]
+fn completed_scry_bottom_trigger_preserves_threshold_and_effect_provenance() {
+    let def = parse_trigger_line(
+        "When you choose to put two or more cards on the bottom of your library while scrying, exile that many cards from the bottom of your library.",
+        "Completed Scry Test",
+    );
+    assert_eq!(def.mode, TriggerMode::Scry);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert_eq!(def.scry_bottom_count, Some((Comparator::GE, 2)));
+    let execute = def
+        .execute
+        .as_ref()
+        .expect("completed-scry trigger must have an effect body");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::TriggeringScryBottomCount,
+            },
+            position: crate::types::ability::LibraryPosition::Bottom,
+            face_down: false,
+        }
+    ));
+}
+
+#[test]
+fn completed_scry_bottom_trigger_preserves_exact_threshold() {
+    let def = parse_trigger_line(
+        "When you choose to put exactly two cards on the bottom of your library while scrying, draw a card.",
+        "Completed Scry Exact Test",
+    );
+    assert_eq!(def.mode, TriggerMode::Scry);
+    assert_eq!(def.scry_bottom_count, Some((Comparator::EQ, 2)));
+    assert!(
+        def.execute.is_some(),
+        "reach guard: the completed-scry condition must leave its effect body for the normal trigger pipeline"
+    );
 }
 
 /// Issue #1499 — Arabella, Abandoned Doll: "Whenever Arabella attacks, it
@@ -5388,7 +5557,11 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
             transform_sub.condition,
         );
     match &*transform_sub.effect {
-        Effect::Transform { target } => {
+        Effect::Transform {
+            target,
+            scope: EffectScope::Single,
+            ..
+        } => {
             // The parser today emits `ParentTarget` here — "transform it"
             // refers back to the Untap target (the trigger source).
             assert_eq!(
@@ -5397,7 +5570,7 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
                 "Transform.target must be ParentTarget — 'transform it' inherits the Untap target",
             );
         }
-        other => panic!("nested sub_ability effect must be Transform, got {other:?}"),
+        other => panic!("nested sub_ability effect must be a single Transform, got {other:?}"),
     }
     // The Transform clause is the inner-most sub_ability and inherits the
     // default `ContinuationStep` link — the chain shape is
@@ -7046,6 +7219,7 @@ fn trigger_evelyn_exiles_each_library_with_collection_counter_and_permission() {
         Effect::ExileTop {
             player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 1 },
+            position: crate::types::ability::LibraryPosition::Top,
             face_down: false,
         }
     ));
@@ -14031,6 +14205,70 @@ fn trigger_necropotence_you_discard_exile_from_graveyard() {
     }
 }
 
+/// CR 701.23a + CR 608.2k: a search result is the parent target of its
+/// delivery continuation, even inside an ETB whose event source would
+/// otherwise lift `ParentTarget` to `TriggeringSource`. That protection ends
+/// at an independent sibling: a later "that creature" still denotes the
+/// entering creature.
+#[test]
+fn event_source_lift_skips_search_delivery_but_resumes_at_independent_sibling() {
+    let sponsor = parse_trigger_line(
+        "When this creature enters, each player who controls fewer lands than the player who controls the most lands searches their library for a number of basic land cards less than or equal to the difference, puts those cards onto the battlefield tapped, then shuffles.",
+        "Scholarship Sponsor",
+    );
+    let sponsor_search = sponsor
+        .execute
+        .as_deref()
+        .expect("Scholarship Sponsor ETB must have an execute chain");
+    assert!(matches!(
+        sponsor_search.effect.as_ref(),
+        Effect::SearchLibrary { .. }
+    ));
+    let sponsor_delivery = sponsor_search
+        .sub_ability
+        .as_deref()
+        .expect("Scholarship Sponsor search must retain its delivery");
+    assert!(
+        matches!(
+            sponsor_delivery.effect.as_ref(),
+            Effect::ChangeZone {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "the search-result delivery must remain ParentTarget"
+    );
+
+    let synthetic = parse_trigger_line(
+        "When this creature enters, search your library for a basic land card, put it onto the battlefield, then shuffle. Then exile that creature.",
+        "Search Boundary Fixture",
+    );
+    let mut node = synthetic.execute.as_deref();
+    let mut saw_search = false;
+    let mut independent_exile_target = None;
+    while let Some(ability) = node {
+        match ability.effect.as_ref() {
+            Effect::SearchLibrary { .. } => saw_search = true,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } => independent_exile_target = Some(target.clone()),
+            _ => {}
+        }
+        node = ability.sub_ability.as_deref();
+    }
+    assert!(
+        saw_search,
+        "the synthetic trigger must retain its search root"
+    );
+    assert_eq!(
+        independent_exile_target,
+        Some(TargetFilter::TriggeringSource),
+        "the independent post-search sibling must still bind to the entering creature"
+    );
+}
+
 /// CR 701.9a + CR 603.2c: type qualifier on the discarded card must be
 /// preserved so a "discards a land card" trigger fires only on land
 /// discards (Aclazotz, Deepest Betrayal class).
@@ -17918,6 +18156,50 @@ fn trigger_enchanted_player_attacked() {
     assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
     // CR 508.3b: only fires when the player themselves is attacked.
     assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player),);
+    assert!(def.execute.is_some());
+}
+
+#[test]
+fn trigger_one_or_more_of_your_opponents_are_attacked() {
+    // Issue #6643 (Party Dude, level 3): CR 508.3b + CR 102.3 — fires when any
+    // creature attacks a player who is an opponent of the controller.
+    let def = parse_trigger_line(
+        "Whenever one or more of your opponents are attacked, up to one target attacking creature gets +X/+X until end of turn, where X is the number of cards in your hand.",
+        "Party Dude",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_target, Some(TargetFilter::Opponent));
+    // CR 508.3b: only fires when the opponent player themselves is attacked,
+    // not when a planeswalker they control or battle they protect is.
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    // CR 603.2c: the aggregate "one or more ... are attacked" phrasing is a
+    // single trigger event even if it contains multiple occurrences (e.g. two
+    // distinct opponents attacked in the same declaration), so it must be
+    // batched — otherwise the ordinary per-defending-player split would fire
+    // this once per attacked opponent.
+    assert!(
+        def.batched,
+        "aggregate 'one or more ... are attacked' must be batched (CR 603.2c)"
+    );
+    assert!(def.execute.is_some());
+}
+
+#[test]
+fn trigger_one_of_your_opponents_is_attacked() {
+    // Singular counterpart of the same CR 508.3b class: CR 603.2c's "trigger
+    // repeatedly if one event contains multiple occurrences" clause applies
+    // here instead, so this form is intentionally NOT batched.
+    let def = parse_trigger_line(
+        "Whenever one of your opponents is attacked, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_target, Some(TargetFilter::Opponent));
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert!(
+        !def.batched,
+        "singular 'one of your opponents is attacked' must not be batched"
+    );
     assert!(def.execute.is_some());
 }
 

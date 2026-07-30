@@ -22,8 +22,11 @@ use super::super::oracle_target::{parse_target, parse_type_phrase, parse_zone_wo
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 use super::sequence::parse_dig_from_among;
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
-use crate::parser::oracle_ir::ast::ContinuationAst;
+use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_ir::effect_chain::{
+    AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope,
@@ -1391,6 +1394,36 @@ fn parse_its_a_card_type_gate_body<'a>(
     ))
     .parse(rest)
     .ok()?;
+    // CR 205.2a + CR 205.2b: A printed card-type DISJUNCTION ("instant or
+    // sorcery card", Hidetsugu and Kairi / Oriq Loremage / The Biblioplex) names
+    // every type that satisfies the gate, and `RevealedHasCardType` matches its
+    // `card_types` with `any` — so the whole disjunction must be carried, not
+    // just one leg. The last-word fallback below cannot express this: it reduces
+    // "instant or sorcery" to "sorcery" and silently drops the instant leg,
+    // making the gate false for revealed instants.
+    //
+    // Full consumption is required so this arm claims only genuine disjunctions.
+    // A conjunctive type stack ("artifact creature card") leaves an unconsumed
+    // remainder and falls through to the single-type path below, preserving its
+    // existing reading.
+    if let Ok((_, card_types)) =
+        all_consuming(nom_primitives::parse_core_type_disjunction).parse(type_str)
+    {
+        if card_types.len() > 1 {
+            let (after_type, additional_filter) = parse_revealed_card_gate_suffix(after_type, ctx);
+            return Some((
+                maybe_negate(
+                    AbilityCondition::RevealedHasCardType {
+                        card_types,
+                        additional_filter,
+                        subtype_filter: None,
+                    },
+                    negated,
+                ),
+                after_type,
+            ));
+        }
+    }
     let type_word = type_str.rsplit(' ').next().unwrap_or(type_str);
     let capitalized = format!("{}{}", &type_word[..1].to_uppercase(), &type_word[1..]);
     // CR 608.2c: "permanent" is not a CoreType (it spans CR 110.1's permanent card
@@ -4137,8 +4170,8 @@ fn is_replacement_marker_tail(after_instead_lower: &str) -> bool {
 ///    you may instead reveal two creature and/or land cards from among them and put
 ///    them into your hand."
 ///
-/// Returns a new AbilityDefinition carrying the alternative Dig plus condition; the
-/// caller wraps the preceding Dig as `else_ability`. Class coverage: any card of form
+/// Returns native IR carrying the alternative Dig plus condition; the caller wraps
+/// the preceding Dig as `else_ability`. Class coverage: any card of form
 /// "look at top N / reveal a <filter> card from among them ... if <cond>, you may
 /// instead reveal M <filter'> cards from among them" (CR 608.2c replacement effect).
 pub(crate) fn try_parse_dig_instead_alternative(
@@ -4146,7 +4179,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
     previous: Option<&AbilityDefinition>,
     kind: AbilityKind,
     ctx: &mut ParseContext,
-) -> Option<AbilityDefinition> {
+) -> Option<AbilityIr> {
     // Gate: previous effect must be a Dig that the alternative can piggy-back on.
     let prev = previous?;
     let Effect::Dig {
@@ -4271,9 +4304,20 @@ pub(crate) fn try_parse_dig_instead_alternative(
         source: DigSource::Library,
     };
 
-    let mut result = AbilityDefinition::new(kind, alt_effect);
-    result.condition = Some(condition);
-    Some(result)
+    Some(AbilityIr {
+        source_text: text.to_string(),
+        body: EffectChainIr::single_clause(
+            text,
+            kind,
+            parsed_clause(alt_effect),
+            None,
+            None,
+            false,
+        ),
+        shell: AbilityShellIr::default(),
+        die_results: vec![],
+        root_transforms: vec![AbilityRootTransform::AppendCondition(condition)],
+    })
 }
 
 pub(crate) fn parse_additional_cost_instead_condition_fragment(
@@ -5723,6 +5767,25 @@ pub(super) fn try_nom_condition_as_ability_condition(
                 ));
             }
         }
+        // CR 205.2a + CR 205.2b: Card-type disjunction ("it's an instant or
+        // sorcery") — carry every printed leg, since `RevealedHasCardType`
+        // matches `card_types` with `any`. Guarded on a multi-leg result and
+        // placed ahead of the single-type match so one-word gates keep taking
+        // the arms below unchanged (including the "nonland" negation).
+        if let Ok((_, card_types)) =
+            all_consuming(nom_primitives::parse_core_type_disjunction).parse(rest)
+        {
+            if card_types.len() > 1 {
+                return Some(maybe_negate(
+                    AbilityCondition::RevealedHasCardType {
+                        card_types,
+                        additional_filter: None,
+                        subtype_filter: None,
+                    },
+                    negated,
+                ));
+            }
+        }
         let card_type = match rest {
             "creature" => Some(CoreType::Creature),
             "land" => Some(CoreType::Land),
@@ -7149,6 +7212,19 @@ mod tests {
     use crate::parser::parse_oracle_text;
     use crate::types::ability::{AggregateFunction, PlayerFilter, SharedQuality};
     use crate::types::counter::{CounterMatch, CounterType};
+
+    /// CR 608.2c: Aven Courier's chosen-counter predicate depends on a value
+    /// selected by the immediately preceding instruction. The generic suffix
+    /// condition parser has no such binding and must leave the whole clause for
+    /// the `PutChosenCounter` grammar to consume.
+    #[test]
+    fn chosen_counter_suffix_remains_effect_local() {
+        let original = "Put a counter of that kind on target permanent you control if it doesn't have a counter of that kind on it";
+        let (condition, remainder) =
+            strip_suffix_conditional(original, &mut ParseContext::default());
+        assert_eq!(condition, None);
+        assert_eq!(remainder, original);
+    }
 
     #[test]
     fn strip_milled_shared_quality_conditional_maps_grindstone_gate() {

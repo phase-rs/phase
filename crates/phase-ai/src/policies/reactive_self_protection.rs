@@ -173,6 +173,7 @@ mod tests {
             }],
             target,
             duration: None,
+            end_cost: None,
         }
     }
 
@@ -280,6 +281,7 @@ mod tests {
             }],
             target: None,
             duration: None,
+            end_cost: None,
         }
     }
 
@@ -431,6 +433,7 @@ mod tests {
             }],
             target: None,
             duration: None,
+            end_cost: None,
         };
         assert!(!is_self_protection_effect(&effect));
     }
@@ -478,7 +481,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -517,6 +520,7 @@ mod tests {
             }],
             target: None,
             duration: None,
+            end_cost: None,
         };
         assert!(is_self_protection_effect(&effect));
     }
@@ -748,7 +752,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -810,7 +814,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -858,7 +862,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -902,7 +906,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },

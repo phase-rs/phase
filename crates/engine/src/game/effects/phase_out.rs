@@ -413,7 +413,7 @@ mod tests {
                 or_trigger: None,
                 lifetime: DelayedTriggerLifetime::ThisTurn,
             },
-            ability: crate::game::ability_utils::build_resolved_from_def(
+            ability: Box::new(crate::game::ability_utils::build_resolved_from_def(
                 &AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::Draw {
@@ -423,7 +423,7 @@ mod tests {
                 ),
                 source,
                 PlayerId(0),
-            ),
+            )),
             controller: PlayerId(0),
             source_id: source,
             one_shot: true,

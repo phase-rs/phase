@@ -14,6 +14,13 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::{
+    ResolvedStackEntryFinalizeCommand, ResolvedStackEntryFinalizeReplayInvariantError,
+    ResolvedStackPushCommand, ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError,
+    ResolvedStackRemovalCommand, ResolvedStackRemovalReplayInvariantError,
+    ResolvedUncommittedTriggerRemovalCommand,
+    ResolvedUncommittedTriggerRemovalReplayInvariantError,
+};
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
@@ -65,7 +72,445 @@ pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut 
     events.push(GameEvent::StackPushed {
         object_id: entry.id,
     });
+    // CR 733: journal the settled push after every source-referential stamp
+    // above has been written into the entry, so the record carries the stamped
+    // values themselves rather than the state they were derived from.
+    journal_stack_push(state, &entry, ResolvedStackPushOrigin::Put);
     state.stack.push_back(entry);
+}
+
+/// CR 707.10: Put a *copy* of a spell or ability onto the stack.
+///
+/// This is the copy-family sibling of [`push_to_stack`], not a wrapper around
+/// it. Putting an object onto the stack (CR 405.1 / CR 601.2a) and copying one
+/// onto it (CR 707.10) agree that exactly one `StackPushed` is emitted, but
+/// they disagree on the two source-referential stamps, so they are separate
+/// authorities rather than one funnel:
+///
+/// * CR 701.27f generation — a copy captures the source's generation at
+///   *copy-creation* time and must overwrite whatever the copied ability
+///   inherited from the original's earlier stack push. [`push_to_stack`]
+///   deliberately guards its stamp with `is_none()` (delayed triggered
+///   abilities carry a creation-time generation that firing must not clobber);
+///   applying that guard here would leave the copy comparing against the
+///   *original's* generation instead of its own.
+/// * Force-block binding — deliberately NOT re-bound here. A copied ability
+///   already carries the `force_block_attacker` its original was bound to
+///   (`ResolvedAbility` is cloned wholesale by the copy effects), and that
+///   binding came from the trigger's captured `trigger_source` provenance in
+///   `triggers::bind_force_block_attacker_recursive`. Calling
+///   `bind_force_block_source_recursive` here would overwrite that exact
+///   choice-time referent with a fresh live `state.objects` lookup — a global
+///   rescan where CR 707.10b says the copy has the same source as the original.
+///   Do not add it.
+pub(crate) fn push_copy_to_stack(
+    state: &mut GameState,
+    mut entry: StackEntry,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 701.27f: an activated or triggered ability of a permanent may transform
+    // that permanent only if it hasn't transformed since the ability was put
+    // onto the stack. Copying such an ability puts a NEW ability onto the stack,
+    // so the copy compares against the source at copy-creation time rather than
+    // the original ability's earlier stack-entry time. Spell copies are outside
+    // the rule entirely — CR 701.27f covers only "an activated or triggered
+    // ability of a permanent" — so this stamp is inert for spell-copy callers.
+    if matches!(
+        entry.kind,
+        StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
+    ) {
+        let count = state
+            .objects
+            .get(&entry.source_id)
+            .filter(|object| object.back_face.is_some())
+            .map(|object| object.transformation_count);
+        if let Some(ability) = entry.ability_mut() {
+            ability.set_source_transformation_count_recursive(count);
+        }
+    }
+    events.push(GameEvent::StackPushed {
+        object_id: entry.id,
+    });
+    // CR 733: same journal point as [`push_to_stack`]. The copy's deliberately
+    // different stamping is already baked into `entry`, so this records the same
+    // operand set under a different origin rather than a sibling command.
+    journal_stack_push(state, &entry, ResolvedStackPushOrigin::Copy);
+    state.stack.push_back(entry);
+}
+
+/// Records one settled stack push for both stack authorities.
+///
+/// CR 405.2: an object goes on top of everything already on the stack, so the
+/// index it will occupy is the current depth. Reading that here — before either
+/// caller's `push_back` — is the one piece of shared logic the two authorities
+/// could otherwise get out of step on.
+fn journal_stack_push(state: &mut GameState, entry: &StackEntry, origin: ResolvedStackPushOrigin) {
+    let resulting_position = state.stack.len();
+    let cause = state.current_or_begin_rules_execution_node();
+    let command = ResolvedStackPushCommand {
+        entry: Box::new(entry.clone()),
+        origin,
+        resulting_position,
+        cause,
+    };
+    state
+        .resolved_rules_journal
+        .record_stack_push(command)
+        .expect("resolved stack push must have a live journal cause");
+}
+
+/// Installs one already-resolved stack push verbatim.
+///
+/// CR 405.1 / CR 707.10: the recorded entry is pushed exactly as it was
+/// recorded. Nothing is restamped — the CR 701.27f generation, the CR 400.7
+/// incarnation, and the CR 509.1c force-block referent all travel inside the
+/// entry, so replay never repeats the live `state.objects` lookups that produced
+/// them. Re-deriving the force-block binding in particular would swap a
+/// choice-time referent for a global rescan (see [`push_copy_to_stack`]).
+///
+/// Deliberately does NOT require the source object to exist: the ordinary path
+/// tolerates a missing source (synthetic game-rule triggers push with
+/// `ObjectId(0)`), so a source-existence precondition would reject pushes the
+/// engine legitimately performs.
+///
+/// `StackDepthMismatch` is a deliberate fail-closed canary, not a bug to route
+/// around. Stack POPS are not journaled yet (CR 608.1 resolve-pop, CR 603.3c/d
+/// abort-pop, CR 701.6a counter-removal, CR 601.2a cast-abort), so once any
+/// un-journaled removal runs, the replayed depth diverges from every later
+/// recorded position and this check refuses instead of installing an entry
+/// somewhere the recording never described. Do not weaken it to make a replay
+/// pass; see [`ResolvedStackPushCommand`] for the scheduled gap.
+pub fn apply_resolved_stack_push(
+    state: &mut GameState,
+    command: &ResolvedStackPushCommand,
+) -> Result<(), ResolvedStackPushReplayInvariantError> {
+    if state.stack.len() != command.resulting_position {
+        return Err(ResolvedStackPushReplayInvariantError::StackDepthMismatch {
+            expected: command.resulting_position,
+            found: state.stack.len(),
+        });
+    }
+    if state.stack.iter().any(|entry| entry.id == command.entry.id) {
+        return Err(ResolvedStackPushReplayInvariantError::DuplicateStackEntry(
+            command.entry.id,
+        ));
+    }
+    if !state
+        .players
+        .iter()
+        .any(|player| player.id == command.entry.controller)
+    {
+        return Err(ResolvedStackPushReplayInvariantError::UnknownController(
+            command.entry.controller,
+        ));
+    }
+
+    state.stack.push_back(command.entry.as_ref().clone());
+    Ok(())
+}
+
+/// Installs one already-resolved CR 601.2i cast finalization verbatim.
+///
+/// CR 601.2i: the recorded finalized entry and paid-facts snapshot are written
+/// back exactly as they were recorded. Nothing is re-derived — in particular the
+/// entry is located by its recorded CR 405.2 position rather than by repeating
+/// the authority's last-match scan, and `distinct_colors_spent` is taken from
+/// the snapshot rather than re-read from the object's `colors_spent_to_cast`,
+/// which a replayed predecessor need not still agree with.
+///
+/// Fails closed on any disagreement with the predecessor state: a position past
+/// the stack depth, a different entry at that position, a pre-finalize entry
+/// that is not the one recorded, or different pre-existing paid facts.
+pub fn apply_resolved_stack_entry_finalize(
+    state: &mut GameState,
+    command: &ResolvedStackEntryFinalizeCommand,
+) -> Result<(), ResolvedStackEntryFinalizeReplayInvariantError> {
+    let depth = state.stack.len();
+    let entry = state.stack.get(command.entry_position).ok_or(
+        ResolvedStackEntryFinalizeReplayInvariantError::PositionOutOfRange {
+            position: command.entry_position,
+            depth,
+        },
+    )?;
+    if entry.id != command.object {
+        return Err(
+            ResolvedStackEntryFinalizeReplayInvariantError::EntryIdentityMismatch {
+                position: command.entry_position,
+                expected: command.object,
+                found: entry.id,
+            },
+        );
+    }
+    if entry.kind != *command.expected_old_kind {
+        return Err(
+            ResolvedStackEntryFinalizeReplayInvariantError::EntryKindMismatch(
+                command.entry_position,
+            ),
+        );
+    }
+    // CR 601.2i settles the entry retag and the paid-facts snapshot together, so
+    // the snapshot precondition is checked BEFORE either is installed — a replay
+    // must not leave a finalized entry behind when the snapshot side is the half
+    // that disagrees.
+    if state.stack_paid_facts.get(&command.object) != command.expected_old_paid_facts.as_deref() {
+        return Err(
+            ResolvedStackEntryFinalizeReplayInvariantError::PaidFactsMismatch(command.object),
+        );
+    }
+
+    state
+        .stack
+        .get_mut(command.entry_position)
+        .expect("the entry was just read at this position")
+        .kind = command.resulting_kind.as_ref().clone();
+    state.stack_paid_facts.insert(
+        command.object,
+        command.resulting_paid_facts.as_ref().clone(),
+    );
+    Ok(())
+}
+
+/// Everything one stack removal settles: the entry plus the per-entry side-table
+/// rows keyed on it.
+///
+/// The rows are returned rather than discarded because the resolution pop
+/// consumes both — the paid snapshot feeds cost-dependent resolution and the
+/// batch feeds CR 603.7c event context. Callers that only need the entry drop
+/// the rest.
+pub(crate) struct PoppedStackEntry {
+    pub entry: StackEntry,
+    pub paid_facts: Option<StackPaidSnapshot>,
+    pub trigger_event_batch: Option<Vec<GameEvent>>,
+}
+
+/// CR 405.2: removes one object from the stack at a known index.
+///
+/// The single authority for every one-entry stack removal — the CR 405.5
+/// resolution pop and the drain loops (batched resolution, inert no-op batches,
+/// CR 724.1b stack exile) via [`pop_top_stack_entry`], the CR 701.6a counter,
+/// and the CR 601.2a / CR 601.2i cast rollbacks. Each call removes exactly one
+/// object, so a drain of N entries is N removals rather than one bulk mutation.
+///
+/// Both side tables are dropped here rather than by the callers because they are
+/// keyed on the entry and settle WITH the removal: dropping the entry but
+/// leaving `stack_paid_facts` or `stack_trigger_event_batches` behind would
+/// strand rows against an id no longer on the stack. The counter and rollback
+/// sites previously dropped only `stack_paid_facts` (and the CR 601.2a reject
+/// dropped neither), so routing them here also closes those leaks.
+///
+/// NOT used by [`pop_uncommitted_pending_trigger_entry`], which performs the
+/// same mutation. That is deliberate: the CR 603.3d removal is a distinct family
+/// with its own record, and routing it through this authority would journal one
+/// mutation twice, so a replay would remove two entries where execution removed
+/// one.
+pub(crate) fn remove_stack_entry_at(
+    state: &mut GameState,
+    index: usize,
+) -> Option<PoppedStackEntry> {
+    // `im::Vector::remove` panics out of range rather than returning `Option`,
+    // so the bound is checked here rather than leaned on.
+    if index >= state.stack.len() {
+        return None;
+    }
+    let entry = state.stack.remove(index);
+    let paid_facts = state.stack_paid_facts.remove(&entry.id);
+    let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
+
+    // CR 733: journal once ALL THREE removals have settled, so the record
+    // describes a stack the entry has already left. An out-of-range index is the
+    // one case that journals nothing — `?` returns above, because no mutation
+    // happened at all.
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_stack_removal(ResolvedStackRemovalCommand {
+            entry: Box::new(entry.clone()),
+            index,
+            resulting_depth: state.stack.len(),
+            cause,
+        })
+        .expect("resolved stack removal must have a live journal cause");
+
+    Some(PoppedStackEntry {
+        entry,
+        paid_facts,
+        trigger_event_batch,
+    })
+}
+
+/// CR 405.2: removes the topmost object from the stack.
+///
+/// A thin wrapper over [`remove_stack_entry_at`] — the top of an N-deep stack is
+/// index N-1 — kept because the resolution and drain callers have no index to
+/// pass and reading `remove_stack_entry_at(state, state.stack.len() - 1)` at
+/// each of them would obscure that they are simply resolving the top object.
+pub(crate) fn pop_top_stack_entry(state: &mut GameState) -> Option<PoppedStackEntry> {
+    remove_stack_entry_at(state, state.stack.len().checked_sub(1)?)
+}
+
+/// Replays one already-resolved CR 405.2 stack removal.
+///
+/// Installs the recorded removal with nothing re-derived: the entry is verified
+/// at the RECORDED index rather than located by a fresh scan, which matters
+/// because the production sites find it with predicates that can match a
+/// different entry on a diverged stack. All preconditions are checked BEFORE any
+/// mutation, so a rejected replay leaves the stack and both side tables
+/// untouched.
+pub fn apply_resolved_stack_removal(
+    state: &mut GameState,
+    command: &ResolvedStackRemovalCommand,
+) -> Result<(), ResolvedStackRemovalReplayInvariantError> {
+    // CR 405.2: the predecessor must be exactly one deeper than the record.
+    let expected_depth = command.resulting_depth + 1;
+    if state.stack.len() != expected_depth {
+        return Err(ResolvedStackRemovalReplayInvariantError::DepthMismatch {
+            expected: expected_depth,
+            found: state.stack.len(),
+        });
+    }
+    let Some(found) = state.stack.get(command.index) else {
+        return Err(ResolvedStackRemovalReplayInvariantError::IndexOutOfRange {
+            index: command.index,
+            depth: state.stack.len(),
+        });
+    };
+    // Compared WHOLE rather than by id: an applier that matched on `id` alone
+    // would discard a divergent object that merely reused the identifier.
+    if found != command.entry.as_ref() {
+        return Err(ResolvedStackRemovalReplayInvariantError::RemovedEntryMismatch);
+    }
+
+    // In range: the `get` above returned `Some`, so this cannot panic.
+    let entry = state.stack.remove(command.index);
+    state.stack_paid_facts.remove(&entry.id);
+    state.stack_trigger_event_batches.remove(&entry.id);
+    Ok(())
+}
+
+/// CR 603.3d: removes an uncommitted triggered ability from the stack.
+///
+/// The "push first, choose second" invariant (see
+/// [`GameState::pending_trigger_entry`]) puts a triggered ability on the stack
+/// BEFORE its choices are gathered, so the entry is live while a `WaitingFor`
+/// fills its slots. CR 603.3d: "If a choice is required when the triggered
+/// ability goes on the stack but no legal choices can be made for it, or if a
+/// rule or a continuous effect otherwise makes the ability illegal, the ability
+/// is simply removed from the stack." This is the single authority for that
+/// removal.
+///
+/// The two side tables are cleared here rather than by the callers because they
+/// are keyed on the entry and settle WITH the pop — a removal that dropped the
+/// entry but left `stack_paid_facts` or `stack_trigger_event_batches` behind
+/// would strand rows against an id no longer on the stack.
+///
+/// Guarded on the entry still being topmost: the cursor can outlive the entry
+/// when another path already removed it, and popping unconditionally would then
+/// discard an unrelated stack object.
+///
+/// Note this deliberately does NOT clear `pending_trigger`; that is a separate
+/// piece of construction state owned by
+/// `engine::drop_mid_construction_pending_trigger`, which calls this and then
+/// clears it.
+pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
+    let Some(entry_id) = state.pending_trigger_entry.take() else {
+        // No cursor: nothing was consumed and nothing settled, so there is no
+        // mutation to journal.
+        return;
+    };
+    let removed = (state.stack.back().map(|e| e.id) == Some(entry_id))
+        .then(|| {
+            let entry = state.stack.pop_back().expect("the entry was just observed");
+            state.stack_paid_facts.remove(&entry_id);
+            state.stack_trigger_event_batches.remove(&entry_id);
+            entry
+        })
+        .map(Box::new);
+
+    // CR 733: journal AFTER the removal settles, and journal BOTH outcomes. The
+    // `.take()` above is unconditional, so a guard that declines to pop still
+    // consumed the cursor — recording only the popping case would leave a replay
+    // of the other holding a `pending_trigger_entry` the real execution cleared.
+    let cause = state.current_or_begin_rules_execution_node();
+    let command = ResolvedUncommittedTriggerRemovalCommand {
+        consumed_entry_id: entry_id,
+        removed,
+        resulting_depth: state.stack.len(),
+        cause,
+    };
+    state
+        .resolved_rules_journal
+        .record_uncommitted_trigger_removal(command)
+        .expect("resolved uncommitted trigger removal must have a live journal cause");
+}
+
+/// Installs one already-resolved CR 603.3d removal verbatim.
+///
+/// Nothing is re-derived: the entry is compared WHOLE against the recorded one
+/// rather than matched by id, so a replay whose stack top merely shares an id
+/// fails closed instead of discarding a different object. The two side tables are
+/// dropped by the recorded entry's own id.
+///
+/// Both recorded outcomes are honoured. `removed: None` means the original
+/// execution consumed the cursor without popping, so this refuses to pop — and
+/// asserts the predecessor agrees, because a replay whose top IS that entry would
+/// otherwise silently diverge from the execution being replayed.
+pub fn apply_resolved_uncommitted_trigger_removal(
+    state: &mut GameState,
+    command: &ResolvedUncommittedTriggerRemovalCommand,
+) -> Result<(), ResolvedUncommittedTriggerRemovalReplayInvariantError> {
+    if state.pending_trigger_entry != Some(command.consumed_entry_id) {
+        return Err(
+            ResolvedUncommittedTriggerRemovalReplayInvariantError::CursorMismatch {
+                expected: command.consumed_entry_id,
+                found: state.pending_trigger_entry,
+            },
+        );
+    }
+    let top_id = state.stack.back().map(|e| e.id);
+    match command.removed.as_deref() {
+        Some(recorded) => {
+            if state.stack.len() != command.resulting_depth + 1 {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::DepthMismatch {
+                        expected: command.resulting_depth + 1,
+                        found: state.stack.len(),
+                    },
+                );
+            }
+            if state.stack.back() != Some(recorded) {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::RemovedEntryMismatch,
+                );
+            }
+        }
+        None => {
+            if state.stack.len() != command.resulting_depth {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::DepthMismatch {
+                        expected: command.resulting_depth,
+                        found: state.stack.len(),
+                    },
+                );
+            }
+            if top_id == Some(command.consumed_entry_id) {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::UnexpectedRemovableEntry(
+                        command.consumed_entry_id,
+                    ),
+                );
+            }
+        }
+    }
+
+    state.pending_trigger_entry = None;
+    if command.removed.is_some() {
+        state.stack.pop_back();
+        state.stack_paid_facts.remove(&command.consumed_entry_id);
+        state
+            .stack_trigger_event_batches
+            .remove(&command.consumed_entry_id);
+    }
+    Ok(())
 }
 
 /// The ability currently represented by a stack entry for presentation.
@@ -340,11 +785,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.announced_source_x = None;
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
-    let entry = match state.stack.pop_back() {
-        Some(e) => e,
-        None => return,
+    let Some(PoppedStackEntry {
+        entry,
+        paid_facts: paid_snapshot,
+        trigger_event_batch,
+    }) = pop_top_stack_entry(state)
+    else {
+        return;
     };
-    let paid_snapshot = state.stack_paid_facts.remove(&entry.id);
 
     // CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     // resolve via their typed payload — they have no ResolvedAbility/targets
@@ -358,8 +806,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         });
         return;
     }
-
-    let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
 
     // CR 603.4: Intervening-if condition rechecked at resolution time.
     if let StackEntryKind::TriggeredAbility {
@@ -431,12 +877,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         StackEntryKind::ActivatedAbility { ability, .. } => {
             (Some(ability.clone()), false, CastingVariant::Normal, 0)
         }
-        StackEntryKind::TriggeredAbility { ability, .. } => (
-            Some(ResolvedAbility::clone(ability)),
-            false,
-            CastingVariant::Normal,
-            0,
-        ),
+        StackEntryKind::TriggeredAbility { ability, .. } => {
+            (Some(ability.clone()), false, CastingVariant::Normal, 0)
+        }
         StackEntryKind::KeywordAction { .. } => unreachable!(
             "KeywordAction stack entries are resolved via the early-return branch above"
         ),
@@ -824,7 +1267,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         });
         if has_epic {
             if let Some(spell_ability) = ability.clone() {
-                super::effects::epic::arm_epic(state, entry.id, entry.controller, spell_ability);
+                super::effects::epic::arm_epic(state, entry.id, entry.controller, *spell_ability);
             }
         }
     }
@@ -981,6 +1424,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // mutable permission list is casting-time authorization, not
             // resolution-time cast metadata.
             if let Some(obj) = state.objects.get(&entry.id) {
+                // CR 107.3m + CR 707.10: a resolving copied spell has no new
+                // payment snapshot, but inherits the original spell's chosen
+                // X on its stack object. Off-stack entry paths pass `None`.
+                let resolving_spell_x = paid_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.x_value)
+                    .or(obj.cost_x_paid);
                 let cast_transformed = paid_snapshot
                     .as_ref()
                     .is_some_and(|snapshot| snapshot.cast_transformed);
@@ -1005,11 +1455,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // replacement pipeline sees the correct counter count.
                 let intrinsic = match (cast_transformed, obj.back_face.as_ref()) {
                     (true, Some(back)) => super::printed_cards::intrinsic_entry_counters_for_face(
+                        back.printed_loyalty,
                         back.loyalty,
+                        resolving_spell_x,
                         back.defense,
                         &back.card_types,
                     ),
-                    _ => super::printed_cards::intrinsic_etb_counters(obj),
+                    _ => super::printed_cards::intrinsic_etb_counters(obj, resolving_spell_x),
                 };
                 if !intrinsic.is_empty() {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
@@ -1168,7 +1620,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     state.push_spell_resolution(pending_spell_resolution_snapshot(
                                         state,
                                         &entry,
-                                        ability.as_ref(),
+                                        ability.as_deref(),
                                         casting_variant,
                                         actual_mana_spent,
                                         &spell_targets,
@@ -1314,7 +1766,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     state.push_spell_resolution(pending_spell_resolution_snapshot(
                         state,
                         &entry,
-                        ability.as_ref(),
+                        ability.as_deref(),
                         casting_variant,
                         actual_mana_spent,
                         &spell_targets,
@@ -1542,7 +1994,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             state.push_spell_resolution(pending_spell_resolution_snapshot(
                                 state,
                                 &entry,
-                                ability.as_ref(),
+                                ability.as_deref(),
                                 casting_variant,
                                 actual_mana_spent,
                                 &spell_targets,
@@ -2809,18 +3261,15 @@ fn resolve_batched(
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
 
-    // Pop the run's entries (resolution order is back-to-front), cleaning the
-    // per-entry side tables exactly as `resolve_top` does for a single entry.
+    // Pop the run's entries (resolution order is back-to-front) through the same
+    // authority `resolve_top` uses for a single entry, so the per-entry side
+    // tables settle with each removal.
     let mut popped = Vec::with_capacity(consumed as usize);
     for _ in 0..consumed {
-        match state.stack.pop_back() {
-            Some(entry) => {
-                state.stack_paid_facts.remove(&entry.id);
-                state.stack_trigger_event_batches.remove(&entry.id);
-                popped.push(entry);
-            }
-            None => break,
-        }
+        let Some(removed) = pop_top_stack_entry(state) else {
+            break;
+        };
+        popped.push(removed.entry);
     }
 
     // CR 603.7c: Set the trigger event context once from the (identical) top
@@ -3146,13 +3595,11 @@ fn resolve_inert_noop_batch(
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
     for _ in 0..consumed {
-        let Some(entry) = state.stack.pop_back() else {
+        let Some(removed) = pop_top_stack_entry(state) else {
             break;
         };
-        state.stack_paid_facts.remove(&entry.id);
-        state.stack_trigger_event_batches.remove(&entry.id);
         events.push(GameEvent::StackResolved {
-            object_id: entry.id,
+            object_id: removed.entry.id,
         });
     }
     consumed
@@ -3811,15 +4258,16 @@ pub(crate) fn create_warp_delayed_trigger(
         );
     }
 
-    state
-        .delayed_triggers
-        .push(crate::types::game_state::DelayedTrigger {
+    super::triggers::install_delayed_trigger(
+        state,
+        crate::types::game_state::DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            ability: delayed_ability,
+            ability: Box::new(delayed_ability),
             controller,
             source_id: object_id,
             one_shot: true,
-        });
+        },
+    );
 }
 
 #[cfg(test)]
@@ -3869,7 +4317,7 @@ mod tests {
         let entry = StackEntry {
             kind: StackEntryKind::Spell {
                 card_id: CardId(10),
-                ability: Some(final_ability),
+                ability: Some(Box::new(final_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -4023,6 +4471,7 @@ mod tests {
             power: None,
             toughness: None,
             loyalty,
+            printed_loyalty: None,
             defense,
             card_types,
             mana_cost: Default::default(),
@@ -4075,7 +4524,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -4175,11 +4624,11 @@ mod tests {
         });
         state.pending_trigger_entry = Some(entry_id);
         state.pending_trigger_event_batch = vec![trigger_event.clone()];
-        state.pending_trigger = Some(PendingTrigger {
+        state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id: predator,
             controller: PlayerId(0),
             condition: None,
-            ability: state.stack.back().unwrap().ability().unwrap().clone(),
+            ability: Box::new(state.stack.back().unwrap().ability().unwrap().clone()),
             timestamp: state.turn_number,
             target_constraints: Vec::new(),
             distribute: None,
@@ -4190,7 +4639,7 @@ mod tests {
             may_trigger_origin: Some(MayTriggerOrigin::Printed { trigger_index: 0 }),
             subject_match_count: None,
             die_result: None,
-        });
+        }));
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
@@ -4259,7 +4708,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(102),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -4526,7 +4975,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(724),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -4847,7 +5296,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(72),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -5438,7 +5887,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Flashback,
                 actual_mana_spent: 0,
             },
@@ -5469,7 +5918,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::GraveyardPermission {
                     source: ObjectId(999),
                     frequency: crate::types::statics::CastFrequency::OncePerTurn,
@@ -5574,7 +6023,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Flashback,
                 actual_mana_spent: 0,
             },
@@ -5893,7 +6342,7 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::Spell {
                     card_id: CardId(1),
-                    ability: Some(ability),
+                    ability: Some(Box::new(ability)),
                     casting_variant: CastingVariant::Normal,
                     actual_mana_spent: 0,
                 },
@@ -5945,7 +6394,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(modal_ability.clone()),
+                ability: Some(Box::new(modal_ability.clone())),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 3,
             },
@@ -5992,7 +6441,7 @@ mod tests {
         };
         state.stack.back_mut().unwrap().kind = StackEntryKind::Spell {
             card_id: CardId(1),
-            ability: Some(modal_ability),
+            ability: Some(Box::new(modal_ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 3,
         };
@@ -6158,7 +6607,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(300),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -6260,7 +6709,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(900),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -6310,7 +6759,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(901),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -10637,7 +11086,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },

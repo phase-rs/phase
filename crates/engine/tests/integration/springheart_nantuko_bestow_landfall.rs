@@ -22,7 +22,6 @@
 //! resolution, and the optional-effect decision are all submitted as
 //! `GameAction`s.
 
-use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
@@ -150,12 +149,11 @@ fn springheart_bestowed_accept_creates_copy_of_enchanted_creature() {
     );
 
     let mut runner = scenario.build();
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&springheart_id)
-        .unwrap()
-        .attached_to = Some(AttachTarget::Object(host_id));
+    // CR 702.103b: put Springheart onto the host in its real BESTOWED AURA form
+    // (no Creature type, Aura subtype, enchant creature). Hand-setting
+    // `attached_to` on a printed creature is a state production never creates,
+    // and CR 704.5p sentence 1 correctly sweeps it on the next SBA check.
+    runner.attach_as_bestowed_aura(springheart_id, host_id);
 
     let card_id = runner.state().objects[&forest_id].card_id;
     runner
@@ -205,12 +203,11 @@ fn springheart_bestowed_decline_creates_insect_token() {
     let forest_id = scenario.add_land_to_hand(P0, "Forest").id();
 
     let mut runner = scenario.build();
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&springheart_id)
-        .unwrap()
-        .attached_to = Some(AttachTarget::Object(host_id));
+    // CR 702.103b: put Springheart onto the host in its real BESTOWED AURA form
+    // (no Creature type, Aura subtype, enchant creature). Hand-setting
+    // `attached_to` on a printed creature is a state production never creates,
+    // and CR 704.5p sentence 1 correctly sweeps it on the next SBA check.
+    runner.attach_as_bestowed_aura(springheart_id, host_id);
 
     let card_id = runner.state().objects[&forest_id].card_id;
     runner

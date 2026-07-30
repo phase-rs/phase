@@ -53,16 +53,18 @@
     "matchScore": "Placar da partida {{p0}}-{{p1}}{{draws}}. Mova cartas entre o deck principal e o sideboard e depois envie.",
     "draws_one": " ({{count}} empate)",
     "draws_other": " ({{count}} empates)",
-    "main": "Principal ({{count}}/{{total}})",
+    "main": "Principal ({{count}}, mín. {{min}})",
     "sideboard": "Sideboard ({{count}})",
+    "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Mova cartas do sideboard.",
     "moveFromMain": "Mova cartas do deck principal.",
-    "matchesRegistered": "O deck principal corresponde ao tamanho registrado ({{total}}).",
-    "submitDisabled": "O deck principal está com {{count}} / {{total}} — envio desativado.",
     "resetAria": "Redefinir para o deck registrado",
     "reset": "Redefinir",
     "submitAria": "Enviar deck para o próximo jogo",
-    "submitDeck": "Enviar Deck"
+    "submitDeck": "Enviar Deck",
+    "readyToSubmit": "O deck é legal — pronto para enviar.",
+    "belowMinimum": "O deck principal precisa de pelo menos {{min}} cartas — {{count}} agora.",
+    "overSideboardCap": "O sideboard tem {{count}} cartas — máximo {{max}}."
   },
   "brokerOfflinePrompt": {
     "title": "Servidor de lobby inacessível",

@@ -7,8 +7,8 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{
-    auto_pass_recommended, auto_pass_recommended_for_viewer, legal_actions_for_viewer,
-    legal_actions_full,
+    auto_pass_recommended, auto_pass_recommended_for_viewer, end_continuous_effect_offers,
+    legal_actions_for_viewer, legal_actions_full,
 };
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
@@ -16,19 +16,21 @@ use engine::game::engine::{
     apply, apply_for_simulation, resolve_all_fast_forward, ResolveAllCallbackDecision,
     ResolveAllFastForwardResult as BatchResolveResult,
 };
+use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::game::preview::{compute_preview_diff, preview_auto_payment_sources};
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
     evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
     is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
-    load_and_hydrate_decks, rehydrate_game_from_card_db, resolve_deck_list,
+    load_and_hydrate_decks, max_deck_copies, rehydrate_game_from_card_db, resolve_deck_list,
     signature_spell_selection_policy, start_game, start_game_with_starting_player,
     validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
     PlayerDeckList, ReplayPlayer,
 };
-use engine::types::format::{FormatConfig, GameFormat};
+use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
 use engine::types::game_state::{PersistedGameState, TrustedGameStateEnvelope, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::interaction::{InteractionSessionId, InteractionSubmission};
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::{GameAction, GameState, PlayerId, ReplayHeader, ReplayLog};
@@ -44,6 +46,34 @@ fn decode_restored_game_state(json_str: &str) -> Result<GameState, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {e}")))
 }
 
+/// Bind the engine's interaction authority for the one game this module hosts.
+///
+/// Both `GameState::new` and the persisted decode leave `interaction_session_id`
+/// as `None`, and while it is unset `derive_viewer_interaction` reports
+/// `AuthorityUnbound` and returns no opportunities at all — so every interaction
+/// surface goes dark. `ensure_interaction_authority` cannot repair this: it only
+/// *maintains* an already-bound session, and clears the slots when there is none.
+///
+/// Always a fresh random id, never the one carried in a restored blob. The id is
+/// the namespace of every minted `InteractionId` (`"{session}.{generation}.{serial}"`),
+/// and re-binding the *same* session deliberately preserves the counters — so
+/// reusing a snapshot's id after an undo would re-issue ids already handed out on
+/// the abandoned branch. A new namespace makes that collision impossible, and
+/// matches server-core's rule that a persisted blob must not drive live authority.
+///
+/// Failure needs no log here (unlike server-core, which has `tracing`): the only
+/// way to get one is decimal-serial exhaustion, so this uses the same
+/// `debug_assert` discipline as `ensure_interaction_authority` itself rather than
+/// pulling `web_sys` into a size-optimized WASM artifact for an unreachable arm.
+fn bind_interaction_session(state: &mut GameState) {
+    let session = InteractionSessionId(format!("wasm-{:016x}", rand::rng().random::<u64>()));
+    let bound = bind_interaction_authority(state, session);
+    debug_assert!(
+        bound.is_ok(),
+        "interaction authority bind failed: {bound:?}"
+    );
+}
+
 /// Result of `get_legal_actions_js` — bundles actions with the engine's auto-pass
 /// recommendation so frontends don't need to classify action meaningfulness.
 #[derive(Serialize)]
@@ -51,6 +81,8 @@ fn decode_restored_game_state(json_str: &str) -> Result<GameState, JsValue> {
 struct LegalActionsResult {
     actions: Vec<GameAction>,
     auto_pass_recommended: bool,
+    /// Ordered CR 116.2c offers already projected by the engine for display.
+    end_continuous_effect_offers: Vec<GameAction>,
     /// Exact engine-authored actions for the deterministic mana-payment shortcut.
     mana_payment_shortcut_actions: Vec<GameAction>,
     /// Effective mana costs for castable spells, keyed by object_id.
@@ -59,12 +91,14 @@ struct LegalActionsResult {
     /// Engine-grouped subset of `actions` keyed by `GameAction::source_object()`.
     /// Frontend uses this for "what can I do with this card?" lookups so it
     /// doesn't have to introspect `GameAction` variants client-side.
-    legal_actions_by_object: std::collections::HashMap<ObjectId, Vec<GameAction>>,
+    legal_actions_by_object:
+        std::collections::HashMap<ObjectId, Vec<engine::game::interaction::ObjectActionPayload>>,
     /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
     /// decision has no legal action for any authorized submitter (an engine
     /// anomaly, not a rules outcome). `None` normally.
     #[serde(skip_serializing_if = "Option::is_none")]
     stuck_diagnostic: Option<engine::ai_support::StuckDecisionDiagnostic>,
+    viewer_interaction: engine::types::interaction::ViewerInteraction,
 }
 
 /// Serialize a Rust value to a JS object via JSON.
@@ -83,7 +117,8 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
 
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::{
-    choose_action_with_session, score_candidates_with_session, AiSession, SessionCache,
+    choose_action_with_session, fallback_action, score_candidates_with_session, AiSession,
+    SessionCache,
 };
 thread_local! {
     /// Game state uses Cell<Option<T>> with take/set to avoid RefCell borrow poisoning.
@@ -390,6 +425,30 @@ pub fn deck_copy_limit(name: &str) -> JsValue {
             return JsValue::NULL;
         };
         to_js(&deck_copy_limit_for(db, name))
+    })
+}
+
+/// CR 100.2a / CR 903.5b: How many copies of the named card a `format` deck may
+/// legally contain across main deck, sideboard, and command zone combined
+/// (CR 100.4a). Unlike `deckCopyLimit`, this is the *resolved* ceiling — it
+/// already applies the basic-land exemption, the card's printed override, and
+/// the format default, so the caller compares a count against it directly.
+///
+/// Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or
+/// `{"type":"UpTo","data":N}`); switch on `.type`. Returns `{"type":"Unlimited"}`
+/// when the card database isn't loaded, so a not-yet-hydrated frontend never
+/// blocks a legal add.
+#[wasm_bindgen(js_name = maxDeckCopies)]
+pub fn max_deck_copies_for_format(name: &str, format: JsValue) -> JsValue {
+    let Ok(format) = serde_wasm_bindgen::from_value::<GameFormat>(format) else {
+        return to_js(&DeckCopyLimit::Unlimited);
+    };
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return to_js(&DeckCopyLimit::Unlimited);
+        };
+        to_js(&max_deck_copies(db, name, format))
     })
 }
 
@@ -888,6 +947,11 @@ pub fn initialize_game(
     };
     REPLAY_LOG.with(|cell| cell.set(Some(ReplayLog::new(replay_header))));
 
+    // After `start_game`, so the slots bound here match the pause the caller is
+    // about to be handed — `bind_all_current_slots` binds for the *current*
+    // `waiting_for`, and nothing re-derives it until the first action boundary.
+    bind_interaction_session(&mut state);
+
     GAME_STATE.with(|cell| cell.set(Some(state)));
     clear_ai_session_cache();
 
@@ -960,6 +1024,30 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     }) {
         Ok(val) => val,
         Err(e) => e,
+    }
+}
+
+/// Submit one opaque, engine-authored interaction response. The browser never
+/// materializes a `GameAction`; only a successful engine reducer result exposes
+/// the exact action to the replay recorder.
+#[wasm_bindgen]
+pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
+    let submission: InteractionSubmission = match serde_wasm_bindgen::from_value(submission) {
+        Ok(submission) => submission,
+        Err(error) => {
+            return JsValue::from_str(&format!(
+                "Engine error: failed to deserialize interaction submission: {error}"
+            ));
+        }
+    };
+    let actor = PlayerId(actor);
+    match with_state_mut(|state| submit_interaction(state, actor, submission)) {
+        Ok(Ok(applied)) => {
+            record_replay_action(false, actor, applied.action);
+            to_js(&applied.result)
+        }
+        Ok(Err(error)) => JsValue::from_str(&format!("Engine error: {:?}", error.code)),
+        Err(error) => error,
     }
 }
 
@@ -1180,15 +1268,24 @@ pub fn get_legal_actions_js() -> JsValue {
         engine::game::layers::flush_layers(state);
         let (actions, spell_costs, legal_actions_by_object) = legal_actions_full(state);
         let auto_pass = auto_pass_recommended(state, &actions);
+        let end_continuous_effect_offers = end_continuous_effect_offers(&actions);
         let mana_payment_shortcut_actions =
             engine::ai_support::mana_payment_shortcut_actions(state, &legal_actions_by_object);
         to_js(&LegalActionsResult {
             actions,
             auto_pass_recommended: auto_pass,
+            end_continuous_effect_offers,
             mana_payment_shortcut_actions,
             spell_costs,
-            legal_actions_by_object,
+            legal_actions_by_object: engine::game::interaction::object_action_payloads(
+                &legal_actions_by_object,
+            ),
             stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
+            viewer_interaction: engine::game::interaction::derive_viewer_interaction(
+                state,
+                state,
+                state.active_player,
+            ),
         })
     }) {
         Ok(val) => val,
@@ -1266,28 +1363,38 @@ struct ViewerSnapshot {
     state: GameState,
     actions: Vec<GameAction>,
     auto_pass_recommended: bool,
+    end_continuous_effect_offers: Vec<GameAction>,
     mana_payment_shortcut_actions: Vec<GameAction>,
     spell_costs: std::collections::HashMap<ObjectId, ManaCost>,
-    legal_actions_by_object: std::collections::HashMap<ObjectId, Vec<GameAction>>,
+    legal_actions_by_object:
+        std::collections::HashMap<ObjectId, Vec<engine::game::interaction::ObjectActionPayload>>,
     /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
     /// decision has no legal action for any authorized submitter (an engine
     /// anomaly, not a rules outcome). `None` normally.
     #[serde(skip_serializing_if = "Option::is_none")]
     stuck_diagnostic: Option<engine::ai_support::StuckDecisionDiagnostic>,
+    viewer_interaction: engine::types::interaction::ViewerInteraction,
 }
 
 fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsResult {
     let (actions, spell_costs, legal_actions_by_object) = legal_actions_for_viewer(state, viewer);
     let auto_pass_recommended = auto_pass_recommended_for_viewer(state, viewer, &actions);
+    let end_continuous_effect_offers = end_continuous_effect_offers(&actions);
     let mana_payment_shortcut_actions =
         engine::ai_support::mana_payment_shortcut_actions(state, &legal_actions_by_object);
     LegalActionsResult {
         actions,
         auto_pass_recommended,
+        end_continuous_effect_offers,
         mana_payment_shortcut_actions,
         spell_costs,
-        legal_actions_by_object,
+        legal_actions_by_object: engine::game::interaction::object_action_payloads(
+            &legal_actions_by_object,
+        ),
         stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
+        viewer_interaction: engine::game::interaction::derive_viewer_interaction(
+            state, state, viewer,
+        ),
     }
 }
 
@@ -1341,14 +1448,18 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
         let viewer = PlayerId(player_id as u8);
         let filtered = filter_state_for_viewer(state, viewer);
         let legal = legal_actions_result_for_viewer(state, viewer);
+        let viewer_interaction =
+            engine::game::interaction::derive_viewer_interaction(state, &filtered, viewer);
         to_js(&ViewerSnapshot {
             state: filtered,
             actions: legal.actions,
             auto_pass_recommended: legal.auto_pass_recommended,
+            end_continuous_effect_offers: legal.end_continuous_effect_offers,
             mana_payment_shortcut_actions: legal.mana_payment_shortcut_actions,
             spell_costs: legal.spell_costs,
             legal_actions_by_object: legal.legal_actions_by_object,
             stuck_diagnostic: legal.stuck_diagnostic,
+            viewer_interaction,
         })
     }) {
         Ok(val) => val,
@@ -1506,6 +1617,7 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
         }
     });
     finalize_public_state(&mut state);
+    bind_interaction_session(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
     // `initialize_game`) invalidates any in-progress recording — the restored
@@ -1574,6 +1686,7 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
         }
     });
     finalize_public_state(&mut state);
+    bind_interaction_session(&mut state);
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
@@ -1714,6 +1827,31 @@ pub fn replay_seek_js(target: u32) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn clear_replay_playback() {
     REPLAY_PLAYER.with(|cell| cell.set(None));
+}
+
+/// Engine-owned AI escape action for the current waiting state.
+///
+/// Returns the same deadlock-safe `fallback_action` the search path uses when
+/// scoring cannot choose — never invents from legal-action list order. Null
+/// when no legal escape exists (#6393).
+#[wasm_bindgen]
+pub fn get_ai_fallback_action() -> Result<JsValue, JsValue> {
+    with_state_mut(|state| {
+        // Freshly-restored states carry dirty layers; flush so candidate
+        // generation matches `get_ai_action` / `get_legal_actions_js`.
+        engine::game::layers::flush_layers(state);
+        // Escape uses policy penalties from config (sacrifice ordering); Medium
+        // is the controller's default seat difficulty for softlock recovery.
+        let config = create_config_for_players(
+            AiDifficulty::Medium,
+            Platform::Wasm,
+            state.players.len() as u8,
+        );
+        match fallback_action(state, &config) {
+            Some(action) => Ok(to_js(&action)),
+            None => Ok(JsValue::NULL),
+        }
+    })?
 }
 
 /// Get the AI's chosen action for the current game state.
@@ -2042,7 +2180,12 @@ mod resolve_all_tests {
             controller,
             kind: StackEntryKind::ActivatedAbility {
                 source_id: object_id,
-                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    object_id,
+                    controller,
+                )),
             },
         }
     }

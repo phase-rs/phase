@@ -102,6 +102,7 @@ mod tests {
             power: Some(3),
             toughness: Some(3),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: CardType {
                 supertypes: vec![Supertype::Legendary],
@@ -239,7 +240,10 @@ mod tests {
                 id: ObjectId(100),
                 source_id,
                 controller: PlayerId(0),
-                kind: StackEntryKind::ActivatedAbility { source_id, ability },
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id,
+                    ability: Box::new(ability),
+                },
             },
             &mut events,
         );

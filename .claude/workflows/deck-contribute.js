@@ -438,7 +438,7 @@ function clusterVerifyPrompt(mechanic, cards) {
     `2. ./scripts/check-parser-combinators.sh (Gate A)\n` +
     `3. If \`tilt get uiresource clippy >/dev/null 2>&1\` succeeds: ` +
     `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data ; else ` +
-    `cargo clippy-strict && cargo test -p engine && ./scripts/gen-card-data.sh\n` +
+    `cargo clippy-strict && cargo test -p phase-engine && ./scripts/gen-card-data.sh\n` +
     `4. cargo coverage — confirm EACH of these cards is now supported:true gap:0; ` +
     `list the ones that are in cardsSupported:\n${cards.map((c) => `- ${c}`).join('\n')}\n` +
     `5. cargo semantic-audit — confirm none of these cards has findings -> ` +

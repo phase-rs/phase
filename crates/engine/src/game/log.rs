@@ -209,6 +209,9 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::EffectResolved { .. }
         | GameEvent::Unattached { .. }
+        // CR 116.2c: a special action that ends a continuous effect is an
+        // effect-level state change, grouped with the other effect events.
+        | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::BecomesTarget { .. }
         | GameEvent::ReplacementApplied { .. }
         | GameEvent::CrimeCommitted { .. }
@@ -289,7 +292,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![player_seg(state, *player_id), text(" passes priority")]
         }
 
-        GameEvent::PlayerPerformedAction { player_id, action } => vec![
+        GameEvent::PlayerPerformedAction {
+            player_id, action, ..
+        } => vec![
             player_seg(state, *player_id),
             text(" performed action "),
             text(&format!("{action:?}")),
@@ -437,6 +442,20 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             }
             segments
         }
+
+        // CR 116.2c: a player-visible special action with no log line would be a
+        // defect. The group key is engine bookkeeping and is deliberately not
+        // rendered — the source permanent is the player-meaningful identity.
+        GameEvent::ContinuousEffectEnded {
+            group: _,
+            source_id,
+            player,
+        } => vec![
+            player_seg(state, *player),
+            text(" pays to end "),
+            card_seg(state, *source_id),
+            text("'s effect"),
+        ],
 
         // CR 111.1 + CR 603.6a: `from: None` indicates token creation (no prior
         // zone). Render without a source zone to avoid "moves from None to

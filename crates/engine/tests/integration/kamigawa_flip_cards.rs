@@ -49,6 +49,7 @@ fn kenzo_alternative_face() -> BackFaceData {
         power: Some(3),
         toughness: Some(4),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![Supertype::Legendary],
@@ -107,6 +108,7 @@ fn tok_tok_alternative_face() -> BackFaceData {
         power: Some(2),
         toughness: Some(2),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![Supertype::Legendary],

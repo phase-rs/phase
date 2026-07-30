@@ -133,7 +133,7 @@ pub(crate) struct ParseContext {
     /// clause state cannot leak across trigger lines.
     pub pending_trigger_subject_clause: Option<TargetFilter>,
     /// CR 608.2k: Source zone of the current ability's `AbilityCost::Exile`
-    /// component, if any. Set by `parse_activated_ability_definition` after the
+    /// component, if any. Set by `parse_activated_ability_ir` after the
     /// cost is parsed and before the effect text is parsed, then restored after
     /// the ability. Consumed by `parse_cost_paid_object_reference` to
     /// disambiguate "the exiled card" — a cost-paid-object reference
@@ -171,6 +171,23 @@ pub(crate) struct ParseContext {
     /// `SelfRef` so non-token self-triggers ("Whenever ~ attacks, put a counter on
     /// it") are unaffected.
     pub token_created_in_chain: bool,
+    /// CR 608.2c + CR 301.5 + CR 303.4: An EARLIER clause in this same effect
+    /// chain turns the ability's own SOURCE into an attachable object — an Aura
+    /// (CR 303.4: an enchantment with the Aura subtype, attached via its enchant
+    /// ability) or an Equipment (CR 301.5: an artifact with the Equipment
+    /// subtype). This is the animate-then-attach class, of which the 12 Licids
+    /// are the canonical members ("This creature loses this ability and becomes
+    /// an Aura enchantment with enchant creature. Attach **it** to target
+    /// creature"). The source is the only object the chain has made attachable,
+    /// so the following clause's bare "it" attachment anaphor names it
+    /// (`TargetFilter::SelfRef`) rather than the ability's chosen target.
+    /// Seeded only in the chunk loop via
+    /// `parser::oracle_effect::chain_source_becomes_attachment`; every other
+    /// construction site defaults `false` (`..Default::default()`), so an attach
+    /// clause whose chain never animated its source keeps its pre-existing
+    /// `parse_target` binding (Embercleave's Equipment-ETB `ParentTarget`; Aura
+    /// Graft's chained-referent `ParentTarget`).
+    pub source_becomes_attachment_in_chain: bool,
     /// CR 608.2c: Full lowercased effect-chain text for cross-clause features
     /// like cultivate/Final-Parting split-destination detection on a search
     /// clause that does not include the put-destination phrase in its chunk.
@@ -281,8 +298,13 @@ impl ParseContext {
 
     /// Push a diagnostic (replaces oracle_warnings::push_diagnostic).
     pub fn push_diagnostic(&mut self, d: OracleDiagnostic) {
-        if matches!(d, OracleDiagnostic::TargetFallback { .. })
-            && self.diagnostics.iter().any(|existing| existing == &d)
+        // Both variants can be pushed from a combinator that a speculative `alt`
+        // re-enters on a discarded alternative, so an identical entry is noise
+        // rather than signal.
+        if matches!(
+            d,
+            OracleDiagnostic::TargetFallback { .. } | OracleDiagnostic::IgnoredRemainder { .. }
+        ) && self.diagnostics.iter().any(|existing| existing == &d)
         {
             return;
         }

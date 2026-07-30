@@ -11,7 +11,6 @@ import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
 import { useCardHover } from "../../hooks/useCardHover.ts";
-import { useCanHover } from "../../hooks/useCanHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
@@ -277,7 +276,6 @@ export const PermanentCard = memo(function PermanentCard({
 }: PermanentCardProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
-  const canHover = useCanHover();
   const playerId = usePlayerId();
   const gameObjects = useGameStore((s) => s.gameState?.objects);
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -344,7 +342,6 @@ export const PermanentCard = memo(function PermanentCard({
     incomingAttackerCounts,
     manaTappableObjectIds,
     selectableManaCostCreatureIds,
-    selectableSacrificeObjectIds,
     undoableTapObjectIds,
     validAttackerIds,
     validTargetObjectIds,
@@ -429,21 +426,6 @@ export const PermanentCard = memo(function PermanentCard({
 
   const isUndoableTap = undoableTapObjectIds.has(objectId);
 
-  // On touch-only devices, skip mouse events — synthesized mouseenter from touch fires
-  // inspectObject every touch, opening the full-screen MobilePreviewOverlay
-  // and blocking combat interactions (blocker/attacker selection).
-  const handleMouseEnter = useCallback(() => {
-    if (isMobile || !canHover) return;
-    hoverObject(objectId); inspectObject(objectId);
-  }, [canHover, hoverObject, inspectObject, isMobile, objectId]);
-
-  const handleMouseLeave = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    if (isMobile || !canHover) return;
-    const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
-    hoverObject(nextObjectId);
-    inspectObject(nextObjectId);
-  }, [canHover, hoverObject, inspectObject, isMobile]);
-
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
     useCallback(() => {
@@ -452,15 +434,51 @@ export const PermanentCard = memo(function PermanentCard({
     }, [inspectObject, setPreviewSticky, objectId]),
   );
 
+  // Gate on the event's own `pointerType`, not on a `(any-hover: hover)` media
+  // query. The hazard is a touch-synthesized enter — it fires inspectObject on
+  // every touch, opening the full-screen MobilePreviewOverlay and blocking
+  // combat interactions (blocker/attacker selection) — and `pointerType`
+  // reports that per-event. Capability metadata lies on hosts that still
+  // deliver honest pointer events: a remote-desktop session advertises no
+  // hover-capable input while sending `pointerType: "mouse"`. See useCardHover
+  // for why this is a denylist on "touch" rather than a "mouse" allowlist.
+  const handlePointerEnter = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (isMobile || event.pointerType === "touch") return;
+    hoverObject(objectId); inspectObject(objectId);
+  }, [hoverObject, inspectObject, isMobile, objectId]);
+
+  // Composes with useLongPress's own `onPointerLeave` instead of replacing it —
+  // this handler wins the key collision in the spread below, so dropping the
+  // delegation would leave the long-press timer running after the pointer
+  // slides off the card.
+  const cancelLongPress = longPressHandlers.onPointerLeave;
+  const handlePointerLeave = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    cancelLongPress(event);
+    if (isMobile || event.pointerType === "touch") return;
+    const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
+    hoverObject(nextObjectId);
+    inspectObject(nextObjectId);
+  }, [cancelLongPress, hoverObject, inspectObject, isMobile]);
+
   const controllerIdentity = useGameStore(
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
+  const viewerInteraction = useGameStore((s) => s.viewerInteraction);
+  const interactionAttachmentFan = useMemo(
+    () =>
+      viewerInteraction?.attachmentFans[objectId] ?? null,
+    [objectId, viewerInteraction],
+  );
 
-  const openAttachmentFan = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation();
+  const showAttachmentFan = useCallback(() => {
     dismissPreview();
     setAttachmentFanHost(objectId);
   }, [dismissPreview, objectId, setAttachmentFanHost]);
+
+  const openAttachmentFan = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    showAttachmentFan();
+  }, [showAttachmentFan]);
 
   if (!obj) return null;
 
@@ -477,31 +495,10 @@ export const PermanentCard = memo(function PermanentCard({
 
   const ptDisplay = computePTDisplay(obj);
   const isSelected = selectedObjectId === objectId;
-  // CR 301.5 / CR 303.4: An attached Equipment/Aura is an independent permanent
-  // that can be a valid target, an activation source (re-equip), or a board
-  // choice in its own right. Collapsed behind its host it is unreachable —
-  // clicks land on the host instead, so a "put a counter on target nonland
-  // permanent you control" trigger lands on the creature rather than the chosen
-  // Equipment, and an attached Equipment can't be re-activated to move it. Open
-  // a host's attachments whenever any of them is actionable in the current
-  // waiting state so each is independently clickable without requiring a hover.
-  const attachmentsActionable =
-    obj.attachments.length > 0
-    && obj.attachments.some(
-      (id) =>
-        validTargetObjectIds.has(id)
-        || activatableObjectIds.has(id)
-        || manaTappableObjectIds.has(id)
-        || boardChoiceObjectIds.has(id)
-        || selectableSacrificeObjectIds.has(id)
-        || selectableManaCostCreatureIds.has(id)
-        // An attachment tapped for mana that can still be untapped (undo) is
-        // itself actionable — keep it expanded so the undo affordance stays
-        // clickable. `undoableTapObjectIds` is already gated upstream
-        // (GameBoard `undoLegal`) to the states whose engine match arms accept
-        // the untap, so no extra state check is needed here.
-        || undoableTapObjectIds.has(id),
-    );
+  // The viewer-scoped engine projection owns both the direct-attachment
+  // relationship and whether one is actionable for this interaction. The
+  // board must not rediscover either fact from the raw snapshot.
+  const attachmentsActionable = interactionAttachmentFan !== null;
   const attachmentsLifted =
     obj.attachments.length > 0
     && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree);
@@ -676,6 +673,12 @@ export const PermanentCard = memo(function PermanentCard({
       });
     } else if (isValidTarget) {
       dispatchAction({ type: "ChooseTarget", data: { target: { Object: objectId } } });
+    } else if (attachmentsActionable) {
+      // The host is not a legal choice, but one of its attachments is. Open
+      // the full-card chooser rather than requiring a precise click on an
+      // overlapping attachment peek. The fan derives every selectable card
+      // from the engine's current legal-target set.
+      showAttachmentFan();
     } else if (isActivatable) {
       const o = useGameStore.getState().gameState?.objects[objectId];
       // Read the engine-provided action list for this permanent — the mapping
@@ -777,9 +780,9 @@ export const PermanentCard = memo(function PermanentCard({
       }}
       transition={{ type: "spring", stiffness: 300, damping: 20 }}
       onClick={handleClick}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
       {...longPressHandlers}
+      onPointerEnter={handlePointerEnter}
+      onPointerLeave={handlePointerLeave}
     >
       {isManaPaymentPreviewSource && (
         <div

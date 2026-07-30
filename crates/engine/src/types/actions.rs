@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use serde::{Deserialize, Serialize};
 
 use super::ability::{LibraryPosition, TargetRef};
@@ -905,6 +903,27 @@ pub enum GameAction {
         epoch: u64,
         response: PrecastCopyShortcutResponse,
     },
+    /// CR 116.2c: Special action — pay a continuous effect's printed termination
+    /// cost to end it ("You may pay {W} to end this effect"). CR 116.1: special
+    /// actions don't use the stack and can't be responded to.
+    ///
+    /// `group` names the continuous effect ONE resolution created (see
+    /// [`crate::types::game_state::EndEffectPermission`]); it is a group key,
+    /// NOT a `TransientContinuousEffect::id`.
+    ///
+    /// `source_name` and `cost` are engine-authored presentation values. Clients
+    /// display them verbatim and echo them back; dispatch revalidates `group`
+    /// against live state and never trusts either echoed value.
+    ///
+    /// Appended at the END of this enum on purpose: `GameActionKind` derives
+    /// `PartialOrd, Ord`, so a mid-enum insertion would renumber later
+    /// discriminants and shift `cmp_stable` ordering (AI candidate ordering and
+    /// replay determinism).
+    EndContinuousEffect {
+        group: crate::types::game_state::EndEffectGroupId,
+        source_name: String,
+        cost: crate::types::mana::ManaCost,
+    },
 }
 
 /// CR 117.3d: The mutation a `GameAction::SetPriorityYield` performs on the
@@ -1440,6 +1459,24 @@ impl GameAction {
         self.into()
     }
 
+    /// Whether this is an actor-scoped UI preference action.
+    ///
+    /// These mutations are legal in every `WaitingFor` state, do not change game
+    /// progression, and must not trigger auto-pass advancement at the engine
+    /// boundary. The authenticated actor is the only preference owner.
+    pub fn is_actor_scoped_preference(&self) -> bool {
+        matches!(
+            self,
+            GameAction::CancelAutoPass
+                | GameAction::SetPhaseStops { .. }
+                | GameAction::SetPriorityPassingMode { .. }
+                | GameAction::SetPriorityYield { .. }
+                | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::SetTriggerOrderTemplate { .. }
+                | GameAction::ReorderHand { .. }
+        )
+    }
+
     /// Issue #4878: allocation-free total order over `GameAction`, used for
     /// deterministic AI candidate / legal-action sorting. Orders by the
     /// `GameActionKind` discriminant first, then by payload fields, so equal
@@ -1462,8 +1499,8 @@ impl GameAction {
             GameAction::TapLandForMana { .. }
                 | GameAction::UntapLandForMana { .. }
                 // CR 118.3a: pinning/unpinning a pool unit is a mana-payment-window
-                // action; classifying it here grants MP skip_legality acceptance and
-                // AI-exclusion via the single !is_mana_ability authority.
+                // action; classifying it here keeps it out of AI priority-action
+                // candidates via the single !is_mana_ability authority.
                 | GameAction::SpendPoolMana { .. }
                 | GameAction::UnspendPoolMana { .. }
         )
@@ -1480,51 +1517,6 @@ impl GameAction {
             | GameAction::CastSpellAsSneak { payment_mode, .. }
             | GameAction::CastSpellAsWebSlinging { payment_mode, .. } => Some(payment_mode),
             _ => None,
-        }
-    }
-
-    /// CR 601.2g: `CastPaymentMode` selects whether the engine auto-pays an
-    /// unambiguous mana cost or pauses after announcement for manual mana
-    /// activation — a per-player payment preference, not part of whether the
-    /// cast itself is legal. Candidate enumeration (`ai_support::candidates`)
-    /// emits every cast candidate with the canonical `Auto` mode, so any
-    /// membership test of a submitted action against the enumerated legal set
-    /// must erase the preference first (GH #6275: the multiplayer server's
-    /// legality gate rejected every `Manual`-mode cast). Borrows `self`
-    /// unchanged unless a `Manual` mode has to be rewritten.
-    pub fn with_canonical_payment_mode(&self) -> Cow<'_, Self> {
-        match self {
-            GameAction::CastSpell {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellForFree {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellAsMiracle {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellAsMadness {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellAsSneak {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            }
-            | GameAction::CastSpellAsWebSlinging {
-                payment_mode: CastPaymentMode::Manual,
-                ..
-            } => {
-                let mut canonical = self.clone();
-                if let Some(mode) = canonical.payment_mode_mut() {
-                    *mode = CastPaymentMode::Auto;
-                }
-                Cow::Owned(canonical)
-            }
-            _ => Cow::Borrowed(self),
         }
     }
 
@@ -1675,6 +1667,11 @@ impl GameAction {
             | GameAction::RespondToShortcut { .. }
             | GameAction::DeclineShortcut
             | GameAction::PrecastCopyShortcut { .. }
+            // CR 116.2c: the payload names a continuous-effect GROUP, not a
+            // permanent — a global action with no source object (frontend
+            // Pattern A). The Licid that installed the effect is not addressed
+            // by this action.
+            | GameAction::EndContinuousEffect { .. }
             | GameAction::ChooseActivationCostBranch { .. } => None,
         }
     }
@@ -1682,81 +1679,6 @@ impl GameAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// GH #6275: every cast-family variant must canonicalize `Manual` to
-    /// `Auto` so legality-gate membership checks match the enumerated
-    /// candidates; everything else must pass through borrowed and unchanged.
-    #[test]
-    fn with_canonical_payment_mode_erases_manual_on_every_cast_variant() {
-        use crate::types::game_state::CastPaymentMode;
-
-        let oid = ObjectId(1);
-        let cid = CardId(2);
-        let other = ObjectId(3);
-        let make = |payment_mode: CastPaymentMode| -> Vec<GameAction> {
-            vec![
-                GameAction::CastSpell {
-                    object_id: oid,
-                    card_id: cid,
-                    targets: vec![other],
-                    payment_mode,
-                },
-                GameAction::CastSpellForFree {
-                    object_id: oid,
-                    card_id: cid,
-                    source_id: other,
-                    payment_mode,
-                },
-                GameAction::CastSpellAsMiracle {
-                    object_id: oid,
-                    card_id: cid,
-                    payment_mode,
-                },
-                GameAction::CastSpellAsMadness {
-                    object_id: oid,
-                    card_id: cid,
-                    payment_mode,
-                },
-                GameAction::CastSpellAsSneak {
-                    hand_object: oid,
-                    card_id: cid,
-                    creature_to_return: other,
-                    payment_mode,
-                },
-                GameAction::CastSpellAsWebSlinging {
-                    hand_object: oid,
-                    card_id: cid,
-                    creature_to_return: other,
-                    payment_mode,
-                },
-            ]
-        };
-
-        for (manual, auto) in make(CastPaymentMode::Manual)
-            .iter()
-            .zip(&make(CastPaymentMode::Auto))
-        {
-            let canonical = manual.with_canonical_payment_mode();
-            assert!(
-                matches!(canonical, Cow::Owned(_)),
-                "Manual {} must be rewritten",
-                manual.variant_name()
-            );
-            assert_eq!(canonical.as_ref(), auto);
-
-            let unchanged = auto.with_canonical_payment_mode();
-            assert!(
-                matches!(unchanged, Cow::Borrowed(_)),
-                "Auto {} must stay borrowed",
-                auto.variant_name()
-            );
-        }
-
-        assert!(matches!(
-            GameAction::PassPriority.with_canonical_payment_mode(),
-            Cow::Borrowed(_)
-        ));
-    }
 
     #[test]
     fn pass_priority_serializes_as_tagged_union() {
@@ -2018,6 +1940,15 @@ mod tests {
             ),
             (GameAction::CancelCast, None),
             (GameAction::CompanionToHand, None),
+            // CR 116.2c: the group key is not an ObjectId — no source object.
+            (
+                GameAction::EndContinuousEffect {
+                    group: crate::types::game_state::EndEffectGroupId(1),
+                    source_name: "Calming Licid".to_string(),
+                    cost: crate::types::mana::ManaCost::zero(),
+                },
+                None,
+            ),
             (GameAction::CancelAutoPass, None),
             (
                 GameAction::SetPriorityPassingMode {

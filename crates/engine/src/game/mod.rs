@@ -59,6 +59,8 @@ pub(crate) mod engine_replacement;
 pub(crate) mod engine_resolution_choices;
 pub mod engine_resolve_batch;
 pub(crate) mod engine_stack;
+// CR 116.2c: the "pay a cost to end a continuous effect" special action.
+pub mod end_continuous_effect;
 pub(crate) mod exile_links;
 pub mod filter;
 // CR 710: Kamigawa flip cards (flipping, alternative-face application).
@@ -200,7 +202,7 @@ pub use deck_loading::{
 };
 pub use deck_validation::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, evaluate_deck_compatibility,
-    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
+    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible, max_deck_copies,
     signature_spell_selection_policy, validate_deck_for_format, validate_name_deck_for_format,
     validate_name_deck_for_format_full, CompatibilityCheck, DeckCompatibilityRequest,
     DeckCompatibilityResult, DeckCoverage, SignatureSpellSelectionPolicy, UnsupportedCard,

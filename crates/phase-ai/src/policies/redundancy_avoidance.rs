@@ -478,6 +478,7 @@ fn redundancy_delta(
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }
@@ -1581,6 +1582,7 @@ mod tests {
                 static_abilities: vec![stat],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: Some(TargetFilter::SelfRef),
+                end_cost: None,
             },
         );
         // Pre-existing flying on the source — the grant is redundant.
@@ -1618,6 +1620,7 @@ mod tests {
                 })],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
         let instant = create_object(
@@ -1663,6 +1666,7 @@ mod tests {
                 })],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
         let sorcery = create_object(
@@ -1708,6 +1712,7 @@ mod tests {
                 })],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
         let artifact = create_object(
@@ -1752,6 +1757,7 @@ mod tests {
                 static_abilities: vec![stat],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: Some(TargetFilter::SelfRef),
+                end_cost: None,
             },
         );
         // No pre-existing flying on source — the grant is new value.
@@ -1789,6 +1795,7 @@ mod tests {
                 static_abilities: vec![stat],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
         // Hexproof already active from a prior activation this turn — re-granting
@@ -1833,6 +1840,7 @@ mod tests {
                 static_abilities: vec![stat],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
         // No pre-existing hexproof — the grant is new value.

@@ -1,10 +1,12 @@
 //! Hidden engine-authority interaction projection and submission boundary.
 //!
-//! No production transport calls this module yet. The existing human action UI
-//! remains the only exposed authority until the separately reviewed adapter
-//! cutover. Engine tests may use these entry points to prove the contract.
+//! Production adapters consume this projection while the existing action UI
+//! remains the exposed authority until its separately reviewed cutover.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::ai_support::{
     validated_candidate_actions_for_semantic_owner, ActionMetadata, CandidateAction,
@@ -29,26 +31,33 @@ use crate::types::game_state::{
     ActionResult, AutoMayChoice, CastPaymentMode, CastingVariant, CombatDamageAssignmentMode,
     ConvokeMode, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice, GameState, ManaChoice,
     ManaChoiceContext, ManaChoicePrompt, OutsideGameChoiceSource, PayCostKind, PileSide,
-    ShardChoice, ShardOptions, WaitingFor,
+    PtDirection, ShardChoice, ShardOptions, TargetEffectDetail, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::{
     ActiveInteractionSlot, AggregateComparator, AmountAssignment, ConfirmSemantics,
-    InteractionActionCode, InteractionAggregateFunction, InteractionAvailability,
+    InteractionActionCode, InteractionActionId, InteractionAggregateFunction,
+    InteractionAttachmentFan, InteractionAttachmentFanChild, InteractionAvailability,
     InteractionChoice, InteractionChoiceId, InteractionChoiceStatus,
     InteractionDamageAssignmentMode, InteractionGroupConstraint, InteractionId,
-    InteractionIntentCode, InteractionManaColor, InteractionObjectProperty, InteractionOpportunity,
-    InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
-    InteractionPreview, InteractionPreviewRequest, InteractionPreviewStatus, InteractionProgress,
-    InteractionReasonCode, InteractionRelationConstraint, InteractionRelationSourceConstraint,
-    InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
+    InteractionIntentCode, InteractionManaAbilityActivationScope, InteractionManaColor,
+    InteractionManaComparator, InteractionManaRestriction, InteractionManaSpecialAction,
+    InteractionManaSpellCostCriterion, InteractionManaZoneSpendPolarity, InteractionObjectProperty,
+    InteractionOpportunity, InteractionOpportunityResponse, InteractionOutcomeCode,
+    InteractionPresentationSurface, InteractionPreview, InteractionPreviewRequest,
+    InteractionPreviewStatus, InteractionProgress, InteractionReasonCode,
+    InteractionRelationConstraint, InteractionRelationSourceConstraint, InteractionResponse,
+    InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
     InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPoint,
     InteractionShortcutPointKind, InteractionShortcutReply, InteractionShortcutResponseCode,
     InteractionSlotKind, InteractionSubmission, InteractionSummaryCode, InteractionWaitingForCode,
     InteractionWaitingForKind, InteractionZoneCode, SelectionConstraint, SimultaneousDecisionKind,
     ViewerInteraction, MAX_INTERACTION_LIST_LEN,
 };
-use crate::types::mana::{ManaColor, ManaCost, ManaType};
+use crate::types::mana::{
+    AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaType, SpecialAction,
+    SpellCostCriterion, ZoneSpendPolarity,
+};
 use crate::types::match_config::DeckCardCount;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -58,9 +67,9 @@ use super::dungeon::DungeonId;
 use super::engine::{
     apply_interaction, apply_interaction_for_simulation, EngineError, MAX_SHORTCUT_CYCLES,
 };
-use super::game_object::RoomDoor;
+use super::game_object::{AttachTarget, RoomDoor};
 use super::merge::MergeSide;
-use super::{turn_control, visibility};
+use super::{mana_sources, turn_control, visibility};
 
 pub const MAX_INTERACTION_STRING_LEN: usize = 256;
 const MAX_INTERACTION_SESSION_ID_LEN: usize = 128;
@@ -974,6 +983,12 @@ struct TargetSequenceProjection {
     max: usize,
     unique: bool,
     action: TargetSequenceAction,
+    /// CR 115.1: what the announcing spell/ability will do to the chosen
+    /// target, derived from the current slot's `effect_kind`. Only the two
+    /// slot-carrying states (`TargetSelection`, `TriggerTargetSelection`) can
+    /// answer this; every other state on this model is a "choose" without a
+    /// per-slot effect attribution and stays neutral.
+    intent: InteractionIntentCode,
 }
 
 #[derive(Debug, Clone)]
@@ -1112,7 +1127,11 @@ struct SideboardCardProjection {
 #[derive(Debug, Clone)]
 struct SideboardProjection {
     cards: Vec<SideboardCardProjection>,
-    main_total: u32,
+    /// CR 100.2a / CR 100.4a: inclusive bounds on the main-deck total. The pool
+    /// is invariant across the partition, so the minimum deck size and the
+    /// sideboard cap both reduce to limits on this one number.
+    min_main_total: u32,
+    max_main_total: u32,
 }
 
 fn target_sequence_projection(
@@ -1124,15 +1143,22 @@ fn target_sequence_projection(
             selection,
             ..
         } => {
-            let optional = target_slots
-                .get(selection.current_slot)
-                .is_some_and(|slot| slot.optional);
+            let slot = target_slots.get(selection.current_slot);
+            let optional = slot.is_some_and(|slot| slot.optional);
             TargetSequenceProjection {
                 candidates: selection.current_legal_targets.clone(),
                 min: usize::from(!optional),
                 max: 1,
                 unique: true,
                 action: TargetSequenceAction::ChooseTarget,
+                // CR 601.2c: targets are announced one slot at a time, and each
+                // slot carries its own effect, so the label is per-slot rather
+                // than per-spell. A chained "destroy target creature. Draw a
+                // card. Target player gains 2 life" announces two slots with
+                // two different intents.
+                intent: slot.map_or(InteractionIntentCode::Choose, |slot| {
+                    target_intent(slot.effect_kind, slot.effect_detail)
+                }),
             }
         }
         WaitingFor::TriggerTargetSelection {
@@ -1140,15 +1166,22 @@ fn target_sequence_projection(
             selection,
             ..
         } => {
-            let optional = target_slots
-                .get(selection.current_slot)
-                .is_some_and(|slot| slot.optional);
+            let slot = target_slots.get(selection.current_slot);
+            let optional = slot.is_some_and(|slot| slot.optional);
             TargetSequenceProjection {
                 candidates: selection.current_legal_targets.clone(),
                 min: usize::from(!optional),
                 max: 1,
                 unique: true,
                 action: TargetSequenceAction::ChooseTarget,
+                // CR 601.2c: targets are announced one slot at a time, and each
+                // slot carries its own effect, so the label is per-slot rather
+                // than per-spell. A chained "destroy target creature. Draw a
+                // card. Target player gains 2 life" announces two slots with
+                // two different intents.
+                intent: slot.map_or(InteractionIntentCode::Choose, |slot| {
+                    target_intent(slot.effect_kind, slot.effect_detail)
+                }),
             }
         }
         WaitingFor::MultiTargetSelection {
@@ -1166,6 +1199,7 @@ fn target_sequence_projection(
             max: *max_targets,
             unique: true,
             action: TargetSequenceAction::SelectObjects,
+            intent: InteractionIntentCode::Choose,
         },
         WaitingFor::ChooseObjectsSelection { eligible, .. } => TargetSequenceProjection {
             candidates: eligible.clone(),
@@ -1173,6 +1207,7 @@ fn target_sequence_projection(
             max: eligible.len(),
             unique: true,
             action: TargetSequenceAction::SelectTargets,
+            intent: InteractionIntentCode::Choose,
         },
         WaitingFor::EachPlayerCopyChosenSelection {
             eligible, min, max, ..
@@ -1182,6 +1217,7 @@ fn target_sequence_projection(
             max: *max as usize,
             unique: true,
             action: TargetSequenceAction::SelectTargets,
+            intent: InteractionIntentCode::Choose,
         },
         WaitingFor::ProliferateChoice { eligible, .. }
         | WaitingFor::TimeTravelChoice { eligible, .. } => TargetSequenceProjection {
@@ -1190,6 +1226,7 @@ fn target_sequence_projection(
             max: eligible.len(),
             unique: true,
             action: TargetSequenceAction::SelectTargets,
+            intent: InteractionIntentCode::Choose,
         },
         WaitingFor::RetargetChoice {
             scope,
@@ -1212,6 +1249,10 @@ fn target_sequence_projection(
                 max: count,
                 unique: false,
                 action: TargetSequenceAction::Retarget,
+                // CR 115.7: retargeting changes an existing spell's targets. The
+                // intent belongs to that spell, not to this choice, and this
+                // state carries no slot to read it from.
+                intent: InteractionIntentCode::Choose,
             }
         }
         _ => return Ok(None),
@@ -2087,12 +2128,23 @@ fn sideboard_projection(
             .checked_add(entry.count)
             .ok_or(InteractionReasonCode::PayloadTooLarge)?;
     }
-    let main_total = pool
-        .registered_main
-        .iter()
-        .try_fold(0u32, |total, entry| total.checked_add(entry.count));
-    let Some(main_total) = main_total else {
+    // The partition is over the whole registered pool, so the main-deck total
+    // can range up to every card the player owns for this match.
+    let pool_total = totals
+        .values()
+        .try_fold(0u32, |total, count| total.checked_add(*count));
+    let Some(max_main_total) = pool_total else {
         return Err(InteractionReasonCode::PayloadTooLarge);
+    };
+    // CR 100.2a / CR 100.4a: `handle_submit_sideboard` is the authority; take
+    // its bounds verbatim so this projection can never be stricter than what
+    // the engine will actually accept. Because the pool is invariant, the
+    // sideboard cap is equivalent to a floor on the main-deck total.
+    let (min_main_deck_size, max_sideboard_size) =
+        crate::game::match_flow::sideboard_submission_bounds(state, semantic_owner);
+    let min_main_total = match max_sideboard_size {
+        Some(max) => min_main_deck_size.max(max_main_total.saturating_sub(max)),
+        None => min_main_deck_size,
     };
     let cards = totals
         .into_iter()
@@ -2102,7 +2154,11 @@ fn sideboard_projection(
             total,
         })
         .collect();
-    Ok(Some(SideboardProjection { cards, main_total }))
+    Ok(Some(SideboardProjection {
+        cards,
+        min_main_total,
+        max_main_total,
+    }))
 }
 
 fn attack_target_ref(target: &AttackTarget) -> TargetRef {
@@ -2572,6 +2628,127 @@ fn effect_zone_intent(effect_kind: EffectKind, destination: Option<Zone>) -> Int
             | Some(Zone::Command)
             | None => InteractionIntentCode::Choose,
         }
+    }
+}
+
+/// CR 115.1 + CR 601.2c: Label a target announcement with what the announcing
+/// spell or ability will do to the thing being chosen.
+///
+/// Mirrors `effect_zone_intent` above: the slot stores the game fact
+/// (`EffectKind`), and this projection-layer function decides how to present
+/// it. Nothing about the label is stored in `GameState`.
+///
+/// The catch-all is deliberate and safe. `EffectKind` has 231 variants, the
+/// overwhelming majority of which never reach a CR 115.1 target slot, and the
+/// fallback is the NEUTRAL `Choose` — so an unmapped or newly-added kind reads
+/// as "just pick one", which is an honest partial rather than a wrong claim.
+/// An exhaustive match here would be 231 arms whose default answer is the same
+/// value, and would make every unrelated effect addition edit this function.
+fn target_intent(effect_kind: EffectKind, detail: TargetEffectDetail) -> InteractionIntentCode {
+    // The zone family's unit tag says only "a zone change"; the destination is
+    // the deciding fact and is stamped on the slot. Delegate to the existing
+    // zone labeller rather than reimplementing it, so `EffectZoneChoice` and a
+    // zone-change target announcement can never disagree.
+    if let TargetEffectDetail::Destination(destination) = detail {
+        return effect_zone_intent(effect_kind, Some(destination));
+    }
+    match effect_kind {
+        // CR 120.1: damage.
+        EffectKind::DealDamage
+        | EffectKind::DamageAll
+        | EffectKind::DamageEachPlayer
+        | EffectKind::ApplyPostReplacementDamage
+        | EffectKind::EachDealsDamageEqualToPower
+        | EffectKind::EachSourceDealsDamage => InteractionIntentCode::Damage,
+        // CR 701.8: destroy.
+        EffectKind::Destroy | EffectKind::DestroyAll => InteractionIntentCode::Destroy,
+        // CR 701.19: regeneration shield. Unambiguously protective.
+        EffectKind::Regenerate | EffectKind::RemoveAllDamage => InteractionIntentCode::Regenerate,
+        // CR 701.6: counter a spell.
+        EffectKind::Counter | EffectKind::CounterAll => InteractionIntentCode::Counter,
+        // CR 701.21: sacrifice.
+        EffectKind::Sacrifice | EffectKind::ChooseAndSacrificeRest | EffectKind::Exploit => {
+            InteractionIntentCode::Sacrifice
+        }
+        // CR 701.26: tap / untap.
+        EffectKind::Tap | EffectKind::TapAll => InteractionIntentCode::Tap,
+        EffectKind::Untap | EffectKind::UntapAll => InteractionIntentCode::Untap,
+        // CR 701.17: mill.
+        EffectKind::Mill => InteractionIntentCode::Mill,
+        // CR 701.9: discard.
+        EffectKind::DiscardCard | EffectKind::Discard => InteractionIntentCode::Discard,
+        // CR 121.1: draw.
+        EffectKind::Draw => InteractionIntentCode::Draw,
+        // CR 119.3: life gain / loss.
+        EffectKind::GainLife => InteractionIntentCode::GainLife,
+        EffectKind::LoseLife => InteractionIntentCode::LoseLife,
+        // CR 701.14: fight.
+        EffectKind::Fight => InteractionIntentCode::Fight,
+        // CR 701.3: attach (Auras and Equipment).
+        EffectKind::Attach | EffectKind::AttachAll | EffectKind::ReturnAsAura => {
+            InteractionIntentCode::Attach
+        }
+        // CR 707: copy.
+        EffectKind::CopySpell
+        | EffectKind::EpicCopy
+        | EffectKind::CastCopyOfCard
+        | EffectKind::CopyTokenOf
+        | EffectKind::BecomeCopy => InteractionIntentCode::Copy,
+        // CR 613.1b: control change.
+        EffectKind::GainControl
+        | EffectKind::GainControlAll
+        | EffectKind::ControlNextTurn
+        | EffectKind::GiveControl
+        | EffectKind::ExchangeControl => InteractionIntentCode::GainControl,
+        // CR 701.20: reveal.
+        EffectKind::Reveal | EffectKind::RevealUntil => InteractionIntentCode::Reveal,
+        // CR 406.1: exile. Only the kinds that name exile in the tag itself
+        // qualify. Plain "exile target creature" is `EffectKind::ChangeZone`,
+        // whose destination lives in the `Effect` payload and not in the unit
+        // tag, so it cannot be recognized here and stays neutral below — the
+        // same shape as the `Pump` sign problem. `effect_zone_intent` solves
+        // this for `EffectZoneChoice` only because that state stores the
+        // destination alongside the kind.
+        EffectKind::ExileHaunting | EffectKind::ExileTop | EffectKind::HeistExile => {
+            InteractionIntentCode::Exile
+        }
+        // Return to hand ("bounce"). Not a keyword action, so no CR citation:
+        // it is an ordinary zone change to the owner's hand.
+        EffectKind::Bounce | EffectKind::BounceAll => InteractionIntentCode::Return,
+        // CR 613.4: characteristic modification. Covers both directions —
+        // `EffectKind` is a unit tag, so `Pump` is the same variant for
+        // "+3/+3" and "-3/-3" (`Effect::Pump` carries the sign in `PtValue`,
+        // and that sign can be dynamic). `Modify` therefore names the action
+        // and claims no disposition; see the adapter's mapping for the
+        // consequence at the protocol boundary.
+        // CR 613.4: direction is read off `Effect::Pump`'s `PtValue` payload at
+        // slot construction, because `EffectKind` cannot carry it. `Modify`
+        // survives for the two populations where no direction is true: a
+        // dynamic magnitude (X / count-based) and a genuinely opposing
+        // modification ("+2/-2").
+        EffectKind::Pump | EffectKind::PumpAll => match detail {
+            TargetEffectDetail::Modification(PtDirection::Increase) => InteractionIntentCode::Buff,
+            TargetEffectDetail::Modification(PtDirection::Decrease) => {
+                InteractionIntentCode::Debuff
+            }
+            TargetEffectDetail::None | TargetEffectDetail::Destination(_) => {
+                InteractionIntentCode::Modify
+            }
+        },
+        EffectKind::SwitchPT
+        | EffectKind::DoublePT
+        | EffectKind::DoublePTAll
+        | EffectKind::PutCounter
+        | EffectKind::PutCounterAll
+        | EffectKind::PutChosenCounter
+        | EffectKind::RemoveCounter
+        | EffectKind::MultiplyCounter
+        | EffectKind::MoveCounters
+        | EffectKind::Animate => InteractionIntentCode::Modify,
+        // Everything else is either not reachable from a target slot or has no
+        // effect-semantic disposition (e.g. `NoOp`, which the mutate and other
+        // pipeline-resolved slots carry). Neutral by construction.
+        _ => InteractionIntentCode::Choose,
     }
 }
 
@@ -3354,6 +3531,47 @@ fn interaction_choice_id(
     InteractionChoiceId(format!("{}.{}{}", interaction_id.0, namespace, index))
 }
 
+/// Stable, opaque identity for an exact serialized action. The interaction
+/// projection and per-object action payload both use this, so consumers never
+/// need to correlate semantic rows by array position.
+pub fn interaction_action_id(action: &GameAction) -> InteractionActionId {
+    let encoded = serde_json::to_vec(action).expect("GameAction serialization must succeed");
+    let digest = Sha256::digest(encoded);
+    InteractionActionId(format!("a{:x}", digest))
+}
+
+/// A per-object legal action with an engine-authored identity that can be
+/// joined to an [`InteractionPresentationSurface::Action`] without depending
+/// on either transport's row ordering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectActionPayload {
+    #[serde(flatten)]
+    pub action: GameAction,
+    pub interaction_action_id: InteractionActionId,
+}
+
+pub fn object_action_payloads(
+    actions: &HashMap<ObjectId, Vec<GameAction>>,
+) -> HashMap<ObjectId, Vec<ObjectActionPayload>> {
+    actions
+        .iter()
+        .map(|(object_id, object_actions)| {
+            (
+                *object_id,
+                object_actions
+                    .iter()
+                    .cloned()
+                    .map(|action| ObjectActionPayload {
+                        interaction_action_id: interaction_action_id(&action),
+                        action,
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 fn zone_code(zone: Zone) -> InteractionZoneCode {
     match zone {
         Zone::Battlefield => InteractionZoneCode::Battlefield,
@@ -3474,6 +3692,152 @@ fn mana_color_symbol(color: ManaColor) -> &'static str {
         ManaColor::Black => "B",
         ManaColor::Red => "R",
         ManaColor::Green => "G",
+    }
+}
+
+fn interaction_mana_comparator(comparator: Comparator) -> InteractionManaComparator {
+    match comparator {
+        Comparator::GT => InteractionManaComparator::GreaterThan,
+        Comparator::LT => InteractionManaComparator::LessThan,
+        Comparator::GE => InteractionManaComparator::AtLeast,
+        Comparator::LE => InteractionManaComparator::AtMost,
+        Comparator::EQ => InteractionManaComparator::Equal,
+        Comparator::NE => InteractionManaComparator::NotEqual,
+    }
+}
+
+fn interaction_mana_ability_activation_scope(
+    scope: AbilityActivationScope,
+) -> InteractionManaAbilityActivationScope {
+    match scope {
+        AbilityActivationScope::OfSpellType => InteractionManaAbilityActivationScope::OfSpellType,
+        AbilityActivationScope::Any => InteractionManaAbilityActivationScope::Any,
+    }
+}
+
+fn interaction_mana_special_action(action: SpecialAction) -> InteractionManaSpecialAction {
+    match action {
+        SpecialAction::CompanionToHand => InteractionManaSpecialAction::CompanionToHand,
+        SpecialAction::UnlockDoor => InteractionManaSpecialAction::UnlockDoor,
+        SpecialAction::Plot => InteractionManaSpecialAction::Plot,
+        SpecialAction::TurnFaceUp => InteractionManaSpecialAction::TurnFaceUp,
+        SpecialAction::RollPlanarDie => InteractionManaSpecialAction::RollPlanarDie,
+        SpecialAction::EndContinuousEffect => InteractionManaSpecialAction::EndContinuousEffect,
+    }
+}
+
+fn interaction_mana_spell_cost_criterion(
+    criterion: &SpellCostCriterion,
+) -> InteractionManaSpellCostCriterion {
+    match criterion {
+        SpellCostCriterion::ManaValue { comparator, value } => {
+            InteractionManaSpellCostCriterion::ManaValue {
+                comparator: interaction_mana_comparator(*comparator),
+                value: *value,
+            }
+        }
+        SpellCostCriterion::HasXInCost => InteractionManaSpellCostCriterion::HasXInCost,
+    }
+}
+
+/// Uses the enum's Serde representation, which is the protocol's canonical
+/// keyword vocabulary, instead of its unstable debug representation.
+fn interaction_keyword_kind_code(keyword: crate::types::keywords::KeywordKind) -> String {
+    serde_json::to_value(keyword)
+        .expect("fieldless keyword kinds serialize")
+        .as_str()
+        .expect("fieldless keyword kinds serialize as strings")
+        .to_owned()
+}
+
+fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionManaRestriction {
+    match restriction {
+        ManaRestriction::OnlyForSpell => InteractionManaRestriction::OnlyForSpell,
+        ManaRestriction::OnlyForSpellType(spell_type) => {
+            InteractionManaRestriction::OnlyForSpellType {
+                spell_type: spell_type.clone(),
+            }
+        }
+        ManaRestriction::OnlyForCreatureType(creature_type) => {
+            InteractionManaRestriction::OnlyForCreatureType {
+                creature_type: creature_type.clone(),
+            }
+        }
+        ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type,
+            ability,
+        } => InteractionManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: spell_type.clone(),
+            ability: interaction_mana_ability_activation_scope(*ability),
+        },
+        ManaRestriction::OnlyForActivation => InteractionManaRestriction::OnlyForActivation,
+        ManaRestriction::OnlyForTaggedActivation(tag) => {
+            InteractionManaRestriction::OnlyForTaggedActivation {
+                tag: tag.keyword_str().to_string(),
+            }
+        }
+        ManaRestriction::OnlyForXCosts => InteractionManaRestriction::OnlyForXCosts,
+        ManaRestriction::OnlyForSpellWithKeywordKind(keyword) => {
+            InteractionManaRestriction::OnlyForSpellWithKeywordKind {
+                keyword: interaction_keyword_kind_code(*keyword),
+            }
+        }
+        ManaRestriction::OnlyForSpellWithKeywordKindFromZone(keyword, zone) => {
+            InteractionManaRestriction::OnlyForSpellWithKeywordKindFromZone {
+                keyword: interaction_keyword_kind_code(*keyword),
+                zone: zone_code(*zone),
+            }
+        }
+        ManaRestriction::OnlyForSpellWithManaValue { comparator, value } => {
+            InteractionManaRestriction::OnlyForSpellWithManaValue {
+                comparator: interaction_mana_comparator(*comparator),
+                value: *value,
+            }
+        }
+        ManaRestriction::OnlyForSpellMatchingCostCriteria {
+            spell_type,
+            criteria,
+        } => InteractionManaRestriction::OnlyForSpellMatchingCostCriteria {
+            spell_type: spell_type.clone(),
+            criteria: criteria
+                .iter()
+                .map(interaction_mana_spell_cost_criterion)
+                .collect(),
+        },
+        ManaRestriction::OnlyForSpellWithColorCount { comparator, count } => {
+            InteractionManaRestriction::OnlyForSpellWithColorCount {
+                comparator: interaction_mana_comparator(*comparator),
+                count: *count,
+            }
+        }
+        ManaRestriction::OnlyForSpellColor(color) => {
+            InteractionManaRestriction::OnlyForSpellColor {
+                color: mana_color_dto(*color),
+            }
+        }
+        ManaRestriction::OnlyForSpellFromZone(zone_spend) => {
+            InteractionManaRestriction::OnlyForSpellFromZone {
+                zone: zone_code(zone_spend.zone),
+                polarity: match zone_spend.polarity {
+                    ZoneSpendPolarity::From => InteractionManaZoneSpendPolarity::From,
+                    ZoneSpendPolarity::NotFrom => InteractionManaZoneSpendPolarity::NotFrom,
+                },
+            }
+        }
+        ManaRestriction::OnlyForFaceDownSpell => InteractionManaRestriction::OnlyForFaceDownSpell,
+        ManaRestriction::OnlyForAny(restrictions) => InteractionManaRestriction::OnlyForAny {
+            restrictions: restrictions
+                .iter()
+                .map(interaction_mana_restriction)
+                .collect(),
+        },
+        ManaRestriction::OnlyForSpecialAction(action) => {
+            InteractionManaRestriction::OnlyForSpecialAction {
+                action: interaction_mana_special_action(*action),
+            }
+        }
+        ManaRestriction::Impossible => InteractionManaRestriction::Impossible,
+        ManaRestriction::ConvokePayment => InteractionManaRestriction::ConvokePayment,
     }
 }
 
@@ -3793,9 +4157,37 @@ fn project_action_payload(
         GameAction::ChooseEntryAttackTarget { target } => {
             push_attack_target_surface(surfaces, state, target, InteractionRoleCode::AttackTarget)
         }
+        GameAction::TapLandForMana { selection } => {
+            let Some(player) = state
+                .objects
+                .get(&selection.source.object_id)
+                .map(|object| object.controller)
+            else {
+                return;
+            };
+            let Ok(option) =
+                mana_sources::live_land_mana_option_for_selection(state, player, selection)
+            else {
+                return;
+            };
+            for (index, unit) in mana_sources::live_mana_output_for_option(state, player, &option)
+                .into_iter()
+                .enumerate()
+            {
+                surfaces.push(InteractionPresentationSurface::Mana {
+                    role: InteractionRoleCode::ProducedMana,
+                    index: Some(index as u32),
+                    symbols: vec![mana_type_code(unit.mana_type).to_string()],
+                    restrictions: unit
+                        .restrictions
+                        .iter()
+                        .map(interaction_mana_restriction)
+                        .collect(),
+                });
+            }
+        }
         GameAction::PlayLand { .. }
         | GameAction::Foretell { .. }
-        | GameAction::TapLandForMana { .. }
         | GameAction::UntapLandForMana { .. }
         | GameAction::Transform { .. }
         | GameAction::PlayFaceDown { .. }
@@ -4173,6 +4565,7 @@ fn project_action_payload(
                 role: InteractionRoleCode::ConvokeMana,
                 index: None,
                 symbols: vec![mana_type_code(*mana_type).to_string()],
+                restrictions: Vec::new(),
             });
         }
         GameAction::HarmonizeTap { creature_id } => {
@@ -4405,6 +4798,7 @@ fn project_action_payload(
                 role: InteractionRoleCode::ManaChoice,
                 index: None,
                 symbols,
+                restrictions: Vec::new(),
             });
             push_value_surface(surfaces, InteractionRoleCode::Count, count);
         }
@@ -4416,6 +4810,7 @@ fn project_action_payload(
                     .iter()
                     .map(|mana_type| mana_type_code(*mana_type).to_string())
                     .collect(),
+                restrictions: Vec::new(),
             });
         }
         GameAction::ChooseSpecializeColor { color } => push_value_surface(
@@ -4463,6 +4858,23 @@ fn project_action_payload(
             };
             surfaces.push(InteractionPresentationSurface::ShortcutResponse { response });
         }
+        // CR 116.2c: two live pay-to-end permissions are two distinct
+        // candidates, so the group key must reach the surface list or they
+        // project identically. The permanent whose resolution installed the
+        // effect is the player-meaningful discriminator and is derived HERE, in
+        // the engine, rather than being widened into the action payload.
+        GameAction::EndContinuousEffect { group, .. } => {
+            if let Some(source) = crate::game::end_continuous_effect::source_of_group(state, *group)
+            {
+                push_object_surface(
+                    surfaces,
+                    state,
+                    source,
+                    InteractionRoleCode::PermissionSource,
+                );
+            }
+            push_value_surface(surfaces, InteractionRoleCode::Selected, group.0);
+        }
     }
 }
 
@@ -4483,6 +4895,7 @@ fn project_prompt_payload(
                         role: InteractionRoleCode::ModeCost,
                         index: None,
                         symbols: mana_cost_symbols(cost),
+                        restrictions: Vec::new(),
                     });
                 }
             }
@@ -4497,6 +4910,7 @@ fn project_prompt_payload(
                     role: InteractionRoleCode::CastingCost,
                     index: None,
                     symbols: mana_cost_symbols(&option.mana_cost),
+                    restrictions: Vec::new(),
                 });
             }
         }
@@ -4626,6 +5040,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::HarmonizeTap { .. } => InteractionActionCode::HarmonizeTap,
         GameAction::DeclareCompanion { .. } => InteractionActionCode::DeclareCompanion,
         GameAction::CompanionToHand => InteractionActionCode::CompanionToHand,
+        GameAction::EndContinuousEffect { .. } => InteractionActionCode::EndContinuousEffect,
         GameAction::DiscoverChoice { .. } => InteractionActionCode::DiscoverChoice,
         GameAction::GraveyardPaidCastChoice { .. } => {
             InteractionActionCode::GraveyardPaidCastChoice
@@ -4693,6 +5108,7 @@ fn action_surfaces(
         },
         InteractionPresentationSurface::Action {
             code: action_code(action),
+            action_id: Some(interaction_action_id(action)),
         },
     ];
     if let Some(source) = action.source_object() {
@@ -4877,6 +5293,7 @@ fn loop_shortcut_choices(
                             role: InteractionRoleCode::Color,
                             index: None,
                             symbols: vec![mana_color_symbol(*color).to_string()],
+                            restrictions: Vec::new(),
                         },
                     ),
                 }
@@ -5272,6 +5689,7 @@ fn mana_group_choices(
                         role: InteractionRoleCode::ManaChoice,
                         index: Some(candidate.group as u32),
                         symbols: vec![mana_type_code(mana_type).to_string()],
+                        restrictions: Vec::new(),
                     });
                 }
                 ManaGroupCandidateValue::Phyrexian { choice, color } => {
@@ -5279,6 +5697,7 @@ fn mana_group_choices(
                         role: InteractionRoleCode::PhyrexianPayment,
                         index: Some(candidate.group as u32),
                         symbols: vec![mana_color_code(color).to_string()],
+                        restrictions: Vec::new(),
                     });
                     push_value_surface(
                         &mut surfaces,
@@ -5306,6 +5725,7 @@ fn mana_group_choices(
                 },
                 InteractionPresentationSurface::Action {
                     code: InteractionActionCode::CancelCast,
+                    action_id: Some(interaction_action_id(&GameAction::CancelCast)),
                 },
             ],
             status: InteractionChoiceStatus::Available,
@@ -5357,6 +5777,7 @@ fn mode_sequence_choices(
                 },
                 InteractionPresentationSurface::Action {
                     code: InteractionActionCode::CancelCast,
+                    action_id: Some(interaction_action_id(&GameAction::CancelCast)),
                 },
             ],
             status: InteractionChoiceStatus::Available,
@@ -5977,9 +6398,22 @@ fn opportunity_for_slot(
                             filtered_state,
                         ),
                     },
-                    surfaces: vec![InteractionPresentationSurface::Summary {
-                        code: InteractionSummaryCode::Decision,
-                    }],
+                    surfaces: vec![
+                        InteractionPresentationSurface::Summary {
+                            code: InteractionSummaryCode::Decision,
+                        },
+                        // CR 115.1: the opportunity-level label for what this
+                        // announcement will do to whatever is chosen. The
+                        // per-candidate identity surfaces are emitted by
+                        // `target_sequence_choices`; what was missing here was
+                        // the intent, so a consumer could not tell a kill spell
+                        // from a pump spell.
+                        InteractionPresentationSurface::Selection {
+                            intent: projection.intent,
+                            constraint: SelectionConstraint::Count { min, max },
+                            confirm: ConfirmSemantics::Explicit,
+                        },
+                    ],
                     progress: InteractionProgress {
                         selected: 0,
                         minimum: min,
@@ -6341,22 +6775,27 @@ fn opportunity_for_slot(
                     interaction_id: slot.interaction_id.clone(),
                     response: InteractionOpportunityResponse::Schema {
                         spec: InteractionResponseSpec::DeckPartition {
-                            main_total: projection.main_total,
+                            min_main_total: projection.min_main_total,
+                            max_main_total: projection.max_main_total,
                             confirm: ConfirmSemantics::Explicit,
                         },
                         candidates: sideboard_choices(&slot.interaction_id, &projection),
                     },
+                    // `total` carries an *exact* required aggregate; CR 100.5
+                    // leaves the main-deck size a range, so there is none to
+                    // assert and `min`/`max` carry the whole constraint. Same
+                    // encoding the range-valued shortcut surface uses.
                     surfaces: vec![InteractionPresentationSurface::Amount {
-                        min: projection.main_total,
-                        max: projection.main_total,
-                        total: Some(projection.main_total),
+                        min: projection.min_main_total,
+                        max: projection.max_main_total,
+                        total: None,
                     }],
                     progress: InteractionProgress {
                         selected: 0,
-                        minimum: projection.main_total,
-                        maximum: Some(projection.main_total),
+                        minimum: projection.min_main_total,
+                        maximum: Some(projection.max_main_total),
                         aggregate: Some(0),
-                        confirmable: projection.main_total == 0,
+                        confirmable: projection.min_main_total == 0,
                     },
                 },
                 InteractionAvailability::InputRequired,
@@ -6743,6 +7182,7 @@ pub fn derive_viewer_interaction(
             can_submit: false,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Terminal {
                 outcome: InteractionOutcomeCode::Terminal,
             },
@@ -6758,6 +7198,7 @@ pub fn derive_viewer_interaction(
             can_submit: false,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Waiting,
         };
     }
@@ -6775,6 +7216,7 @@ pub fn derive_viewer_interaction(
             can_submit: true,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::AuthorityUnbound,
             },
@@ -6790,6 +7232,7 @@ pub fn derive_viewer_interaction(
             can_submit: true,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::InvalidAuthorityState,
             },
@@ -6816,12 +7259,14 @@ pub fn derive_viewer_interaction(
             can_submit: true,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::PayloadTooLarge,
             },
         };
     }
     let mut opportunities = Vec::with_capacity(slots.len());
+    let mut attachment_fans = BTreeMap::new();
     let mut first_progress = None;
     let mut first_fallback = None;
     let default_availability = InteractionAvailability::Stuck {
@@ -6830,8 +7275,21 @@ pub fn derive_viewer_interaction(
     for slot in slots {
         let (mut opportunity, mut slot_availability) =
             opportunity_for_slot(authoritative_state, filtered_state, viewer, slot);
-        if bound_outbound_opportunity(&opportunity).is_err() {
+        let opportunity_is_bounded = bound_outbound_opportunity(&opportunity).is_ok();
+        if !opportunity_is_bounded {
             (opportunity, slot_availability) = payload_too_large_opportunity(&slot.interaction_id);
+        }
+        if opportunity_is_bounded
+            && !matches!(
+                slot_availability,
+                InteractionAvailability::Unsupported { .. }
+            )
+        {
+            attachment_fans.extend(attachment_fans_for_slot(
+                authoritative_state,
+                filtered_state,
+                slot,
+            ));
         }
         if matches!(
             slot_availability,
@@ -6860,10 +7318,12 @@ pub fn derive_viewer_interaction(
             WaitingFor::Priority { .. }
         ) && authoritative_state.auto_pass.contains_key(&viewer),
         opportunities,
+        attachment_fans,
         availability,
     };
     if bound_outbound_view(&view).is_err() {
         view.opportunities.clear();
+        view.attachment_fans.clear();
         view.availability = InteractionAvailability::Unsupported {
             reason: InteractionReasonCode::PayloadTooLarge,
         };
@@ -6871,9 +7331,191 @@ pub fn derive_viewer_interaction(
     view
 }
 
+/// Build attachment affordances from typed decision provenance. The host
+/// back-link and child forward-link must agree; this avoids surfacing stale
+/// relationship data or indirect descendants.
+fn attachment_fans_for_slot(
+    authoritative_state: &GameState,
+    filtered_state: &GameState,
+    slot: &ActiveInteractionSlot,
+) -> BTreeMap<u64, InteractionAttachmentFan> {
+    let semantic_owner = PlayerId(slot.semantic_owner);
+    let model = human_response_model(&filtered_state.waiting_for, semantic_owner);
+    let object_choices = match model {
+        HumanResponseModel::TargetSequence => {
+            target_sequence_projection(&filtered_state.waiting_for)
+                .ok()
+                .flatten()
+                .into_iter()
+                .flat_map(|projection| {
+                    projection
+                        .candidates
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, target)| match target {
+                            TargetRef::Object(object_id) => Some((
+                                object_id,
+                                interaction_choice_id(&slot.interaction_id, 't', index),
+                            )),
+                            TargetRef::Player(_) => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        }
+        HumanResponseModel::Select => {
+            selection_projection(&filtered_state.waiting_for, filtered_state, semantic_owner)
+                .ok()
+                .flatten()
+                .into_iter()
+                .flat_map(|projection| {
+                    projection
+                        .object_ids
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, object_id)| {
+                            (
+                                object_id,
+                                interaction_choice_id(&slot.interaction_id, 's', index),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        }
+        HumanResponseModel::ExactCandidates(AuditedExactCandidates) => {
+            actor_candidates(authoritative_state, semantic_owner)
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, candidate)| {
+                    candidate.action.source_object().map(|object_id| {
+                        (
+                            object_id,
+                            interaction_choice_id(&slot.interaction_id, 'c', index),
+                        )
+                    })
+                })
+                .collect()
+        }
+        HumanResponseModel::Terminal
+        | HumanResponseModel::AssignAmounts
+        | HumanResponseModel::AmountAssignments
+        | HumanResponseModel::DamageAssignments
+        | HumanResponseModel::TriggerOrder
+        | HumanResponseModel::CoinFlipSequence
+        | HumanResponseModel::CategorySelection
+        | HumanResponseModel::CombatRelations(_)
+        | HumanResponseModel::ManaGroups(_)
+        | HumanResponseModel::ModeSequence
+        | HumanResponseModel::OutsideSelection
+        | HumanResponseModel::TextChoice
+        | HumanResponseModel::ShortcutReply
+        | HumanResponseModel::DirectChoices
+        | HumanResponseModel::SideboardPartition
+        | HumanResponseModel::NumberRange(_)
+        | HumanResponseModel::LoopShortcut => Vec::new(),
+    };
+    attachment_fans_for_object_choices(filtered_state, &slot.interaction_id, model, object_choices)
+}
+
+fn attachment_fans_for_object_choices(
+    filtered_state: &GameState,
+    interaction_id: &InteractionId,
+    model: HumanResponseModel,
+    object_choices: impl IntoIterator<Item = (ObjectId, InteractionChoiceId)>,
+) -> BTreeMap<u64, InteractionAttachmentFan> {
+    let mut fans: BTreeMap<
+        (InteractionId, ObjectId),
+        BTreeMap<ObjectId, Vec<InteractionChoiceId>>,
+    > = BTreeMap::new();
+
+    for (child_id, choice_id) in object_choices {
+        let Some(child) = filtered_state.objects.get(&child_id) else {
+            continue;
+        };
+        let Some(AttachTarget::Object(host_id)) = child.attached_to else {
+            continue;
+        };
+        let Some(host) = filtered_state.objects.get(&host_id) else {
+            continue;
+        };
+        if !host.attachments.contains(&child_id) {
+            continue;
+        }
+        let choice_ids = fans
+            .entry((interaction_id.clone(), host_id))
+            .or_default()
+            .entry(child_id)
+            .or_default();
+        if !choice_ids.contains(&choice_id) {
+            choice_ids.push(choice_id);
+        }
+    }
+
+    fans.into_iter()
+        .filter_map(|((interaction_id, host_id), children)| {
+            let children = children
+                .into_iter()
+                .filter_map(|(object_id, choice_ids)| {
+                    let [choice_id] = choice_ids.as_slice() else {
+                        return None;
+                    };
+                    attachment_fan_submission(&interaction_id, model, choice_id.clone()).map(
+                        |submission| InteractionAttachmentFanChild {
+                            object_id: object_id.0,
+                            submission,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            (!children.is_empty()).then_some((
+                host_id.0,
+                InteractionAttachmentFan {
+                    host_id: host_id.0,
+                    children,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Only publish one-step attachment picks. Multi-choice objects and response
+/// families that require the UI to synthesize a payload stay in the normal
+/// interaction surface until the engine exposes a dedicated picker model.
+fn attachment_fan_submission(
+    interaction_id: &InteractionId,
+    model: HumanResponseModel,
+    choice_id: InteractionChoiceId,
+) -> Option<InteractionSubmission> {
+    let response = match model {
+        HumanResponseModel::ExactCandidates(_) => InteractionResponse::Choose { choice_id },
+        HumanResponseModel::Select => InteractionResponse::Select {
+            choice_ids: vec![choice_id],
+        },
+        HumanResponseModel::TargetSequence => InteractionResponse::Sequence {
+            choice_ids: vec![choice_id],
+        },
+        _ => return None,
+    };
+    Some(InteractionSubmission {
+        interaction_id: interaction_id.clone(),
+        response,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InteractionSubmitError {
     pub code: InteractionReasonCode,
+}
+
+/// Successful interaction submission. The action is the exact opaque response
+/// materialized by the engine and is available to trusted adapters solely for
+/// post-success replay recording.
+#[derive(Debug, Clone)]
+pub struct AppliedInteraction {
+    pub action: GameAction,
+    pub result: ActionResult,
 }
 
 impl From<InteractionReasonCode> for InteractionSubmitError {
@@ -6940,10 +7582,18 @@ fn bound_outbound_surface(
             counter_type: value,
             ..
         } => budget.string(value)?,
-        InteractionPresentationSurface::Mana { symbols, .. } => {
+        InteractionPresentationSurface::Mana {
+            symbols,
+            restrictions,
+            ..
+        } => {
             budget.list(symbols.len())?;
             for symbol in symbols {
                 budget.string(symbol)?;
+            }
+            budget.list(restrictions.len())?;
+            for restriction in restrictions {
+                bound_outbound_mana_restriction(restriction, budget)?;
             }
         }
         InteractionPresentationSurface::Summary { .. }
@@ -6953,6 +7603,57 @@ fn bound_outbound_surface(
         | InteractionPresentationSurface::Selection { .. }
         | InteractionPresentationSurface::Amount { .. }
         | InteractionPresentationSurface::ShortcutResponse { .. } => {}
+    }
+    Ok(())
+}
+
+fn bound_outbound_mana_restriction(
+    restriction: &InteractionManaRestriction,
+    budget: &mut OutboundBudget,
+) -> Result<(), InteractionReasonCode> {
+    match restriction {
+        InteractionManaRestriction::OnlyForSpell
+        | InteractionManaRestriction::OnlyForActivation
+        | InteractionManaRestriction::OnlyForXCosts
+        | InteractionManaRestriction::OnlyForFaceDownSpell
+        | InteractionManaRestriction::Impossible
+        | InteractionManaRestriction::ConvokePayment => {}
+        InteractionManaRestriction::OnlyForSpellType { spell_type }
+        | InteractionManaRestriction::OnlyForCreatureType {
+            creature_type: spell_type,
+        }
+        | InteractionManaRestriction::OnlyForTaggedActivation { tag: spell_type }
+        | InteractionManaRestriction::OnlyForSpellWithKeywordKind {
+            keyword: spell_type,
+        } => {
+            budget.string(spell_type)?;
+        }
+        InteractionManaRestriction::OnlyForTypeSpellsOrAbilities { spell_type, .. } => {
+            budget.string(spell_type)?;
+        }
+        InteractionManaRestriction::OnlyForSpellWithKeywordKindFromZone { keyword, .. } => {
+            budget.string(keyword)?;
+        }
+        InteractionManaRestriction::OnlyForSpellMatchingCostCriteria {
+            spell_type,
+            criteria,
+        } => {
+            if let Some(spell_type) = spell_type {
+                budget.string(spell_type)?;
+            }
+            budget.list(criteria.len())?;
+        }
+        InteractionManaRestriction::OnlyForSpellWithManaValue { .. }
+        | InteractionManaRestriction::OnlyForSpellWithColorCount { .. }
+        | InteractionManaRestriction::OnlyForSpellColor { .. }
+        | InteractionManaRestriction::OnlyForSpellFromZone { .. }
+        | InteractionManaRestriction::OnlyForSpecialAction { .. } => {}
+        InteractionManaRestriction::OnlyForAny { restrictions } => {
+            budget.list(restrictions.len())?;
+            for restriction in restrictions {
+                bound_outbound_mana_restriction(restriction, budget)?;
+            }
+        }
     }
     Ok(())
 }
@@ -7097,6 +7798,14 @@ fn bound_outbound_view(view: &ViewerInteraction) -> Result<(), InteractionReason
     budget.list(view.opportunities.len())?;
     for opportunity in &view.opportunities {
         bound_outbound_opportunity_with_budget(opportunity, &mut budget)?;
+    }
+    budget.list(view.attachment_fans.len())?;
+    for fan in view.attachment_fans.values() {
+        budget.list(fan.children.len())?;
+        for child in &fan.children {
+            budget.string(child.submission.interaction_id.as_str())?;
+            bound_outbound_response(&child.submission.response, &mut budget)?;
+        }
     }
     if let InteractionAvailability::ProgressAvailable { witness } = &view.availability {
         budget.string(witness.interaction_id.as_str())?;
@@ -7783,10 +8492,16 @@ fn materialize_sideboard_response(
         }
         main_counts[index] = assignment.amount;
     }
-    let main_total = main_counts
+    // CR 100.2a / CR 100.4a / CR 100.5: the main deck must land inside the
+    // projected interval, not on an exact size — a larger main deck is legal
+    // as long as the sideboard still fits under its cap.
+    let Some(main_total) = main_counts
         .iter()
-        .try_fold(0u32, |total, count| total.checked_add(*count));
-    if main_total != Some(projection.main_total) {
+        .try_fold(0u32, |total, count| total.checked_add(*count))
+    else {
+        return Err(InteractionReasonCode::ConstraintUnsatisfied);
+    };
+    if main_total < projection.min_main_total || main_total > projection.max_main_total {
         return Err(InteractionReasonCode::ConstraintUnsatisfied);
     }
     let main = projection
@@ -7815,9 +8530,9 @@ fn materialize_sideboard_response(
         GameAction::SubmitSideboard { main, sideboard },
         InteractionProgress {
             selected: assignments.len().min(u32::MAX as usize) as u32,
-            minimum: projection.main_total,
-            maximum: Some(projection.main_total),
-            aggregate: i32::try_from(projection.main_total).ok(),
+            minimum: projection.min_main_total,
+            maximum: Some(projection.max_main_total),
+            aggregate: i32::try_from(main_total).ok(),
             confirmable: true,
         },
     ))
@@ -8527,6 +9242,41 @@ pub fn preview_interaction(
     }
 }
 
+/// Materialize the `GameAction` an interaction response denotes, **without**
+/// applying it.
+///
+/// [`submit_interaction`] is the mutating path and delegates here for everything
+/// up to the reducer, so the two cannot drift. This variant exists for consumers
+/// that own their own dispatch and need the action itself — the ManaBrew adapter
+/// translates a client's prompt answer into a `GameAction` and returns it to its
+/// caller rather than applying it.
+///
+/// Such a consumer must never re-derive this mapping. `materialize_response`
+/// matches exhaustively on `HumanResponseModel` with no catch-all arm, so the
+/// compiler forces every new decision family through it; a reimplementation
+/// living outside the engine would keep compiling while silently going stale.
+///
+/// Dropping the mutation does not weaken authorization. `slot_for_submission`
+/// still authenticates `actor` against the slot, so this cannot be used to
+/// materialize a decision that belongs to another player.
+pub fn resolve_interaction_response(
+    state: &GameState,
+    actor: PlayerId,
+    submission: &InteractionSubmission,
+) -> Result<GameAction, InteractionSubmitError> {
+    bound_string(submission.interaction_id.as_str())?;
+    validate_response_bounds(&submission.response)?;
+    slot_for_submission(state, actor, &submission.interaction_id)?;
+    let filtered = visibility::filter_state_for_viewer(state, actor);
+    let (action, _) = materialize_response(
+        state,
+        &filtered,
+        &submission.interaction_id,
+        &submission.response,
+    )?;
+    Ok(action)
+}
+
 /// Hidden engine-only submission entry point. The opaque interaction and choice
 /// IDs are looked up against current trusted state, authorization is rechecked,
 /// projection is recomputed from a viewer-filtered clone, and the materialized
@@ -8535,21 +9285,18 @@ pub fn submit_interaction(
     state: &mut GameState,
     actor: PlayerId,
     submission: InteractionSubmission,
-) -> Result<ActionResult, InteractionSubmitError> {
-    bound_string(submission.interaction_id.as_str())?;
-    validate_response_bounds(&submission.response)?;
+) -> Result<AppliedInteraction, InteractionSubmitError> {
+    let action = resolve_interaction_response(state, actor, &submission)?;
+    // Re-read the slot rather than threading it out of `resolve_*`: keeping that
+    // function's return to the action alone is what makes it usable as a public
+    // seam. The lookup is a scan of `active_interaction_slots`, which holds one
+    // slot per pending decision, and it has already succeeded once here.
     let semantic_owner =
         PlayerId(slot_for_submission(state, actor, &submission.interaction_id)?.semantic_owner);
-    let filtered = visibility::filter_state_for_viewer(state, actor);
-    let (action, _) = materialize_response(
-        state,
-        &filtered,
-        &submission.interaction_id,
-        &submission.response,
-    )?;
-    apply_interaction(state, actor, semantic_owner, action).map_err(|_error: EngineError| {
-        InteractionSubmitError {
+    let result = apply_interaction(state, actor, semantic_owner, action.clone()).map_err(
+        |_error: EngineError| InteractionSubmitError {
             code: InteractionReasonCode::ReducerRejected,
-        }
-    })
+        },
+    )?;
+    Ok(AppliedInteraction { action, result })
 }

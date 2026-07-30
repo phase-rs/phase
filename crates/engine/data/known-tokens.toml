@@ -4691,7 +4691,7 @@ set_code = "SOS"
 set_name = "Secrets of Strixhaven"
 collector_number = "7"
 released_at = "2026-04-24"
-type_line = "Token Creature Inkling"
+type_line = "Token Creature — Inkling"
 rules_text = "Flying"
 
 [token.body]
@@ -4699,7 +4699,7 @@ display_name = "Inkling"
 power = 1
 toughness = 1
 core_types = ["Creature"]
-subtypes = []
+subtypes = ["Inkling"]
 supertypes = []
 colors = [
     "Black",
@@ -13086,6 +13086,7 @@ source_card_names = [
     "Grave Titan",
     "Gravedig",
     "Graveyard Marshal",
+    "Grim Reaper's Scythe",
     "Grixis Slavedriver",
     "Havengul Runebinder",
     "Headless Rider",
@@ -96460,13 +96461,16 @@ source_card_names = [
     "Collector's Vault",
     "Common Crook",
     "Contested Game Ball",
+    "Contract Hero",
     "Contract Killing",
     "Corsair Captain",
     "Crack Open",
     "Creative Outburst",
+    "Crossover Collaboration",
     "Culmination of Studies",
     "Currency Converter",
     "Cutthroat Negotiator",
+    "Daily Bugle Newspaper",
     "Deadeye Plunderers",
     "Deadly Derision",
     "Deadly Dispute",
@@ -96532,6 +96536,7 @@ source_card_names = [
     "Hell to Pay",
     "Henry Wu, InGen Geneticist",
     "Herald of Hadar",
+    "Heroes for Hire",
     "Hit the Mother Lode",
     "Hoard Hauler",
     "Hoard Robber",
@@ -96559,6 +96564,7 @@ source_card_names = [
     "Kerblam! Warehouse",
     "Kheru Goldkeeper",
     "Killmonger, Ruthless Usurper",
+    "Kingpin, Wilson Fisk",
     "Korvold and the Noble Thief",
     "Life Insurance",
     "Lobelia Sackville-Baggins",
@@ -96566,6 +96572,7 @@ source_card_names = [
     "Loot Dispute",
     "Lotho, Corrupt Shirriff",
     "Luck Bobblehead",
+    "Luke Cage, Hero for Hire",
     "Luxurious Locomotive",
     "Magda, Brazen Outlaw",
     "Magda, the Hoardmaster",
@@ -144052,6 +144059,7 @@ source_card_names = [
     "Grave Titan",
     "Gravedig",
     "Graveyard Marshal",
+    "Grim Reaper's Scythe",
     "Grixis Slavedriver",
     "Havengul Runebinder",
     "Headless Rider",
@@ -163907,6 +163915,7 @@ source_card_names = [
     "Grave Titan",
     "Gravedig",
     "Graveyard Marshal",
+    "Grim Reaper's Scythe",
     "Grixis Slavedriver",
     "Havengul Runebinder",
     "Headless Rider",
@@ -167944,13 +167953,16 @@ source_card_names = [
     "Collector's Vault",
     "Common Crook",
     "Contested Game Ball",
+    "Contract Hero",
     "Contract Killing",
     "Corsair Captain",
     "Crack Open",
     "Creative Outburst",
+    "Crossover Collaboration",
     "Culmination of Studies",
     "Currency Converter",
     "Cutthroat Negotiator",
+    "Daily Bugle Newspaper",
     "Deadeye Plunderers",
     "Deadly Derision",
     "Deadly Dispute",
@@ -168016,6 +168028,7 @@ source_card_names = [
     "Hell to Pay",
     "Henry Wu, InGen Geneticist",
     "Herald of Hadar",
+    "Heroes for Hire",
     "Hit the Mother Lode",
     "Hoard Hauler",
     "Hoard Robber",
@@ -168043,6 +168056,7 @@ source_card_names = [
     "Kerblam! Warehouse",
     "Kheru Goldkeeper",
     "Killmonger, Ruthless Usurper",
+    "Kingpin, Wilson Fisk",
     "Korvold and the Noble Thief",
     "Life Insurance",
     "Lobelia Sackville-Baggins",
@@ -168050,6 +168064,7 @@ source_card_names = [
     "Loot Dispute",
     "Lotho, Corrupt Shirriff",
     "Luck Bobblehead",
+    "Luke Cage, Hero for Hire",
     "Luxurious Locomotive",
     "Magda, Brazen Outlaw",
     "Magda, the Hoardmaster",
@@ -173739,7 +173754,7 @@ set_code = "SOS"
 set_name = "Secrets of Strixhaven"
 collector_number = "6"
 released_at = "2026-04-24"
-type_line = "Token Creature Inkling"
+type_line = "Token Creature — Inkling"
 rules_text = "Flying"
 
 [token.body]
@@ -173747,7 +173762,7 @@ display_name = "Inkling"
 power = 1
 toughness = 1
 core_types = ["Creature"]
-subtypes = []
+subtypes = ["Inkling"]
 supertypes = []
 colors = [
     "Black",
@@ -190291,13 +190306,16 @@ source_card_names = [
     "Collector's Vault",
     "Common Crook",
     "Contested Game Ball",
+    "Contract Hero",
     "Contract Killing",
     "Corsair Captain",
     "Crack Open",
     "Creative Outburst",
+    "Crossover Collaboration",
     "Culmination of Studies",
     "Currency Converter",
     "Cutthroat Negotiator",
+    "Daily Bugle Newspaper",
     "Deadeye Plunderers",
     "Deadly Derision",
     "Deadly Dispute",
@@ -190363,6 +190381,7 @@ source_card_names = [
     "Hell to Pay",
     "Henry Wu, InGen Geneticist",
     "Herald of Hadar",
+    "Heroes for Hire",
     "Hit the Mother Lode",
     "Hoard Hauler",
     "Hoard Robber",
@@ -190390,6 +190409,7 @@ source_card_names = [
     "Kerblam! Warehouse",
     "Kheru Goldkeeper",
     "Killmonger, Ruthless Usurper",
+    "Kingpin, Wilson Fisk",
     "Korvold and the Noble Thief",
     "Life Insurance",
     "Lobelia Sackville-Baggins",
@@ -190397,6 +190417,7 @@ source_card_names = [
     "Loot Dispute",
     "Lotho, Corrupt Shirriff",
     "Luck Bobblehead",
+    "Luke Cage, Hero for Hire",
     "Luxurious Locomotive",
     "Magda, Brazen Outlaw",
     "Magda, the Hoardmaster",
@@ -197357,13 +197378,16 @@ source_card_names = [
     "Collector's Vault",
     "Common Crook",
     "Contested Game Ball",
+    "Contract Hero",
     "Contract Killing",
     "Corsair Captain",
     "Crack Open",
     "Creative Outburst",
+    "Crossover Collaboration",
     "Culmination of Studies",
     "Currency Converter",
     "Cutthroat Negotiator",
+    "Daily Bugle Newspaper",
     "Deadeye Plunderers",
     "Deadly Derision",
     "Deadly Dispute",
@@ -197429,6 +197453,7 @@ source_card_names = [
     "Hell to Pay",
     "Henry Wu, InGen Geneticist",
     "Herald of Hadar",
+    "Heroes for Hire",
     "Hit the Mother Lode",
     "Hoard Hauler",
     "Hoard Robber",
@@ -197456,6 +197481,7 @@ source_card_names = [
     "Kerblam! Warehouse",
     "Kheru Goldkeeper",
     "Killmonger, Ruthless Usurper",
+    "Kingpin, Wilson Fisk",
     "Korvold and the Noble Thief",
     "Life Insurance",
     "Lobelia Sackville-Baggins",
@@ -197463,6 +197489,7 @@ source_card_names = [
     "Loot Dispute",
     "Lotho, Corrupt Shirriff",
     "Luck Bobblehead",
+    "Luke Cage, Hero for Hire",
     "Luxurious Locomotive",
     "Magda, Brazen Outlaw",
     "Magda, the Hoardmaster",

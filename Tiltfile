@@ -141,7 +141,7 @@ local_resource('server',
 # `cargo test-all`) do not enable engine/proptest; a feature mismatch here would
 # force a rebuild.
 local_resource('build-native',
-    cmd = 'cargo nextest run -p engine -p phase-ai --no-run',
+    cmd = 'cargo nextest run -p phase-engine -p phase-ai --no-run',
     deps = ENGINE_SRC + ENGINE_TESTS + AI_SRC + AI_TESTS,
     ignore = TMP_IGNORE,
     allow_parallel = True,
@@ -150,7 +150,7 @@ local_resource('build-native',
 )
 
 local_resource('test-engine',
-    cmd = 'cargo nextest run -p engine',
+    cmd = 'cargo nextest run -p phase-engine',
     deps = ENGINE_SRC + ENGINE_TESTS,
     ignore = TMP_IGNORE,
     resource_deps = ['build-native'],

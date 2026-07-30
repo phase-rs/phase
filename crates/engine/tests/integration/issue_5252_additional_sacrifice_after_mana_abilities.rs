@@ -884,7 +884,7 @@ fn finalize_rejection_happens_before_deferred_sacrifice_costs_are_paid() {
 
     let commander = scenario.add_creature(P0, "Commander Creature", 2, 2).id();
     let plain = scenario.add_creature(P0, "Plain Creature", 2, 2).id();
-    let artifact = scenario
+    let _artifact = scenario
         .add_creature(P0, "Chromatic Lens-shaped Rock", 0, 1)
         .as_artifact()
         .with_static(StaticMode::SpendManaAsAnyColor {
@@ -943,6 +943,7 @@ fn finalize_rejection_happens_before_deferred_sacrifice_costs_are_paid() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("conditional flash should allow cast announcement before target choice");
+    let before_rejected_target = runner.state().clone();
     let result = runner.act(GameAction::SelectTargets {
         targets: vec![engine::types::ability::TargetRef::Object(plain)],
     });
@@ -950,30 +951,12 @@ fn finalize_rejection_happens_before_deferred_sacrifice_costs_are_paid() {
         result.is_err(),
         "non-commander target must reject before deferred sacrifice costs are paid"
     );
-    assert!(
-        !runner.state().objects[&artifact].tapped,
-        "rejected cast must not tap the deferred sacrifice artifact for mana"
-    );
+    // Rejected actions are atomic: the invalid target cannot pay mana or the
+    // deferred sacrifice cost, and the valid target-selection state remains.
     assert_eq!(
-        runner.state().objects[&artifact].zone,
-        Zone::Battlefield,
-        "rejected cast must not sacrifice the deferred artifact"
-    );
-    let pool_total = runner
-        .state()
-        .players
-        .iter()
-        .find(|player| player.id == P0)
-        .map(|player| player.mana_pool.total())
-        .unwrap_or(0);
-    assert_eq!(pool_total, 0, "rejected cast must not leave floated mana");
-    assert!(
-        runner.state().pending_cast.is_none(),
-        "terminal cast rejection must not restore a stale pending cast"
-    );
-    assert!(
-        runner.state().stack.is_empty(),
-        "terminal cast rejection must remove the announcement stack entry"
+        runner.state(),
+        &before_rejected_target,
+        "finalize rejection must preserve the pre-selection cast state"
     );
 }
 

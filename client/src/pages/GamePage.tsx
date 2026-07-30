@@ -19,6 +19,11 @@ import type {
   ObjectId,
   SerializedAbilityCost,
 } from "../adapter/types";
+import type {
+  InteractionManaRestriction,
+  InteractionPresentationSurface,
+  ViewerInteraction,
+} from "../adapter/generated/interaction";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -500,6 +505,15 @@ export function GamePage() {
         if (!isOnlineMode) {
           setReconnectState({ status: "failed" });
         }
+        break;
+      case "requestRejected":
+        // The server refused a request; the session is intact. Deliberately
+        // does NOT touch `reconnectState` — that is the whole point of this
+        // case existing beside `error` rather than being folded into it.
+        // `event.reason` is server-authored and so passes through raw, per
+        // `client/src/i18n/README.md` ("a string gets `t()` if and only if the
+        // frontend authored it").
+        useMultiplayerStore.getState().showToast(event.reason);
         break;
       case "deckRejected":
         navigate("/multiplayer", {
@@ -1531,7 +1545,27 @@ function GamePageContent({
         onSettingsClick={() => setPreferencesOpen({})}
         onHelpClick={() => setHelpSheetOpen(true)}
         onConcede={onShowConcedeDialog}
-        onRequestTakeback={isOnlineMode ? handleRequestTakeback : undefined}
+        // Takeback is a TRANSPORT capability, not a mode policy: only
+        // `WebSocketAdapter` implements `sendRequestTakeback`, which is why
+        // `handleRequestTakeback` already guards on the adapter type. Gating
+        // the prop the same way makes the button's presence agree with the
+        // handler instead of duplicating a different rule.
+        //
+        // `isOnlineMode` was wrong twice over. It is URL-derived and can never
+        // see `native-ai` (desktop solo arrives as `mode=ai`), so desktop solo
+        // — which has a real server-authoritative takeback and no client-side
+        // undo — never got the button. And it showed the button to spectators,
+        // whom `request_takeback` rejects server-side.
+        //
+        // A mode-based replacement would be wrong in the other direction:
+        // `p2p-host`/`p2p-join`/`draft-match` are also wire-authoritative but
+        // do not necessarily carry a `WebSocketAdapter`, so they would get a
+        // dead button that silently no-ops inside the handler's own guard.
+        onRequestTakeback={
+          adapter instanceof WebSocketAdapter && mode !== "spectate"
+            ? handleRequestTakeback
+            : undefined
+        }
         showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
         onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
         debugClickModeButtonVisible={debugClickModeButtonVisible}
@@ -1963,6 +1997,8 @@ function GamePageContent({
               pool={pool}
               gameNumber={waitingFor.data.game_number}
               score={waitingFor.data.score}
+              minMainDeckSize={waitingFor.data.min_main_deck_size}
+              maxSideboardSize={waitingFor.data.max_sideboard_size}
               onSubmit={handleSubmitSideboard}
             />
           );
@@ -2847,6 +2883,133 @@ function GameOverScreen({
 
 // ── Ability Choice Modal ──────────────────────────────────────────────────
 
+export function manaRestrictionLabel(
+  t: TFunction<"game">,
+  restriction: InteractionManaRestriction,
+): string {
+  switch (restriction.type) {
+    case "onlyForTypeSpellsOrAbilities":
+      return t(
+        restriction.data.ability === "ofSpellType"
+          ? "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesOfSpellType"
+          : "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesAny",
+        { spellType: restriction.data.spellType },
+      );
+    case "onlyForSpell":
+      return t("gamePage.manaRestrictions.onlyForSpell");
+    case "onlyForActivation":
+      return t("gamePage.manaRestrictions.onlyForActivation");
+    case "onlyForSpellType":
+      return t("gamePage.manaRestrictions.onlyForSpellType", restriction.data);
+    case "onlyForCreatureType":
+      return t("gamePage.manaRestrictions.onlyForCreatureType", restriction.data);
+    case "onlyForTaggedActivation":
+      return t("gamePage.manaRestrictions.onlyForTaggedActivation", restriction.data);
+    case "onlyForXCosts":
+      return t("gamePage.manaRestrictions.onlyForXCosts");
+    case "onlyForSpellWithKeywordKind":
+      return t("gamePage.manaRestrictions.onlyForSpellWithKeywordKind", restriction.data);
+    case "onlyForSpellWithKeywordKindFromZone":
+      return t("gamePage.manaRestrictions.onlyForSpellWithKeywordKindFromZone", restriction.data);
+    case "onlyForSpellWithManaValue":
+      return t("gamePage.manaRestrictions.onlyForSpellWithManaValue", restriction.data);
+    case "onlyForSpellMatchingCostCriteria":
+      return t("gamePage.manaRestrictions.onlyForSpellMatchingCostCriteria", {
+        spellType: restriction.data.spellType ?? t("gamePage.manaRestrictions.anySpell"),
+        criteria: restriction.data.criteria.map((criterion) => {
+          switch (criterion.type) {
+            case "manaValue":
+              return t("gamePage.manaRestrictions.manaValueCriterion", criterion.data);
+            case "hasXInCost":
+              return t("gamePage.manaRestrictions.hasXInCostCriterion");
+          }
+        }).join(", "),
+      });
+    case "onlyForSpellWithColorCount":
+      return t("gamePage.manaRestrictions.onlyForSpellWithColorCount", restriction.data);
+    case "onlyForSpellColor":
+      return t("gamePage.manaRestrictions.onlyForSpellColor", restriction.data);
+    case "onlyForSpellFromZone":
+      return t("gamePage.manaRestrictions.onlyForSpellFromZone", restriction.data);
+    case "onlyForFaceDownSpell":
+      return t("gamePage.manaRestrictions.onlyForFaceDownSpell");
+    case "onlyForAny":
+      return t("gamePage.manaRestrictions.onlyForAny", {
+        restrictions: restriction.data.restrictions
+          .map((nested) => manaRestrictionLabel(t, nested))
+          .join(" "),
+      });
+    case "onlyForSpecialAction":
+      return t("gamePage.manaRestrictions.onlyForSpecialAction", restriction.data);
+    case "impossible":
+      return t("gamePage.manaRestrictions.impossible");
+    case "convokePayment":
+      return t("gamePage.manaRestrictions.convokePayment");
+  }
+}
+
+function projectedManaChoiceLabel(t: TFunction<"game">, surfaces: InteractionPresentationSurface[]): {
+  label: string;
+  description?: string;
+} {
+  const units = surfaces.filter(
+    (surface): surface is Extract<InteractionPresentationSurface, { type: "mana" }> =>
+      surface.type === "mana" && surface.data.role === "producedMana",
+  );
+  if (units.length === 0) return { label: t("gamePage.manaRestrictions.tapForMana") };
+
+  const grouped = new Map<string, { symbols: string[]; restrictions: InteractionManaRestriction[]; count: number }>();
+  for (const unit of units) {
+    const key = JSON.stringify([unit.data.symbols, unit.data.restrictions]);
+    const group = grouped.get(key);
+    if (group) {
+      group.count += 1;
+    } else {
+      grouped.set(key, {
+        symbols: unit.data.symbols,
+        restrictions: unit.data.restrictions,
+        count: 1,
+      });
+    }
+  }
+  const label = [...grouped.values()]
+    .map(({ symbols, count }) => {
+      const mana = symbols.map((symbol) => `{${symbol}}`).join("");
+      return count === 1 ? mana : `${mana} × ${count}`;
+    })
+    .join(" + ");
+  const restrictions = [...grouped.values()]
+    .flatMap((group) => group.restrictions.map((restriction) => manaRestrictionLabel(t, restriction)));
+  return {
+    label: t("gamePage.manaRestrictions.tapFor", { mana: label }),
+    description: restrictions.length > 0 ? [...new Set(restrictions)].join(" ") : undefined,
+  };
+}
+
+export function projectedManaChoices(
+  interaction: ViewerInteraction | null,
+  objectId: ObjectId,
+): Map<string, InteractionPresentationSurface[]> {
+  const choices = new Map<string, InteractionPresentationSurface[]>();
+  if (!interaction) return choices;
+  for (const opportunity of interaction.opportunities) {
+    if (opportunity.response.type !== "exactChoices") continue;
+    for (const choice of opportunity.response.data.choices) {
+      const action = choice.surfaces.find(
+        (surface): surface is Extract<InteractionPresentationSurface, { type: "action" }> =>
+          surface.type === "action" && surface.data.code === "tapLandForMana",
+      );
+      const isSource = choice.surfaces.some(
+        (surface) => surface.type === "object"
+          && surface.data.role === "source"
+          && surface.data.reference === String(objectId),
+      );
+      if (action?.data.actionId && isSource) choices.set(action.data.actionId, choice.surfaces);
+    }
+  }
+  return choices;
+}
+
 function AbilityChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
@@ -2859,6 +3022,7 @@ function AbilityChoiceModal() {
   const webSlingingCosts = useGameStore(
     (s) => s.gameState?.derived?.web_slinging_costs,
   );
+  const viewerInteraction = useGameStore((s) => s.viewerInteraction);
 
   if (!pending || !obj) return null;
 
@@ -2890,6 +3054,7 @@ function AbilityChoiceModal() {
         : allPlayOrCast
           ? t("gamePage.abilityChoice.subtitlePlay")
           : t("gamePage.abilityChoice.subtitleChoose");
+  const manaChoices = projectedManaChoices(viewerInteraction, pending.objectId);
 
   return (
     <ChoiceModal
@@ -2898,12 +3063,18 @@ function AbilityChoiceModal() {
       previewCardName={obj.name}
       previewCardTypes={obj.card_types}
       options={pending.actions.map((action, i) => {
-        const { label, description } = abilityChoiceLabel(
+        let { label, description } = abilityChoiceLabel(
           action,
           obj,
           objects,
           webSlingingCosts,
         );
+        if (action.type === "TapLandForMana") {
+          const surfaces = action.interactionActionId
+            ? manaChoices.get(action.interactionActionId)
+            : undefined;
+          if (surfaces) ({ label, description } = projectedManaChoiceLabel(t, surfaces));
+        }
         // CR 606.1: prefix a loyalty badge for planeswalker ability costs,
         // reading the structured Loyalty cost (never parsing the label string).
         const ability =

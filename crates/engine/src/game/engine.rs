@@ -90,11 +90,17 @@ pub enum PublicFinalizeMode {
 /// selected contribution. Once helper payment has started or completed, its
 /// resources may have changed and cancellation cannot roll that prefix back.
 fn ensure_assist_cancellation_is_allowed(state: &GameState) -> Result<(), EngineError> {
+    let pending = state
+        .pending_cast
+        .as_deref()
+        .or_else(|| state.waiting_for.pending_cast_ref());
+    if pending.is_some_and(|pending| pending.activation_cost_committed) {
+        return Err(EngineError::ActionNotAllowed(
+            "Cannot cancel an activation after a cost is paid".to_string(),
+        ));
+    }
     if matches!(
-        state
-            .pending_cast
-            .as_deref()
-            .map(|pending| pending.assist_state),
+        pending.map(|pending| pending.assist_state),
         Some(AssistState::PaymentStarted { .. } | AssistState::Paid { .. })
     ) {
         return Err(EngineError::ActionNotAllowed(
@@ -297,6 +303,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     mana_sources::preflight_tap_land_action(state, semantic_owner, &action)?;
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
+    let is_actor_scoped_preference = action.is_actor_scoped_preference();
     interaction::ensure_interaction_authority(state);
     let previous_interaction_waiting = state.waiting_for.clone();
     let previous_interaction_slots = state.active_interaction_slots.clone();
@@ -314,11 +321,14 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     state.exiled_from_hand_this_resolution = 0;
     state.die_result_this_resolution = None;
     state.consumed_before_priority_trigger_events.clear();
-    check_actor_authorization(state, authenticated_actor, &action)?;
+    if let Err(err) = check_actor_authorization(state, authenticated_actor, &action) {
+        *state = boundary_snapshot;
+        return Err(err);
+    }
     let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
         Ok(result) => result,
         Err(err) => {
-            state.consumed_before_priority_trigger_events.clear();
+            *state = boundary_snapshot;
             return Err(err);
         }
     };
@@ -326,7 +336,11 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
-    let auto_pass_advanced = run_auto_pass_loop(state, &mut result);
+    let auto_pass_advanced = if is_actor_scoped_preference {
+        false
+    } else {
+        run_auto_pass_loop(state, &mut result)
+    };
     reconcile_terminal_result(state, &mut result);
     // Debug "infinite mana" (CR 500.5 suppressed for flagged players): restore any
     // pool that a spend during this action depleted, before public state is
@@ -3020,9 +3034,10 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_
 ///
 /// - `Concede` self-authenticates via its own `player_id` field — but we still
 ///   require it to match `actor` so a player cannot concede someone else on
-///   their behalf (CR 104.3a).
+///   their behalf (CR 104.3a). It is no longer an action after the game has
+///   ended, when there is no authorized submitter.
 /// - **Preference actions** (SetPhaseStops, SetPriorityPassingMode,
-///   CancelAutoPass) are per-player UI
+///   CancelAutoPass, ReorderHand) are per-player UI
 ///   settings. They have no CR semantics, mutate only the submitter's own
 ///   preference slot, and may legitimately fire at any time — e.g. the human
 ///   toggles a phase stop while the AI holds priority. The downstream handlers
@@ -3035,26 +3050,14 @@ fn check_actor_authorization(
     actor: PlayerId,
     action: &GameAction,
 ) -> Result<(), EngineError> {
-    if let GameAction::Concede { player_id } = action {
-        // CR 104.3a: A player may concede at any time — but only themselves.
-        if *player_id != actor {
-            return Err(EngineError::WrongPlayer);
-        }
-        return Ok(());
-    }
-    if matches!(
-        action,
-        GameAction::SetPhaseStops { .. }
-            | GameAction::SetPriorityPassingMode { .. }
-            | GameAction::SetPriorityYield { .. }
-            | GameAction::SetMayTriggerAutoChoice { .. }
-            | GameAction::SetTriggerOrderTemplate { .. }
-            | GameAction::CancelAutoPass
-            | GameAction::Debug(_)
-            | GameAction::GrantDebugPermission { .. }
-            | GameAction::RevokeDebugPermission { .. }
-            | GameAction::ReorderHand { .. }
-    ) {
+    if action.is_actor_scoped_preference()
+        || matches!(
+            action,
+            GameAction::Debug(_)
+                | GameAction::GrantDebugPermission { .. }
+                | GameAction::RevokeDebugPermission { .. }
+        )
+    {
         return Ok(());
     }
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
@@ -3062,7 +3065,19 @@ fn check_actor_authorization(
     // pending player may submit in any order. Falls back to single-player
     // semantics for every other variant.
     let authorized = turn_control::authorized_submitters(state);
-    if !authorized.is_empty() && !authorized.contains(&actor) {
+    if authorized.is_empty() {
+        return Err(EngineError::WrongPlayer);
+    }
+    if let GameAction::Concede { player_id } = action {
+        // CR 104.3a: A player may concede at any time in an unfinished game —
+        // but only themselves. `GameOver` has no authorized submitter, so it
+        // cannot admit a second concession.
+        if *player_id != actor {
+            return Err(EngineError::WrongPlayer);
+        }
+        return Ok(());
+    }
+    if !authorized.contains(&actor) {
         return Err(EngineError::WrongPlayer);
     }
     Ok(())
@@ -3156,6 +3171,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::DelveManaPayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
             )
         ),
@@ -3175,6 +3191,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::DelveManaPayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
             )
         ),
@@ -3239,6 +3256,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         mana_abilities::resume_mana_ability_cost_move(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::ActivationMillPayment { .. })
+    ) {
+        casting_costs::resume_activation_mill_cost_payment(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
         Some(PendingCostMoveResume::LoyaltyActivation { .. })
     ) {
         super::planeswalker::resume_loyalty_activation(state, events)?
@@ -3254,9 +3276,51 @@ pub(super) fn resume_pending_continuation_if_priority(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        effects::drain_pending_continuation(state, events);
-        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        // CR 118.3b + CR 119.4 + CR 616.1: A life-payment replacement child
+        // drains to its recorded resolution boundary before the paid outer
+        // action resumes. Ordinary continuations then drain only if that
+        // deferred owner actually completed in this pass.
+        let deferred_life_boundary = state
+            .pending_deferred_life_cost_resume
+            .as_ref()
+            .map(crate::types::game_state::DeferredLifeCostResume::resume_at_resolution_depth);
+        if deferred_life_boundary.is_none_or(|boundary| state.resolution_stack.len() > boundary) {
+            effects::drain_pending_continuation(state, events);
+        }
+        if matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && deferred_life_boundary.is_none_or(|boundary| state.resolution_stack.len() > boundary)
+        {
             effects::resume_resolution_frames(state, events);
+        }
+        let mut drained_deferred_life = false;
+        if matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && state
+                .pending_deferred_life_cost_resume
+                .as_ref()
+                .is_some_and(|resume| {
+                    state.resolution_stack.len() <= resume.resume_at_resolution_depth()
+                })
+        {
+            let waiting_for = drain_pending_deferred_life_cost_resume(state, events)?;
+            state.waiting_for = waiting_for;
+            drained_deferred_life = true;
+        }
+        if matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && drained_deferred_life
+            && state.pending_deferred_life_cost_resume.is_none()
+        {
+            effects::drain_pending_continuation(state, events);
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                effects::resume_resolution_frames(state, events);
+            }
+        }
+        // CR 614.6 + CR 500.5: An interactive cross-event substitute may be
+        // the child that suspended the APNAP phase-transition drain. Resume
+        // that typed owner only after the post-replacement frame has
+        // terminally drained; ordinary phase-boundary prompts use other states
+        // and are intentionally unaffected.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            turns::resume_phase_transition_after_post_replacement(state, events);
         }
         // CR 605.3b + CR 616.1: A post-replacement prompt reaches this common
         // boundary only after ordinary continuations drain. The shared typed
@@ -3270,6 +3334,118 @@ pub(super) fn resume_pending_continuation_if_priority(
         }
     }
     Ok(())
+}
+
+/// CR 118.3b + CR 119.4 + CR 616.1: Resume the exact outer cost action after
+/// the life-loss replacement's post-effect has drained back to its recorded
+/// resolution-stack boundary.
+fn drain_pending_deferred_life_cost_resume(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(resume) = state.pending_deferred_life_cost_resume.take() else {
+        return Ok(state.waiting_for.clone());
+    };
+    let resume_for_restore = resume.clone();
+    let result = (|| -> Result<WaitingFor, EngineError> {
+        match resume {
+            crate::types::game_state::DeferredLifeCostResume::Cast {
+                player,
+                pending,
+                remaining_life_payments,
+                resume_at_resolution_depth,
+            } => {
+                let pending = pending.ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Deferred life payment is missing its cast or activation root".to_string(),
+                    )
+                })?;
+                let mut remaining = remaining_life_payments.into_iter();
+                while let Some(amount) = remaining.next() {
+                    match super::life_costs::pay_life_as_cast_or_activation_cost(
+                        state, player, amount, events,
+                    ) {
+                        super::life_costs::PayLifeCostResult::Paid { .. } => {}
+                        super::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution {
+                            ..
+                        }
+                        | super::life_costs::PayLifeCostResult::DeferredReplacementChoice {
+                            ..
+                        } => {
+                            state.pending_deferred_life_cost_resume =
+                                Some(crate::types::game_state::DeferredLifeCostResume::Cast {
+                                    player,
+                                    pending: Some(pending),
+                                    remaining_life_payments: remaining.collect(),
+                                    resume_at_resolution_depth,
+                                });
+                            return Ok(state.waiting_for.clone());
+                        }
+                        super::life_costs::PayLifeCostResult::InsufficientLife
+                        | super::life_costs::PayLifeCostResult::Prohibited => {
+                            return Err(EngineError::ActionNotAllowed(
+                                "Cannot complete deferred life cost".to_string(),
+                            ));
+                        }
+                    }
+                }
+                if pending.prepaid_actual_mana_spent.is_some() {
+                    state.pending_cast = Some(pending);
+                    super::casting_costs::finalize_automatic_mana_payment(state, player, events)
+                } else {
+                    super::casting_costs::finish_pending_cost_or_cast(
+                        state, player, *pending, events,
+                    )
+                }
+            }
+            crate::types::game_state::DeferredLifeCostResume::PayAmount {
+                player, total, ..
+            } => Ok(super::engine_resolution_choices::finish_pay_amount_choice(
+                state, player, total, events,
+            )),
+            crate::types::game_state::DeferredLifeCostResume::ManaRoot {
+                player,
+                resume,
+                remaining_life_payments,
+                resume_at_resolution_depth,
+            } => {
+                let mut remaining = remaining_life_payments.into_iter();
+                while let Some(amount) = remaining.next() {
+                    match super::life_costs::pay_life_as_cost(state, player, amount, events) {
+                        super::life_costs::PayLifeCostResult::Paid { .. } => {}
+                        super::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution {
+                            ..
+                        }
+                        | super::life_costs::PayLifeCostResult::DeferredReplacementChoice {
+                            ..
+                        } => {
+                            state.pending_deferred_life_cost_resume =
+                                Some(crate::types::game_state::DeferredLifeCostResume::ManaRoot {
+                                    player,
+                                    resume,
+                                    remaining_life_payments: remaining.collect(),
+                                    resume_at_resolution_depth,
+                                });
+                            return Ok(state.waiting_for.clone());
+                        }
+                        super::life_costs::PayLifeCostResult::InsufficientLife
+                        | super::life_costs::PayLifeCostResult::Prohibited => {
+                            return Err(EngineError::ActionNotAllowed(
+                                "Cannot complete deferred Phyrexian life payment".to_string(),
+                            ));
+                        }
+                    }
+                }
+                super::mana_abilities::finish_mana_root_after_deferred_life_payment(
+                    state, player, *resume, events,
+                )
+            }
+        }
+    })();
+    if result.is_err() && state.pending_deferred_life_cost_resume.is_none() {
+        state.pending_deferred_life_cost_resume = Some(resume_for_restore);
+    }
+    result
 }
 
 /// CR 702.66a: Finish one Delve payment after its graveyard-to-exile cost move
@@ -4873,7 +5049,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (WaitingFor::TargetSelection { player, .. }, GameAction::SelectTargets { targets }) => {
             engine_casting::handle_target_selection_select_targets(
                 state,
@@ -4897,7 +5073,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::OptionalCostChoice {
                 player,
@@ -4921,7 +5097,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::ChooseGiftRecipient {
                 player,
@@ -4929,7 +5105,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 702.47a–e: Splice — caster reveals a card to splice onto the spell
         // (re-offering for the rest), or declines to finish and proceed to targets.
         (
@@ -4954,7 +5130,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 601.2b: Defiler cycle — player decides whether to pay life for mana reduction.
         (
             WaitingFor::DefilerPayment {
@@ -4980,7 +5156,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 118.3 + CR 601.2b + CR 605.3b: Player selected objects to pay a
         // cost. The single `PayCost` state dispatches on `kind` (which action)
         // and `resume` (spell-cast vs mana-ability pipeline) to the
@@ -5392,7 +5568,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 118.3: Player selected permanents to sacrifice as cost.
         (
             WaitingFor::ActivationCostOneOfChoice {
@@ -5416,7 +5592,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 601.2b + CR 701.4a: player chose the creature type for a pre-choice
         // behold cost; record it and resume behold payment.
         (
@@ -5442,7 +5618,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // Blight: player selected creature(s) to put -1/-1 counters on as cost.
         (
             WaitingFor::BlightChoice {
@@ -5468,7 +5644,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::ChooseManaColor {
                 choice, context, ..
@@ -5644,7 +5820,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 608.2d: Player decided whether to perform an optional effect ("You may X").
         (WaitingFor::OptionalEffectChoice { .. }, GameAction::DecideOptionalEffect { accept }) => {
             engine_payment_choices::handle_optional_effect_choice(state, accept, &mut events)?
@@ -5874,7 +6050,7 @@ fn apply_action(
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => WaitingFor::Priority { player },
             }
@@ -5882,10 +6058,11 @@ fn apply_action(
         (WaitingFor::ChooseXValue { player, .. }, GameAction::CancelCast) => {
             // CR 601.2f + CR 601.2i: Caster may back out before committing to an
             // X value. Pop the stack entry placed at announcement and restore.
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => WaitingFor::Priority { player },
             }
@@ -6064,10 +6241,11 @@ fn apply_action(
             }
         }
         (WaitingFor::AssistChoosePlayer { player, .. }, GameAction::CancelCast) => {
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => WaitingFor::Priority { player },
             }
@@ -6182,17 +6360,13 @@ fn apply_action(
                     .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
                 let activation_ability_index = pending_ref.activation_ability_index;
                 let current_shards = if let Some(ability_index) = activation_ability_index {
-                    let (source_types, source_subtypes) =
-                        casting::activation_source_types(state, spell_object);
-                    let activation_ctx = crate::types::mana::PaymentContext::Activation {
-                        source_types: &source_types,
-                        source_subtypes: &source_subtypes,
-                        ability_tag: casting::activation_ability_tag(
+                    let activation_context =
+                        casting::activation_payment_context(
                             state,
                             spell_object,
-                            ability_index,
-                        ),
-                    };
+                            Some(ability_index),
+                        );
+                    let activation_ctx = activation_context.as_payment_context();
                     let any_color = casting::player_can_spend_as_any_color_for_payment(
                         state,
                         player,
@@ -6272,7 +6446,7 @@ fn apply_action(
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => WaitingFor::Priority { player },
             }
@@ -7263,7 +7437,7 @@ fn apply_action(
                 source_id: source,
                 controller: p,
                 condition: None,
-                ability,
+                ability: Box::new(ability),
                 timestamp: 0,
                 target_constraints: vec![],
                 distribute: None,
@@ -7652,6 +7826,32 @@ fn apply_action(
         (WaitingFor::Priority { player }, GameAction::CompanionToHand) => {
             super::companion::handle_companion_to_hand(state, *player, &mut events)?
         }
+        // CR 116.2c: Special action — pay a continuous effect's printed
+        // termination cost to end it ("You may pay {W} to end this effect").
+        // CR 116.1: special actions don't use the stack, so nothing is put on
+        // the stack and no player gets a chance to respond.
+        //
+        // NO timing gate: CR 116.2c grants the action "any time they have
+        // priority, unless that effect specifies another timing restriction",
+        // and no card in the shipped class states one. This deliberately
+        // diverges from `CompanionToHand` above, whose CR 116.2g DOES carry a
+        // sorcery-speed restriction.
+        (
+            WaitingFor::Priority { player },
+            GameAction::EndContinuousEffect { group, .. },
+        ) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            super::end_continuous_effect::handle_end_continuous_effect(
+                state,
+                *player,
+                group,
+                &mut events,
+            )?
+        }
         // CR 722.3c / CR 601.2: Prepare (Strixhaven) — cast a copy of the
         // prepared face through the normal spell-casting pipeline (costs,
         // targeting, and mode choices all run through casting.rs single
@@ -7772,6 +7972,8 @@ fn apply_action(
             events.push(GameEvent::PlayerPerformedAction {
                 player_id: p,
                 action: PlayerActionKind::Proliferate,
+                look_count: None,
+                scry_bottom_count: None,
             });
             let pending = state
                 .take_active_proliferate_frame()
@@ -8108,10 +8310,11 @@ fn apply_action(
         }
         // CR 601.2d: Distribute among targets (casting-time distribution).
         (WaitingFor::DistributeAmong { player, .. }, GameAction::CancelCast) => {
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => {
                     return Err(EngineError::InvalidAction(
@@ -8209,7 +8412,7 @@ fn apply_action(
                         state,
                         p,
                         *pending,
-                        ability,
+                        *ability,
                         cost,
                         &mut events,
                     ) {
@@ -8552,13 +8755,7 @@ fn apply_retarget(
 /// CR 603.3c + CR 608.2c: Drop a mid-construction optional triggered modal that
 /// was declined before mode choice.
 pub(super) fn drop_mid_construction_pending_trigger(state: &mut GameState) {
-    if let Some(entry_id) = state.pending_trigger_entry.take() {
-        if state.stack.back().map(|e| e.id) == Some(entry_id) {
-            state.stack.pop_back();
-            state.stack_paid_facts.remove(&entry_id);
-            state.stack_trigger_event_batches.remove(&entry_id);
-        }
-    }
+    super::stack::pop_uncommitted_pending_trigger_entry(state);
     state.pending_trigger = None;
 }
 
@@ -8653,13 +8850,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                 &mode_abilities,
                 &unavailable_modes,
             ) else {
-                if let Some(entry_id) = state.pending_trigger_entry.take() {
-                    if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                        state.stack.pop_back();
-                        state.stack_paid_facts.remove(&entry_id);
-                        state.stack_trigger_event_batches.remove(&entry_id);
-                    }
-                }
+                super::stack::pop_uncommitted_pending_trigger_entry(state);
                 state.pending_trigger = None;
                 return Ok(None);
             };
@@ -8678,13 +8869,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                  dispatch_pending_trigger_context must resolve it inline",
             );
             if modal.selection.is_random() {
-                if let Some(entry_id) = state.pending_trigger_entry.take() {
-                    if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                        state.stack.pop_back();
-                        state.stack_paid_facts.remove(&entry_id);
-                        state.stack_trigger_event_batches.remove(&entry_id);
-                    }
-                }
+                super::stack::pop_uncommitted_pending_trigger_entry(state);
                 state.pending_trigger = None;
                 return Ok(None);
             }
@@ -8698,13 +8883,7 @@ pub(super) fn begin_pending_trigger_target_selection(
             // dead branch — kept as a defensive cleanup for any
             // delayed-revalidation paths.
             if unavailable_modes.len() >= modal.mode_count {
-                if let Some(entry_id) = state.pending_trigger_entry.take() {
-                    if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                        state.stack.pop_back();
-                        state.stack_paid_facts.remove(&entry_id);
-                        state.stack_trigger_event_batches.remove(&entry_id);
-                    }
-                }
+                super::stack::pop_uncommitted_pending_trigger_entry(state);
                 state.pending_trigger = None;
                 return Ok(None);
             }
@@ -8819,13 +8998,7 @@ pub(super) fn begin_pending_trigger_target_selection(
         // branch above: if the "push first" dispatcher already pushed an
         // in-construction entry for this trigger, pop it before clearing the
         // cursor.
-        if let Some(entry_id) = state.pending_trigger_entry.take() {
-            if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                state.stack.pop_back();
-                state.stack_paid_facts.remove(&entry_id);
-                state.stack_trigger_event_batches.remove(&entry_id);
-            }
-        }
+        super::stack::pop_uncommitted_pending_trigger_entry(state);
         state.pending_trigger = None;
         return Ok(None);
     };
@@ -9263,7 +9436,7 @@ fn handle_play_land(
     // counters" replacement for planeswalkers and battles entering the
     // battlefield via a play-from-zone action.
     if let Some(obj) = state.objects.get(&object_id) {
-        let intrinsic = super::printed_cards::intrinsic_etb_counters(obj);
+        let intrinsic = super::printed_cards::intrinsic_etb_counters(obj, None);
         if !intrinsic.is_empty() {
             if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                 enter_with_counters,
@@ -9606,19 +9779,11 @@ pub(super) fn handle_spend_pool_mana(
     // is correctly eligible to pin when it can legally pay the activation.
     // Owned holders so the context's borrowed slices outlive the eligibility check.
     let spell_meta;
-    let source_types;
-    let source_subtypes;
-    let ability_tag;
+    let activation_context;
     let ctx = if let Some(ability_index) = activation_ability_index {
-        let (types, subtypes) = super::casting::activation_source_types(state, object_id);
-        source_types = types;
-        source_subtypes = subtypes;
-        ability_tag = super::casting::activation_ability_tag(state, object_id, ability_index);
-        Some(crate::types::mana::PaymentContext::Activation {
-            source_types: &source_types,
-            source_subtypes: &source_subtypes,
-            ability_tag,
-        })
+        activation_context =
+            super::casting::activation_payment_context(state, object_id, Some(ability_index));
+        Some(activation_context.as_payment_context())
     } else {
         spell_meta = super::casting::build_spell_meta(state, player, object_id);
         spell_meta
@@ -9665,7 +9830,7 @@ fn mana_unit_eligible_for_cost(
 
     // CR 106.6: a unit whose restrictions reject this context can pay nothing here.
     if let Some(ctx) = ctx {
-        if !unit.restrictions.iter().all(|r| r.allows(ctx)) {
+        if !mana_payment::mana_unit_permits_payment_context(unit, ctx) {
             return false;
         }
     }
@@ -9807,6 +9972,24 @@ fn handle_equip_activation(
 /// CR 702.122a: Activate a Vehicle's crew ability from Priority.
 /// Unlike Equip (CR 702.6a) and Saddle (CR 702.171a), Crew has NO "Activate only as a
 /// sorcery" restriction — it can be activated any time the controller has priority.
+/// CR 702.122a + CR 702.122d: can this creature legally be tapped to pay a crew
+/// cost right now?
+///
+/// Composes the two halves the crew payment path enforces — the tappability rule
+/// in [`is_tappable_creature_for_cost`] (controlled, untapped, a creature, and
+/// not under a `CantTap` restriction) and the `CantCrew` static — into one
+/// named authority.
+///
+/// `pub` so consumers outside this module (`phase-ai`'s
+/// `VehicleDeploymentPolicy`) ask THIS question instead of assembling their own
+/// filter from the parts. A partial duplicate silently over-counts: omitting the
+/// `object_cant_tap` term alone makes a `CantTap` 3/3 look like it can pay
+/// Crew 3, which it cannot.
+pub fn creature_can_pay_crew(state: &GameState, id: ObjectId, player: PlayerId) -> bool {
+    is_tappable_creature_for_cost(state, id, player)
+        && !super::static_abilities::object_has_cant_crew(state, id)
+}
+
 fn is_tappable_creature_for_cost(state: &GameState, id: ObjectId, player: PlayerId) -> bool {
     state.objects.get(&id).is_some_and(|o| {
         o.controller == player

@@ -14,6 +14,10 @@ use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::{
+    ResolvedCombatMembershipCommand, ResolvedCombatMembershipEdit,
+    ResolvedCombatMembershipReplayInvariantError,
+};
 use crate::types::statics::{
     AttackDefenderScope, BlockExceptionKind, CombatAloneAction, CombatAloneRequirement, StaticMode,
     StaticModeKind,
@@ -340,6 +344,115 @@ pub enum DamageTarget {
     Player(PlayerId),
 }
 
+/// CR 506.4: The exact combat roles one object held at a single moment.
+///
+/// Recorded by the CR 733 removal command so a replay can verify it is pruning
+/// the same edges the live removal pruned. `damage_assignments` is carried
+/// explicitly because `CombatState`'s hand-written `PartialEq` does NOT compare
+/// that field — a check that leaned on whole-struct equality would be blind to
+/// exactly the bookkeeping this authority prunes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CombatParticipation {
+    /// The object's own attacker entry, when it was an attacking creature.
+    pub attacking: Option<AttackerInfo>,
+    /// CR 509.1g: attacking creatures this object was blocking.
+    pub blocking: Vec<ObjectId>,
+    /// CR 509.1h: blocking creatures assigned to this object as an attacker.
+    pub blocked_by: Vec<ObjectId>,
+    /// CR 510.1: combat damage this object had already been assigned to deal.
+    pub damage_assignments: Vec<DamageAssignment>,
+}
+
+impl CombatParticipation {
+    /// Reads every combat role `oid` currently holds.
+    pub fn capture(state: &GameState, oid: ObjectId) -> Self {
+        let Some(combat) = state.combat.as_ref() else {
+            return Self::default();
+        };
+        Self {
+            attacking: combat
+                .attackers
+                .iter()
+                .find(|a| a.object_id == oid)
+                .cloned(),
+            blocking: combat
+                .blocker_to_attacker
+                .get(&oid)
+                .cloned()
+                .unwrap_or_default(),
+            blocked_by: combat
+                .blocker_assignments
+                .get(&oid)
+                .cloned()
+                .unwrap_or_default(),
+            damage_assignments: combat
+                .damage_assignments
+                .get(&oid)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    /// CR 506.4: whether the object held no combat role at all, so removing it
+    /// would prune nothing.
+    pub fn is_empty(&self) -> bool {
+        self.attacking.is_none()
+            && self.blocking.is_empty()
+            && self.blocked_by.is_empty()
+            && self.damage_assignments.is_empty()
+    }
+}
+
+/// CR 506.4: Drops every combat edge that names `oid`, in the live authority's
+/// order. Returns whether `oid` was an attacking creature, which is the only
+/// case that can change a Layer 6 `FilterProp::Attacking` grant.
+///
+/// Single structural authority shared by the live `remove_object_from_combat`
+/// and the CR 733 replay applier, so a replayed prune cannot drift from the
+/// prune the game actually performed.
+pub(crate) fn prune_object_from_combat(state: &mut GameState, oid: ObjectId) -> bool {
+    let Some(combat) = state.combat.as_mut() else {
+        return false;
+    };
+    let attackers_before = combat.attackers.len();
+    combat.attackers.retain(|a| a.object_id != oid);
+    let attacker_removed = combat.attackers.len() != attackers_before;
+    // Drop attacker-keyed forward assignments (oid was an attacker with blockers
+    // assigned to it).
+    combat.blocker_assignments.remove(&oid);
+    // Remove as blocker from all remaining attacker assignments.
+    for blockers in combat.blocker_assignments.values_mut() {
+        blockers.retain(|b| *b != oid);
+    }
+    // Remove reverse lookup when oid was a blocker.
+    combat.blocker_to_attacker.remove(&oid);
+    // Prune oid from every blocker's attacker list (oid was an attacker).
+    combat.blocker_to_attacker.retain(|_, attackers| {
+        attackers.retain(|id| *id != oid);
+        !attackers.is_empty()
+    });
+    // CR 510.1: remove any pending damage assignments for this object.
+    combat.damage_assignments.remove(&oid);
+    attacker_removed
+}
+
+/// CR 733: Journals one settled combat-membership edit through its owning family.
+fn record_combat_membership_edit(
+    state: &mut GameState,
+    object: ObjectIncarnationRef,
+    edit: ResolvedCombatMembershipEdit,
+) {
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_combat_membership(ResolvedCombatMembershipCommand {
+            object,
+            edit,
+            cause,
+        })
+        .expect("resolved combat membership must have a live journal cause");
+}
+
 /// CR 508.4: Place a permanent onto the battlefield attacking.
 /// The creature is not "declared as an attacker" — attack triggers do not fire.
 /// Determines the defending player from: (1) source creature's combat info,
@@ -355,6 +468,26 @@ pub fn enter_attacking(
     let (defending_player, attack_target) =
         defending_player_for_enters_attacking(state, source_id, controller);
 
+    push_attacker_and_journal(state, object_id, defending_player, attack_target);
+}
+
+/// CR 508.4 + CR 733: seat `object_id` as an attacking creature against an
+/// already-decided defender and journal the settled pair.
+///
+/// Shared by `enter_attacking` (which derives the pair from ambient state) and
+/// `place_attacking_alongside` (which is handed the pair by its caller), so both
+/// entry points record through one authority.
+fn push_attacker_and_journal(
+    state: &mut GameState,
+    object_id: ObjectId,
+    defending_player: PlayerId,
+    attack_target: AttackTarget,
+) {
+    let reference = state
+        .objects
+        .get(&object_id)
+        .map(ObjectIncarnationRef::from_object);
+
     if let Some(combat) = state.combat.as_mut() {
         combat.attackers.push(AttackerInfo::new(
             object_id,
@@ -365,6 +498,20 @@ pub fn enter_attacking(
         // attacking is an attacking creature; re-evaluate Layer 6
         // FilterProp::Attacking { defender: None } grants immediately.
         state.layers_dirty.mark_full();
+
+        // CR 733 + CR 508.4: the defending player and attack target are a CHOICE
+        // the rules assign to the controller; record the settled pair so replay
+        // installs it instead of re-deriving from ambient state.
+        if let Some(reference) = reference {
+            record_combat_membership_edit(
+                state,
+                reference,
+                ResolvedCombatMembershipEdit::Attack {
+                    resulting_defending_player: defending_player,
+                    resulting_attack_target: attack_target,
+                },
+            );
+        }
     }
 }
 
@@ -478,17 +625,12 @@ pub fn place_attacking_alongside(
         // at entry time, not re-entry).
         obj.summoning_sick = true;
     }
-    if let Some(combat) = state.combat.as_mut() {
-        combat.attackers.push(AttackerInfo::new(
-            object_id,
-            attack_target,
-            defending_player,
-        ));
-        // CR 702.49c + CR 702.190b + CR 506.4 + CR 613.1f: Ninjutsu/Sneak place a
-        // creature already attacking; re-evaluate Layer 6 FilterProp::Attacking { defender: None }
-        // grants.
-        state.layers_dirty.mark_full();
-    }
+    // CR 702.49c + CR 702.190b + CR 506.4 + CR 613.1f: Ninjutsu/Sneak place a
+    // creature already attacking; re-evaluate Layer 6 FilterProp::Attacking { defender: None }
+    // grants. CR 733: journals through the same attacker-seating authority as
+    // `enter_attacking` — the caller already chose the defender, so the recorded
+    // pair is its argument rather than an ambient derivation.
+    push_attacker_and_journal(state, object_id, defending_player, attack_target);
 }
 
 /// CR 509.1g + CR 506.3e + CR 509.1h: Put a permanent onto the battlefield as a
@@ -504,9 +646,11 @@ pub fn place_attacking_alongside(
 /// trigger, so no `BlockersDeclared` event is emitted; combat damage reads the
 /// recorded assignments directly. Returns `true` when the block was established.
 pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: ObjectId) -> bool {
-    let Some(blocker_controller) = state.objects.get(&blocker_id).map(|o| o.controller) else {
+    let Some(blocker) = state.objects.get(&blocker_id) else {
         return false;
     };
+    let blocker_controller = blocker.controller;
+    let reference = ObjectIncarnationRef::from_object(blocker);
     let Some(combat) = state.combat.as_mut() else {
         return false;
     };
@@ -524,6 +668,8 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
         return false;
     }
     // CR 509.1h: an attacking creature with one or more blockers becomes blocked.
+    // The bit is sticky, so its prior value is recorded rather than recomputed.
+    let expected_attacker_blocked = info.blocked;
     info.blocked = true;
     // CR 509.1g: the creature becomes a blocking creature for the chosen attacker.
     combat
@@ -541,6 +687,18 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
     // CR 506.4 + CR 613.1f: a new blocking creature can satisfy Layer 6
     // `FilterProp::Blocking` grants; re-evaluate continuous effects.
     state.layers_dirty.mark_full();
+    // CR 733: journal the settled block. All four writes above (the sticky
+    // blocked bit, both blocker maps, and the per-turn blocked set) follow
+    // structurally from this blocker/attacker pair, so the pair plus the prior
+    // blocked bit is the whole receipt.
+    record_combat_membership_edit(
+        state,
+        reference,
+        ResolvedCombatMembershipEdit::Block {
+            resulting_attacker: attacker_id,
+            expected_attacker_blocked,
+        },
+    );
     true
 }
 
@@ -551,21 +709,205 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
 /// damage. Emits no event (the caller decides whether the CR 509.3c precondition
 /// is met). Returns `false` if `oid` is not a current attacker.
 pub fn mark_attacker_blocked(state: &mut GameState, oid: ObjectId) -> bool {
+    let reference = state
+        .objects
+        .get(&oid)
+        .map(ObjectIncarnationRef::from_object);
     let Some(combat) = state.combat.as_mut() else {
         return false;
     };
     let Some(info) = combat.attackers.iter_mut().find(|a| a.object_id == oid) else {
         return false;
     };
+    // CR 509.1h: the bit is sticky, so re-marking an already-blocked attacker
+    // mutates nothing and is not journaled.
+    let already_blocked = info.blocked;
     info.blocked = true;
     // CR 613.1f: `FilterProp::Blocked` grants may now apply; re-evaluate layers.
     state.layers_dirty.mark_full();
+    // CR 733: journal only the false-to-true transition, so the applier can
+    // require the bit is still clear before installing it.
+    if let Some(reference) = reference.filter(|_| !already_blocked) {
+        record_combat_membership_edit(state, reference, ResolvedCombatMembershipEdit::MarkBlocked);
+    }
     true
+}
+
+/// Installs one already-resolved CR 506.3 / CR 506.4 combat-membership edit
+/// verbatim.
+///
+/// Deliberately re-runs NONE of the resolve-time derivation. In particular it
+/// never calls `enter_attacking`: that authority picks the defending player from
+/// ambient state (`state.current_trigger_event`, the source's attacker entry, a
+/// controller-scan of the live attacker list, then an opponent fallback), none
+/// of which is reconstructible during replay. CR 508.4 makes the defender a
+/// choice the controller owns, so re-deriving it would both desynchronize replay
+/// and re-decide a settled choice. The recorded pair is installed as-is.
+///
+/// Legality gates are likewise not re-run: CR 506.3b/c/e and CR 508.4a decided
+/// at resolve time whether the creature ever became attacking or blocking, and a
+/// recorded command exists only because it did.
+pub fn apply_resolved_combat_membership(
+    state: &mut GameState,
+    command: &ResolvedCombatMembershipCommand,
+) -> Result<(), ResolvedCombatMembershipReplayInvariantError> {
+    let object_id = command.object.object_id;
+    let object = state.objects.get(&object_id).ok_or(
+        ResolvedCombatMembershipReplayInvariantError::UnknownObject(object_id),
+    )?;
+    // CR 400.7: a re-entered object is a new object and must not satisfy a
+    // command recorded against its predecessor incarnation.
+    let found = ObjectIncarnationRef::from_object(object);
+    if found != command.object {
+        return Err(ResolvedCombatMembershipReplayInvariantError::StaleObject {
+            expected: command.object,
+            found,
+        });
+    }
+
+    // Every edit in this family reads the recorded expectation against live
+    // state BEFORE any mutation, so a rejected command leaves no partial edit.
+    match &command.edit {
+        ResolvedCombatMembershipEdit::Attack {
+            resulting_defending_player,
+            resulting_attack_target,
+        } => {
+            let combat = state
+                .combat
+                .as_mut()
+                .ok_or(ResolvedCombatMembershipReplayInvariantError::NoCombat)?;
+            if combat.attackers.iter().any(|a| a.object_id == object_id) {
+                return Err(
+                    ResolvedCombatMembershipReplayInvariantError::AlreadyAttacking(object_id),
+                );
+            }
+            // CR 508.4: install the RECORDED defender and attack target.
+            combat.attackers.push(AttackerInfo::new(
+                object_id,
+                *resulting_attack_target,
+                *resulting_defending_player,
+            ));
+        }
+        ResolvedCombatMembershipEdit::Block {
+            resulting_attacker,
+            expected_attacker_blocked,
+        } => {
+            let combat = state
+                .combat
+                .as_mut()
+                .ok_or(ResolvedCombatMembershipReplayInvariantError::NoCombat)?;
+            let info = combat
+                .attackers
+                .iter_mut()
+                .find(|a| a.object_id == *resulting_attacker)
+                .ok_or(ResolvedCombatMembershipReplayInvariantError::NotAttacking(
+                    *resulting_attacker,
+                ))?;
+            if info.blocked != *expected_attacker_blocked {
+                return Err(
+                    ResolvedCombatMembershipReplayInvariantError::BlockedPreconditionMismatch {
+                        attacker: *resulting_attacker,
+                        expected: *expected_attacker_blocked,
+                        found: info.blocked,
+                    },
+                );
+            }
+            if combat
+                .blocker_to_attacker
+                .get(&object_id)
+                .is_some_and(|attackers| attackers.contains(resulting_attacker))
+            {
+                return Err(
+                    ResolvedCombatMembershipReplayInvariantError::DuplicateBlock {
+                        attacker: *resulting_attacker,
+                        blocker: object_id,
+                    },
+                );
+            }
+            // CR 509.1h then CR 509.1g: the same four writes the live authority
+            // performed, in the same order.
+            info.blocked = true;
+            combat
+                .blocker_to_attacker
+                .entry(object_id)
+                .or_default()
+                .push(*resulting_attacker);
+            combat
+                .blocker_assignments
+                .entry(*resulting_attacker)
+                .or_default()
+                .push(object_id);
+            state.creatures_blocked_this_turn.insert(object_id);
+        }
+        ResolvedCombatMembershipEdit::MarkBlocked => {
+            let combat = state
+                .combat
+                .as_mut()
+                .ok_or(ResolvedCombatMembershipReplayInvariantError::NoCombat)?;
+            let info = combat
+                .attackers
+                .iter_mut()
+                .find(|a| a.object_id == object_id)
+                .ok_or(ResolvedCombatMembershipReplayInvariantError::NotAttacking(
+                    object_id,
+                ))?;
+            // CR 509.1h: recorded only on a false-to-true transition, so a
+            // still-unblocked attacker is the only state this can install into.
+            if info.blocked {
+                return Err(
+                    ResolvedCombatMembershipReplayInvariantError::BlockedPreconditionMismatch {
+                        attacker: object_id,
+                        expected: false,
+                        found: true,
+                    },
+                );
+            }
+            info.blocked = true;
+        }
+        ResolvedCombatMembershipEdit::Remove {
+            expected_participation,
+        } => {
+            let found = CombatParticipation::capture(state, object_id);
+            if found != *expected_participation {
+                return Err(
+                    ResolvedCombatMembershipReplayInvariantError::ParticipationMismatch {
+                        object: object_id,
+                        expected: Box::new(expected_participation.clone()),
+                        found: Box::new(found),
+                    },
+                );
+            }
+            // CR 506.4: the prune itself is a structural consequence of the
+            // verified participation, so it re-runs the live authority.
+            //
+            // CR 613.1f: mirror the live authority's narrower marking — only a
+            // removed ATTACKER can change a `FilterProp::Attacking` grant, so
+            // pruning a pure blocker leaves the layer system alone.
+            if prune_object_from_combat(state, object_id) {
+                state.layers_dirty.mark_full();
+            }
+            return Ok(());
+        }
+    }
+
+    // CR 506.4 + CR 613.1f: seating an attacker or establishing a block drives
+    // Layer 6 `FilterProp::Attacking` / `Blocking` / `Blocked` grants;
+    // re-evaluate exactly as the live authorities do.
+    state.layers_dirty.mark_full();
+    Ok(())
 }
 
 /// Validate attacker declarations per CR 508.1.
 pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Result<(), String> {
     let active = state.active_player;
+
+    // CR 508.1a: choosing a creature more than once cannot produce two
+    // attackers; reject duplicate declarations before checking their other
+    // individual restrictions.
+    let mut declared = HashSet::with_capacity(attacker_ids.len());
+    if attacker_ids.iter().any(|id| !declared.insert(*id)) {
+        return Err("A creature can't be declared as an attacker more than once".to_string());
+    }
 
     // CR 508.1c: Attack restrictions make the declaration illegal if disobeyed.
     if let Some(max) = max_attackers_each_combat(state) {
@@ -3404,13 +3746,22 @@ fn attack_passes_temporary_prohibition(
         let crate::types::ability::GameRestriction::ProhibitActivity {
             source,
             affected_players,
-            activity: crate::types::ability::ProhibitedActivity::Attack { defended },
+            activity:
+                crate::types::ability::ProhibitedActivity::Attack {
+                    defended,
+                    protected_player,
+                },
             ..
         } = restriction
         else {
             continue;
         };
-        let Some(protected) = state.objects.get(source).map(|o| o.controller) else {
+        // New restrictions snapshot the protected player on resolution. Legacy
+        // serialized restrictions have no snapshot and retain their historic
+        // source-controller lookup.
+        let Some(protected) = (*protected_player)
+            .or_else(|| state.objects.get(source).map(|object| object.controller))
+        else {
             continue;
         };
         let attacker_is_affected = match affected_players {
@@ -11283,6 +11634,7 @@ mod tests {
                 static_abilities: vec![static_def],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
             vec![],
             attacker,

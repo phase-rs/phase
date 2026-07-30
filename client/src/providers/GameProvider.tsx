@@ -1580,6 +1580,20 @@ export function GameProvider({
                 waitingFor: { type: "GameOver", data: { winner: event.winner } },
               });
             }
+            if (event.type === "requestRejected") {
+              // A NEW forwarding branch, not an addition to an existing group:
+              // `stateChanged` and `gameOver` above are handled inline and are
+              // never forwarded, so the only pre-existing `onWsEventRef` call
+              // in this handler is the terminal one below. This event must
+              // reach GamePage (which toasts it) while touching nothing else —
+              // it must not null `nativeAdapter`, dispose the controller, or
+              // clear the store adapter. `nativeSessionLive` is the existing
+              // guard against firing into a torn-down page.
+              //
+              // The online path needs no counterpart: its listener forwards
+              // every event unconditionally.
+              if (nativeSessionLive) onWsEventRef.current?.(event);
+            }
             if (event.type === "reconnectFailed" || event.type === "error") {
               const adapter = nativeAdapter;
               nativeAdapter = null;
@@ -1744,6 +1758,7 @@ export function GameProvider({
             waitingFor: null,
             legalActions: [],
             autoPassRecommended: false,
+            endContinuousEffectOffers: [],
             manaPaymentShortcutActions: [],
             spellCosts: {},
             stateHistory: [],

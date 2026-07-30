@@ -15,7 +15,9 @@ use crate::types::card_type::CardType;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::format::FormatConfig;
-use crate::types::game_state::{CastPaymentMode, CastingVariant, ProductionOverride};
+use crate::types::game_state::{
+    CastPaymentMode, CastingVariant, PendingCast, ProductionOverride, TargetSelectionProgress,
+};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::statics::{CastFrequency, StaticMode};
@@ -64,7 +66,12 @@ fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
         controller,
         kind: StackEntryKind::ActivatedAbility {
             source_id: object_id,
-            ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+            ability: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![],
+                object_id,
+                controller,
+            )),
         },
     }
 }
@@ -103,6 +110,34 @@ fn cards_revealed_events_are_remembered_publicly() {
     let mut replay = pre_state;
     replay.apply_resolved_information(&command).unwrap();
     assert_eq!(replay.public_revealed_cards, state.public_revealed_cards);
+}
+
+#[test]
+fn assist_cancellation_rejects_committed_activation_held_by_waiting_for() {
+    let mut state = setup_game_at_main_phase();
+    let mut pending = PendingCast::new(
+        ObjectId(1),
+        CardId(1),
+        ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0)),
+        ManaCost::NoCost,
+    );
+    pending.activation_cost_committed = true;
+    state.waiting_for = WaitingFor::TargetSelection {
+        player: PlayerId(0),
+        pending_cast: Box::new(pending),
+        target_slots: vec![],
+        mode_labels: vec![],
+        selection: TargetSelectionProgress {
+            current_slot: 0,
+            selected_slots: vec![],
+            current_legal_targets: vec![],
+        },
+    };
+
+    assert!(matches!(
+        ensure_assist_cancellation_is_allowed(&state),
+        Err(EngineError::ActionNotAllowed(message)) if message == "Cannot cancel an activation after a cost is paid"
+    ));
 }
 
 /// CR 603.3d regression — reported turn-34 Commander freeze (All Will Be
@@ -153,7 +188,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
         source_id,
         controller: PlayerId(0),
         condition: None,
-        ability: ability.clone(),
+        ability: Box::new(ability.clone()),
         timestamp: 0,
         target_constraints: vec![],
         distribute: None,
@@ -182,7 +217,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
             die_result: None,
         },
     });
-    state.pending_trigger = Some(pending);
+    state.pending_trigger = Some(Box::new(pending));
     state.pending_trigger_entry = Some(entry_id);
     let stack_len_before = state.stack.len();
 
@@ -234,7 +269,7 @@ fn choose_new_targets_all_allows_unchanged_illegal_target() {
         controller: PlayerId(1),
         kind: StackEntryKind::Spell {
             card_id: CardId(1),
-            ability: Some(stack_ability),
+            ability: Some(Box::new(stack_ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -1596,6 +1631,7 @@ fn room_back_face(name: &str) -> BackFaceData {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType::default(),
         mana_cost: ManaCost::default(),
@@ -2056,6 +2092,7 @@ fn unlock_door_restricted_mana_rejected_for_effect_and_spell_payments() {
         source_types: &["Artifact".to_string()],
         source_subtypes: &["Equipment".to_string()],
         ability_tag: None,
+        mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Unrestricted,
     }));
     let _ = ManaType::Red;
 }
@@ -2205,6 +2242,137 @@ fn cancel_auto_pass_routes_by_actor() {
         !state.auto_pass.contains_key(&PlayerId(0)),
         "P0's auto-pass should have been cancelled"
     );
+}
+
+/// Actor-scoped preference mutations must not advance an already-active
+/// auto-pass session. Before admission moved into `apply`, server-core returned
+/// directly for these six actions; routing through the shared boundary must
+/// preserve that no-progression behavior.
+#[test]
+fn actor_scoped_preferences_do_not_advance_active_auto_pass() {
+    let preferences = vec![
+        GameAction::CancelAutoPass,
+        GameAction::SetPhaseStops {
+            stops: vec![crate::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: crate::types::phase::PhaseStopScope::AllTurns,
+            }],
+        },
+        GameAction::SetPriorityPassingMode {
+            mode: crate::types::game_state::PriorityPassingMode::SkipLowUseWindows,
+        },
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::ClearAll,
+        },
+        GameAction::SetMayTriggerAutoChoice {
+            op: MayTriggerAutoChoiceOp::ClearAll,
+        },
+        GameAction::SetTriggerOrderTemplate {
+            op: TriggerOrderTemplateOp::ClearAll,
+        },
+    ];
+
+    for action in preferences {
+        let mut state = setup_game_at_main_phase();
+        state.auto_pass.insert(
+            PlayerId(0),
+            crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+                until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        match &action {
+            GameAction::CancelAutoPass => {
+                state.auto_pass.insert(
+                    PlayerId(1),
+                    crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+                        until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+                    },
+                );
+            }
+            GameAction::SetPriorityYield { .. } => state.add_priority_yield(
+                PlayerId(1),
+                crate::types::game_state::YieldTarget::AllCopies {
+                    card_id: CardId(1),
+                    trigger_description: None,
+                },
+            ),
+            GameAction::SetMayTriggerAutoChoice { .. } => state.set_may_trigger_auto_choice(
+                may_trigger_key(PlayerId(1), ObjectId(1)),
+                crate::types::game_state::AutoMayChoice::Accept,
+            ),
+            GameAction::SetTriggerOrderTemplate { .. } => {
+                state.set_trigger_order_template(persistent_order_template(PlayerId(1), 1));
+            }
+            GameAction::SetPhaseStops { .. } | GameAction::SetPriorityPassingMode { .. } => {}
+            _ => unreachable!("preference list is exhaustive"),
+        }
+        let waiting_for = state.waiting_for.clone();
+        let priority_passes = state.priority_passes.clone();
+
+        let result = apply(&mut state, PlayerId(1), action.clone())
+            .expect("actor-scoped preference should be accepted out of priority");
+
+        assert!(
+            result.events.is_empty(),
+            "{} must not auto-pass or emit game events",
+            action.variant_name()
+        );
+        assert_eq!(
+            state.waiting_for,
+            waiting_for,
+            "{} advanced priority",
+            action.variant_name()
+        );
+        assert_eq!(
+            state.priority_passes,
+            priority_passes,
+            "{} changed the priority-pass sequence",
+            action.variant_name()
+        );
+        assert!(
+            state.auto_pass.contains_key(&PlayerId(0)),
+            "{} consumed P0's active auto-pass session",
+            action.variant_name()
+        );
+        match action {
+            GameAction::CancelAutoPass => assert!(
+                !state.auto_pass.contains_key(&PlayerId(1)),
+                "CancelAutoPass must remove the actor's own session"
+            ),
+            GameAction::SetPhaseStops { stops } => assert_eq!(
+                state.phase_stops.get(&PlayerId(1)),
+                Some(&stops),
+                "SetPhaseStops must persist the actor's stops"
+            ),
+            GameAction::SetPriorityPassingMode { mode } => assert_eq!(
+                state.priority_passing_modes.get(&PlayerId(1)),
+                Some(&mode),
+                "SetPriorityPassingMode must persist the actor's mode"
+            ),
+            GameAction::SetPriorityYield { .. } => assert!(
+                !state
+                    .priority_yields
+                    .iter()
+                    .any(|yielded| yielded.player == PlayerId(1)),
+                "SetPriorityYield::ClearAll must clear the actor's yields"
+            ),
+            GameAction::SetMayTriggerAutoChoice { .. } => assert!(
+                state
+                    .may_trigger_auto_choices
+                    .iter()
+                    .all(|record| record.key.player != PlayerId(1)),
+                "SetMayTriggerAutoChoice::ClearAll must clear the actor's choices"
+            ),
+            GameAction::SetTriggerOrderTemplate { .. } => assert!(
+                state
+                    .decision_templates
+                    .iter()
+                    .all(|template| template.owner != PlayerId(1)),
+                "SetTriggerOrderTemplate::ClearAll must clear the actor's templates"
+            ),
+            _ => unreachable!("preference list is exhaustive"),
+        }
+    }
 }
 
 // --- GameAction::SetPriorityYield (CR 117.3d + CR 400.7 + CR 704.5d) ---
@@ -4032,6 +4200,7 @@ fn engine_error_display() {
 #[test]
 fn apply_rejects_action_from_wrong_actor() {
     let mut state = setup_game_at_main_phase();
+    let before = state.clone();
     // `setup_game_at_main_phase` leaves P0 with priority.
     assert_eq!(
         turn_control::authorized_submitter(&state),
@@ -4044,6 +4213,10 @@ fn apply_rejects_action_from_wrong_actor() {
     assert!(
         matches!(result, Err(EngineError::WrongPlayer)),
         "expected WrongPlayer, got {result:?}"
+    );
+    assert_eq!(
+        state, before,
+        "authorization rejection must restore every boundary-side mutation"
     );
 
     // P0 submitting the same action must succeed.
@@ -4234,6 +4407,56 @@ fn apply_rejects_spoofed_concede() {
     };
     let result = apply(&mut state, PlayerId(1), self_concede);
     assert!(result.is_ok(), "self-concede should succeed: {result:?}");
+}
+
+#[test]
+fn game_over_rejects_ordinary_actions_but_keeps_preferences_actor_scoped() {
+    let mut state = setup_game_at_main_phase();
+    state.waiting_for = WaitingFor::GameOver {
+        winner: Some(PlayerId(0)),
+    };
+    let before = state.clone();
+
+    let pass = apply(&mut state, PlayerId(0), GameAction::PassPriority);
+    assert!(matches!(pass, Err(EngineError::WrongPlayer)));
+    assert_eq!(
+        state, before,
+        "rejected ordinary action must not mutate GameOver"
+    );
+
+    let concede = apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::Concede {
+            player_id: PlayerId(1),
+        },
+    );
+    assert!(matches!(concede, Err(EngineError::WrongPlayer)));
+    assert_eq!(
+        state, before,
+        "rejected self-concede must not mutate GameOver"
+    );
+
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::SetPhaseStops {
+            stops: vec![crate::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: crate::types::phase::PhaseStopScope::AllTurns,
+            }],
+        },
+    )
+    .expect("preferences remain actor-scoped after GameOver");
+    assert!(matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    assert_eq!(
+        state.phase_stops.get(&PlayerId(1)),
+        Some(&vec![crate::types::phase::PhaseStop {
+            phase: Phase::End,
+            scope: crate::types::phase::PhaseStopScope::AllTurns,
+        }]),
+        "actor-scoped preference must persist after GameOver"
+    );
 }
 
 #[test]
@@ -5111,6 +5334,7 @@ fn vorinclex_cant_untap_trigger_fires_on_opponent_tap() {
                                 }])],
                             duration: Some(duration.clone()),
                             target: Some(TargetFilter::TriggeringSource),
+                            end_cost: None,
                         },
                     )
                     .duration(duration),
@@ -7376,7 +7600,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
     state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast {
         object_id: ObjectId(0),
         card_id: CardId(0),
-        ability: crate::types::ability::ResolvedAbility::new(
+        ability: Box::new(crate::types::ability::ResolvedAbility::new(
             crate::types::ability::Effect::Unimplemented {
                 name: "Test".to_string(),
                 description: None,
@@ -7384,8 +7608,9 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
             vec![],
             ObjectId(0),
             PlayerId(0),
-        ),
+        )),
         cost: crate::types::mana::ManaCost::NoCost,
+        prepaid_actual_mana_spent: None,
         base_cost: None,
         declared_mana_additions: Vec::new(),
         activation_cost: None,
@@ -7416,7 +7641,9 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         assist_state: AssistState::NotOffered,
         activation_residual: crate::types::game_state::ActivationResidual::None,
         activation_target_selection: crate::types::game_state::ActivationTargetSelection::Pending,
+        activation_cost_committed: false,
         alt_cost_grant_source: None,
+        activation_trigger_collection: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
         player: PlayerId(0),
@@ -7770,7 +7997,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
     state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast {
         object_id: ObjectId(0),
         card_id: CardId(0),
-        ability: crate::types::ability::ResolvedAbility::new(
+        ability: Box::new(crate::types::ability::ResolvedAbility::new(
             crate::types::ability::Effect::Unimplemented {
                 name: "Test".to_string(),
                 description: None,
@@ -7778,8 +8005,9 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
             vec![],
             ObjectId(0),
             PlayerId(0),
-        ),
+        )),
         cost: crate::types::mana::ManaCost::NoCost,
+        prepaid_actual_mana_spent: None,
         base_cost: None,
         declared_mana_additions: Vec::new(),
         activation_cost: None,
@@ -7810,7 +8038,9 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         assist_state: AssistState::NotOffered,
         activation_residual: crate::types::game_state::ActivationResidual::None,
         activation_target_selection: crate::types::game_state::ActivationTargetSelection::Pending,
+        activation_cost_committed: false,
         alt_cost_grant_source: None,
+        activation_trigger_collection: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
         player: PlayerId(0),
@@ -9093,11 +9323,16 @@ fn reorder_hand_rejects_non_permutation() {
     let a = ObjectId(100);
     let b = ObjectId(101);
     state.players[0].hand = crate::im::Vector::from(vec![a, b]);
+    let before = state.clone();
 
     // Wrong length.
     let err = apply(&mut state, p0, GameAction::ReorderHand { order: vec![a] })
         .expect_err("wrong length must error");
     assert!(matches!(err, EngineError::InvalidAction(_)));
+    assert_eq!(
+        state, before,
+        "a reducer rejection must restore transient boundary state as well as the hand"
+    );
 
     // Right length, wrong contents.
     let stranger = ObjectId(999);
@@ -9110,6 +9345,10 @@ fn reorder_hand_rejects_non_permutation() {
     )
     .expect_err("stranger id must error");
     assert!(matches!(err, EngineError::InvalidAction(_)));
+    assert_eq!(
+        state, before,
+        "each rejected reducer attempt must leave the complete state unchanged"
+    );
 
     // Hand unchanged after rejected calls.
     assert_eq!(

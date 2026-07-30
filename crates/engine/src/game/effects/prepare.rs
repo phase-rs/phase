@@ -213,8 +213,14 @@ pub(crate) fn open_copy_target_selection(
 
 fn cleanup_failed_prepared_copy_cast(state: &mut GameState, copy_id: ObjectId) {
     // Defensive cleanup for any failed cast attempt after synthesizing the
-    // ephemeral copy object.
-    state.stack.retain(|entry| entry.id != copy_id);
+    // ephemeral copy object. The predicate filters on a unique id, so this
+    // removes at most ONE entry — routed through the shared stack-removal
+    // authority rather than expressed as a `retain`, which would leave both
+    // per-entry side tables stranded and the removal unjournaled.
+    if let Some(idx) = state.stack.iter().position(|entry| entry.id == copy_id) {
+        crate::game::stack::remove_stack_entry_at(state, idx)
+            .expect("position yielded a live stack index");
+    }
     state.objects.remove(&copy_id);
 }
 
@@ -751,7 +757,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -811,7 +817,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(42),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -1182,6 +1188,7 @@ mod tests {
                 power: None,
                 toughness: None,
                 loyalty: None,
+                printed_loyalty: None,
                 defense: None,
                 card_types,
                 mana_cost,

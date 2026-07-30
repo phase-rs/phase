@@ -48,6 +48,15 @@ export interface CardEntryRowProps {
    *  The BO3 between-games sideboarding modal uses this to enforce a pure
    *  partition UI (cards can only be moved between sections, not removed). */
   onRemove?: (name: string, section: "main" | "sideboard") => void;
+  /** Optional — when omitted, the `+` increment button is not rendered. Paired
+   *  with `canIncrement`; the BO3 sideboarding modal omits both so its list
+   *  stays a pure partition (see `onRemove`). */
+  onIncrement?: (name: string, section: "main" | "sideboard") => void;
+  /** CR 100.2a: whether another copy fits under the engine-resolved copy limit
+   *  for this card and format. Disables the `+` when it doesn't. Defaults to
+   *  permitting the increment so a not-yet-loaded limit never blocks a legal
+   *  add. */
+  canIncrement?: (name: string) => boolean;
   onCardHover?: (cardName: string | null) => void;
   unsupported?: UnsupportedCard;
   onChooseArt?: (cardName: string, x: number, y: number) => void;
@@ -79,6 +88,8 @@ export function CardEntryRow({
   section,
   onMove,
   onRemove,
+  onIncrement,
+  canIncrement,
   onCardHover,
   unsupported,
   onChooseArt,
@@ -100,6 +111,8 @@ export function CardEntryRow({
     !!onSetAsCommander &&
     !!isCommanderEligible &&
     isCommanderEligible(entry.name);
+  // Absent predicate = no known ceiling yet, so don't block a legal add.
+  const incrementAllowed = canIncrement?.(entry.name) ?? true;
   const [expanded, setExpanded] = useState(false);
   const printingsLoaded = usePrintingsLoaded();
   const oracleId = printingsLoaded ? resolveOracleIdSync(entry.name) : null;
@@ -201,6 +214,26 @@ export function CardEntryRow({
               "←"
             )}
           </button>
+          {onIncrement && (
+            <button
+              type="button"
+              onClick={() => onIncrement(entry.name, section)}
+              disabled={!incrementAllowed}
+              className={`${controlVisibility} ml-1 ${controlSize} rounded text-emerald-300 hover:bg-emerald-900/40 disabled:cursor-not-allowed disabled:text-slate-600 disabled:hover:bg-transparent`}
+              aria-label={
+                incrementAllowed
+                  ? t("card.addOne", { name: entry.name })
+                  : t("card.copyLimit", { name: entry.name })
+              }
+              title={
+                incrementAllowed
+                  ? t("card.addOne", { name: entry.name })
+                  : t("card.copyLimit", { name: entry.name })
+              }
+            >
+              +
+            </button>
+          )}
           {onRemove && (
             <button
               type="button"

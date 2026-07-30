@@ -21,7 +21,11 @@ export function CastArcAnimation({
   mode,
   onComplete,
 }: CastArcAnimationProps) {
-  const { src } = useCardImage(cardName, { size: "small" });
+  // `normal`, not `small`: this renders a bare image element with no ladder at
+  // CARD_WIDTH 80 (160 device px at DPR 2), so the real 146px asset would
+  // upscale. Requesting `normal` keeps this overlay byte-identical to before
+  // `small` became a distinct asset.
+  const { src } = useCardImage(cardName, { size: "normal" });
 
   if (mode === "resolve-spell") {
     // Instant/sorcery: fade out with scale reduction at current position

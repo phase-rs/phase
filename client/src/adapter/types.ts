@@ -1,4 +1,9 @@
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type {
+  InteractionActionId,
+  InteractionSubmission,
+  ViewerInteraction,
+} from "./generated/interaction";
 
 // ── Identifiers ──────────────────────────────────────────────────────────
 
@@ -515,7 +520,9 @@ export type SpecialAction =
   | "UnlockDoor"
   | "Plot"
   | "TurnFaceUp"
-  | "RollPlanarDie";
+  | "RollPlanarDie"
+  // CR 116.2c: pay a continuous effect's printed termination cost to end it.
+  | "EndContinuousEffect";
 
 export type ManaRestriction =
   // "Spend this mana only to cast spells."
@@ -558,6 +565,8 @@ export type ManaRestriction =
         count: number;
       };
     }
+  // "Spend this mana only to cast spells of the source's chosen color."
+  | { OnlyForSpellColor: ManaColor }
   // "Spend this mana only to cast a spell from, or not from, the named zone."
   | { OnlyForSpellFromZone: ZoneSpend }
   // "Spend this mana only to cast a face-down spell."
@@ -570,6 +579,8 @@ export type ManaRestriction =
   | { OnlyForAny: ManaRestriction[] }
   // "Spend this mana only on the named special action."
   | { OnlyForSpecialAction: SpecialAction }
+  // A source-dependent restriction could not resolve its required choice.
+  | "Impossible"
   // Internal convoke-tap marker — never surfaced to the player.
   | "ConvokePayment";
 
@@ -1684,7 +1695,7 @@ export type WaitingFor =
   | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; trigger_controller?: PlayerId; trigger_event?: GameEvent; trigger_events?: GameEvent[]; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
-  | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
+  | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore; min_main_deck_size: number; max_sideboard_size: number | null } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" }; persist_player?: PlayerId } }
   | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source: { prompt: { identity: unknown; controller: PlayerId; display_name: string } }; proposition_truth?: boolean } }
@@ -2244,6 +2255,13 @@ export type GameAction =
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
   | { type: "DeclareCompanion"; data: { choice: CompanionDeclaration } }
   | { type: "CompanionToHand" }
+  // CR 116.2c: special action — pay a continuous effect's printed termination
+  // cost to end it. `group` is an engine-minted group key (see
+  // `EndEffectPermission`), NOT a `TransientContinuousEffect.id`.
+  | {
+      type: "EndContinuousEffect";
+      data: { group: number; source_name: string; cost: ManaCost };
+    }
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "GraveyardPaidCastChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
@@ -2336,7 +2354,11 @@ export type LoopCollapseAxis = "Tokens" | "Counters" | "Life" | "Mixed";
 
 export type PayableResource =
   | { type: "Energy" }
-  | { type: "ManaGeneric"; data: { per_x: number } }
+  // CR 107.3f + CR 118.1 + CR 118.12: `base_cost` is the UNCONCRETIZED mana
+  // cost (still carrying the X shard alongside any colored/generic pips,
+  // e.g. `{X}{W}{U}{B}`) — the engine concretizes X into it and pays the
+  // full result, so colored requirements are never dropped (#6410).
+  | { type: "ManaGeneric"; data: { base_cost: ManaCost } }
   | { type: "Counters" }
   | { type: "Speed" }
   // CR 732.2a: not a resource payment — the finite count an accepted
@@ -2454,7 +2476,14 @@ export type GameEvent =
   // CR 705: a coin was flipped. `won` is whether the flipping player won the flip
   // (relative to that player) — there is no engine-named face; the heads/tails
   // depiction is a presentation choice.
-  | { type: "CoinFlipped"; data: { player_id: PlayerId; won: boolean } };
+  | { type: "CoinFlipped"; data: { player_id: PlayerId; won: boolean } }
+  // CR 116.2c: a player took the special action of paying a continuous effect's
+  // printed termination cost. `group` is the engine-minted group key;
+  // `source_id` is the permanent whose resolution installed the effect.
+  | {
+      type: "ContinuousEffectEnded";
+      data: { group: number; source_id: ObjectId; player: PlayerId };
+    };
 
 // ── Game State ───────────────────────────────────────────────────────────
 
@@ -2703,6 +2732,9 @@ export interface TurnOrderSlotView {
   is_starting_player?: boolean;
 }
 
+/** CR 509.1g: engine-authored public `(blocker, attacker)` combat display pair. */
+export type BlockerAssignmentPair = [ObjectId, ObjectId];
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -2723,8 +2755,15 @@ export interface DerivedViews {
    * recipient ObjectId-as-string. A null value means the grant remains live
    * while its source is not a public, phased-in battlefield object, so the UI
    * shows the badge without naming an unavailable source.
-   */
+  */
   temporary_cant_be_blocked?: Record<string, ObjectId | null>;
+
+  /**
+   * CR 509.1g: sorted public blocker-to-attacker pairs. BlockAssignmentLines
+   * renders these directly rather than deciding which combat relations are
+   * visible from raw combat state. Omitted when no creature is blocking.
+   */
+  blocker_assignment_pairs?: BlockerAssignmentPair[];
   /**
    * CR 613.2a + CR 707.2: battlefield permanents whose copiable values are
    * currently supplied by a copy effect (Clone, Phantasmal Image, Vesuvan
@@ -3114,6 +3153,20 @@ export interface TransientContinuousEffect {
   /** `ContinuousModification` payloads — opaque to the display layer; the
    *  FE only inspects the discriminant + a small subset of fields. */
   modifications: ContinuousModification[];
+  /** CR 116.2c: engine-provided standing permission to end this effect by
+   *  paying a cost, as a special action. Absent when the effect has no printed
+   *  termination permission. Display-only: the FE interpolates `cost` into a
+   *  label and echoes `group` back in the action — it never derives either. */
+  end_permission?: EndEffectPermission;
+}
+
+/**
+ * CR 116.2c: mirrors `engine::types::game_state::EndEffectPermission`.
+ * `group` names every transient effect one resolution installed.
+ */
+export interface EndEffectPermission {
+  group: number;
+  cost: ManaCost;
 }
 
 /**
@@ -3188,6 +3241,7 @@ export const AdapterErrorCode = {
    * original dispatch.
    */
   ENGINE_UNRESPONSIVE: "ENGINE_UNRESPONSIVE",
+  UNSUPPORTED: "UNSUPPORTED",
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
   DECK_REJECTED: "DECK_REJECTED",
@@ -3322,9 +3376,20 @@ export interface StuckDecisionDiagnostic {
   stuckPlayers: number[];
 }
 
+/** Engine-authored object-action identity shared with interaction surfaces. */
+export type ObjectAction = GameAction & { interactionActionId?: InteractionActionId };
+
+/** Engine-authored CR 116.2c action shape, including display name and cost. */
+export type EndContinuousEffectOffer = Extract<
+  GameAction,
+  { type: "EndContinuousEffect" }
+>;
+
 export interface LegalActionsResult {
   actions: GameAction[];
   autoPassRecommended: boolean;
+  /** Ordered pay-to-end offers projected by the engine for direct rendering. */
+  endContinuousEffectOffers?: EndContinuousEffectOffer[];
   /** Exact engine-authored actions for the deterministic mana-payment shortcut. */
   manaPaymentShortcutActions?: GameAction[];
   /** Effective mana costs for castable spells, keyed by object_id string. */
@@ -3335,9 +3400,11 @@ export interface LegalActionsResult {
    * for "what can I do with this card?" lookups instead of inferring action
    * availability from objects.
    */
-  legalActionsByObject?: Record<string, GameAction[]>;
+  legalActionsByObject?: Record<string, ObjectAction[]>;
   /** Engine progress-wedge diagnostic: present only when the current decision is wedged. */
   stuckDiagnostic?: StuckDecisionDiagnostic;
+  /** Engine-authored, viewer-scoped interaction opportunities for this snapshot. */
+  viewerInteraction?: ViewerInteraction;
 }
 
 /**
@@ -3352,9 +3419,10 @@ export interface ViewerSnapshot {
   state: GameState;
   actions: GameAction[];
   autoPassRecommended: boolean;
+  endContinuousEffectOffers?: EndContinuousEffectOffer[];
   manaPaymentShortcutActions?: GameAction[];
   spellCosts?: Record<string, ManaCost>;
-  legalActionsByObject?: Record<string, GameAction[]>;
+  legalActionsByObject?: Record<string, ObjectAction[]>;
   /**
    * Engine progress-wedge diagnostic, mirrored from `LegalActionsResult` for
    * shape parity. Currently inert on this path: the store's `stuckDiagnostic`
@@ -3363,6 +3431,7 @@ export interface ViewerSnapshot {
    * carry this field, so the snapshot copy is a deliberate parity placeholder.
    */
   stuckDiagnostic?: StuckDecisionDiagnostic;
+  viewerInteraction?: ViewerInteraction;
 }
 
 export interface BatchResolveResult {
@@ -3427,6 +3496,7 @@ export function nextSnapshotSeq(): number {
 export const EMPTY_LEGAL_ACTIONS: LegalActionsResult = {
   actions: [],
   autoPassRecommended: false,
+  endContinuousEffectOffers: [],
   manaPaymentShortcutActions: [],
 };
 
@@ -3457,6 +3527,8 @@ export interface EngineAdapter {
    * action payload or the UI state.
    */
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  /** Submit an opaque response from the engine's current interaction projection. */
+  submitInteraction?(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   /**
    * Read-only preview of the exact automatic `CastSpell` action currently
    * offered by the engine. Unsupported transports omit this capability.
@@ -3474,6 +3546,12 @@ export interface EngineAdapter {
    */
   getSnapshot(): Promise<EngineSnapshot>;
   getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null> | GameAction | null;
+  /**
+   * Engine-owned deadlock-safe AI escape action for the current waiting state.
+   * Null when no legal escape exists. Non-Priority AI escape must use this —
+   * never invent from `getLegalActions()` enumeration order (#6393).
+   */
+  getAiFallbackAction?(): Promise<GameAction | null> | GameAction | null;
   resolveAll?(
     requester: number,
     aiSeats: { playerId: number; difficulty: string }[],

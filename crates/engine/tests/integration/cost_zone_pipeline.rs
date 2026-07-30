@@ -855,6 +855,7 @@ fn collect_evidence_cost_pauses_for_moved_redirect_before_resuming_its_effect() 
                 GameEvent::PlayerPerformedAction {
                     player_id: P0,
                     action: engine::types::events::PlayerActionKind::CollectEvidence,
+                    ..
                 }
             ))
             .count(),
@@ -933,6 +934,7 @@ fn collect_evidence_cost_completes_when_the_replacement_dispatcher_prevents_its_
                 GameEvent::PlayerPerformedAction {
                     player_id: P0,
                     action: engine::types::events::PlayerActionKind::CollectEvidence,
+                    ..
                 }
             ))
             .count(),
@@ -1805,6 +1807,102 @@ fn paused_sacrifice_cost_stamps_cross_action_departures_and_collects_dies_once()
             .count(),
         1,
         "the deferred first departure trigger is collected once after the full group is stamped"
+    );
+}
+
+#[test]
+fn target_activation_replacement_paused_sacrifice_stages_cost_triggers_until_commit() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Targeted Sacrifice Replacement Witness", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+            .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                2,
+            ))),
+        )
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Targeted Sacrifice Witness", 1, 1)
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Targeted Sacrifice Witness", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let target = scenario.add_creature(P1, "Target", 2, 2).id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&first)
+        .unwrap()
+        .trigger_definitions
+        .push(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::SelfRef)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Graveyard)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+        );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("targeted activation starts with target selection");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        })
+        .expect("target is declared before the sacrifice cost");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("second sacrifice reaches the replacement pipeline");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "the first sacrifice event stays inside the pending activation session"
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("replacement completion commits the activation");
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(
+                entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if source_id == first
+            ))
+            .count(),
+        1,
+        "the replacement-paused sacrifice trigger is collected once at activation commit"
     );
 }
 

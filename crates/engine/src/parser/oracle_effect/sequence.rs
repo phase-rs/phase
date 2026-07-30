@@ -23,8 +23,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
     Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp,
-    ForEachCategoryAction, LibraryPosition, MultiTargetSpec, ObjectScope, PermissionGrantee,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
+    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
     SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TypeFilter, TypedFilter,
 };
@@ -3787,7 +3787,7 @@ pub(super) fn apply_clause_continuation(
             }
         }
         ContinuationAst::ManaRestriction {
-            restriction,
+            restrictions: new_restrictions,
             grants: new_grants,
         } => {
             let Some(previous) = defs.last_mut() else {
@@ -3799,7 +3799,7 @@ pub(super) fn apply_clause_continuation(
                 ..
             } = &mut *previous.effect
             {
-                restrictions.push(restriction);
+                restrictions.extend(new_restrictions);
                 grants.extend(new_grants);
             }
         }
@@ -3935,6 +3935,7 @@ pub(super) fn apply_clause_continuation(
                         .description("goaded".to_string())],
                     duration: duration.or(Some(Duration::Permanent)),
                     target: Some(TargetFilter::LastCreated),
+                    end_cost: None,
                 },
             ));
         }
@@ -3968,6 +3969,34 @@ pub(super) fn apply_clause_continuation(
                     }) => {
                         *cant_regenerate = true;
                     }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        ContinuationAst::EndEffectCost { cost } => {
+            // CR 116.2c + CR 608.2c: the termination clause is separated from the
+            // animation by an intervening clause on all thirteen shipped cards
+            // (an `Attach`, or an `Unimplemented` "move"), so this is a role +
+            // guard bind, not `LastEmitted`.
+            //
+            // The guard is the DETECTOR's own predicate, so the def bound here is
+            // exactly the def detection saw — and because `role_members` applies
+            // the guard as a membership filter, a later empty-statics
+            // `GenericEffect` cannot steal the bind and swallow the cost.
+            let bound = env.resolve(
+                defs,
+                super::assembly::AntecedentSelector::LastWithRole(
+                    super::assembly::AntecedentRole::GenericEffectHead,
+                ),
+                Some(super::assembly::BindGuard::EffectShape(
+                    super::assembly::EffectClass::InstalledContinuousEffect,
+                )),
+                super::assembly::OnMiss::Ignore,
+            );
+            if let Some(bound_index) = bound {
+                match &mut *defs[bound_index].effect {
+                    Effect::GenericEffect { end_cost, .. } => *end_cost = Some(cost),
+                    // The guard admits only `GenericEffect` with non-empty statics.
                     _ => unreachable!(),
                 }
             }
@@ -4862,6 +4891,7 @@ pub(super) fn apply_clause_continuation(
             *defs[bound_index].effect = Effect::ExileTop {
                 player,
                 count,
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down,
             };
         }
@@ -5115,6 +5145,13 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::GoadLastCreated { .. } => true,
         ContinuationAst::CantRegenerate => true,
+        // CR 116.2c: recognition was already gated on a preceding
+        // continuous-effect-installing `GenericEffect`, so absorption is
+        // unconditional. Full absorption is REQUIRED, not merely convenient: the
+        // clause grants a LATER special action and performs nothing at
+        // resolution, so any def it emitted would be wrong — which is precisely
+        // what the mandatory `Effect::PayCost` it replaces was.
+        ContinuationAst::EndEffectCost { .. } => true,
         // CR 120.4a: recognition was gated on a preceding DealDamage, so the
         // rider is always absorbed into that effect (never a standalone effect).
         ContinuationAst::ExcessDamageToController { .. } => true,
@@ -6021,6 +6058,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // `Dig`, and the sacrificed creature feeds the continuation's filter
         // via `ObjectScope::CostPaidObject`.
         Effect::Sacrifice { .. } | Effect::PayCost { .. } => true,
+        // CR 406.3 + CR 608.2c + CR 701.24a: Exiling a face-down pile and
+        // shuffling it for its "If you do" rider is an intervening instruction;
+        // a later continuation may still refer to an earlier Dig.
+        Effect::ExileFaceDownPile { .. } => true,
         // CR 406.3: turning the exiled card face up is its own resolving effect,
         // not a Dig-lookback-transparent clause.
         Effect::TurnFaceUp { .. } => false,
@@ -6511,10 +6552,14 @@ pub(super) fn parse_followup_continuation_ast(
             // (coverage green). A dropped unsupported restriction also drops any
             // paired `grants`; that is intentional (no real card pairs a grant with
             // an unsupported restriction).
-            if let Some((restriction, grants)) = super::mana::parse_mana_spend_restriction(&lower) {
-                if restriction.is_coverage_supported() {
+            if let Some((restrictions, grants)) = super::mana::parse_mana_spend_restriction(&lower) {
+                if !restrictions.is_empty()
+                    && restrictions
+                        .iter()
+                        .all(ManaSpendRestriction::is_coverage_supported)
+                {
                     return Some(ContinuationAst::ManaRestriction {
-                        restriction,
+                        restrictions,
                         grants,
                     });
                 }
@@ -7961,6 +8006,17 @@ mod tests {
     use super::*;
     use crate::types::ability::QuantityExpr;
 
+    #[test]
+    fn face_down_pile_is_dig_lookback_transparent() {
+        let effect = Effect::ExileFaceDownPile {
+            object: TargetFilter::TriggeringSource,
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 6 },
+        };
+
+        assert!(clause_is_dig_lookback_transparent(&effect));
+    }
+
     // CR 608.2c + CR 601.2c: "target opponent does the same / does so" replicates
     // the preceding sibling effect for a targeted opponent. The recognizer must
     // accept the "does the same", "does so", and leading-"then" phrasings.
@@ -9256,6 +9312,7 @@ mod tests {
                 static_abilities,
                 duration,
                 target,
+                end_cost: _,
             } => {
                 assert_eq!(*target, Some(TargetFilter::LastCreated));
                 assert_eq!(*duration, Some(Duration::Permanent));
@@ -9288,6 +9345,7 @@ mod tests {
                 static_abilities,
                 duration,
                 target,
+                end_cost: _,
             } => {
                 assert_eq!(*target, Some(TargetFilter::LastCreated));
                 assert_eq!(*duration, Some(Duration::UntilHostLeavesPlay));

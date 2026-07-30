@@ -11,7 +11,8 @@ use nom::sequence::{delimited, preceded};
 use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
-use crate::types::ability::PtValue;
+use crate::types::ability::{AggregateFunction, ObjectProperty, PtValue};
+use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterType, KEYWORD_COUNTERS};
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -339,6 +340,116 @@ pub fn parse_color(input: &str) -> OracleResult<'_, ManaColor> {
         value(ManaColor::Green, tag("green")),
     ))
     .parse(input)
+}
+
+/// CR 205.2a: Parse a single printed card-type word into its [`CoreType`].
+///
+/// Enumerates the CR 205.2a card-type list ("artifact, battle, conspiracy,
+/// creature, dungeon, enchantment, instant, kindred, land, phenomenon, plane,
+/// planeswalker, scheme, sorcery, and vanguard") plus the errata'd legacy
+/// "tribal" spelling of kindred (CR 308.3). Operates on already-lowercased text.
+///
+/// "vanguard" is absent because [`CoreType`] models no Vanguard variant — the
+/// Vanguard variant's avatar cards are out of scope for the engine, so there is
+/// nothing to map the word onto.
+///
+/// Ordering note: "planeswalker" MUST precede "plane" — they share a prefix and
+/// `alt` commits to the first success, so the reverse order would parse
+/// "planeswalker" as `Plane` with a stray "swalker" remainder.
+///
+/// This combinator matches a bare word with no trailing word-boundary check, so
+/// callers that parse a full phrase must verify the remainder themselves (e.g.
+/// via `all_consuming`) rather than accepting a prefix match.
+pub fn parse_core_type(input: &str) -> OracleResult<'_, CoreType> {
+    alt((
+        value(CoreType::Artifact, tag("artifact")),
+        value(CoreType::Battle, tag("battle")),
+        value(CoreType::Conspiracy, tag("conspiracy")),
+        value(CoreType::Creature, tag("creature")),
+        value(CoreType::Dungeon, tag("dungeon")),
+        value(CoreType::Enchantment, tag("enchantment")),
+        value(CoreType::Instant, tag("instant")),
+        value(CoreType::Kindred, tag("kindred")),
+        value(CoreType::Tribal, tag("tribal")),
+        value(CoreType::Land, tag("land")),
+        value(CoreType::Phenomenon, tag("phenomenon")),
+        value(CoreType::Planeswalker, tag("planeswalker")),
+        value(CoreType::Plane, tag("plane")),
+        value(CoreType::Scheme, tag("scheme")),
+        value(CoreType::Sorcery, tag("sorcery")),
+    ))
+    .parse(input)
+}
+
+/// CR 205.2a + CR 205.2b: Parse a disjunction of printed card-type words into
+/// the set of types that satisfy the gate — "instant or sorcery", "artifact or
+/// enchantment", "artifact, creature, or enchantment".
+///
+/// CR 205.2b ("objects satisfy the criteria for any effect that applies to any
+/// of their card types") is why a disjunction lowers to a *set*: consumers such
+/// as `AbilityCondition::RevealedHasCardType` match with `any`, so listing every
+/// printed leg is exactly the OR semantics the Oracle text prints.
+///
+/// An explicit `or` boundary is REQUIRED for a multi-leg result, because CR
+/// 205.2b describes TWO different things this grammar must not conflate. Its
+/// first sentence — "Some objects have more than one card type (for example, an
+/// artifact creature)" — is a CONJUNCTIVE type stack: ONE object bearing every
+/// listed type. Its second sentence — "Such objects satisfy the criteria for any
+/// effect that applies to any of their card types" — is the `any` match that
+/// makes a printed DISJUNCTION lower to a set.
+///
+/// Only the printed "or" tells the two apart. A bare comma list ("land,
+/// instant") or a printed "and" ("artifact and creature") is the conjunctive
+/// reading, so lowering it to a set that consumers evaluate with `any` would
+/// silently widen a both-types gate into an either-type gate. Comma legs are
+/// therefore buffered and only committed once a terminal `", or "` / `" or "`
+/// leg proves the list really was disjunctive:
+///
+/// - `"instant or sorcery"` → `[Instant, Sorcery]`
+/// - `"artifact, creature, or enchantment"` → `[Artifact, Creature, Enchantment]`
+/// - `"land, instant"` → `[Land]`, remainder `", instant"` (rejected upstream by
+///   the caller's `all_consuming`)
+/// - `"artifact and creature"` → `[Artifact]`, remainder `" and creature"`
+///
+/// A single type word is a well-formed one-element disjunction, so this is a
+/// drop-in superset of [`parse_core_type`].
+pub fn parse_core_type_disjunction(input: &str) -> OracleResult<'_, Vec<CoreType>> {
+    let (after_first, first) = parse_core_type(input)?;
+
+    // Comma legs are provisional until an `or` boundary appears. `pending` holds
+    // them; `probe` walks the candidate list without committing the remainder.
+    let mut pending: Vec<CoreType> = Vec::new();
+    let mut probe = after_first;
+
+    loop {
+        // Terminal disjunctive leg — commits every buffered comma leg with it.
+        // ", or " is tried before " or " because the Oxford comma must be
+        // consumed whole rather than leaving a dangling ", ".
+        if let Ok((after_last, last)) = alt((
+            preceded(tag::<_, _, OracleError<'_>>(", or "), parse_core_type),
+            preceded(tag(" or "), parse_core_type),
+        ))
+        .parse(probe)
+        {
+            let mut types = Vec::with_capacity(pending.len() + 2);
+            types.push(first);
+            types.append(&mut pending);
+            types.push(last);
+            return Ok((after_last, types));
+        }
+
+        // Intermediate ", " leg — buffer it and keep looking for the `or`.
+        match preceded(tag::<_, _, OracleError<'_>>(", "), parse_core_type).parse(probe) {
+            Ok((after_mid, mid)) => {
+                pending.push(mid);
+                probe = after_mid;
+            }
+            // No `or` boundary anywhere in the list — not a disjunction. Yield
+            // the single leading type and leave the comma tail unconsumed so a
+            // full-consumption caller rejects the phrase outright.
+            Err(_) => return Ok((after_first, vec![first])),
+        }
+    }
 }
 
 /// CR 122.1: Combinator mapping a player-counter kind word to its typed
@@ -1211,6 +1322,40 @@ pub fn split_once_on<'a>(
     Ok(("", (before, after)))
 }
 
+/// Parse a superlative adjective into its corresponding `AggregateFunction`.
+///
+/// CR 208.1 (a creature's power and toughness) + CR 202.3 (an object's mana
+/// value): greatest/highest select the maximum of the population, least/lowest/
+/// smallest the minimum.
+///
+/// Relocated here from `oracle_nom/condition.rs` so the condition layer and the
+/// target/filter layer share ONE atom rather than maintaining parallel tables.
+pub(crate) fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
+    alt((
+        value(AggregateFunction::Max, tag("greatest")),
+        value(AggregateFunction::Max, tag("highest")),
+        value(AggregateFunction::Min, tag("lowest")),
+        value(AggregateFunction::Min, tag("least")),
+        // Parity with the target-suffix table this consolidation absorbs. ZERO
+        // corpus attestation (0 hits over 35,679 MTGJSON faces), so it adds no
+        // card coverage — it exists so the consolidation loses no grammar that
+        // either predecessor table recognized.
+        value(AggregateFunction::Min, tag("smallest")),
+    ))
+    .parse(input)
+}
+
+/// Property keyword → [`ObjectProperty`]. Shared by the condition layer's
+/// comparison grammar and the target/filter layer's superlative head.
+pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
+    alt((
+        value(ObjectProperty::Power, tag("power")),
+        value(ObjectProperty::Toughness, tag("toughness")),
+        value(ObjectProperty::ManaValue, tag("mana value")),
+    ))
+    .parse(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1974,5 +2119,123 @@ mod tests {
             assert_eq!(kind, expected, "input: {input:?}");
         }
         assert!(parse_alt_cost_keyword_name_to_kind("unknown").is_err());
+    }
+
+    /// CR 205.2a: every card-type word the enum models maps to its `CoreType`.
+    #[test]
+    fn test_parse_core_type_covers_cr_205_2a_words() {
+        let cases = [
+            ("artifact", CoreType::Artifact),
+            ("battle", CoreType::Battle),
+            ("conspiracy", CoreType::Conspiracy),
+            ("creature", CoreType::Creature),
+            ("dungeon", CoreType::Dungeon),
+            ("enchantment", CoreType::Enchantment),
+            ("instant", CoreType::Instant),
+            ("kindred", CoreType::Kindred),
+            ("tribal", CoreType::Tribal),
+            ("land", CoreType::Land),
+            ("phenomenon", CoreType::Phenomenon),
+            ("plane", CoreType::Plane),
+            ("scheme", CoreType::Scheme),
+            ("sorcery", CoreType::Sorcery),
+        ];
+        for (input, expected) in cases {
+            let (rest, parsed) = parse_core_type(input).unwrap();
+            assert_eq!(parsed, expected, "input: {input:?}");
+            assert!(rest.is_empty(), "input {input:?} left remainder {rest:?}");
+        }
+        assert!(parse_core_type("goblin").is_err());
+    }
+
+    /// "planeswalker" shares a prefix with "plane"; `alt` commits to its first
+    /// success, so the longer word must win or the remainder is corrupted.
+    #[test]
+    fn test_parse_core_type_prefers_planeswalker_over_plane() {
+        let (rest, parsed) = parse_core_type("planeswalker").unwrap();
+        assert_eq!(parsed, CoreType::Planeswalker);
+        assert!(rest.is_empty(), "planeswalker left remainder {rest:?}");
+    }
+
+    /// CR 205.2a + CR 205.2b: a printed disjunction carries every leg.
+    #[test]
+    fn test_parse_core_type_disjunction_carries_every_leg() {
+        let cases: [(&str, Vec<CoreType>); 4] = [
+            ("sorcery", vec![CoreType::Sorcery]),
+            (
+                "instant or sorcery",
+                vec![CoreType::Instant, CoreType::Sorcery],
+            ),
+            (
+                "artifact, creature, or enchantment",
+                vec![
+                    CoreType::Artifact,
+                    CoreType::Creature,
+                    CoreType::Enchantment,
+                ],
+            ),
+            (
+                "artifact, creature, enchantment, or land",
+                vec![
+                    CoreType::Artifact,
+                    CoreType::Creature,
+                    CoreType::Enchantment,
+                    CoreType::Land,
+                ],
+            ),
+        ];
+        for (input, expected) in cases {
+            let (rest, parsed) = parse_core_type_disjunction(input).unwrap();
+            assert_eq!(parsed, expected, "input: {input:?}");
+            assert!(rest.is_empty(), "input {input:?} left remainder {rest:?}");
+        }
+    }
+
+    /// A bare comma is NOT an `or` boundary. Without a printed "or" the phrase is
+    /// an enumerated/conjunctive type stack, and lowering it to a set that
+    /// consumers evaluate with `any` would widen a both-types gate into an
+    /// either-type gate. Only the leading type is yielded, and the comma tail is
+    /// left unconsumed so a full-consumption caller rejects the phrase outright.
+    #[test]
+    fn test_parse_core_type_disjunction_rejects_bare_comma_list() {
+        for input in ["land, instant", "artifact, creature", "land, instant, land"] {
+            let (rest, parsed) = parse_core_type_disjunction(input).unwrap();
+            assert_eq!(
+                parsed.len(),
+                1,
+                "input {input:?} must not yield a multi-leg disjunction, got {parsed:?}"
+            );
+            assert!(
+                !rest.is_empty(),
+                "input {input:?} must leave its comma tail unconsumed"
+            );
+            // The guard that actually protects callers: full consumption fails,
+            // so such a phrase can never reach a multi-type `RevealedHasCardType`.
+            assert!(
+                all_consuming(parse_core_type_disjunction)
+                    .parse(input)
+                    .is_err(),
+                "input {input:?} must be rejected under all_consuming"
+            );
+        }
+    }
+
+    /// A printed "and" between card types is a conjunction naming one object
+    /// with BOTH types, not the `any`-match set this combinator builds — it must
+    /// not be swallowed as a disjunction separator.
+    #[test]
+    fn test_parse_core_type_disjunction_rejects_and_conjunction() {
+        let (rest, parsed) = parse_core_type_disjunction("artifact and creature").unwrap();
+        assert_eq!(parsed, vec![CoreType::Artifact]);
+        assert_eq!(rest, " and creature");
+    }
+
+    /// A trailing non-type clause must not be consumed: the comma-leg probe has
+    /// to rewind to the leading type rather than failing the whole parse.
+    #[test]
+    fn test_parse_core_type_disjunction_backtracks_over_trailing_clause() {
+        let (rest, parsed) = parse_core_type_disjunction("instant, then draw a card").unwrap();
+        assert_eq!(parsed, vec![CoreType::Instant]);
+        assert_eq!(rest, ", then draw a card");
     }
 }

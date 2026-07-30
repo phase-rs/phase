@@ -1,6 +1,35 @@
 {
   "entries": [
     {
+      "id": 183,
+      "date": "2026-07-29",
+      "title": "Repeated payments resolve correctly",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Deathbringer Regent joins the supported pool, while Ozai’s conditional mana ability and Runadi, Behemoth Caller’s counter-and-haste package now work as printed\n\n🛠️ Cards That Now Work Right\n• Repeated optional payments now happen one at a time, with each resulting trigger appearing only after the payment succeeds\n• Elenda and Azor’s X payment now charges its colored mana as well as X; Mosswort Bridge correctly lets you play its hidden card\n• Fight Rigging and Collector’s Cage keep their counter target separate from their hidden card, while Culling Scales correctly finds the lowest-mana-value nonland permanent\n• Captain America’s Shield and similar Equipment attack triggers can affect creatures the defending player controls; Mockingbird correctly uses the mana spent to cast it for its copy limit\n• Activated abilities now choose targets before paying their costs, correctly handle independent repeated player choices, and keep required player targets distinct\n\n⚔️ Combat & Gameplay\n• Damage prevention now applies to the intended recipient instead of broadening to every possible target\n• Turn-control effects no longer lose queued payment choices, so controlled players can pay costs such as Lava Dart’s flashback sacrifice\n\n🖥️ Interface\n• Attachments can now be selected reliably from their interaction fan\n\n🤖 AI\n• AI better recognizes Vehicle, discard-matters, and cost-reduction decks, and makes more reliable land, mana-payment, and sacrifice decisions",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1532224460164301061"
+    },
+    {
+      "id": 182,
+      "date": "2026-07-28",
+      "title": "Yurlok brings mana burn back",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Yurlok of Scorch Thrash now brings its three-player mana burst and life loss for unspent mana to the battlefield\n• Scholarship Sponsor, Enigma Ridges, Felisa, Fang of Silverquill, Orzhov Advokist, The Temporal Anchor, and Hidetsugu and Kairi join the supported pool\n\n🛠️ Cards That Now Work Right\n• Molten Psyche, Relic of Progenitus, Circle of Power, Licids, Aven Courier, Orcish Farmer, Elrond, Master of Healing, Moonmist, and Waterbend cards now follow their printed targets, durations, costs, or effects\n• Effects that scry multiple times in one resolution now preserve every resulting trigger; face-down exile piles and zero-target divided triggers resolve without the hangs and crashes they could cause\n\n⚔️ Combat & Gameplay\n• Extra-turn sequences resume with the right player, and multiplayer games accept legal attack declarations split across defenders\n• Sideboarding accepts legal main-deck sizes for the selected format, while the deck builder makes adjusting that size easier\n\n🖥️ Interface\n• Target prompts now distinguish helpful selections from hostile ones, instead of treating every target as an attack\n• Mana choices retain their individual costs and restrictions, hover previews behave reliably across pointer types, and desktop solo games regain their sandbox, checkpoint, and reconnect options\n\n🤖 AI\n• AI better recognizes draw-payoff and devotion strategies, chooses more effective removal, and makes sounder choices around mana development, self-bounce, and costly trades\n\n🌐 Multiplayer\n• Private lobby hosts stay private, and the server more reliably preserves legal actions and manual payment choices across multiplayer games",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1531741229509775480"
+    },
+    {
       "id": 181,
       "date": "2026-07-25",
       "title": "Kamigawa flip cards arrive",

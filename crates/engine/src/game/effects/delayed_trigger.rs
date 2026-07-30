@@ -199,13 +199,16 @@ pub fn resolve(
         condition,
         crate::types::ability::DelayedTriggerCondition::WheneverEvent { .. }
     );
-    state.delayed_triggers.push(DelayedTrigger {
-        condition,
-        ability: delayed_ability,
-        controller: ability.controller,
-        source_id: ability.source_id,
-        one_shot,
-    });
+    crate::game::triggers::install_delayed_trigger(
+        state,
+        DelayedTrigger {
+            condition,
+            ability: Box::new(delayed_ability),
+            controller: ability.controller,
+            source_id: ability.source_id,
+            one_shot,
+        },
+    );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CreateDelayedTrigger,

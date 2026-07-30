@@ -1,4 +1,5 @@
 import type { BatchResolveResult, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, WaitingFor } from "../adapter/types";
+import type { InteractionSubmission } from "../adapter/generated/interaction";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
@@ -13,7 +14,7 @@ import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
 import {
-  isMultiplayerMode,
+  isAuthorityRemote,
   useGameStore,
   saveAuthoritativeGame,
   saveCheckpoints,
@@ -180,10 +181,22 @@ function waitingForActorMatches(
   if (typeof data !== "object" || data === null) return false;
   const fields = data as Record<string, unknown>;
 
-  if (waitingFor.type === "Priority") {
+  // CR 723: under a turn-control effect (Emrakul, the Promised End;
+  // Mindslaver; etc.) a single-actor WaitingFor's `player` field names the
+  // semantic seat whose decision this is, which can differ from the
+  // authenticated actor actually submitting it (the controller). The engine
+  // keeps `gameState.priority_player` synced to the authorized submitter for
+  // whichever WaitingFor is current — for every single-actor variant, not
+  // just "Priority" (`sync_priority_player_from_waiting_for` in
+  // `public_state.rs` runs off `WaitingFor::acting_player()`, which every
+  // single-actor variant implements). Every variant carrying a `player`
+  // field must therefore consult it too, not only "Priority" — otherwise a
+  // queued action for e.g. a flashback sacrifice-cost PayCost prompt gets
+  // dropped as "stale" purely because the controller's id doesn't match the
+  // controlled seat's id (#6431).
+  if ("player" in fields) {
     return fields.player === actor || gameState?.priority_player === actor;
   }
-  if (fields.player === actor) return true;
 
   const pending = fields.pending;
   return (
@@ -291,7 +304,7 @@ async function processAction(
   const { gameMode } = useGameStore.getState();
   const shouldSaveHistory =
     UNDOABLE_ACTIONS.has(action.type) &&
-    !isMultiplayerMode(gameMode) &&
+    !isAuthorityRemote(gameMode) &&
     gameState.stack.length === 0;
 
   // 3. Call WASM — get events without updating state yet.
@@ -693,6 +706,33 @@ export function dispatchAction(
   actor: number = getPlayerId(),
 ): Promise<void> {
   return dispatchActionInternal(action, actor, null);
+}
+
+/**
+ * Submit an engine-authored interaction response through the same adapter and
+ * atomic snapshot boundary used by ordinary game actions.  The response is
+ * opaque: UI callers cannot materialize or reinterpret a GameAction.
+ */
+export async function dispatchInteraction(
+  submission: InteractionSubmission,
+  actor: number = getPlayerId(),
+): Promise<void> {
+  const { adapter, gameState, gameMode } = useGameStore.getState();
+  if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) return;
+  if (!adapter.submitInteraction) {
+    throw new AdapterError(
+      AdapterErrorCode.UNSUPPORTED,
+      "This game connection does not support interaction responses",
+      false,
+    );
+  }
+
+  const result = await adapter.submitInteraction(submission, actor);
+  const snapshot = await adapter.getSnapshot();
+  useGameStore.getState().commitEngineSnapshot(snapshot, {
+    events: result.events,
+    logEntries: result.log_entries ?? [],
+  });
 }
 
 /** Dispatch a standing preference only while its captured game lifecycle is

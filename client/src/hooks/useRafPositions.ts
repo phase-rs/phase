@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { BlockerAssignmentPair } from "../components/board/blockAssignmentVisibility.ts";
+import type { BlockerAssignmentPair } from "../adapter/types.ts";
 import { objectAnchorSelector } from "../utils/objectAnchorSelector.ts";
 
 export interface LinePosition {

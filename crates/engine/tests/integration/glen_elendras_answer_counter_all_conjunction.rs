@@ -94,7 +94,7 @@ fn push_activated_ability(runner: &mut GameRunner, controller: PlayerId, card: u
         controller,
         kind: StackEntryKind::ActivatedAbility {
             source_id: source,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "test_ability".to_string(),
                     description: None,
@@ -102,7 +102,7 @@ fn push_activated_ability(runner: &mut GameRunner, controller: PlayerId, card: u
                 vec![],
                 source,
                 controller,
-            ),
+            )),
         },
     });
     ability_id

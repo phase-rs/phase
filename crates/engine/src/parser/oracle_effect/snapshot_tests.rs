@@ -590,6 +590,7 @@ fn returned_creatures_can_receive_counters_and_additive_type_followup() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*subtype_followup.effect
     else {
         panic!("expected GenericEffect, got {:?}", subtype_followup.effect);
@@ -680,6 +681,7 @@ fn returned_target_can_receive_contracted_additive_type_followup() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*subtype_followup.effect
     else {
         panic!("expected GenericEffect, got {:?}", subtype_followup.effect);
@@ -971,7 +973,10 @@ fn strax_choose_a_player_at_random_records_random_selection() {
     );
     match def.effect.as_ref() {
         Effect::Choose {
-            choice_type: ChoiceType::Player,
+            choice_type:
+                ChoiceType::Player {
+                    distinctness: PlayerChoiceDistinctness::Independent,
+                },
             selection,
             ..
         } => assert_eq!(*selection, TargetSelectionMode::Random),
@@ -988,16 +993,20 @@ fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
         AbilityKind::Spell,
     );
 
-    // Node 0: the first `Choose(Player)`.
+    // Node 0: the first `Choose(Player)` — no ordinal, so the default
+    // `Independent` distinctness applies (CR 608.2c; issue #6381 confirms the
+    // bare "choose a player" must NOT exclude prior choices).
     assert!(
         matches!(
             def.effect.as_ref(),
             Effect::Choose {
-                choice_type: ChoiceType::Player,
+                choice_type: ChoiceType::Player {
+                    distinctness: PlayerChoiceDistinctness::Independent
+                },
                 ..
             }
         ),
-        "first node must be Choose(Player), got {:?}",
+        "first node must be Choose(Player) with Independent distinctness, got {:?}",
         def.effect
     );
 
@@ -1015,17 +1024,21 @@ fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
         "the +1/+1 counters go on a creature the 1st chosen player controls"
     );
 
-    // Node 2: the second `Choose(Player)`.
+    // Node 2: the second `Choose(Player)` — "a second player" carries the
+    // ordinal, so it must be `DistinctFromPriorChoices` (Gluntch's "three
+    // distinct players" ruling).
     let node2 = node1.sub_ability.as_ref().expect("2nd Choose node");
     assert!(
         matches!(
             node2.effect.as_ref(),
             Effect::Choose {
-                choice_type: ChoiceType::Player,
+                choice_type: ChoiceType::Player {
+                    distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices
+                },
                 ..
             }
         ),
-        "node 2 must be Choose(Player) — not Unimplemented — got {:?}",
+        "node 2 must be Choose(Player) with DistinctFromPriorChoices — not Unimplemented — got {:?}",
         node2.effect
     );
 
@@ -1040,17 +1053,20 @@ fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
         "the 2nd chosen player draws the card"
     );
 
-    // Node 4: the third `Choose(Player)`.
+    // Node 4: the third `Choose(Player)` — "a third player" carries the
+    // ordinal, so it must be `DistinctFromPriorChoices` too.
     let node4 = node3.sub_ability.as_ref().expect("3rd Choose node");
     assert!(
         matches!(
             node4.effect.as_ref(),
             Effect::Choose {
-                choice_type: ChoiceType::Player,
+                choice_type: ChoiceType::Player {
+                    distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices
+                },
                 ..
             }
         ),
-        "node 4 must be Choose(Player) — not Unimplemented — got {:?}",
+        "node 4 must be Choose(Player) with DistinctFromPriorChoices — not Unimplemented — got {:?}",
         node4.effect
     );
 

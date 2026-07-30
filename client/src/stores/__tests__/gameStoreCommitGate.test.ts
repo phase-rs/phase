@@ -58,6 +58,16 @@ describe("gameStore commitEngineSnapshot — revision gate", () => {
 
   it("commits a fresh pair and records its seq", () => {
     const snapshot = snapshotOf(PRIORITY, [{ type: "PassPriority" }]);
+    snapshot.legalResult.endContinuousEffectOffers = [
+      {
+        type: "EndContinuousEffect",
+        data: {
+          group: 8,
+          source_name: "Calming Licid",
+          cost: { type: "Cost", shards: ["W"], generic: 0 },
+        },
+      },
+    ];
 
     const accepted = useGameStore.getState().commitEngineSnapshot(snapshot);
 
@@ -66,6 +76,9 @@ describe("gameStore commitEngineSnapshot — revision gate", () => {
     expect(store.gameState).toEqual(snapshot.state);
     expect(store.waitingFor).toEqual(PRIORITY);
     expect(store.legalActions).toEqual(snapshot.legalResult.actions);
+    expect(store.endContinuousEffectOffers).toEqual(
+      snapshot.legalResult.endContinuousEffectOffers,
+    );
     expect(store.lastCommittedSeq).toBe(snapshot.seq);
   });
 

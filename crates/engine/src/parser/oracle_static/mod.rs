@@ -160,7 +160,9 @@ pub(crate) use keyword_grant::{
     parse_graveyard_granted_keyword_kind, parse_quoted_ability_modifications, split_keyword_list,
     try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
 };
-pub(crate) use mana_transform::try_parse_retain_unspent_mana_static;
+pub(crate) use mana_transform::{
+    is_unspent_mana_loss_causes_life_loss_static, try_parse_retain_unspent_mana_static,
+};
 pub(crate) use restriction::parse_cant_be_activated_exemption_in_text;
 pub(crate) use restriction::parse_passive_cant_be_cast_spell_filter;
 pub(crate) use restriction::try_parse_top_of_library_cast_permission;
@@ -218,6 +220,20 @@ pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
 }
 
 /// Lowering: apply post-parse transforms to produce the final `StaticDefinition`.
+///
+/// **Every transform added here must be idempotent.** Recognizers that already
+/// call `parse_static_line` (which lowers internally, above) and then hand the
+/// result to `StaticIr::from_definition` cause this function to run a second
+/// time over an already-lowered definition — the Class level-section arms in
+/// `oracle_class.rs` are the current example, and they interpose
+/// `wrap_static_with_class_level` between the two passes, so a transform must
+/// also be stable under a condition it did not see on the first pass. Both
+/// transforms below satisfy this today: `populate_active_zones_from_condition`
+/// self-guards on `active_zones.is_empty()` and its collector ignores
+/// `ClassLevelGE`, and `bind_counter_anaphor_to_recipient` rewrites only
+/// `ObjectScope::Anaphoric`, of which none survive the first pass. A
+/// non-idempotent transform added here would silently double-apply across every
+/// such site.
 pub(crate) fn lower_static_ir(ir: &StaticIr) -> crate::types::ability::StaticDefinition {
     let mut def = ir.definition.clone();
     shared::populate_active_zones_from_condition(&mut def);

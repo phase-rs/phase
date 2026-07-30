@@ -8,7 +8,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, CastingVariant, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
-use crate::types::zones::Zone;
+use crate::types::statics::CastFrequency;
+use crate::types::zones::{EtbTapState, Zone};
 
 /// CR 400.1/400.2: Recursively extract a filter's own `controller` axis,
 /// looking through the composed forms (`Not`/`And`/`Or`) a real card's target
@@ -1135,6 +1136,7 @@ fn record_lingering_permissions(
     target_ids: &[ObjectId],
 ) -> Result<(), EffectError> {
     let (
+        mode,
         without_paying,
         cast_transformed,
         alt_ability_cost,
@@ -1143,6 +1145,7 @@ fn record_lingering_permissions(
         mana_spend_permission,
     ) = match &ability.effect {
         Effect::CastFromZone {
+            mode,
             without_paying_mana_cost,
             cast_transformed,
             alt_ability_cost,
@@ -1151,6 +1154,7 @@ fn record_lingering_permissions(
             mana_spend_permission,
             ..
         } => (
+            *mode,
             *without_paying_mana_cost,
             *cast_transformed,
             alt_ability_cost.clone(),
@@ -1253,6 +1257,41 @@ fn record_lingering_permissions(
             if !obj.casting_permissions.contains(&permission) {
                 obj.casting_permissions.push(permission);
             }
+
+            // CR 305.1: A `CastFromZone` in `mode: Play` must also authorize
+            // playing the card when it is a land. The look-to-play contract
+            // for face-down exile is keyed on `CastingPermission::PlayFromExile`
+            // (CR 406.3a + CR 406.3b), not on `ExileWithAltCost` alone.
+            if matches!(mode, crate::types::ability::CardPlayMode::Play)
+                && alt_ability_cost.is_none()
+            {
+                // CR 305.1: lands are played (not cast) but still require
+                // face-down exile look/play authority.
+                let play_duration = duration.clone().unwrap_or_else(|| {
+                    matches!(current_zone, Some(Zone::Graveyard | Zone::Hand))
+                        .then_some(Duration::UntilEndOfTurn)
+                        .unwrap_or(Duration::Permanent)
+                });
+
+                let play_permission = CastingPermission::PlayFromExile {
+                    duration: play_duration,
+                    granted_to: ability.controller,
+                    frequency: CastFrequency::Unlimited,
+                    source_id: Some(ability.source_id),
+                    invalidation: None,
+                    exiled_by_ability_controller: Some(ability.controller),
+                    mana_spend_permission,
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: EtbTapState::Unspecified,
+                };
+
+                if !obj.casting_permissions.contains(&play_permission) {
+                    obj.casting_permissions.push(play_permission);
+                }
+            }
         }
     }
     Ok(())
@@ -1328,6 +1367,108 @@ mod tests {
         );
         state.objects.get_mut(&obj_id).unwrap().mana_cost = ManaCost::zero();
         obj_id
+    }
+
+    #[test]
+    fn play_mode_without_paying_stamps_zero_cost_cast_and_play_from_exile() {
+        let mut state = make_test_state();
+        let obj_id = add_card_to_exile(&mut state, PlayerId(1), CardId(100));
+
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Any,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&obj_id).unwrap();
+
+        assert!(
+            obj.casting_permissions.iter().any(|p| matches!(
+                p,
+                CastingPermission::ExileWithAltCost {
+                    cost,
+                    granted_to: Some(PlayerId(0)),
+                    duration: None,
+                    ..
+                } if *cost == ManaCost::zero()
+            )),
+            "play-mode without-paying must grant a zero-cost exile alt-cost cast permission"
+        );
+
+        assert!(
+            obj.casting_permissions.iter().any(|p| matches!(
+                p,
+                CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    granted_to,
+                    source_id: Some(ObjectId(999)),
+                    exiled_by_ability_controller: Some(PlayerId(0)),
+                    mana_spend_permission: None,
+                    card_filter: None,
+                    ..
+                } if *granted_to == PlayerId(0)
+            )),
+            "play-mode without-paying must also stamp PlayFromExile for face-down exile look/play"
+        );
+    }
+
+    #[test]
+    fn play_mode_with_alt_ability_cost_does_not_stamp_play_from_exile() {
+        let mut state = make_test_state();
+        let obj_id = add_card_to_exile(&mut state, PlayerId(1), CardId(101));
+
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Any,
+                without_paying_mana_cost: false,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: Some(
+                    crate::types::ability::AbilityCost::KeywordCostOfCastSpell {
+                        keyword: crate::types::keywords::KeywordKind::Suspend,
+                    },
+                ),
+                constraint: None,
+                duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert!(
+            !obj.casting_permissions.iter().any(|p| matches!(
+                p,
+                CastingPermission::PlayFromExile { .. }
+            )),
+            "play-mode with alt-ability cost is a spell-cost override; it must not accidentally grant PlayFromExile"
+        );
+        assert!(
+            obj.casting_permissions
+                .iter()
+                .any(|p| matches!(p, CastingPermission::ExileWithAltAbilityCost { .. })),
+            "play-mode with alt-ability cost must still grant ExileWithAltAbilityCost"
+        );
     }
 
     fn electrodominance_hand_ability(max_value: i32) -> ResolvedAbility {
@@ -1803,7 +1944,7 @@ mod tests {
             controller: PlayerId(0),
             kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
                 source_id: siege_id,
-                ability: ability.clone(),
+                ability: Box::new(ability.clone()),
             },
         });
 

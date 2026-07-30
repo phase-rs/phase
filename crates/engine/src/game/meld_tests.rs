@@ -481,6 +481,7 @@ fn meld_renamed_non_meld_partner_is_noop() {
             }],
             condition: None,
             duration_subject: None,
+            end_permission: None,
             source_name: String::new(),
         });
     crate::game::layers::flush_layers(&mut state);

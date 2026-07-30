@@ -9,9 +9,11 @@ import init, {
   take_last_panic_message,
   initialize_game,
   submit_action,
+  submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
   get_ai_action,
+  get_ai_fallback_action,
   get_ai_scored_candidates,
   select_action_from_scores,
   get_legal_actions_js,
@@ -43,6 +45,7 @@ import init, {
 } from "@wasm/engine";
 
 import type { GameAction } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest } from "../types/bracketEstimate";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
@@ -61,6 +64,7 @@ type EngineRequest =
       firstPlayer?: number;
     }
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
+  | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
@@ -69,6 +73,7 @@ type EngineRequest =
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
   | { type: "getAiAction"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiFallbackAction"; id: number }
   | {
       type: "getAiScoredCandidates";
       id: number;
@@ -281,6 +286,19 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
+      case "submitInteraction": {
+        const actionResult = submit_interaction_js(msg.actor, msg.submission);
+        if (typeof actionResult === "string") {
+          error(msg.id, actionResult);
+          break;
+        }
+        result(msg.id, {
+          events: actionResult.events ?? [],
+          log_entries: actionResult.log_entries ?? [],
+        });
+        break;
+      }
+
       case "previewManaPayment": {
         const sources = preview_mana_payment_js(msg.actor, msg.action);
         if (typeof sources === "string") {
@@ -368,6 +386,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       case "getAiAction": {
         const aiResult = get_ai_action(msg.difficulty, msg.playerId);
         result(msg.id, aiResult ?? null);
+        break;
+      }
+
+      case "getAiFallbackAction": {
+        const fallback = get_ai_fallback_action();
+        result(msg.id, fallback ?? null);
         break;
       }
 

@@ -37,7 +37,7 @@ fn hand_size(runner: &engine::game::scenario::GameRunner, player: PlayerId) -> u
 }
 
 #[test]
-fn necrodominance_pay_any_life_draws_that_many() {
+fn necrodominance_pay_prompt_is_not_misclassified_as_life_loss_deferral() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     // Stock libraries so the end step / draw steps never deck anyone out and so
@@ -69,9 +69,31 @@ fn necrodominance_pay_any_life_draws_that_many() {
             WaitingFor::PayAmountChoice { player, max, .. } => {
                 assert_eq!(*player, P0);
                 assert!(*max >= 3, "P0 has ≥3 life to pay, got max {max}");
-                runner
+                let result = runner
                     .act(GameAction::SubmitPayAmount { amount: 3 })
                     .expect("submit 3 life");
+                assert_eq!(
+                    result
+                        .events
+                        .iter()
+                        .filter(|event| matches!(
+                            event,
+                            engine::types::events::GameEvent::LifeChanged {
+                                player_id: P0,
+                                amount: -3
+                            }
+                        ))
+                        .count(),
+                    1,
+                    "the production pay-life action must commit exactly once despite its ambient PayAmountChoice"
+                );
+                assert!(
+                    !matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::PayAmountChoice { .. }
+                    ),
+                    "the paid prompt must advance rather than be mistaken for a replacement deferral"
+                );
                 drew = true;
                 // Let the IfYouDo Draw rider resolve, then stop.
                 let _ = runner.act(GameAction::PassPriority);

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type {
-  GameAction,
+  ObjectAction,
   ObjectId,
   PlayerId,
   TurnOrderSlotView,
@@ -189,7 +189,7 @@ interface UiStoreState {
    *  back-to-back rolls play serially instead of clobbering. */
   diceRollQueue: DiceRollPayload[];
   focusedOpponent: number | null;
-  pendingAbilityChoice: { objectId: ObjectId; actions: GameAction[] } | null;
+  pendingAbilityChoice: { objectId: ObjectId; actions: ObjectAction[] } | null;
   /** When non-null, the AttachmentsDialog is open showing every Aura
    *  enchanting this player. Lives in uiStore (not local React state inside
    *  the badge) so the dialog can be rendered as a child of `<DialogHost>`
@@ -293,7 +293,7 @@ interface UiStoreActions {
    *  advancing to the next queued roll if any. */
   skipDiceRoll: () => void;
   setFocusedOpponent: (id: number | null) => void;
-  setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
+  setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: ObjectAction[] } | null) => void;
   setEnchantmentsDialogPlayer: (id: number | null) => void;
   setAttachmentFanHost: (id: ObjectId | null) => void;
   setMobileHandOpen: (open: boolean) => void;

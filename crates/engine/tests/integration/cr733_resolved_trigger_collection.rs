@@ -39,7 +39,7 @@ fn pending_context(source_id: ObjectId) -> PendingTriggerContext {
             source_id,
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -47,7 +47,7 @@ fn pending_context(source_id: ObjectId) -> PendingTriggerContext {
                 Vec::new(),
                 source_id,
                 PlayerId(0),
-            ),
+            )),
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,
@@ -69,6 +69,8 @@ fn occurrence(player: PlayerId) -> ConsumedTriggerEventOccurrence {
         event: GameEvent::PlayerPerformedAction {
             player_id: player,
             action: PlayerActionKind::Scry,
+            look_count: None,
+            scry_bottom_count: None,
         },
         occurrence: 0,
     }

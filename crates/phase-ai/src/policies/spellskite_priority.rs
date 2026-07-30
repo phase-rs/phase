@@ -192,7 +192,7 @@ mod tests {
             source_id: ObjectId(900),
             controller: OPP,
             kind: StackEntryKind::Spell {
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 card_id: CardId(900),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
@@ -227,7 +227,7 @@ mod tests {
             source_id: ObjectId(900),
             controller: OPP,
             kind: StackEntryKind::Spell {
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 card_id: CardId(900),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,

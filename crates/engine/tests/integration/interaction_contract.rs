@@ -1,28 +1,35 @@
+use std::sync::Arc;
+
 use engine::analysis::decision_template::{
     DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount, ShortcutDecisionSchema,
 };
 use engine::game::engine::apply;
 use engine::game::interaction::{
-    bind_interaction_authority, derive_viewer_interaction, preview_interaction, submit_interaction,
+    bind_interaction_authority, derive_viewer_interaction, preview_interaction,
+    resolve_interaction_response, submit_interaction,
 };
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
+use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CounterCostSelection,
-    Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypedFilter, ZoneOwner,
+    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, ChosenAttribute,
+    CounterCostSelection, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    TypedFilter, ZoneOwner,
 };
 use engine::types::actions::{GameAction, MulliganChoice};
+use engine::types::card::CardFace;
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
     AlternativeCastKeyword, AutoPassMode, CastPaymentMode, GameState, MulliganBottomEntry,
     MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason, PendingTriggerSummary,
-    TurnBoundary, WaitingFor,
+    PlayerDeckPool, TurnBoundary, WaitingFor,
 };
-use engine::types::identifiers::CardId;
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::interaction::{
-    InteractionActionCode, InteractionAvailability, InteractionChoiceId,
+    AmountAssignment, InteractionActionCode, InteractionAvailability, InteractionChoiceId,
+    InteractionManaAbilityActivationScope, InteractionManaColor, InteractionManaRestriction,
     InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
     InteractionPreviewRequest, InteractionPreviewStatus, InteractionReasonCode,
     InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
@@ -31,6 +38,7 @@ use engine::types::interaction::{
     MAX_INTERACTION_LIST_LEN,
 };
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::match_config::MatchPhase;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -194,7 +202,8 @@ fn priority_cast_exposes_auto_and_manual_and_opaque_manual_submission_starts_pay
                 matches!(
                     surface,
                     InteractionPresentationSurface::Action {
-                        code: InteractionActionCode::CastSpell
+                        code: InteractionActionCode::CastSpell,
+                        ..
                     }
                 )
             }) && choice.surfaces.iter().any(|surface| {
@@ -284,6 +293,40 @@ fn bottom_card_opportunities_use_and_only_materialize_select_responses() {
 }
 
 #[test]
+fn resolving_a_response_materializes_the_advertised_action_under_the_same_authorization() {
+    let mut state = GameState::new_two_player(42);
+    bind(&mut state, "resolve-seam");
+    let witness = progress_witness(&state, P0);
+
+    // Authorization parity with `submit_interaction` is the entire risk of a
+    // non-mutating sibling: without the actor check it would become a way to
+    // materialize — and therefore to read — a decision belonging to another
+    // seat. Nothing here asserts that the state is unchanged, because
+    // `resolve_interaction_response` takes `&GameState`: non-mutation is a
+    // borrow-checker guarantee, and a test of it would pass for reasons that
+    // have nothing to do with this function.
+    let unauthorized = resolve_interaction_response(&state, P1, &witness)
+        .expect_err("resolving authorizes against the actor, not merely the interaction id");
+    assert_eq!(unauthorized.code, InteractionReasonCode::NotAuthorized);
+
+    let action = resolve_interaction_response(&state, P0, &witness)
+        .expect("the advertised progress witness resolves to the action it denotes");
+    assert_eq!(action, GameAction::PassPriority);
+
+    // The same witness really is submittable, so the resolution above concerns a
+    // live decision rather than one the engine would have refused anyway.
+    // Equivalence between the two paths needs no assertion: `submit_interaction`
+    // delegates here, so they cannot disagree.
+    let applied = submit_interaction(&mut state, P0, witness)
+        .expect("the witness the projection advertised is submittable");
+    assert_eq!(
+        applied.action,
+        GameAction::PassPriority,
+        "the post-success transaction exposes the exact engine-materialized action for replay"
+    );
+}
+
+#[test]
 fn priority_projection_previews_submits_and_rejects_stale_or_unauthorized_ids() {
     let mut state = GameState::new_two_player(42);
     bind(&mut state, "priority");
@@ -349,6 +392,69 @@ fn priority_projection_previews_submits_and_rejects_stale_or_unauthorized_ids() 
     )
     .expect_err("an accepted submission consumes its opaque capability");
     assert_eq!(stale.code, InteractionReasonCode::StaleInteraction);
+}
+
+#[test]
+fn attachment_fans_are_per_interaction_filtered_and_direct() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Fan Host", 2, 2).id();
+    let attachment = scenario.add_creature(P0, "Fan Attachment", 1, 1).id();
+    let unrelated = scenario.add_creature(P0, "Fan Unrelated", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        engine::game::effects::attach::attach_to(state, attachment, host);
+        state.objects.get_mut(&attachment).unwrap().tapped = true;
+        state.objects.get_mut(&unrelated).unwrap().tapped = true;
+        state.waiting_for = WaitingFor::ChooseUntapSubset {
+            player: P0,
+            group: vec![attachment, unrelated],
+            max: 1,
+        };
+        bind(state, "attachment-fan");
+    }
+
+    let view = viewer_interaction(runner.state(), P0);
+    assert!(
+        !view.opportunities.is_empty(),
+        "reach guard: the selected attachment has a live opportunity"
+    );
+    assert_eq!(view.attachment_fans.len(), 1);
+    let fan = view
+        .attachment_fans
+        .get(&host.0)
+        .expect("the engine keys the fan by its visible host object");
+    assert_eq!(fan.host_id, host.0);
+    assert_eq!(fan.children.len(), 1);
+    assert_eq!(fan.children[0].object_id, attachment.0);
+    let submission = fan.children[0].submission.clone();
+    submit_interaction(runner.state_mut(), P0, submission).expect(
+        "the engine-authored fan submission resolves through production interaction dispatch",
+    );
+    assert!(
+        !runner.state().objects[&attachment].tapped,
+        "the published attachment submission applies its selected untap"
+    );
+
+    let mut mismatched_filtered = filter_state_for_viewer(runner.state(), P0);
+    mismatched_filtered
+        .objects
+        .get_mut(&host)
+        .expect("fixture host remains visible")
+        .attachments
+        .clear();
+    let mismatched = derive_viewer_interaction(runner.state(), &mismatched_filtered, P0);
+    assert!(
+        mismatched.attachment_fans.is_empty(),
+        "a stale host back-link must not expose an attachment fan from authoritative state"
+    );
+
+    let unauthorized = viewer_interaction(runner.state(), P1);
+    assert!(
+        unauthorized.attachment_fans.is_empty(),
+        "non-authorized viewers receive no attachment sidecar before any opportunity derivation"
+    );
 }
 
 #[test]
@@ -510,7 +616,8 @@ fn exact_priority_choices_distinguish_two_engine_authored_card_objects() {
                 matches!(
                     surface,
                     InteractionPresentationSurface::Action {
-                        code: InteractionActionCode::PlayLand
+                        code: InteractionActionCode::PlayLand,
+                        ..
                     }
                 )
             })
@@ -835,6 +942,7 @@ fn modal_schema_includes_mode_indices_and_engine_descriptions() {
         surface,
         InteractionPresentationSurface::Action {
             code: InteractionActionCode::CancelCast,
+            ..
         }
     )));
     let descriptions: std::collections::HashSet<_> = choices
@@ -994,7 +1102,8 @@ fn zone_opponent_chooser_exact_choices_surface_distinct_opponents_and_action_cod
             matches!(
                 surface,
                 InteractionPresentationSurface::Action {
-                    code: InteractionActionCode::ChooseZoneOpponentChooser
+                    code: InteractionActionCode::ChooseZoneOpponentChooser,
+                    ..
                 }
             )
         })
@@ -1066,6 +1175,230 @@ fn mana_group_schema_exposes_engine_authored_symbols() {
 }
 
 #[test]
+fn tap_land_for_mana_projects_live_castle_output_per_unit_and_rejects_stale_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let castle = scenario
+        .add_land_from_oracle(
+            P0,
+            "Castle Garenbrig",
+            "{T}: Add {G}.\n{T}: Add {G}{G}{G}{G}{G}{G}. Spend this mana only to cast creature spells or activate abilities of creatures.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    bind(runner.state_mut(), "live-castle-mana-output");
+
+    let view = priority_view(runner.state());
+    let interaction_id = view.opportunities[0].interaction_id.clone();
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("priority is projected as exact choices");
+    };
+    let castle_choices: Vec<_> = choices
+        .iter()
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Action {
+                        code: InteractionActionCode::TapLandForMana,
+                        ..
+                    }
+                )
+            }) && choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Object {
+                        role: InteractionRoleCode::Source,
+                        reference,
+                        ..
+                    } if reference == &castle.0.to_string()
+                )
+            })
+        })
+        .collect();
+    assert_eq!(
+        castle_choices.len(),
+        2,
+        "Castle exposes both mana abilities"
+    );
+
+    let (one_green, six_green) = castle_choices
+        .iter()
+        .map(|choice| {
+            let produced: Vec<_> = choice
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        symbols,
+                        restrictions,
+                        ..
+                    } => Some((symbols, restrictions)),
+                    _ => None,
+                })
+                .collect();
+            (choice.id.clone(), produced)
+        })
+        .fold(
+            (None, None),
+            |(one, six), (choice_id, produced)| match produced.len() {
+                1 => (Some(choice_id), six),
+                6 => (one, Some((choice_id, produced))),
+                count => panic!("unexpected Castle mana output count: {count}"),
+            },
+        );
+    let one_green = one_green.expect("the unrestricted one-green ability is projected");
+    let (six_green, six_output) = six_green.expect("the restricted six-green ability is projected");
+    assert!(six_output.iter().all(|(symbols, restrictions)| {
+        *symbols == &vec!["G".to_string()]
+            && *restrictions
+                == &vec![InteractionManaRestriction::OnlyForTypeSpellsOrAbilities {
+                    spell_type: "Creature".to_string(),
+                    ability: InteractionManaAbilityActivationScope::OfSpellType,
+                }]
+    }));
+
+    submit_interaction(
+        runner.state_mut(),
+        P0,
+        InteractionSubmission {
+            interaction_id: interaction_id.clone(),
+            response: InteractionResponse::Choose {
+                choice_id: one_green,
+            },
+        },
+    )
+    .expect("the sibling one-green option is a legal activation");
+    let stale = submit_interaction(
+        runner.state_mut(),
+        P0,
+        InteractionSubmission {
+            interaction_id,
+            response: InteractionResponse::Choose {
+                choice_id: six_green,
+            },
+        },
+    )
+    .expect_err("the six-green choice is stale after its sibling tapped the land");
+    assert_eq!(stale.code, InteractionReasonCode::StaleInteraction);
+}
+
+#[test]
+fn tap_land_for_mana_projects_resolved_and_missing_chosen_color_restrictions() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oracle = "As this land enters, choose a color.\n{T}: Add {C}. Spend this mana only to cast monocolored spells of the chosen color.";
+    let red_source = scenario
+        .add_land_from_oracle(P0, "Red Chosen Color Contract", oracle)
+        .id();
+    let blue_source = scenario
+        .add_land_from_oracle(P0, "Blue Chosen Color Contract", oracle)
+        .id();
+    let missing_choice_source = scenario
+        .add_land_from_oracle(P0, "Missing Chosen Color Contract", oracle)
+        .id();
+    let mut runner = scenario.build();
+    for (source, color) in [(red_source, ManaColor::Red), (blue_source, ManaColor::Blue)] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .expect("chosen-color source exists")
+            .chosen_attributes
+            .push(ChosenAttribute::Color(color));
+    }
+
+    let projected_restrictions = |state: &mut GameState, source: ObjectId, binding: &str| {
+        bind(state, binding);
+        let view = priority_view(state);
+        let InteractionOpportunityResponse::ExactChoices { choices } =
+            &view.opportunities[0].response
+        else {
+            panic!("priority is projected as exact choices");
+        };
+        choices
+            .iter()
+            .find(|choice| {
+                choice.surfaces.iter().any(|surface| {
+                    matches!(
+                        surface,
+                        InteractionPresentationSurface::Action {
+                            code: InteractionActionCode::TapLandForMana,
+                            ..
+                        }
+                    )
+                }) && choice.surfaces.iter().any(|surface| {
+                    matches!(
+                        surface,
+                        InteractionPresentationSurface::Object {
+                            role: InteractionRoleCode::Source,
+                            reference,
+                            ..
+                        } if reference == &source.0.to_string()
+                    )
+                })
+            })
+            .and_then(|choice| {
+                choice.surfaces.iter().find_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        restrictions,
+                        ..
+                    } => Some(restrictions.clone()),
+                    _ => None,
+                })
+            })
+            .expect("the chosen-color mana source projects one produced mana unit")
+    };
+
+    assert_eq!(
+        projected_restrictions(runner.state_mut(), red_source, "red-chosen-color-output"),
+        vec![
+            InteractionManaRestriction::OnlyForSpellWithColorCount {
+                comparator: engine::types::interaction::InteractionManaComparator::Equal,
+                count: 1,
+            },
+            InteractionManaRestriction::OnlyForSpellColor {
+                color: InteractionManaColor::Red,
+            },
+        ],
+        "the viewer contract preserves the red source's resolved restriction"
+    );
+
+    assert_eq!(
+        projected_restrictions(runner.state_mut(), blue_source, "blue-chosen-color-output"),
+        vec![
+            InteractionManaRestriction::OnlyForSpellWithColorCount {
+                comparator: engine::types::interaction::InteractionManaComparator::Equal,
+                count: 1,
+            },
+            InteractionManaRestriction::OnlyForSpellColor {
+                color: InteractionManaColor::Blue,
+            },
+        ],
+        "each source projects its own chosen color rather than another source's choice"
+    );
+
+    assert_eq!(
+        projected_restrictions(
+            runner.state_mut(),
+            missing_choice_source,
+            "missing-chosen-color-output"
+        ),
+        vec![
+            InteractionManaRestriction::OnlyForSpellWithColorCount {
+                comparator: engine::types::interaction::InteractionManaComparator::Equal,
+                count: 1,
+            },
+            InteractionManaRestriction::Impossible,
+        ],
+        "a missing choice remains visibly fail-closed instead of appearing unrestricted"
+    );
+}
+
+#[test]
 fn preference_and_failed_actions_preserve_capability_but_same_actor_progress_rotates_it() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1109,7 +1442,7 @@ fn preference_and_failed_actions_preserve_capability_but_same_actor_progress_rot
 }
 
 #[test]
-fn preference_action_rotates_capability_when_internal_auto_pass_advances() {
+fn preference_action_does_not_advance_auto_pass_or_rotate_capability() {
     let mut state = GameState::new_two_player(42);
     bind(&mut state, "preference-auto-pass");
     let initial = state.active_interaction_slots[0].interaction_id.clone();
@@ -1125,15 +1458,15 @@ fn preference_action_rotates_capability_when_internal_auto_pass_advances() {
         P0,
         GameAction::SetPhaseStops { stops: Vec::new() },
     )
-    .expect("the preference update triggers the configured auto-pass loop");
+    .expect("the actor-scoped preference update is legal");
     assert!(matches!(
         state.waiting_for,
-        WaitingFor::Priority { player: P1 }
+        WaitingFor::Priority { player: P0 }
     ));
     assert!(state
         .active_interaction_slots
         .iter()
-        .all(|slot| slot.interaction_id != initial));
+        .any(|slot| slot.interaction_id == initial));
 }
 
 #[test]
@@ -2382,4 +2715,180 @@ fn oversized_session_fails_closed_and_serial_rolls_to_next_generation() {
                 } => choices.iter().all(|choice| choice.id.as_str().len() <= 256),
             }
     }));
+}
+
+fn sideboard_deck_entry(name: &str, count: u32) -> DeckEntry {
+    DeckEntry {
+        card: CardFace {
+            name: name.to_string(),
+            ..Default::default()
+        },
+        count,
+    }
+}
+
+/// A Standard match between games with a registered 60/15 pool. `Aaa` sorts
+/// before `Bbb`, so the projection's candidate indices are stable.
+fn between_games_sideboard_state() -> GameState {
+    let mut state = GameState::new_two_player(11);
+    state.match_phase = MatchPhase::BetweenGames;
+    state.game_number = 2;
+    state.deck_pools = vec![PlayerDeckPool {
+        player: P0,
+        registered_main: Arc::new(vec![sideboard_deck_entry("Aaa", 60)]),
+        registered_sideboard: Arc::new(vec![sideboard_deck_entry("Bbb", 15)]),
+        current_main: Arc::new(vec![sideboard_deck_entry("Aaa", 60)]),
+        current_sideboard: Arc::new(vec![sideboard_deck_entry("Bbb", 15)]),
+        ..Default::default()
+    }];
+    // The projection recomputes its bounds from `deck_pools` + `format_config`
+    // via the same authority `handle_submit_sideboard` uses, so these published
+    // copies are the client's display hint, not the gate.
+    state.waiting_for = WaitingFor::BetweenGamesSideboard {
+        player: P0,
+        game_number: 2,
+        score: Default::default(),
+        min_main_deck_size: 60,
+        max_sideboard_size: Some(15),
+    };
+    state
+}
+
+fn deck_partition_opportunity(
+    view: &engine::types::interaction::ViewerInteraction,
+) -> (
+    &engine::types::interaction::InteractionOpportunity,
+    u32,
+    u32,
+) {
+    let opportunity = view
+        .opportunities
+        .iter()
+        .find(|opportunity| {
+            matches!(
+                &opportunity.response,
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::DeckPartition { .. },
+                    ..
+                }
+            )
+        })
+        .expect("a between-games seat is offered a deck-partition schema");
+    let InteractionOpportunityResponse::Schema {
+        spec:
+            InteractionResponseSpec::DeckPartition {
+                min_main_total,
+                max_main_total,
+                ..
+            },
+        ..
+    } = &opportunity.response
+    else {
+        unreachable!("filtered for DeckPartition above");
+    };
+    (opportunity, *min_main_total, *max_main_total)
+}
+
+fn partition_choice_ids(
+    opportunity: &engine::types::interaction::InteractionOpportunity,
+) -> Vec<InteractionChoiceId> {
+    let InteractionOpportunityResponse::Schema { candidates, .. } = &opportunity.response else {
+        unreachable!("deck partition is a schema response");
+    };
+    candidates.iter().map(|choice| choice.id.clone()).collect()
+}
+
+/// CR 100.2a + CR 100.4a + CR 100.5: `deck_size` is a *minimum* and non-Commander
+/// decks have no maximum, so the between-games schema must publish the interval
+/// the engine will accept — `[minimum, whole pool]` — not one exact size. A
+/// player who registered 60/15 may legally present anything from 60 up to all
+/// 75 cards; the sideboard cap is what pins the floor at 60.
+///
+/// This drives `HumanResponseModel::SideboardPartition` end-to-end (schema →
+/// submission → applied state) rather than calling `handle_submit_sideboard`
+/// directly, because the interaction layer carries its own copy of the gate.
+#[test]
+fn deck_partition_schema_publishes_an_interval_not_an_exact_deck_size() {
+    let mut state = between_games_sideboard_state();
+    bind(&mut state, "sideboard-interval");
+
+    let view = viewer_interaction(&state, P0);
+    let (opportunity, min_main_total, max_main_total) = deck_partition_opportunity(&view);
+    assert_eq!(
+        (min_main_total, max_main_total),
+        (60, 75),
+        "60-card minimum, and the whole 75-card pool may go to the main deck"
+    );
+    // No exact aggregate exists for a range, so `total` must stay absent.
+    assert!(opportunity
+        .surfaces
+        .contains(&InteractionPresentationSurface::Amount {
+            min: 60,
+            max: 75,
+            total: None,
+        }));
+
+    let choice_ids = partition_choice_ids(opportunity);
+    let interaction_id = opportunity.interaction_id.clone();
+
+    // 59 main cards would leave a 16-card sideboard: below the floor.
+    let too_small = preview_interaction(
+        &state,
+        P0,
+        &InteractionPreviewRequest {
+            request_id: PreviewRequestId("sideboard-too-small".to_string()),
+            interaction_id: interaction_id.clone(),
+            response: InteractionResponse::DeckPartition {
+                main: vec![AmountAssignment {
+                    choice_id: choice_ids[0].clone(),
+                    amount: 59,
+                }],
+            },
+        },
+    );
+    assert_eq!(
+        too_small.status,
+        InteractionPreviewStatus::Rejected {
+            reason: InteractionReasonCode::ConstraintUnsatisfied,
+        }
+    );
+
+    // 61/14 — siding one card in without siding one out. This is the exact
+    // shape the old exact-total contract rejected.
+    submit_interaction(
+        &mut state,
+        P0,
+        InteractionSubmission {
+            interaction_id,
+            response: InteractionResponse::DeckPartition {
+                main: vec![
+                    AmountAssignment {
+                        choice_id: choice_ids[0].clone(),
+                        amount: 60,
+                    },
+                    AmountAssignment {
+                        choice_id: choice_ids[1].clone(),
+                        amount: 1,
+                    },
+                ],
+            },
+        },
+    )
+    .expect("a 61-card main deck is legal when the sideboard still fits under 15");
+
+    let pool = &state.deck_pools[0];
+    assert_eq!(
+        pool.current_main
+            .iter()
+            .map(|entry| entry.count)
+            .sum::<u32>(),
+        61
+    );
+    assert_eq!(
+        pool.current_sideboard
+            .iter()
+            .map(|entry| entry.count)
+            .sum::<u32>(),
+        14
+    );
 }
