@@ -838,9 +838,11 @@ mod tests {
             ServerMessage::GameCreated {
                 game_code,
                 player_token,
+                full_key,
             } => {
                 assert_eq!(game_code, "XYZ789");
                 assert_eq!(player_token, "abc123def456");
+                assert!(full_key.is_none());
             }
             _ => panic!("wrong variant"),
         }
@@ -1116,10 +1118,12 @@ mod tests {
                 game_code,
                 player_id,
                 player_token,
+                full_key,
             } => {
                 assert_eq!(game_code, "ABC123");
                 assert_eq!(player_id, PlayerId(1));
                 assert_eq!(player_token, "token");
+                assert!(full_key.is_none());
             }
             other => panic!("wrong variant: {other:?}"),
         }

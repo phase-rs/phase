@@ -3905,15 +3905,16 @@ async fn handle_client_message(
                             let ranked_result = ranked_duel_players(session).and_then(|players| {
                                 ranked_result_for_duel(game_db, &game_code, &players, winner)
                             });
-                            Some(terminal_artifact(
+                            terminal_artifact(
                                 session,
                                 winner,
                                 "Game ended".to_string(),
                                 ranked_result,
-                            )?)
+                            )
+                            .map(Some)
                         } else {
                             persist_full_session_async(game_db, session);
-                            None
+                            Ok(None)
                         };
 
                         let lock_ms = lock_start.elapsed().as_millis();
@@ -3924,15 +3925,17 @@ async fn handle_client_message(
                             "action processed (lock held)"
                         );
 
-                        Ok((
-                            human_revision,
-                            human_result,
-                            ai_results,
-                            eliminated,
-                            player_count,
-                            game_over_winner,
-                            terminal,
-                        ))
+                        terminal.map(|terminal| {
+                            (
+                                human_revision,
+                                human_result,
+                                ai_results,
+                                eliminated,
+                                player_count,
+                                game_over_winner,
+                                terminal,
+                            )
+                        })
                     }
                     Err(e) => Err(e),
                 }
@@ -5758,17 +5761,18 @@ async fn handle_client_message(
                             let ranked_result = ranked_duel_players(session).and_then(|players| {
                                 ranked_result_for_duel(game_db, &game_code, &players, winner)
                             });
-                            Some(terminal_artifact(
+                            terminal_artifact(
                                 session,
                                 winner,
                                 "Opponent conceded".to_string(),
                                 ranked_result,
-                            )?)
+                            )
+                            .map(Some)
                         } else {
                             persist_full_session_async(game_db, session);
-                            None
+                            Ok(None)
                         };
-                        Ok((revision, result, winner, terminal))
+                        terminal.map(|terminal| (revision, result, winner, terminal))
                     }
                     Err(error) => Err(error),
                 }
@@ -5852,13 +5856,13 @@ async fn handle_client_message(
                                 ranked_result_for_duel(game_db, &game_code, &players, Some(winner))
                             })
                         });
-                        let terminal = terminal_artifact(
+                        terminal_artifact(
                             session,
                             winner,
                             "Match conceded".to_string(),
                             ranked_result,
-                        )?;
-                        Ok((revision, result, winner, terminal))
+                        )
+                        .map(|terminal| (revision, result, winner, terminal))
                     }
                     Err(error) => Err(error),
                 }
@@ -8499,7 +8503,7 @@ mod issue_4548_deadlock_tests {
         };
         let (tx, _rx) = mpsc::unbounded_channel::<ServerMessage>();
 
-        let (game_code, _token, _count) = create_and_connect_multiplayer_session(
+        let (game_code, _token, _count, _full_key) = create_and_connect_multiplayer_session(
             &state,
             &connections,
             &game_db,
@@ -8518,7 +8522,8 @@ mod issue_4548_deadlock_tests {
                 host_tx: tx,
             },
         )
-        .await;
+        .await
+        .expect("test session must be created");
 
         // Both state and connections locks must be free at this point.
         // A regression that holds either guard across the helper's return
