@@ -11132,8 +11132,10 @@ fn effect_tzaangor_copy_next_spell_when_cast() {
 /// temporal helper must therefore construct native IR directly.
 #[test]
 fn temporal_copy_next_helper_emits_native_ir() {
-    let text = "Copy the next instant or sorcery spell you cast this turn when you cast it. \
-                You may choose new targets for the copy.";
+    // This is the first sentence of Tzaangor Shaman's AtomicCards Oracle text.
+    // `parse_effect_chain` splits the following retarget sentence before this
+    // helper sees its all-consuming copy-next grammar.
+    let text = "Copy the next instant or sorcery spell you cast this turn when you cast it";
     let ir = try_parse_temporal_delayed_trigger_ability(text, AbilityKind::Spell)
         .expect("Tzaangor Shaman copy-next grammar must parse");
 
