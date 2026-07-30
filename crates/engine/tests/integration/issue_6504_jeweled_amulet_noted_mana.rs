@@ -6,9 +6,11 @@
 //! and the second ability produced no mana at all regardless of what was
 //! noted.
 
-use engine::game::effects::bounce;
+use engine::game::effects::{bounce, copy_spell};
 use engine::game::scenario::{GameScenario, P0};
-use engine::types::ability::{BounceSelection, Effect, ResolvedAbility, TargetFilter, TargetRef};
+use engine::types::ability::{
+    BounceSelection, CopyRetargetPermission, Effect, ResolvedAbility, TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
@@ -480,5 +482,114 @@ fn jeweled_amulet_lifo_stacked_activations_each_note_their_own_payment() {
         "the red activation must note ITS OWN (red) payment, not the \
          green activation's — a shared mutable per-object latch would leak \
          green into this resolution instead"
+    );
+}
+
+/// CR 707.10: a copy of an activated ability is not itself activated, so it
+/// never paid a mana cost. Copies Jeweled Amulet's first ability (through the
+/// real `copy_spell::resolve` pipeline — same stack-entry lookup and LIFO
+/// resolution a real "copy target activated or triggered ability" card like
+/// Lithoform Engine drives) after the ORIGINAL paid red, and proves the copy
+/// cannot note red (or anything) even though its `ResolvedAbility` chain was
+/// cloned from an original that carried a live `noted_mana_payment`
+/// snapshot. Both PutCounter placements still fire unconditionally (CR
+/// 602.5/608.2c: "Activate only if..." gates ACTIVATION, never re-checked at
+/// resolution, and a copy was never gated by it in the first place), so the
+/// counter count alone can't distinguish correct from buggy behavior here —
+/// only `noted_mana_spent()` can.
+#[test]
+fn jeweled_amulet_copied_activation_does_not_note_original_payment() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let amulet = scenario
+        .add_creature_from_oracle(P0, "Jeweled Amulet", 0, 0, JEWELED_AMULET_ORACLE)
+        .as_artifact()
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+
+    // (1) Activate ability 0 paying red. On the stack, unresolved.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: amulet,
+            ability_index: 0,
+        })
+        .expect("activating ability 0 must succeed");
+    let original_entry_id = runner
+        .state()
+        .stack
+        .back()
+        .expect("reach-guard: the activation must be on the stack")
+        .id;
+
+    // (2) Copy it — mirrors what Lithoform Engine's "{2}, {T}: Copy target
+    // activated or triggered ability you control" drives through the real
+    // engine pipeline, minus the copying permanent's own stack presence
+    // (the mechanism under test, `copy_spell::resolve` and its
+    // `preserve_ability_copy_source_recursive` call, is identical either
+    // way — this is the same direct-resolver-call idiom already used above
+    // for `bounce::resolve`).
+    let copy_ability = ResolvedAbility::new(
+        Effect::CopySpell {
+            target: TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: None,
+            },
+            retarget: CopyRetargetPermission::KeepOriginalTargets,
+            copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
+        },
+        vec![TargetRef::Object(original_entry_id)],
+        ObjectId(999),
+        P0,
+    );
+    let mut events = Vec::new();
+    copy_spell::resolve(runner.state_mut(), &copy_ability, &mut events)
+        .expect("copying the activation must succeed");
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "reach-guard: original + copy must both be on the stack"
+    );
+
+    // (3) LIFO: the copy resolves first.
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach-guard: exactly the original must remain"
+    );
+    assert_eq!(
+        charge_counters(&runner, amulet),
+        1,
+        "the copy's PutCounter still fires unconditionally"
+    );
+    assert!(
+        runner.state().objects[&amulet].noted_mana_spent().is_none(),
+        "CR 707.10: the copy never paid a mana cost, so its NoteManaSpent \
+         must not note the original's (red) payment"
+    );
+
+    // (4) The original resolves second — it DID pay, so it must still note
+    // correctly. This is the paired positive reach-guard proving the fix
+    // clears only the COPY's snapshot, not the original's.
+    runner.resolve_top();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        charge_counters(&runner, amulet),
+        2,
+        "the original's PutCounter also fires (a second charge counter — \
+         CR 602.5: the no-counters restriction gates activation, not \
+         resolution, and was never re-checked for the copy either)"
+    );
+    assert_eq!(
+        runner.state().objects[&amulet].noted_mana_spent(),
+        Some([ManaType::Red].as_slice()),
+        "the original activation must still note its own (red) payment"
     );
 }

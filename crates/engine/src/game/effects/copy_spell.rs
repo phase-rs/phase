@@ -827,9 +827,20 @@ pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, sourc
     }
 }
 
+/// CR 707.10 + CR 707.10b: Normalize a copied activated/triggered ability.
+/// The copy keeps the original ability's source (unlike a spell copy, which
+/// sources itself), so this only re-stamps `source_id` uniformly through the
+/// chain — but it must ALSO clear `noted_mana_payment` (issue #6504):
+/// CR 707.10 says a copy of an activated ability is not itself activated, so
+/// it never paid a mana cost. A naive struct clone otherwise carries the
+/// ORIGINAL activation's payment snapshot along for the ride, and
+/// `Effect::NoteManaSpent` resolving on the copy (Jeweled Amulet's first
+/// ability copied via Rings of Brighthearth or similar) would falsely note
+/// mana colors the copy never paid.
 fn preserve_ability_copy_source_recursive(ability: &mut ResolvedAbility) {
     let source_id = ability.source_id;
     set_resolved_source_recursive(ability, source_id);
+    ability.clear_noted_mana_payment_recursive();
 }
 
 /// CR 707.10d: Replace every object target on a copied spell with `new_target`.
