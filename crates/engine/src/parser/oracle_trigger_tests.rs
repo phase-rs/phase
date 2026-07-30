@@ -21888,6 +21888,61 @@ fn smothering_tithe_that_player_pays_as_triggering_player() {
     }
 }
 
+/// CR 608.2k + CR 608.2d (issue #6477): the bare-pronoun counterpart of
+/// `smothering_tithe_that_player_pays_as_triggering_player` — "they may pay"
+/// anaphors back to "an opponent" from the trigger condition and must resolve
+/// identically to the explicit "that player may pay" phrasing: the opponent
+/// who cast the spell pays (not the Wandering Archaic controller), and the
+/// payment is optional so a decline can gate the copy.
+#[test]
+fn wandering_archaic_they_pay_as_triggering_player() {
+    let def = parse_trigger_line(
+        "Whenever an opponent casts an instant or sorcery spell, they may pay {2}. If they don't, you may copy that spell. You may choose new targets for the copy.",
+        "Wandering Archaic",
+    );
+
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    let execute = def.execute.as_ref().expect("should have execute");
+    match &*execute.effect {
+        Effect::PayCost {
+            payer,
+            cost: AbilityCost::Mana { cost },
+            ..
+        } => {
+            assert_eq!(
+                payer,
+                &TargetFilter::TriggeringPlayer,
+                "the opponent who cast the spell pays, not the Wandering Archaic controller"
+            );
+            assert_eq!(cost, &crate::types::mana::ManaCost::generic(2));
+        }
+        other => panic!("expected PayCost, got: {other:?}"),
+    }
+    assert!(execute.optional, "they may pay should be optional");
+
+    let sub = execute
+        .sub_ability
+        .as_ref()
+        .expect("copy should remain chained");
+    assert_eq!(
+        sub.condition,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed())
+        }),
+        "the copy is gated on the opponent having declined payment"
+    );
+    assert!(sub.optional, "you may copy that spell");
+    match &*sub.effect {
+        Effect::CopySpell {
+            target, retarget, ..
+        } => {
+            assert_eq!(target, &TargetFilter::TriggeringSource);
+            assert_eq!(retarget, &CopyRetargetPermission::MayChooseNewTargets);
+        }
+        other => panic!("expected CopySpell sub_ability, got: {other:?}"),
+    }
+}
+
 /// CR 603.4: Wedding Ring — "an opponent who controls F draws
 /// a card" parses the relative clause into an `ObjectCount >= 1`
 /// intervening-if scoped to the triggering player, ANDed with the

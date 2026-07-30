@@ -2836,13 +2836,24 @@ pub(super) fn parse_subject_application(
     // In trigger effects: "they" refers to the triggering player (for player-type
     // subjects like "an opponent") or the triggering source (for object subjects).
     // Outside trigger context: anaphoric reference to previously mentioned objects.
-    if lower == "they" {
+    // CR 608.2d: an optional "may" modal parallels the "that player may " /
+    // "the player may " forms above — "they may pay {2}" (Wandering Archaic,
+    // Umbilicus) is the pronoun-subject counterpart of "that player may pay
+    // {2}" (Smothering Tithe, Mind Whip); both must set `is_optional` so
+    // `lower_subject_predicate_ast` marks the lowered ability optional and
+    // `resolve_they_pronoun`'s existing player/object dispatch is unchanged.
+    if let Ok((_, is_optional)) = all_consuming(alt((
+        value(true, tag::<_, _, OracleError<'_>>("they may")),
+        value(false, tag("they")),
+    )))
+    .parse(lower.as_str())
+    {
         return Some(SubjectApplication {
             affected: resolve_they_pronoun(ctx),
             target: None,
             multi_target: None,
             inherits_parent: false,
-            is_optional: false,
+            is_optional,
         });
     }
 
