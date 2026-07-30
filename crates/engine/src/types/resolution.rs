@@ -2708,7 +2708,10 @@ fn has_removed_batched_repeated_optional_payment(value: &Value) -> bool {
             .any(has_removed_batched_repeated_optional_payment),
         Value::Object(values) => {
             values
-                .get("RepeatedOptionalPayment")
+                .get("type")
+                .and_then(Value::as_str)
+                .filter(|kind| *kind == "RepeatedOptionalPayment")
+                .and_then(|_| values.get("data"))
                 .and_then(Value::as_object)
                 .and_then(|frame| frame.get("pending"))
                 .and_then(Value::as_object)
@@ -3513,12 +3516,29 @@ mod tests {
         PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
         ResidentDrainPolicy, ZoneDeliveryExileTracking,
     };
+
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::{ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::{EtbTapState, Zone};
     use std::collections::VecDeque;
+
+    #[test]
+    fn removed_batched_repeated_payment_snapshot_is_detected() {
+        assert!(has_removed_batched_repeated_optional_payment(
+            &serde_json::json!([{
+                "type": "RepeatedOptionalPayment",
+                "data": { "pending": { "batched": true } }
+            }])
+        ));
+        assert!(!has_removed_batched_repeated_optional_payment(
+            &serde_json::json!([{
+                "type": "RepeatedOptionalPayment",
+                "data": { "pending": { "batched": false } }
+            }])
+        ));
+    }
 
     fn resolved_draw(source_id: u64) -> ResolvedAbility {
         ResolvedAbility::new(
