@@ -100,6 +100,7 @@ fn emit_resolved(events: &mut Vec<GameEvent>, source_id: ObjectId) {
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::SetRoomDoorLock,
         source_id,
+        subject: None,
     });
 }
 
@@ -121,6 +122,7 @@ mod tests {
             power: None,
             toughness: None,
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: CardType::default(),
             mana_cost: ManaCost::default(),

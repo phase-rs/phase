@@ -62,7 +62,7 @@ fn backup_ability_target_fires_becomes_target_trigger() {
     //    ("Backup 1") on its own, so without the hint `Keyword::Backup(1)`
     //    never reaches `face.keywords` and `synthesize_backup` no-ops.
     //
-    // With both in place the line routes through `parse_keyword_from_oracle` →
+    // With both in place the line routes through `parse_granted_keyword_fragment` →
     // `Keyword::Backup(1)` → synthesized ETB trigger.
     let backup = scenario
         .add_creature_to_hand(P0, "Valeron Sentry", 2, 2)

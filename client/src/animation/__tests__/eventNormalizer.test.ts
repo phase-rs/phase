@@ -8,6 +8,7 @@ import {
   GROUPED_COMBAT_DAMAGE_DURATION_MS,
   GROUPED_COMBAT_DAMAGE_THRESHOLD,
   GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS,
+  GROUPED_TOKEN_CREATION_THRESHOLD,
 } from "../types";
 
 function combatPlayerDamage(sourceId: number, playerId = 0, amount = 1): GameEvent {
@@ -31,6 +32,21 @@ function combatAggregate(sourceIds: number[], playerId = 0, amount = 1): GameEve
       total_damage: sourceIds.length * amount,
     },
   };
+}
+
+function tokenCreated(objectId: number): GameEvent {
+  return { type: "TokenCreated", data: { object_id: objectId, name: "Squirrel", source_id: 99 } };
+}
+
+function tokenEtbPair(objectId: number): GameEvent[] {
+  return [
+    { type: "ZoneChanged", data: { object_id: objectId, from: "Exile", to: "Battlefield" } },
+    tokenCreated(objectId),
+  ];
+}
+
+function counterAdded(objectId: number): GameEvent {
+  return { type: "CounterAdded", data: { object_id: objectId, counter_type: "+1/+1", count: 1 } };
 }
 
 function expectGroupedFlurry(event: AnimationStep["effects"][number]["event"]) {
@@ -230,6 +246,37 @@ describe("normalizeEvents", () => {
     const steps = normalizeEvents(events);
     expect(steps).toHaveLength(1);
     expect(steps[0].effects).toHaveLength(2);
+  });
+
+  it("collapses large token creation runs into one animation step", () => {
+    const tokenIds = Array.from({ length: GROUPED_TOKEN_CREATION_THRESHOLD + 1 }, (_, i) => i + 1);
+    const steps = normalizeEvents(tokenIds.flatMap(tokenEtbPair));
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].duration).toBe(EVENT_DURATIONS.TokenCreated);
+    expect(steps[0].effects.filter((effect) => effect.event.type === "TokenCreated")).toHaveLength(
+      GROUPED_TOKEN_CREATION_THRESHOLD,
+    );
+  });
+
+  it("keeps small token creation runs uncollapsed", () => {
+    const tokenIds = Array.from({ length: GROUPED_TOKEN_CREATION_THRESHOLD }, (_, i) => i + 1);
+    const steps = normalizeEvents(tokenIds.flatMap(tokenEtbPair));
+
+    expect(steps.length).toBeGreaterThan(1);
+    expect(steps.some((step) => (
+      step.effects.filter((effect) => effect.event.type === "TokenCreated").length > 1
+    ))).toBe(false);
+  });
+
+  it("collapses large same-event runs into a bounded animation sample", () => {
+    const objectIds = Array.from({ length: GROUPED_TOKEN_CREATION_THRESHOLD + 1 }, (_, i) => i + 1);
+    const steps = normalizeEvents(objectIds.map(counterAdded));
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].duration).toBe(EVENT_DURATIONS.CounterAdded);
+    expect(steps[0].effects).toHaveLength(GROUPED_TOKEN_CREATION_THRESHOLD);
+    expect(steps[0].effects.every((effect) => effect.event.type === "CounterAdded")).toBe(true);
   });
 
   it("handles mixed event sequence correctly", () => {

@@ -87,7 +87,9 @@ fn craft_ability(cost: ManaCost) -> AbilityDefinition {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .cost(AbilityCost::Composite {
@@ -365,6 +367,7 @@ fn consuming_sepulcher_back_face() -> BackFaceData {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         // CR 712.14a: the back face is the permanent that exists after return.
         // Consuming Sepulcher is an Enchantment — distinct core type from the

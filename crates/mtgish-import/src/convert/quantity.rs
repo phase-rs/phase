@@ -7,9 +7,9 @@
 
 use engine::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
-    CountScope, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter,
-    ZoneRef,
+    CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::player::PlayerCounterKind;
@@ -463,8 +463,8 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
                     aggregate: AggregateFunction::Sum,
                     group_by: None,
                     damage_kind: DamageKindFilter::NoncombatOnly,
-                    // CR 120.10: non-overkill query — count all matching records.
-                    excess_only: false,
+                    // CR 120.6: total query — count all matching records (not overkill-only).
+                    channel: DamageChannel::Total,
                 },
             }
         }
@@ -720,7 +720,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             },
         },
 
-        // CR 609.3: "the number of permanents tapped this way" — the
+        // CR 608.2c: "the number of permanents tapped this way" — the
         // sub_ability chain tracks the tapped set; the count is read via
         // TrackedSetSize. Mirrors the native parser's "tapped this way"
         // mapping (oracle_quantity.rs:577).
@@ -728,7 +728,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             qty: QuantityRef::TrackedSetSize,
         },
 
-        // CR 609.3: "the amount of damage dealt this way" / "the amount of
+        // CR 608.2c: "the amount of damage dealt this way" / "the amount of
         // damage prevented this way" — sub-ability chain anaphor for the
         // preceding damage/prevention effect. Routed through the per-event
         // `EventContextAmount` channel (the same channel the native parser
@@ -740,7 +740,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             qty: QuantityRef::EventContextAmount,
         },
 
-        // CR 609.3: "the number of cards drawn this way" / "the number of
+        // CR 608.2c: "the number of cards drawn this way" / "the number of
         // counters removed this way" / "the number of cards discarded /
         // exiled / milled this way" — preceding-effect numeric anaphors,
         // surfaced as EventContextAmount via the chain's amount channel.
@@ -942,7 +942,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             qty: QuantityRef::EventContextAmount,
         },
 
-        // CR 608.2c + CR 609.3: "the number of [filter] permanents destroyed
+        // CR 608.2c: "the number of [filter] permanents destroyed
         // this way" — routes through the tracked set populated by the preceding
         // DestroyAll effect. When the filter restricts the tracked set, emit
         // FilteredTrackedSetSize so only matching members are counted. Otherwise

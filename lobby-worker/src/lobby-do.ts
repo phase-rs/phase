@@ -25,6 +25,17 @@ import {
   type ConnAttachment,
 } from "./hello-gate";
 import { moderationErrorForLobbyFrame } from "./name-filter";
+import {
+  buildStatsPayload,
+  countGameOutbounds,
+  dayBucket,
+  DAILY_PREFIX,
+  DAILY_SERIES_LIMIT,
+  GAMES_CREATED_KEY,
+  GAMES_JOINED_KEY,
+  PLAYERS_PEAK_KEY,
+  type DailyStat,
+} from "./stats";
 
 // Instantiate the broker WASM once per isolate, at top level (CF imports `.wasm`
 // as a WebAssembly.Module; `initSync` wires the wasm-bindgen imports
@@ -72,6 +83,15 @@ interface CallResult {
 
 const SNAPSHOT_KEY = "broker_snapshot";
 
+// ── Usage analytics (durable, DO-storage-backed) ────────────────────────────
+// The single global DO is a globally-consistent ledger, so a handful of KV
+// counters here ARE the all-time totals — no fan-in across instances needed.
+// Only monotonic facts are persisted; live gauges (players online, active
+// games) are computed on read from the socket set + broker, never stored, so a
+// hibernation-missed decrement can't drift them. The storage keys, stored
+// shapes, and the pure folds/derivations live in `./stats`; this shell owns
+// only the `ctx.storage` I/O and Response construction.
+
 export class LobbyDO {
   private ctx: DurableObjectState;
   /** In-memory broker, restored from the DO-storage snapshot on first use after
@@ -94,6 +114,10 @@ export class LobbyDO {
 
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") !== "websocket") {
+      // Public usage/analytics snapshot (read by the in-app lobby stats panel).
+      if (new URL(request.url).pathname === "/stats") {
+        return this.statsResponse();
+      }
       // Plain GET → version/health endpoint (deploy smoke check asserts
       // protocol_version == released client's).
       return Response.json({
@@ -113,7 +137,9 @@ export class LobbyDO {
     this.broadcastPlayerCount();
     // Lobby occupancy heartbeat — once per connection (not per frame). Lets you
     // see usage and spot connection leaks (count that never returns to 0).
-    console.log({ event: "lobby_connect", players: this.ctx.getWebSockets().length });
+    const players = this.ctx.getWebSockets().length;
+    console.log({ event: "lobby_connect", players });
+    await this.recordPeakPlayers(players);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -169,6 +195,11 @@ export class LobbyDO {
       await this.ctx.storage.put(SNAPSHOT_KEY, broker.snapshot());
       await this.ensureAlarm();
     }
+
+    // Best-effort usage counters — recorded AFTER the authoritative broker
+    // snapshot so a storage fault here can never preempt persisting the lobby
+    // entry (which the hibernation-recovery path depends on).
+    await this.recordGameStats(result.outbounds);
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
@@ -214,6 +245,67 @@ export class LobbyDO {
     if (!broker.is_empty()) {
       await this.ctx.storage.setAlarm(Date.now() + REAP_INTERVAL_MS);
     }
+  }
+
+  // ── Usage analytics ────────────────────────────────────────────────────
+
+  /** Fold GameCreated / PeerInfo outbounds into the durable totals + today's
+   *  bucket. GameCreated = a room was hosted; PeerInfo = a guest was handed the
+   *  host's peer id, i.e. a P2P match actually began. */
+  private async recordGameStats(outbounds: OutboundDto[]): Promise<void> {
+    const { created, joined } = countGameOutbounds(outbounds);
+    if (created === 0 && joined === 0) return;
+
+    const dailyKey = `${DAILY_PREFIX}${dayBucket(Date.now())}`;
+    const [createdTotal, joinedTotal, daily] = await Promise.all([
+      this.ctx.storage.get<number>(GAMES_CREATED_KEY),
+      this.ctx.storage.get<number>(GAMES_JOINED_KEY),
+      this.ctx.storage.get<DailyStat>(dailyKey),
+    ]);
+    const bucket = daily ?? { created: 0, joined: 0 };
+    // Batched write. The DO input gate serializes handler invocations, so this
+    // read-modify-write can't interleave with another frame's increment.
+    await this.ctx.storage.put({
+      [GAMES_CREATED_KEY]: (createdTotal ?? 0) + created,
+      [GAMES_JOINED_KEY]: (joinedTotal ?? 0) + joined,
+      [dailyKey]: { created: bucket.created + created, joined: bucket.joined + joined },
+    });
+  }
+
+  /** Raise the persisted concurrent-players high-water mark if `players`
+   *  exceeds it. Called on connect — the only moment the live count can rise. */
+  private async recordPeakPlayers(players: number): Promise<void> {
+    const peak = (await this.ctx.storage.get<number>(PLAYERS_PEAK_KEY)) ?? 0;
+    if (players > peak) await this.ctx.storage.put(PLAYERS_PEAK_KEY, players);
+  }
+
+  /** Build the `/stats` JSON: live gauges from the socket set + broker, durable
+   *  totals / peak / 30-day series from DO storage. Public, non-sensitive
+   *  counts, so a permissive CORS header lets the browser read it cross-origin. */
+  private async statsResponse(): Promise<Response> {
+    const broker = await this.loadBroker();
+    const [createdTotal, joinedTotal, peak, daily] = await Promise.all([
+      this.ctx.storage.get<number>(GAMES_CREATED_KEY),
+      this.ctx.storage.get<number>(GAMES_JOINED_KEY),
+      this.ctx.storage.get<number>(PLAYERS_PEAK_KEY),
+      this.ctx.storage.list<DailyStat>({
+        prefix: DAILY_PREFIX,
+        reverse: true,
+        limit: DAILY_SERIES_LIMIT,
+      }),
+    ]);
+    const payload = buildStatsPayload({
+      playersOnline: this.ctx.getWebSockets().length,
+      playersPeak: peak ?? 0,
+      activeGames: broker.active_games(),
+      gamesCreatedTotal: createdTotal ?? 0,
+      gamesJoinedTotal: joinedTotal ?? 0,
+      daily,
+      nowMs: Date.now(),
+    });
+    return Response.json(payload, {
+      headers: { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" },
+    });
   }
 
   // ── Outbound side-effect interpretation ────────────────────────────────

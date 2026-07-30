@@ -12,12 +12,26 @@
     "data": "Daten"
   },
   "gameplay": {
+    "collapseLands": "Lands einklappen",
+    "collapseSupport": "Support einklappen",
+    "collapseZoneOptions": {
+      "auto": "Auto",
+      "on": "Immer an",
+      "off": "Immer aus"
+    },
     "title": "Spielablauf",
     "language": "Sprache",
     "cardSize": "Kartengröße",
+    "commandZone": "Kommandozone",
+    "autoPass": "Auto-Pass",
+    "skipLowUsePriorityWindows": "Prioritätsfenster mit geringer Nutzung überspringen (experimentell)",
+    "skipLowUsePriorityWindowsDescription": "Überspringe automatisch deine eigenen Prioritätsfenster bei leerem Stapel während des Versorgungssegments, Ziehsegments und Endsegments. Phasenstopps und Volle Kontrolle halten weiterhin an.",
     "logDefault": "Protokoll-Standard",
     "spellPayment": "Zauberspruch-Bezahlung",
     "manualManaPayment": "Manuelle Manabezahlung für Zaubersprüche",
+    "spellPaymentOptions": { "auto": "Automatisch", "autoExceptSacrificialMana": "Vor dem Opfern fragen", "manual": "Manuell" },
+    "nativeEngine": "Native Engine für lokale Spiele und gehostete Mehrspielerpartien verwenden",
+    "nativeEngineDescription": "Verwende die heruntergeladene Engine für lokale KI-Spiele und Spiele, die du über eine Lobby hostest. Gäste verbinden sich weiterhin über die Peer-to-Peer-Verbindung der Lobby. Fällt auf die integrierte Engine zurück, wenn sie nicht verfügbar ist.",
     "boardBackground": "Spielfeldhintergrund",
     "boardBackgroundGroups": {
       "automatic": "Automatisch",
@@ -54,6 +68,11 @@
     "showKeywords": "Schlüsselwörter auf Schlachtfeldkarten anzeigen",
     "opponentHoverPreview": "Gegner-Hover-Vorschau",
     "showOpponentBoard": "Spielfeld des Gegners beim Hovern über das HUD anzeigen",
+    "multiplayerBoardLayout": "Mehrspieler-Boardlayout",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Fokussierter Gegner",
+      "split": "Geteilter Tisch"
+    },
     "cardPreviewDelay": "Hover-Verzögerung",
     "cardPreviewDelayInstant": "Sofort",
     "cardPreviewDelayValue": "{{ms}} ms",
@@ -69,6 +88,9 @@
       "side": "Die Vorschau dockt am Bildschirmrand an, sodass sie das Spielfeld nie verdeckt.",
       "shift": "Die Vorschau erscheint nur, solange du die Umschalttaste gedrückt hältst, wie bei Tabletop Simulator."
     },
+    "cardPreviewFooter": "Vorschauinformationen",
+    "showCardPreviewFooter": "Informationen unter Kartenvorschauen anzeigen",
+    "cardPreviewFooterHint": "Enthält Kartenname, verfügbare aktivierte Fähigkeiten und Tastaturhinweise. Alt öffnet weiterhin die Parsedetails, wenn dies ausgeblendet ist.",
     "cardArtPreferences": "Karten-Artwork-Einstellungen",
     "clearArtOverrides_one": "Alle Artwork-Überschreibungen aufheben ({{count}})",
     "clearArtOverrides_other": "Alle Artwork-Überschreibungen aufheben ({{count}})",
@@ -172,7 +194,9 @@
     "importedWithPreferences_one": "{{count}} Deck und Einstellungen importiert.",
     "importedWithPreferences_other": "{{count}} Decks und Einstellungen importiert.",
     "skippedMalformed_one": "{{count}} fehlerhaften Eintrag übersprungen.",
-    "skippedMalformed_other": "{{count}} fehlerhafte Einträge übersprungen."
+    "skippedMalformed_other": "{{count}} fehlerhafte Einträge übersprungen.",
+    "telemetry": "Anonyme Absturz- und Nutzungsberichte senden",
+    "telemetryDescription": "Hilft, Abstürze zu beheben und die Kartenunterstützung zu priorisieren. Kein Konto, keine persönlichen Daten – nur Fehler- und Spielzusammenfassungszählungen."
   },
   "resetAll": {
     "confirm": "Alle Einstellungen auf die Standardwerte zurücksetzen? Dies löscht jede Einstellung in diesem Dialog.",

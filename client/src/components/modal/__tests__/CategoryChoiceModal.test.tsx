@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GameObject, WaitingFor } from "../../../adapter/types.ts";
 import { CategoryChoiceModal } from "../CategoryChoiceModal.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { buildGameObjectWithCoreTypes } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 
 const dispatchMock = vi.fn();
 
@@ -14,47 +16,23 @@ vi.mock("../../../hooks/useGameDispatch.ts", () => ({
 type CategoryChoice = Extract<WaitingFor, { type: "CategoryChoice" }>;
 
 function makeObject(id: number, name: string, coreTypes: string[]): GameObject {
-  return {
+  return buildGameObjectWithCoreTypes(coreTypes, {
     id,
     card_id: 1,
-    owner: 0,
-    controller: 0,
     zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name,
     power: 1,
     toughness: 1,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: coreTypes, subtypes: [] },
-    mana_cost: { type: "NoCost" },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
     base_power: 1,
     base_toughness: 1,
-    base_keywords: [],
-    base_color: [],
     timestamp: 1,
     entered_battlefield_turn: 1,
-  } as unknown as GameObject;
+  });
 }
 
 function setUpObjects(objects: Record<string, GameObject>) {
   useGameStore.setState({
-    gameState: { objects } as unknown as ReturnType<
-      typeof useGameStore.getState
-    >["gameState"],
+    gameState: buildGameState({ objects }),
   });
 }
 

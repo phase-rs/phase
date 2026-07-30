@@ -100,7 +100,15 @@ export function searchChoiceAllowsPartialFind(data: SearchChoice["data"]): boole
   );
 }
 
-export type EffectZoneMode = "Sacrifice" | "Topdeck" | "Hand" | "Battlefield" | "Untap" | "Tap";
+export type EffectZoneMode =
+  | "Sacrifice"
+  | "Topdeck"
+  | "Hand"
+  | "Exile"
+  | "Battlefield"
+  | "Untap"
+  | "Tap"
+  | "Attach";
 
 export const EFFECT_ZONE_VISUAL_CLASSES: Record<
   EffectZoneMode,
@@ -121,6 +129,11 @@ export const EFFECT_ZONE_VISUAL_CLASSES: Record<
     overlay: "bg-sky-500/20",
     badge: "bg-sky-500/90",
   },
+  Exile: {
+    ring: "ring-violet-300/80",
+    overlay: "bg-violet-500/20",
+    badge: "bg-violet-500/90",
+  },
   Battlefield: {
     ring: "ring-emerald-400/80",
     overlay: "bg-emerald-500/20",
@@ -136,22 +149,31 @@ export const EFFECT_ZONE_VISUAL_CLASSES: Record<
     overlay: "bg-amber-500/20",
     badge: "bg-amber-500/90",
   },
+  Attach: {
+    ring: "ring-violet-300/80",
+    overlay: "bg-violet-500/20",
+    badge: "bg-violet-500/90",
+  },
 };
 
 export const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
   Sacrifice: "cardChoice.effectZone.labelConfirm",
   Topdeck: "cardChoice.effectZone.labelTop",
   Hand: "cardChoice.effectZone.labelReturn",
+  Exile: "cardChoice.effectZone.labelExile",
   Battlefield: "cardChoice.effectZone.labelPut",
   Untap: "cardChoice.effectZone.labelConfirm",
   Tap: "cardChoice.effectZone.labelConfirm",
+  Attach: "cardChoice.effectZone.labelAttach",
 };
 
 export const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
   Sacrifice: "cardChoice.badges.sacrifice",
   Topdeck: "cardChoice.badges.put",
   Hand: "cardChoice.badges.return",
+  Exile: "cardChoice.badges.exile",
   Battlefield: "cardChoice.badges.put",
   Untap: "cardChoice.badges.untap",
   Tap: "cardChoice.badges.tap",
+  Attach: "cardChoice.badges.attach",
 };

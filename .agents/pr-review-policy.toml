@@ -1,0 +1,102 @@
+# Repo-level PR review policy. Keep contributor names, reviewer identities,
+# standings, and personal exceptions out of this committed file.
+
+[defaults]
+tier = "T2"
+
+[domain]
+rules_domain = "mtg-cr"
+
+[labels]
+frontend_deferred = "defer-fe"
+quality = "quality"
+
+# Artifact verification remains audit-only until the contributor contract is
+# published and an immutable post-publication cutoff is configured.
+[admission]
+mode = "audit"
+enforced_after = ""
+accepted_issue_label = "accepted"
+
+[architecture_scope]
+# Broad cross-surface changes need a maintainer's full implementation review,
+# not automatic closure. In particular, a bounded parser/engine class moving
+# from Effect::Unimplemented to a real implementation may legitimately require
+# engine, interactive-choice, frontend, and transport plumbing.
+mode = "review"
+span_threshold = 3
+patterns = [
+  "crates/engine/src/types/format.rs",
+  "crates/engine/src/types/card_type.rs",
+  "crates/engine/src/game/mod.rs",
+  "crates/engine/src/game/deck_loading.rs",
+  "crates/engine/src/game/deck_validation.rs",
+  "crates/engine/src/game/match_flow.rs",
+  "crates/engine/src/game/mulligan.rs",
+  "crates/server-core/**",
+  "crates/phase-server/src/main.rs",
+]
+
+[requested_changes]
+warning_after_days = 7
+close_after_warning_days = 7
+
+[hard_stops]
+patterns = [
+  ".agents/skills/**",
+  ".claude/skills/**",
+  ".claude/agents/**",
+  ".github/workflows/**",
+  "AGENTS.md",
+  "CLAUDE.md",
+  "GEMINI.md",
+  "docs/AI-CONTRIBUTOR.md",
+  "Cargo.toml",
+  "client/package.json",
+  "client/src-tauri/build.rs",
+  "crates/**/build.rs",
+]
+
+[generated]
+patterns = [
+  "client/public/card-data*.json",
+  "client/public/coverage-*.json",
+  "client/public/scryfall-*.json",
+  "client/public/changelog*.json",
+  "data/mtgjson/**",
+  "triage/**",
+]
+
+[path_classes.frontend]
+patterns = [
+  "client/**",
+  "lobby-worker/**",
+]
+
+[path_classes.engine]
+patterns = [
+  "crates/engine/**",
+  "crates/phase-ai/**",
+  "crates/phase-server/**",
+]
+
+[path_classes.server]
+patterns = [
+  "crates/server-core/**",
+]
+
+[path_classes.draft]
+patterns = [
+  "crates/draft-core/**",
+]
+
+[path_classes.skill]
+patterns = [
+  ".agents/skills/**",
+  ".claude/skills/**",
+]
+
+[path_classes.github]
+patterns = [
+  ".github/**",
+]

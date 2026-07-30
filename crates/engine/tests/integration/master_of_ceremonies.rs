@@ -31,7 +31,7 @@ use engine::game::zones::create_object;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, Effect, PlayerFilter, ResolvedAbility,
-    TargetFilter, VoteTally, VoterScope,
+    TargetFilter, TieResolution, VoteSubject, VoteTally, VoteVisibility, VoterScope,
 };
 use engine::types::actions::GameAction;
 use engine::types::format::FormatConfig;
@@ -93,7 +93,7 @@ fn count_battlefield_objects_named(
 /// The compound-subject combinator inside the parser produces a 2-element
 /// chain whose halves carry `OriginalController` / `ScopedPlayer` recipients,
 /// so the per-voter iteration drives both halves correctly.
-fn parse_moc_reward_body(body_text: &str, choice_index: u8) -> Box<AbilityDefinition> {
+fn parse_moc_reward_body(body_text: &str, choice_index: u32) -> Box<AbilityDefinition> {
     let mut def = parse_effect_chain(body_text, AbilityKind::Spell);
     def.player_scope = Some(PlayerFilter::VotedFor { choice_index });
     Box::new(def)
@@ -125,6 +125,8 @@ fn make_master_of_ceremonies_vote(controller: PlayerId, source_id: ObjectId) -> 
             starting_with: ControllerRef::You,
             voter_scope: VoterScope::EachOpponent,
             tally_mode: VoteTally::PerVote,
+            subject: VoteSubject::Named,
+            visibility: VoteVisibility::Open,
         },
     );
     build_resolved_from_def(&vote_def, source_id, controller)
@@ -144,9 +146,11 @@ fn make_threshold_vote(controller: PlayerId, source_id: ObjectId) -> ResolvedAbi
             ],
             starting_with: ControllerRef::You,
             voter_scope: VoterScope::AllPlayers,
-            tally_mode: VoteTally::Threshold {
-                tie_breaker_index: 0,
+            tally_mode: VoteTally::TopVotes {
+                tie: TieResolution::Breaker(0),
             },
+            subject: VoteSubject::Named,
+            visibility: VoteVisibility::Open,
         },
     );
     build_resolved_from_def(&vote_def, source_id, controller)
@@ -587,6 +591,8 @@ fn tivit_evidence_bribery_still_resolves_via_default_voter_scope() {
             // Default — this is the Tivit/classic-council shape.
             voter_scope: VoterScope::AllPlayers,
             tally_mode: VoteTally::PerVote,
+            subject: VoteSubject::Named,
+            visibility: VoteVisibility::Open,
         },
     );
     let ability = build_resolved_from_def(&vote_def, ObjectId(9001), controller);

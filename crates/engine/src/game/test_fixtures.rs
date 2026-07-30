@@ -37,6 +37,7 @@ pub(crate) fn brushland_colored_ability() -> AbilityDefinition {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
             damage_source: None,
+            excess: None,
         },
     ))
 }

@@ -60,8 +60,8 @@ impl<T: Clone> Definitions<T> {
     /// crate operation (test fixtures, card construction, copy effects). The
     /// single-authority invariant is guarded by the absence of public
     /// iteration, not by restricting writes.
-    pub fn push(&mut self, item: T) {
-        Arc::make_mut(&mut self.0).push(item);
+    pub fn push<U: Into<T>>(&mut self, item: U) {
+        Arc::make_mut(&mut self.0).push(item.into());
     }
 
     /// Remove every definition.
@@ -157,6 +157,27 @@ impl<T> From<Arc<Vec<T>>> for Definitions<T> {
     /// `Definitions<T>` wrapper during `layers.rs` reset.
     fn from(v: Arc<Vec<T>>) -> Self {
         Self(v)
+    }
+}
+
+// Production construction must materialize payload trigger definitions through
+// a base-install or grant authority. Test fixtures retain this bridge for
+// focused tests that deliberately exercise unmaterialized entries.
+#[cfg(any(test, feature = "test-support"))]
+impl From<Vec<crate::types::ability::TriggerDefinition>>
+    for Definitions<crate::types::ability::TriggerEntry>
+{
+    fn from(definitions: Vec<crate::types::ability::TriggerDefinition>) -> Self {
+        definitions.into_iter().map(Into::into).collect()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl From<Arc<Vec<crate::types::ability::TriggerDefinition>>>
+    for Definitions<crate::types::ability::TriggerEntry>
+{
+    fn from(definitions: Arc<Vec<crate::types::ability::TriggerDefinition>>) -> Self {
+        definitions.iter().cloned().map(Into::into).collect()
     }
 }
 

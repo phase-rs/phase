@@ -15,13 +15,16 @@ describe("preferencesStore", () => {
         boardBackground: "auto-wubrg",
         vfxQuality: "full",
         animationSpeedMultiplier: 1.0,
+        showCardPreviewFooter: true,
         pacingMultipliers: { effects: 1.0, combat: 1.0, banners: 1.0 },
+        priorityPassingMode: "Standard",
         masterVolume: 100,
         sfxVolume: 70,
         musicVolume: 40,
         sfxMuted: false,
         musicMuted: false,
         masterMuted: false,
+        multiplayerBoardLayout: "focused",
         aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
         aiBracketFilter: [],
       });
@@ -37,7 +40,9 @@ describe("preferencesStore", () => {
     expect(state.followActiveOpponent).toBe(false);
     expect(state.logDefaultState).toBe("closed");
     expect(state.boardBackground).toBe("auto-wubrg");
+    expect(state.multiplayerBoardLayout).toBe("focused");
     expect(state.aiSeats).toEqual([{ difficulty: "Medium", deckId: "Random" }]);
+    expect(state.priorityPassingMode).toBe("Standard");
   });
 
   it("setAiSeatDifficulty updates the target seat", () => {
@@ -90,6 +95,14 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().hudLayout).toBe("floating");
   });
 
+  it("setMultiplayerBoardLayout updates multiplayer board layout", () => {
+    act(() => {
+      usePreferencesStore.getState().setMultiplayerBoardLayout("split");
+    });
+
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("split");
+  });
+
   it("setFollowActiveOpponent updates the value", () => {
     act(() => {
       usePreferencesStore.getState().setFollowActiveOpponent(true);
@@ -136,6 +149,20 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().vfxQuality).toBe("minimal");
+  });
+
+  it("shows the card preview footer by default and persists changes", () => {
+    // Read the store's actual initialization snapshot so the shared beforeEach
+    // reset cannot mask a regression in buildDefaultPreferences().
+    expect(usePreferencesStore.getInitialState().showCardPreviewFooter).toBe(true);
+
+    act(() => {
+      usePreferencesStore.getState().setShowCardPreviewFooter(false);
+    });
+
+    expect(usePreferencesStore.getState().showCardPreviewFooter).toBe(false);
+    const stored = JSON.parse(localStorage.getItem("phase-preferences")!);
+    expect(stored.state.showCardPreviewFooter).toBe(false);
   });
 
   it("setAnimationSpeedMultiplier updates the value", () => {
@@ -203,6 +230,7 @@ describe("preferencesStore", () => {
       usePreferencesStore.getState().setCardSize("large");
       usePreferencesStore.getState().setMasterVolume(20);
       usePreferencesStore.getState().setPacingMultiplier("combat", 1.5);
+      usePreferencesStore.getState().setPriorityPassingMode("SkipLowUseWindows");
     });
 
     act(() => {
@@ -213,6 +241,7 @@ describe("preferencesStore", () => {
     expect(state.cardSize).toBe("medium");
     expect(state.masterVolume).toBe(100);
     expect(state.pacingMultipliers).toEqual({ effects: 1.0, combat: 1.0, banners: 1.0 });
+    expect(state.priorityPassingMode).toBe("Standard");
   });
 
   it("existing preferences are unchanged after setting animation prefs", () => {
@@ -339,6 +368,52 @@ describe("preferencesStore", () => {
       { difficulty: "Easy", deckId: "Random" },
       { difficulty: "Hard", deckId: "saved:Dimir Control" },
     ]);
+  });
+
+  it("migrates v22 bare phaseStops into scoped { phase, scope: 'AllTurns' }", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { phaseStops: ["PreCombatMain"] }, version: 22 }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().phaseStops).toEqual([
+      { phase: "PreCombatMain", scope: "AllTurns" },
+    ]);
+  });
+
+  it("migrates non-array v22 phaseStops to []", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { phaseStops: "garbage" }, version: 22 }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().phaseStops).toEqual([]);
+  });
+
+  it.each([24, 25])("migrates the legacy Smart value from v%i", (version) => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { priorityPassingMode: "Smart" }, version }),
+    );
+    act(() => usePreferencesStore.persist.rehydrate());
+    expect(usePreferencesStore.getState().priorityPassingMode).toBe("SkipLowUseWindows");
+  });
+
+  it("safely normalizes invalid v25 priority-passing modes", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { priorityPassingMode: "Aggressive" }, version: 25 }),
+    );
+    act(() => usePreferencesStore.persist.rehydrate());
+    expect(usePreferencesStore.getState().priorityPassingMode).toBe("Standard");
   });
 
   // --- Audio preferences ---
@@ -513,5 +588,23 @@ describe("preferencesStore", () => {
     usePreferencesStore.persist.rehydrate();
 
     expect(usePreferencesStore.getState().aiBracketFilter).toEqual([]);
+  });
+
+  it("v20 → v21 migration defaults multiplayerBoardLayout to focused", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: {
+          cardSize: "large",
+        },
+        version: 20,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("focused");
   });
 });

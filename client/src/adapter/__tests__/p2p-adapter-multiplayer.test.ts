@@ -11,9 +11,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
-import { P2PHostAdapter, playerSlotsFromSeatView } from "../p2p-adapter";
-import type { FormatConfig } from "../types";
+import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView } from "../p2p-adapter";
+import { supportsMatchConcede, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
+import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
+import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
 
 // `vi.mock` is hoisted above imports, so the factory can't reference module
 // scope. Inline the wire-format stub. See `./protocolTestStub.ts` for the
@@ -39,16 +41,51 @@ vi.mock("../../network/protocol", async (orig) => {
   };
 });
 
+vi.mock("../../services/p2pTerminalResult", async (orig) => {
+  const actual = await orig<typeof import("../../services/p2pTerminalResult")>();
+  return {
+    ...actual,
+    clearP2PTerminalResult: vi.fn(async () => undefined),
+    commitP2PTerminalResult: vi.fn(async () => true),
+  };
+});
+
 // ── Mock the WasmAdapter so we don't need an actual WASM build ─────────────
 // `vi.hoisted` lets us share these refs with the hoisted vi.mock factory.
 const mocks = vi.hoisted(() => {
+  const getState = vi.fn(async () => ({
+    players: [],
+    objects: {},
+    waiting_for: { type: "Priority", data: { player: 0 } },
+  }));
+  const getLegalActions = vi.fn(async () => ({
+    actions: [],
+    autoPassRecommended: false,
+  }));
+  const checkDeckCompatibility = vi.fn(async () => ({
+    selected_format_compatible: true,
+    selected_format_reasons: [] as string[],
+  }));
+  // Local monotonic stamp — the hoisted factory runs before imports, so it
+  // can't call the adapter module's `nextSnapshotSeq`. Only ordering matters
+  // to these assertions, and `seq` is never compared across clients.
+  let seq = 0;
   return {
     initialize: vi.fn(async () => undefined),
     submitAction: vi.fn(async (_action: unknown) => ({ events: [] })),
-    getState: vi.fn(async () => ({ players: [], objects: {} })),
-    getLegalActions: vi.fn(async () => ({
-      actions: [],
-      autoPassRecommended: false,
+    checkDeckCompatibility,
+    getState,
+    getLegalActions,
+    /**
+     * Reads through the SAME `getState`/`getLegalActions` mocks the tests
+     * script with `mockResolvedValueOnce`, so a host AI-loop iteration consumes
+     * exactly the two `getState` values it always did (loop-top read + the
+     * post-submit pair read) and every scripted sequence still lines up.
+     */
+    getSnapshot: vi.fn(async () => ({
+      state: await getState(),
+      legalResult: await getLegalActions(),
+      seq: ++seq,
     })),
     getLegalActionsForViewer: vi.fn(async (_pid: number) => ({
       actions: [],
@@ -117,6 +154,7 @@ const mocks = vi.hoisted(() => {
   };
 });
 const mockSubmitAction = mocks.submitAction;
+const mockCheckDeckCompatibility = mocks.checkDeckCompatibility;
 const mockGetViewerSnapshot = mocks.getViewerSnapshot;
 const mockInitializeGame = mocks.initializeGame;
 const mockSetMultiplayerMode = mocks.setMultiplayerMode;
@@ -134,6 +172,28 @@ function deferred<T>() {
     resolve = r;
   });
   return { promise, resolve };
+}
+
+function debugLogEntry(value: string): GameLogEntry {
+  return {
+    seq: 0,
+    turn: 1,
+    phase: "PreCombatMain",
+    category: "Debug",
+    segments: [{ type: "Text", value }],
+  };
+}
+
+function remoteState(label: string): GameState {
+  return {
+    label,
+    turn_number: 1,
+    active_player: 0,
+    priority_player: 0,
+    phase: "PreCombatMain",
+    players: [],
+    objects: {},
+  } as unknown as GameState;
 }
 
 function projectSeatViewFromState(stateJson: string) {
@@ -168,8 +228,10 @@ vi.mock("../wasm-adapter", () => ({
       initialize: mocks.initialize,
       initializeGame: mocks.initializeGame,
       submitAction: mocks.submitAction,
+      checkDeckCompatibility: mocks.checkDeckCompatibility,
       getState: mocks.getState,
       getLegalActions: mocks.getLegalActions,
+      getSnapshot: mocks.getSnapshot,
       getLegalActionsForViewer: mocks.getLegalActionsForViewer,
       getFilteredState: mocks.getFilteredState,
       getViewerSnapshot: mocks.getViewerSnapshot,
@@ -192,6 +254,7 @@ beforeEach(() => {
   );
   mockInitialize.mockClear();
   mockSubmitAction.mockClear();
+  mockCheckDeckCompatibility.mockClear();
   mockGetViewerSnapshot.mockClear();
   mockInitializeGame.mockClear();
   mockSetMultiplayerMode.mockClear();
@@ -271,6 +334,23 @@ function twoHeadedGiantConfig(): FormatConfig {
   };
 }
 
+function commanderConfig(): FormatConfig {
+  return {
+    format: "Commander",
+    starting_life: 40,
+    min_players: 2,
+    max_players: 6,
+    deck_size: 100,
+    singleton: true,
+    command_zone: true,
+    commander_damage_threshold: 21,
+    range_of_influence: null,
+    team_based: false,
+    uses_commander: true,
+    allow_debug_actions: false,
+  };
+}
+
 function makeHost(playerCount: number, gracePeriodMs = 5_000, formatConfig?: FormatConfig) {
   const { peer, onGuestConnected, emitConnection } = createFakePeer();
   const hostDeck = {
@@ -339,6 +419,161 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     expect(mockSetMultiplayerMode).toHaveBeenCalledTimes(1);
     expect(mockSetMultiplayerMode).toHaveBeenCalledWith(true);
+  });
+
+  it("does not reinitialize the host during the lobby-to-game handoff", async () => {
+    const { adapter } = makeHost(2);
+
+    await Promise.all([adapter.initialize(), adapter.initialize()]);
+    await adapter.initialize();
+
+    expect(mockInitialize).toHaveBeenCalledTimes(1);
+    expect(mockSetMultiplayerMode).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences a stale host when a same-session resume claims a new incarnation", async () => {
+    const persistedSession = {
+      gameId: "lease-game",
+      roomCode: "ABCDE",
+      sessionKey: "stable-p2p-session",
+      useBroker: false,
+      playerTokens: {},
+      guestDecks: {},
+      kickedTokens: [],
+      eliminatedSeats: [],
+      playerCount: 2,
+      hostDeckData: {
+        player: { main_deck: ["Mountain"], sideboard: [] },
+        opponent: { main_deck: ["Forest"], sideboard: [] },
+        ai_decks: [],
+      },
+      gameStarted: false,
+    };
+    const stalePeer = createFakePeer();
+    const currentPeer = createFakePeer();
+    const stale = new P2PHostAdapter(
+      persistedSession.hostDeckData,
+      stalePeer.peer as unknown as Peer,
+      stalePeer.onGuestConnected,
+      2,
+      undefined,
+      undefined,
+      5_000,
+      undefined,
+      true,
+      undefined,
+      { gameId: "lease-game", roomCode: "ABCDE", resumeData: { session: persistedSession } },
+    );
+    await stale.initialize();
+
+    const current = new P2PHostAdapter(
+      persistedSession.hostDeckData,
+      currentPeer.peer as unknown as Peer,
+      currentPeer.onGuestConnected,
+      2,
+      undefined,
+      undefined,
+      5_000,
+      undefined,
+      true,
+      undefined,
+      { gameId: "lease-game", roomCode: "ABCDE", resumeData: { session: persistedSession } },
+    );
+    await current.initialize();
+
+    const staleGuest = new FakeOpenableConnection();
+    stalePeer.emitConnection(staleGuest as unknown as DataConnection);
+    staleGuest.fireOpen();
+    await flushPromises();
+    expect(await staleGuest.getSentMessages()).toContainEqual({
+      type: "reconnect_rejected",
+      reason: "Host session superseded",
+    });
+
+    const currentGuest = await joinGuest(currentPeer.emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    await flushPromises();
+    expect(current.getPlayerSlots()[1]?.kind.type).toBe("JoinedHuman");
+    expect((await currentGuest.getSentMessages()).some(
+      (message) => (message as { authority?: { sessionKey?: string } }).authority?.sessionKey === "stable-p2p-session",
+    )).toBe(true);
+
+    stale.dispose();
+    current.dispose();
+  });
+
+  it("retries failed initialization without duplicating guest connections", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    mockInitialize
+      .mockRejectedValueOnce(new Error("worker startup failed"))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(adapter.initialize()).rejects.toThrow("worker startup failed");
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    await flushPromises(20);
+
+    expect(mockInitialize).toHaveBeenCalledTimes(2);
+    expect(adapter.getPlayerSlots().map((slot) => slot.kind.type)).toEqual([
+      "HostHuman",
+      "JoinedHuman",
+    ]);
+    const messages = await guest.getSentMessages();
+    expect(messages.filter((message) => (message as { type?: string }).type === "seat_snapshot"))
+      .toHaveLength(1);
+    expect(messages.some((message) => (message as { type?: string }).type === "kick")).toBe(false);
+  });
+
+  it("rejects a non-Oathbreaker guest signature spell before game setup", async () => {
+    mockCheckDeckCompatibility.mockResolvedValueOnce({
+      selected_format_compatible: false,
+      selected_format_reasons: ["Commander does not use a signature spell slot"],
+    });
+    const { adapter, emitConnection } = makeHost(2, 5_000, commanderConfig());
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: {
+        player: {
+          main_deck: ["Plains"],
+          sideboard: [],
+          commander: ["Legal Commander"],
+          companion: [],
+          signature_spell: ["Invalid Signature Spell"],
+        },
+      },
+    });
+    await flushPromises(20);
+
+    expect(mockCheckDeckCompatibility).toHaveBeenCalledWith({
+      main_deck: ["Plains"],
+      sideboard: [],
+      commander: ["Legal Commander"],
+      companion: [],
+      signature_spell: ["Invalid Signature Spell"],
+      selected_format: "Commander",
+    });
+    expect(mockInitializeGame).not.toHaveBeenCalled();
+
+    const kicked = (await guest.getSentMessages()).find(
+      (message) =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type: string }).type === "kick",
+    );
+    expect(kicked).toMatchObject({
+      type: "kick",
+      reason: "Deck rejected: Commander does not use a signature spell slot",
+      format: "Commander",
+    });
+    expect(guest.open).toBe(false);
   });
 
   it("projects team metadata from wire SeatView into player slots", () => {
@@ -504,8 +739,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
           type: "MulliganDecision",
           data: {
             pending: [
-              { player: 0, mulligan_count: 0 },
-              { player: 1, mulligan_count: 0 },
+              { player: 0, mulligan_count: 0, phase: { type: "Declare" } },
+              { player: 1, mulligan_count: 0, phase: { type: "Declare" } },
             ],
             free_first_mulligan: false,
           },
@@ -975,7 +1210,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
   });
 
-  // Regression guard: the wire must carry legalActionsByObject + spellCosts
+  // Regression guard: the wire must carry legalActionsByObject, spellCosts,
+  // and engine-authored mana-payment shortcut actions
   // across game_setup, state_update, and reconnect_ack. Dropping these fields
   // — even though the flat `legalActions` array still arrives — leaves guests
   // unable to click cards in their hand, because the frontend card-click
@@ -985,7 +1221,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   // because those dispatch as plain GameActions, which is why the original
   // bug evaded detection for so long. This test locks in the fix at every
   // wire site so a future refactor cannot silently regress.
-  it("wire protocol round-trips legalActionsByObject + spellCosts on every send site", async () => {
+  it("wire protocol round-trips legal projections on every send site", async () => {
     // Seed the mocked engine's legal-actions response with non-empty
     // per-object grouping and spell costs. The host adapter is expected to
     // forward these verbatim to every guest via game_setup, state_update,
@@ -997,6 +1233,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     const spellCosts = {
       "42": { generic: 1, colored: { R: 1 } },
     };
+    const manaPaymentShortcutActions: GameAction[] = [{ type: "PassPriority" }];
     // Cast via `unknown` because the hoisted mock's default return is inferred
     // as `{ actions: never[]; autoPassRecommended: boolean }`, which would
     // reject our richer payload. The adapter consumes the full
@@ -1016,6 +1253,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         { type: "PassPriority" },
       ],
       autoPassRecommended: false,
+      manaPaymentShortcutActions,
       legalActionsByObject,
       spellCosts,
     }));
@@ -1036,12 +1274,14 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         playerToken: string;
         legalActionsByObject?: Record<string, unknown>;
         spellCosts?: Record<string, unknown>;
+        manaPaymentShortcutActions?: GameAction[];
       } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "game_setup",
     );
     expect(setup).toBeDefined();
     expect(setup!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(setup!.spellCosts).toEqual(spellCosts);
+    expect(setup!.manaPaymentShortcutActions).toEqual(manaPaymentShortcutActions);
     const playerToken = setup!.playerToken;
 
     // ── state_update ───────────────────────────────────────────────────────
@@ -1053,12 +1293,14 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         type: "state_update";
         legalActionsByObject?: Record<string, unknown>;
         spellCosts?: Record<string, unknown>;
+        manaPaymentShortcutActions?: GameAction[];
       } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "state_update",
     );
     expect(stateUpdate).toBeDefined();
     expect(stateUpdate!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(stateUpdate!.spellCosts).toEqual(spellCosts);
+    expect(stateUpdate!.manaPaymentShortcutActions).toEqual(manaPaymentShortcutActions);
 
     // ── reconnect_ack ──────────────────────────────────────────────────────
     g1.simulateClose();
@@ -1076,11 +1318,519 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         type: "reconnect_ack";
         legalActionsByObject?: Record<string, unknown>;
         spellCosts?: Record<string, unknown>;
+        manaPaymentShortcutActions?: GameAction[];
       } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "reconnect_ack",
     );
     expect(ack).toBeDefined();
     expect(ack!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(ack!.spellCosts).toEqual(spellCosts);
+    expect(ack!.manaPaymentShortcutActions).toEqual(manaPaymentShortcutActions);
+  });
+
+  it("keeps turn-controller auto-pass recommendations viewer-scoped on setup, update, and reconnect", async () => {
+    const viewerSnapshot = (pid: number) => ({
+      state: {
+        filteredFor: pid,
+        players: [],
+        active_player: 2,
+        priority_player: 1,
+        phase: "Upkeep",
+        waiting_for: { type: "Priority", data: { player: 2 } },
+        turn_decision_controller: 1,
+        priority_passing_modes: pid === 1 ? { "1": "SkipLowUseWindows" } : {},
+      },
+      actions: pid === 1 ? [{ type: "PassPriority" }] : [],
+      autoPassRecommended: pid === 1,
+    });
+    (mocks.getViewerSnapshot as unknown as {
+      mockImplementation: (fn: (pid: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number) => viewerSnapshot(pid));
+
+    const messageOfType = async <T extends { type: string }>(
+      conn: FakeOpenableConnection,
+      type: T["type"],
+    ): Promise<T> => {
+      const message = (await conn.getSentMessages()).find(
+        (candidate) =>
+          typeof candidate === "object"
+          && candidate !== null
+          && (candidate as { type: string }).type === type,
+      );
+      expect(message).toBeDefined();
+      return message as T;
+    };
+    type ViewerMessage = {
+      type: "game_setup" | "state_update" | "reconnect_ack";
+      playerToken?: string;
+      state: { priority_passing_modes?: Record<string, string> };
+      legalActions: GameAction[];
+      autoPassRecommended: boolean;
+    };
+    const expectControllerView = (message: ViewerMessage) => {
+      expect(message.autoPassRecommended).toBe(true);
+      expect(message.legalActions).toEqual([{ type: "PassPriority" }]);
+      expect(message.state.priority_passing_modes).toEqual({
+        "1": "SkipLowUseWindows",
+      });
+    };
+    const expectControlledView = (message: ViewerMessage) => {
+      expect(message.autoPassRecommended).toBe(false);
+      expect(message.legalActions).toEqual([]);
+      expect(message.state.priority_passing_modes).toEqual({});
+    };
+
+    const { adapter, emitConnection } = makeHost(3, 5_000);
+    await adapter.initialize();
+    const controller = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    const controlled = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const controllerSetup = await messageOfType<ViewerMessage & { playerToken: string }>(
+      controller,
+      "game_setup",
+    );
+    const controlledSetup = await messageOfType<ViewerMessage & { playerToken: string }>(
+      controlled,
+      "game_setup",
+    );
+    expectControllerView(controllerSetup);
+    expectControlledView(controlledSetup);
+
+    controller.sent.length = 0;
+    controlled.sent.length = 0;
+    await adapter.submitAction({ type: "PassPriority" }, 0);
+    expectControllerView(await messageOfType<ViewerMessage>(controller, "state_update"));
+    expectControlledView(await messageOfType<ViewerMessage>(controlled, "state_update"));
+
+    controller.simulateClose();
+    const reconnectedController = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: controllerSetup.playerToken,
+    });
+    await flushPromises();
+    expectControllerView(
+      await messageOfType<ViewerMessage>(reconnectedController, "reconnect_ack"),
+    );
+
+    controlled.simulateClose();
+    const reconnectedControlled = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: controlledSetup.playerToken,
+    });
+    await flushPromises();
+    expectControlledView(
+      await messageOfType<ViewerMessage>(reconnectedControlled, "reconnect_ack"),
+    );
+  });
+
+  it("state_update broadcasts engine log entries to guests", async () => {
+    const logEntries = [debugLogEntry("AI guesses Nonland")];
+    const events: GameEvent[] = [{ type: "ChoiceMade", data: { player: 1 } } as unknown as GameEvent];
+    (mocks.submitAction as unknown as {
+      mockResolvedValueOnce: (value: unknown) => void;
+    }).mockResolvedValueOnce({ events, log_entries: logEntries });
+
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    guest.sent.length = 0;
+    await adapter.submitAction({ type: "PassPriority" }, 0);
+
+    const stateUpdate = (await guest.getSentMessages()).find(
+      (m): m is { type: "state_update"; logEntries?: GameLogEntry[] } =>
+        typeof m === "object" && m !== null && (m as { type: string }).type === "state_update",
+    );
+    expect(stateUpdate).toBeDefined();
+    expect(stateUpdate!.logEntries).toEqual(logEntries);
+  });
+
+  it("guest receive path exposes state_update log entries for pending and unsolicited updates", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    const emitted = vi.fn();
+    adapter.onEvent(emitted);
+    await adapter.initialize();
+
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+
+    const pendingLogs = [debugLogEntry("AI guesses Land")];
+    const pendingEvents: GameEvent[] = [
+      { type: "ChoiceMade", data: { player: 1 } } as unknown as GameEvent,
+    ];
+    const pendingSubmit = adapter.submitAction({ type: "PassPriority" }, 1);
+    await conn.simulateData({
+      type: "state_update",
+      state: remoteState("pending"),
+      events: pendingEvents,
+      logEntries: pendingLogs,
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await expect(pendingSubmit).resolves.toEqual({
+      events: pendingEvents,
+      log_entries: pendingLogs,
+    });
+
+    const unsolicitedLogs = [debugLogEntry("Player guesses Nonland")];
+    const unsolicitedEvents: GameEvent[] = [
+      { type: "CardPredicateGuessMade", data: { player: 1 } } as unknown as GameEvent,
+    ];
+    const unsolicitedState = remoteState("unsolicited");
+    await conn.simulateData({
+      type: "state_update",
+      state: unsolicitedState,
+      events: unsolicitedEvents,
+      logEntries: unsolicitedLogs,
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+
+    // The engine pair now travels as one seq-stamped `EngineSnapshot`.
+    expect(emitted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "stateChanged",
+        snapshot: expect.objectContaining({
+          state: unsolicitedState,
+          seq: expect.any(Number),
+        }),
+        events: unsolicitedEvents,
+        logEntries: unsolicitedLogs,
+      }),
+    );
+  });
+
+  // Issue #5913: the host relays the engine's verdict verbatim, so a guest must
+  // classify a stale ReorderHand exactly as the local-WASM seat does. Before the
+  // shared classifier this path built a generic ACTION_REJECTED, and
+  // `dispatchAction` — which suppresses only STALE_ACTION — still surfaced the
+  // red error to P2P guests.
+  it("guest classifies a stale ReorderHand rejection from the host as STALE_ACTION", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await adapter.initialize();
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+
+    const stale = adapter.submitAction(
+      { type: "ReorderHand", data: { order: [1, 2, 3] } } as unknown as GameAction,
+      1,
+    );
+    await conn.simulateData({
+      type: "action_rejected",
+      reason: "Engine error: ReorderHand: expected 6 ids, got 5",
+    });
+    await expect(stale).rejects.toMatchObject({
+      code: "STALE_ACTION",
+      recoverable: false,
+    });
+
+    // A genuine rejection must still surface as a recoverable ACTION_REJECTED.
+    const real = adapter.submitAction({ type: "PassPriority" }, 1);
+    await conn.simulateData({
+      type: "action_rejected",
+      reason: "Engine error: Something genuinely wrong",
+    });
+    await expect(real).rejects.toMatchObject({
+      code: "ACTION_REJECTED",
+      recoverable: true,
+    });
+  });
+
+  it("guest snapshots stay coherent and strictly ordered across successive state updates", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await adapter.initialize();
+
+    /** One inbound host update carrying a state and the legal actions derived from it. */
+    const pushUpdate = (label: string, actions: GameAction[]) =>
+      conn.simulateData({
+        type: "state_update",
+        state: remoteState(label),
+        events: [],
+        legalActions: actions,
+        autoPassRecommended: false,
+        manaPaymentShortcutActions: [],
+      });
+
+    const passPriority = [{ type: "PassPriority" }] as unknown as GameAction[];
+    const decideOptional = [
+      { type: "DecideOptionalEffect", data: { accept: true } },
+    ] as unknown as GameAction[];
+
+    await pushUpdate("first", passPriority);
+    const first = await adapter.getSnapshot();
+
+    // Coherence: the pair in a snapshot is the pair that arrived together.
+    expect((first.state as unknown as { label: string }).label).toBe("first");
+    expect(first.legalResult.actions).toEqual(passPriority);
+
+    // And the un-paired reads are served from that SAME cached snapshot, so they
+    // cannot straddle two updates the way two independent fields could.
+    expect(await adapter.getState()).toBe(first.state);
+    expect(await adapter.getLegalActions()).toBe(first.legalResult);
+
+    await pushUpdate("second", decideOptional);
+    const second = await adapter.getSnapshot();
+
+    // The second update replaces BOTH halves together — never one without the
+    // other. A `state:"second"` paired with the first update's `PassPriority`
+    // actions is precisely the mixed pair that softlocked the host.
+    expect((second.state as unknown as { label: string }).label).toBe("second");
+    expect(second.legalResult.actions).toEqual(decideOptional);
+
+    // Strictly increasing stamps let the store's gate order these commits.
+    expect(second.seq).toBeGreaterThan(first.seq);
+  });
+
+  it("commits each terminal result to the recipient's filtered final state", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const hostState = {
+      players: [],
+      objects: { 7: { name: "Secret Hand Card" } },
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    } as unknown as GameState;
+    const guestState = {
+      players: [],
+      objects: { 7: { name: "Hidden Card" } },
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    } as unknown as GameState;
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (implementation: (playerId: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (playerId: number) => ({
+      state: playerId === 1 ? guestState : hostState,
+      actions: [],
+      autoPassRecommended: false,
+    }));
+
+    await (adapter as unknown as {
+      commitTerminalIfComplete: (snapshot: unknown, revision: number) => Promise<void>;
+    }).commitTerminalIfComplete({
+      state: hostState,
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 42,
+    }, 42);
+
+    const terminal = (await guest.getSentMessages()).find(
+      (message) => (message as { type?: string }).type === "terminal_result",
+    ) as { type: "terminal_result"; result: { recipient: number; finalStateCommitment: string } } | undefined;
+    expect(terminal?.result.recipient).toBe(1);
+    expect(terminal?.result.finalStateCommitment).toBe(
+      await p2pFinalStateCommitment(guestState),
+    );
+    expect(terminal?.result.finalStateCommitment).not.toBe(
+      await p2pFinalStateCommitment(hostState),
+    );
+    adapter.dispose();
+  });
+
+  it("redelivers a recipient-bound terminal result after a guest reconnects", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "game_setup",
+    );
+    const terminalState = {
+      players: [],
+      objects: { 7: { name: "Hidden Card" } },
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    } as unknown as GameState;
+    (mockGetViewerSnapshot as unknown as { mockResolvedValue: (value: unknown) => void }).mockResolvedValue({
+      state: terminalState,
+      actions: [],
+      autoPassRecommended: false,
+    });
+    await (adapter as unknown as {
+      commitTerminalIfComplete: (snapshot: unknown, revision: number) => Promise<void>;
+    }).commitTerminalIfComplete({
+      state: terminalState,
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 42,
+    }, 42);
+
+    guest.simulateClose();
+    const reconnect = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await vi.waitFor(async () => {
+      const messages = await reconnect.getSentMessages();
+      expect(messages.some((message) =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "terminal_result")).toBe(true);
+    });
+    const messages = await reconnect.getSentMessages();
+    const ackIndex = messages.findIndex((message) =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: string }).type === "reconnect_ack");
+    const terminal = messages.find(
+      (message): message is { type: "terminal_result"; result: { recipient: number; finalStateCommitment: string } } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "terminal_result",
+    );
+    expect(ackIndex).toBeGreaterThanOrEqual(0);
+    expect(messages.indexOf(terminal!)).toBeGreaterThan(ackIndex);
+    expect(terminal?.result.recipient).toBe(1);
+    expect(terminal?.result.finalStateCommitment).toBe(
+      await p2pFinalStateCommitment(terminalState),
+    );
+    adapter.dispose();
+  });
+});
+
+describe("P2PHostAdapter — bound draft match concession", () => {
+  it("installs the capability only when a pod binding supplies its forwarder", async () => {
+    const { peer, onGuestConnected } = createFakePeer();
+    const onConcede = vi.fn();
+    const adapter = new P2PHostAdapter(
+      { player: { main_deck: [], sideboard: [] }, opponent: { main_deck: [], sideboard: [] }, ai_decks: [] },
+      peer as unknown as Peer,
+      onGuestConnected,
+      2,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { onConcede },
+    );
+
+    expect(supportsMatchConcede(adapter)).toBe(true);
+    await adapter.initialize();
+    (adapter as unknown as { gameStarted: boolean }).gameStarted = true;
+    adapter.sendMatchConcede();
+    adapter.sendMatchConcede();
+    expect(onConcede).toHaveBeenCalledTimes(1);
+    expect(onConcede).toHaveBeenCalledWith(0);
+    adapter.dispose();
+  });
+
+  it("routes a bound guest request to match settlement without conceding the engine game", async () => {
+    const { peer, onGuestConnected, emitConnection } = createFakePeer();
+    const onConcede = vi.fn();
+    const adapter = new P2PHostAdapter(
+      { player: { main_deck: [], sideboard: [] }, opponent: { main_deck: [], sideboard: [] }, ai_decks: [] },
+      peer as unknown as Peer,
+      onGuestConnected,
+      2,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { onConcede },
+    );
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    mockSubmitAction.mockClear();
+
+    await guest.simulateData({ type: "match_concede" });
+
+    expect(onConcede).toHaveBeenCalledTimes(1);
+    expect(onConcede).toHaveBeenCalledWith(1);
+    expect(mockSubmitAction).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "Concede" }),
+      expect.anything(),
+    );
+    adapter.dispose();
+  });
+
+  it("rejects a protected match request when no draft binding was installed", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    guest.sent.length = 0;
+
+    await guest.simulateData({ type: "match_concede" });
+
+    expect(await guest.getSentMessages()).toContainEqual(expect.objectContaining({
+      type: "action_rejected",
+      reason: "Whole-match concession is unavailable for this game",
+    }));
+    adapter.dispose();
   });
 });

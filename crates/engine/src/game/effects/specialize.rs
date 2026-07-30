@@ -48,6 +48,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Specialize,
             source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -78,6 +79,7 @@ pub fn handle_choose_specialize_color(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Specialize,
         source_id: object_id,
+        subject: None,
     });
     Ok(())
 }

@@ -18,6 +18,11 @@ const DIE_SIZE = 132;
 // Accent RGB triples (sans `rgb(...)`) so they compose into rgba()/gradients.
 const GOLD = "251,191,36"; // amber-400 — the winner / emphasis accent
 const NEUTRAL = "148,163,184"; // slate-400 — a non-decisive die
+const COIN_WON = "52,211,153"; // emerald-400 — the flipper won
+const COIN_LOST = "251,113,133"; // rose-400 — the flipper lost
+
+let nextRollKey = 1;
+const rollKeys = new WeakMap<DiceRollPayload, string>();
 
 /** Cached WebGL-availability probe. The dice overlay is the first component in
  *  the app that needs WebGL, so it must degrade gracefully where it's absent. */
@@ -51,11 +56,6 @@ export function DiceRollOverlay() {
   const skipDiceRoll = useUiStore((s) => s.skipDiceRoll);
   const shouldReduceMotion = useReducedMotion();
   const { t } = useTranslation();
-
-  // Clear any active/queued roll and its advance timer when leaving the game.
-  // The store is a module singleton that outlives this mount, so without this an
-  // in-flight roll could pop into the next game.
-  useEffect(() => () => useUiStore.getState().resetDiceRoll(), []);
 
   // Tap-to-skip via keyboard: Escape dismisses the current roll (advancing to
   // the next queued one, or clearing the overlay). Bound only while a roll is
@@ -135,9 +135,11 @@ export function DiceRollOverlay() {
 /** Stable identity for a payload so the FIFO advancing from one roll to the next
  *  remounts `DiceRollContent` instead of reconciling stale settle state. */
 function diceRollKey(payload: DiceRollPayload): string {
-  return payload.kind === "coin"
-    ? `coin-${payload.context}-${payload.playerId}-${payload.won}`
-    : `die-${payload.context}-${payload.rolls.map((r) => `${r.playerId}:${r.value}`).join(",")}`;
+  const existing = rollKeys.get(payload);
+  if (existing) return existing;
+  const key = String(nextRollKey++);
+  rollKeys.set(payload, key);
+  return key;
 }
 
 function DiceRollContent({ payload, animate }: { payload: DiceRollPayload; animate: boolean }) {
@@ -151,12 +153,16 @@ function DiceRollContent({ payload, animate }: { payload: DiceRollPayload; anima
     // No engine-named face: `won` (relative to the flipping player) maps to a
     // heads/tails depiction. We show "heads" on a win — a pure display choice.
     const face = payload.won ? "heads" : "tails";
+    const accent = payload.won ? COIN_WON : COIN_LOST;
+    const outcome = payload.won
+      ? t("diceRoll.wonCoinFlip", { name: playerLabel(payload.playerId) })
+      : t("diceRoll.lostCoinFlip", { name: playerLabel(payload.playerId) });
     return (
-      <div className="relative flex flex-col items-center gap-6 select-none">
-        <span className="text-2xl font-bold tracking-wider uppercase text-slate-200">
-          {playerLabel(payload.playerId)}
+      <div className="relative flex flex-col items-center gap-4 select-none">
+        <span className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-400">
+          {t("diceRoll.coinFlip")}
         </span>
-        <DieFace animate={animate} accent={NEUTRAL}>
+        <DieFace animate={animate} accent={accent} emphasize>
           {(handleSettle) =>
             animate ? (
               <Suspense fallback={<DiePlaceholder label="" />}>
@@ -173,6 +179,25 @@ function DiceRollContent({ payload, animate }: { payload: DiceRollPayload; anima
             )
           }
         </DieFace>
+        <motion.span
+          className="rounded-full border px-5 py-2 text-2xl font-extrabold uppercase tracking-wide"
+          initial={{ opacity: 0, scale: 0.82, y: 8 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{
+            delay: animate ? 1.35 / Math.max(speedMultiplier, 0.01) : 0,
+            type: "spring",
+            stiffness: 260,
+            damping: 20,
+          }}
+          style={{
+            color: `rgb(${accent})`,
+            borderColor: `rgba(${accent},0.7)`,
+            backgroundColor: `rgba(${accent},0.14)`,
+            boxShadow: `0 0 28px rgba(${accent},0.32)`,
+          }}
+        >
+          {outcome}
+        </motion.span>
       </div>
     );
   }
@@ -244,6 +269,10 @@ function ContestDice({
       ? winnerIsYou
         ? t("diceRoll.youPlayFirst")
         : t("diceRoll.playerPlaysFirst", { name: getOpponentDisplayName(winner) })
+      : null;
+  const yourTurnCaption =
+    payload.viewerTurnNumber && payload.viewerTurnNumber > 1
+      ? t("diceRoll.youTakeTurn", { turn: payload.viewerTurnNumber })
       : null;
 
   return (
@@ -327,6 +356,47 @@ function ContestDice({
           )}
         </AnimatePresence>
       </div>
+      {revealed && payload.turnOrder && payload.turnOrder.length > 0 && (
+        <motion.div
+          className="flex flex-col items-center gap-2"
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.25, duration: 0.35 }}
+        >
+          <span className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+            {t("diceRoll.turnOrder")}
+          </span>
+          <div className="flex flex-wrap justify-center gap-2">
+            {payload.turnOrder.map((slot) => {
+              return (
+                <span
+                  key={slot.slot_index}
+                  className="rounded-full border px-3 py-1 text-sm font-bold"
+                  style={{
+                    color: slot.is_viewer ? `rgb(${GOLD})` : "#cbd5e1",
+                    borderColor:
+                      slot.is_viewer || slot.is_starting_player
+                        ? `rgba(${GOLD},0.62)`
+                        : "rgba(148,163,184,0.32)",
+                    backgroundColor:
+                      slot.is_viewer || slot.is_starting_player
+                        ? `rgba(${GOLD},0.12)`
+                        : "rgba(15,23,42,0.7)",
+                  }}
+                >
+                  {t("diceRoll.turnOrderItem", {
+                    turn: slot.turn_number,
+                    name: playerLabel(slot.player),
+                  })}
+                </span>
+              );
+            })}
+          </div>
+          {yourTurnCaption && (
+            <span className="text-lg font-extrabold text-amber-300">{yourTurnCaption}</span>
+          )}
+        </motion.div>
+      )}
     </div>
   );
 }

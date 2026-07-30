@@ -19,7 +19,7 @@ Replacement effects modify or prevent game events before they happen (MTG Rule 6
 |------|----------------|-------------------|
 | **614.1** | Replacement effects modify events, don't use the stack | Handled in `replacement.rs` pipeline, not `effects/` |
 | **614.12** | Self-replacement effects apply even when the card isn't on the battlefield yet | `find_applicable_replacements()` scans the entering object in addition to battlefield |
-| **614.16** | "As [permanent] enters" choices are replacement effects | Must resolve *before* zone change completes — see Interactive Replacements below |
+| **614.1c + 614.12a** | "As [permanent] enters" effects are replacement effects; a required choice is made before the permanent enters | Must resolve *before* zone change completes — see Interactive Replacements below |
 | **616.1** | Multiple replacements on same event: affected player/controller chooses order | `pipeline_loop()` returns `NeedsChoice` when multiple candidates exist |
 | **614.6** | A replacement can only apply once to a given event | `applied: HashSet<ReplacementId>` on `ProposedEvent` tracks this |
 
@@ -101,7 +101,7 @@ ReplacementResult::Execute(modified_event) → caller processes the event
 - Handles `Effect::BecomeCopy` specially by returning `WaitingFor::CopyTargetChoice` (CR 707.9 — "enter as a copy").
 - Delegates everything else to `effects::resolve_ability_chain()`, so any `AbilityDefinition` variant is supported as a follow-up — not just a hand-picked pair.
 
-**For effects that must happen *before* the zone change** (like "choose a basic land type" — CR 614.16), see Interactive Replacements below. Those pause the pipeline mid-flight rather than using the post-delivery lifecycle.
+**For effects that must happen *before* the zone change** (like "choose a basic land type" — CR 614.12a), see Interactive Replacements below. Those pause the pipeline mid-flight rather than using the post-delivery lifecycle.
 
 ---
 
@@ -148,21 +148,60 @@ ReplacementResult::Execute(modified_event) → caller processes the event
 
 ### Phase 5 — Tests
 
-- [ ] Parser test: Oracle text → correct `ReplacementDefinition`
-- [ ] Pipeline test: proposed event → replacement applies → modified event
+- [ ] Parser test: Oracle text → correct `ReplacementDefinition` (verbatim Oracle text, never a paraphrase)
+- [ ] Pipeline test: proposed event → replacement applies → modified event — with an assertion that FAILS if the change is reverted; any "replacement does NOT apply" assertion needs a positive reach-guard proving the card parsed (see `/card-test` foot-gun 6)
 - [ ] Engine flow test: full game action → replacement → zone change → post-effect
 - [ ] Provenance test: identify the selected replacement identity carried through `ReplacementId`, `PendingReplacement`, `ProposedEvent::applied`, or the relevant pending/pre-zone-change state. Assert the selected replacement's execute/decline/rider/effect is the one consumed.
 - [ ] Candidate-count tests when applicable: 0 candidates, exactly 1 candidate, and 2+ candidates where CR 616.1 order choice matters.
 - [ ] Multi-replacement test: with two matching replacements, selecting one must not apply the other's execute/decline/rider/effect, and the applied set must prevent reapplication of exactly the selected replacement.
 - [ ] Optional replacement test: accept and decline through the actual `GameAction::ChooseReplacement` / `engine_replacement.rs` path, not only direct `replacement.rs` helper calls.
 - [ ] Serialized-state test: if `ProposedEvent`, pending replacement state, `WaitingFor`, `GameAction`, or serialized replacement fields change, add `#[serde(default)]` or an explicit migration plus a fixture/load test for existing repo-owned serialized data.
-- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
+- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p phase-engine` + `./scripts/gen-card-data.sh`.
+
+---
+
+## "Instead" Lowers to a BRANCH, Never Two Effects
+
+**CR 614.1a: effects that use the word "instead" are replacement effects. CR 614.6: if an
+event is replaced, it never happens.** So an override clause is a *branch*, not a sibling —
+emitting it as a second, independent effect makes the engine execute BOTH the original and
+the replacement. That is the #44 / #79 defect class, and it was ~40 faces.
+
+This bites hardest **across lines**, where the "instead" clause is a separate printed line
+from the effect it overrides:
+
+```
+Destroy target creature.
+If that creature would die this turn, exile it instead.   ← NOT a second ability
+```
+
+The correct lowering is an `AbilityDefinition` whose `else_ability` carries the *displaced*
+branch — one def, two mutually exclusive outcomes. In the IR this is a **clause
+disposition**, not an emitted sibling:
+
+| IR carrier (`parser/oracle_ir/effect_chain.rs`) | Shape |
+|---|---|
+| `ClauseDisposition::ReplaceMeaning { kind }` | The clause replaces/overrides the meaning of the **prior emitted def(s)** rather than emitting an independent sibling (CR 608.2c: "later text on the card may modify the meaning of earlier text") |
+| `ReplaceMeaningKind::Instead(..)` | Multi-clause base + "instead" override; the tail clauses are stashed in the override's `else_ability` |
+| `ReplaceMeaningKind::DigAlt(..)` / `KeywordOverride` | The other two override shapes — the prior def is popped/wrapped, or attached as `sub_ability` |
+
+**The rule for contributors:** if your new pattern's Oracle text contains an override
+("instead", "rather than"), you are extending a `ReplaceMeaning` disposition — you are not
+adding a second `AbilityDefinition` to `result.abilities`. If you find yourself emitting a
+conditional ability whose condition duplicates the override's antecedent, stop: the engine
+will run both branches.
+
+**Test it at runtime, not at parse shape.** A parse test asserting two defs exist proves
+nothing about which ones *execute*. Cast the card and assert the overridden effect did
+**not** happen (see `/card-test`).
 
 ---
 
 ## Interactive Replacements (Pre-Zone-Change Choices)
 
-**MTG Rule 614.16**: "As [permanent] enters the battlefield, choose..." is a replacement effect. The choice modifies the entering event itself — the permanent enters with the choice already made.
+**CR 614.1c** ("As [this permanent] enters . . ." is a replacement effect) **+ CR 614.12a**
+(a replacement that modifies how a permanent enters and requires a choice makes that choice
+as part of the replacement): the choice modifies the entering event itself — the permanent enters with the choice already made.
 
 This is architecturally harder than standard replacements because it requires player input *during* the replacement pipeline, *before* the zone change completes.
 
@@ -204,6 +243,7 @@ The `ProposedEvent::ZoneChange` can carry additional data (or the choice can be 
 | Missing `#[serde(default)]` on new ProposedEvent fields | Deserialization breaks for existing card data | Always default new optional fields |
 | Rescanning replacement candidates after player choice | Multiple matching replacements can apply the wrong execute/decline/rider/effect | Consume the stored `PendingReplacement` / `ReplacementId` identity selected by the player |
 | Handler returns `Modified` but doesn't modify anything | Event processed as-is but marked as "replaced" | Either modify the event or return the original unchanged |
+| Lowering an "instead" override as a second, independent ability | The engine executes **both** the original and the replacement — CR 614.6 says the replaced event never happens (~40 faces, #44/#79) | Lower to a BRANCH: `ClauseDisposition::ReplaceMeaning` → `else_ability`. Prove it with a runtime test asserting the overridden effect did NOT happen |
 
 ---
 
@@ -231,6 +271,9 @@ rg -q "enum ReplacementMode" crates/engine/src/types/ability.rs && \
 rg -q "post_replacement_effect" crates/engine/src/types/game_state.rs && \
 rg -q "enum ProposedEvent" crates/engine/src/types/proposed_event.rs && \
 rg -q "fn parse_shock_land" crates/engine/src/parser/oracle_replacement.rs && \
+rg -q "enum ClauseDisposition" crates/engine/src/parser/oracle_ir/effect_chain.rs && \
+rg -q "enum ReplaceMeaningKind" crates/engine/src/parser/oracle_ir/effect_chain.rs && \
+rg -q "else_ability" crates/engine/src/types/ability.rs && \
 echo "✓ add-replacement-effect skill references valid" || \
 echo "✗ STALE — update skill references"
 ```

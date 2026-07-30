@@ -2,36 +2,182 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::game::game_object::{AttachTarget, BackFaceData, DisplaySource};
-use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
+use crate::game::game_object::{AttachTarget, BackFaceData, DisplaySource, GameObject};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CastingPermission,
-    Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
-    EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction, PermissionGrantee,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SacrificeCost,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    Comparator, ContinuousModification, ControllerRef, CopiableValues, DelayedTriggerCondition,
+    Duration, Effect, EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction,
+    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
+    SacrificeCost, SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DelayedTrigger, GameState, PendingCopyTokenBatch, PendingCounterPostAction,
-    PendingEffectResolutionEvent,
+    DelayedTrigger, GameState, LiminalEntry, LiminalTokenAbilityInjection, PendingCopyTokenBatch,
+    PendingCounterAddition, PendingCounterPostAction, PendingEffectResolutionEvent,
+    TokenEntryEventEmission, WaitingFor,
 };
-use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenSpec};
+use crate::types::resolved_commands::{
+    ResolvedCopyBodyModifications, ResolvedTokenBody, ResolvedTokenCreationCommand,
+    ResolvedTokenCreationReplayInvariantError,
+};
 use crate::types::statics::CastFrequency;
 use crate::types::triggers::TriggerMode;
-use crate::types::zones::Zone;
+use crate::types::zones::{EtbTapState, Zone};
 
 // ── Token script parser ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenAbilitySource {
+    Predefined,
+    CatalogRulesText,
+    None,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TokenAbilityMaterialization {
+    pub source: TokenAbilitySource,
+    pub abilities: Vec<AbilityDefinition>,
+    pub trigger_definitions: Vec<TriggerDefinition>,
+    pub static_definitions: Vec<StaticDefinition>,
+    pub keywords: Vec<Keyword>,
+    pub modifications: Vec<ContinuousModification>,
+    pub back_face: Option<BackFaceData>,
+    pub rules_text: Option<String>,
+    pub unparsed_rules_text_lines: Vec<String>,
+}
+
+impl TokenAbilityMaterialization {
+    fn none() -> Self {
+        Self {
+            source: TokenAbilitySource::None,
+            abilities: Vec::new(),
+            trigger_definitions: Vec::new(),
+            static_definitions: Vec::new(),
+            keywords: Vec::new(),
+            modifications: Vec::new(),
+            back_face: None,
+            rules_text: None,
+            unparsed_rules_text_lines: Vec::new(),
+        }
+    }
+
+    pub(crate) fn has_functional_payload(&self) -> bool {
+        !self.abilities.is_empty()
+            || !self.trigger_definitions.is_empty()
+            || !self.static_definitions.is_empty()
+            || !self.keywords.is_empty()
+            || !self.modifications.is_empty()
+            || self.back_face.is_some()
+    }
+}
+
+/// CR 111.3 + CR 111.10: Materialize the intrinsic ability payload a token
+/// receives from its predefined subtype/name or, if that contributes nothing,
+/// from the linked catalog token rules text.
+pub(crate) fn materialize_token_ability_payload(
+    name: &str,
+    subtypes: &[String],
+    preset: Option<&crate::game::token_presets::TokenPreset>,
+) -> TokenAbilityMaterialization {
+    let predefined = materialize_predefined_token_payload(name, subtypes);
+    if predefined.has_functional_payload() {
+        return predefined;
+    }
+    preset.map_or_else(
+        TokenAbilityMaterialization::none,
+        materialize_catalog_token_payload,
+    )
+}
+
+fn materialize_predefined_token_payload(
+    name: &str,
+    subtypes: &[String],
+) -> TokenAbilityMaterialization {
+    let mut materialized = TokenAbilityMaterialization::none();
+    let mut abilities_to_add = Vec::new();
+    for subtype in subtypes {
+        abilities_to_add.extend(predefined_token_abilities(subtype));
+    }
+    let role_spec = if subtypes.iter().any(|s| s == "Role") {
+        predefined_role_token_spec(name)
+    } else {
+        None
+    };
+    let is_incubator = subtypes.iter().any(|s| s == "Incubator");
+
+    if abilities_to_add.is_empty() && role_spec.is_none() && !is_incubator {
+        return materialized;
+    }
+
+    materialized.source = TokenAbilitySource::Predefined;
+    materialized.abilities = abilities_to_add;
+    if is_incubator {
+        materialized.back_face = Some(incubator_phyrexian_back_face());
+    }
+    for subtype in subtypes {
+        if let Some(text) = predefined_token_rules_text(subtype) {
+            materialized.rules_text = Some(text.to_string());
+            break;
+        }
+    }
+    if let Some(spec) = role_spec {
+        // CR 111.10k: A Monster Role (like every predefined Role) has enchant creature.
+        materialized
+            .keywords
+            .push(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )));
+        materialized.static_definitions = spec.statics;
+        materialized.trigger_definitions = spec.triggers;
+    }
+
+    materialized
+}
+
+fn materialize_catalog_token_payload(
+    preset: &crate::game::token_presets::TokenPreset,
+) -> TokenAbilityMaterialization {
+    let mut materialized = TokenAbilityMaterialization::none();
+    let Some(rules_text) = preset.rules_text.as_deref().filter(|text| !text.is_empty()) else {
+        return materialized;
+    };
+
+    materialized.source = TokenAbilitySource::CatalogRulesText;
+    materialized.rules_text = Some(rules_text.to_string());
+    let (static_definitions, modifications, unparsed_lines) =
+        catalog_rules_text_abilities(rules_text);
+    materialized.static_definitions = static_definitions;
+    materialized.unparsed_rules_text_lines = unparsed_lines;
+
+    for modification in modifications {
+        match modification {
+            ContinuousModification::GrantTrigger { trigger } => {
+                let mut trigger = *trigger;
+                normalize_token_self_lki_trigger(&mut trigger);
+                materialized.trigger_definitions.push(trigger);
+            }
+            ContinuousModification::AddKeyword { keyword } => materialized.keywords.push(keyword),
+            ContinuousModification::GrantAbility { definition } => {
+                materialized.abilities.push(*definition);
+            }
+            other => materialized.modifications.push(other),
+        }
+    }
+
+    materialized
+}
 
 /// Parsed token attributes from a Forge token script name.
 struct TokenAttrs {
@@ -410,8 +556,7 @@ pub fn resolve(
             &fallback_keywords,
             &fallback_supertypes,
             state,
-            ability.controller,
-            ability.source_id,
+            ability,
         )
     });
 
@@ -447,7 +592,10 @@ pub fn resolve(
         copy: None,
         enter_tapped: crate::types::proposed_event::EtbTapState::from_seeded_tapped(tapped),
         count,
-        applied: HashSet::new(),
+        applied: state
+            .post_replacement_token_choice_applied
+            .clone()
+            .unwrap_or_default(),
     };
 
     match replacement::replace_event(state, proposed, events) {
@@ -466,7 +614,7 @@ pub fn resolve(
         }
     }
 
-    // CR 609.3: Consume the tracked set after reading its size for "this way" counting.
+    // CR 608.2c: Consume the tracked set after reading its size for "this way" counting.
     if matches!(
         &ability.effect,
         Effect::Token {
@@ -487,6 +635,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -527,13 +676,8 @@ fn build_token_spec(
         } else {
             // No parsed attrs — resolve fallback P/T, and defer type/color
             // inference to the apply path's creature-only fallback branch.
-            let rp = resolve_pt_value(fallback_power, state, ability.controller, ability.source_id);
-            let rt = resolve_pt_value(
-                fallback_toughness,
-                state,
-                ability.controller,
-                ability.source_id,
-            );
+            let rp = resolve_pt_value(fallback_power, state, ability);
+            let rt = resolve_pt_value(fallback_toughness, state, ability);
             let (p, t, core) = if rp != 0 || rt != 0 {
                 (Some(rp), Some(rt), vec![CoreType::Creature])
             } else {
@@ -656,7 +800,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
             final_count,
             events,
         );
-        if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+        if let Some(pending) = state.active_copy_token_mut() {
             pending.created_ids.extend(status.created_ids);
         } else {
             state.last_created_token_ids = status.created_ids;
@@ -682,72 +826,48 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
             Zone::Battlefield,
         );
 
-        if let Some(obj) = state.objects.get_mut(&obj_id) {
-            // CR 111.1: Mark as token for SBA cleanup (CR 704.5d)
-            obj.is_token = true;
-            // True token from a TokenSpec — image lives in the generic-token
-            // database (Treasure, Spirit, Saproling, Soldier, etc.).
-            obj.display_source = DisplaySource::Token;
-            obj.token_image_ref = token_image_ref;
-            let has_attrs = ch.power.is_some()
-                || ch.toughness.is_some()
-                || !ch.core_types.is_empty()
-                || !ch.subtypes.is_empty()
-                || !ch.supertypes.is_empty()
-                || !ch.colors.is_empty()
-                || !ch.keywords.is_empty();
-            if has_attrs {
-                obj.power = ch.power;
-                obj.toughness = ch.toughness;
-                obj.base_name = ch.display_name.clone();
-                obj.base_power = ch.power;
-                obj.base_toughness = ch.toughness;
-                obj.card_types = CardType {
-                    supertypes: ch.supertypes.clone(),
-                    core_types: ch.core_types.clone(),
-                    subtypes: ch.subtypes.clone(),
-                };
-                obj.base_card_types = obj.card_types.clone();
-                obj.color = ch.colors.clone();
-                obj.base_color = ch.colors.clone();
-                obj.keywords = ch.keywords.clone();
-                obj.base_keywords = ch.keywords.clone();
-            }
-            // CR 400.7 + CR 302.6: Tokens enter the battlefield as new objects
-            // and must run the same ETB-state reset as any other permanent
-            // (summoning sickness, echo, damage, loyalty-activated flags).
-            // Delegate to the single authority for summoning sickness and
-            // related transient flags rather than setting them ad-hoc.
-            obj.reset_for_battlefield_entry(state.turn_number);
-            obj.tapped = enter_tapped.resolve(spec.tapped);
+        // CR 613.7d: a token enters the battlefield, so it receives a timestamp.
+        // Drawn before the `get_mut` borrow (`next_timestamp` takes `&mut self`).
+        let entry_timestamp = state.next_timestamp();
 
-            // CR 113.3d + CR 613.1: Apply static abilities from the token
-            // definition. Mirror onto `base_static_definitions` so the
-            // layers-reset (`base_*` → `*`) at the start of each layers pass
-            // doesn't wipe them before layer 7 reads dynamic P/T grants.
-            if !spec.static_abilities.is_empty() {
-                let static_abilities: Vec<_> = spec
-                    .static_abilities
-                    .iter()
-                    .cloned()
-                    .map(normalized_token_static_definition)
-                    .collect();
-                Arc::make_mut(&mut obj.base_static_definitions)
-                    .extend(static_abilities.iter().cloned());
-                for static_def in static_abilities {
-                    obj.static_definitions.push(static_def);
-                }
-                // CR 702.6a + CR 111.4: Only intrinsic Equip activated abilities
-                // (unconditional SelfRef `GrantAbility(Attach SelfRef → …)`)
-                // are copied onto the token object. Other grants stay in the
-                // static/layer path only.
-                let equip_abilities =
-                    intrinsic_equip_abilities_from_token_statics(&spec.static_abilities);
-                if !equip_abilities.is_empty() {
-                    Arc::make_mut(&mut obj.abilities).extend(equip_abilities.iter().cloned());
-                    Arc::make_mut(&mut obj.base_abilities).extend(equip_abilities);
-                }
-            }
+        // CR 614.1: the post-replacement tapped state, resolved once so the
+        // shared body installs the same value a CR 733 replay will.
+        let resulting_tapped = enter_tapped.resolve(spec.tapped);
+        let turn_number = state.turn_number;
+        let created_reference = state.objects.get_mut(&obj_id).map(|obj| {
+            materialize_token_spec_body(
+                obj,
+                &spec,
+                token_image_ref.clone(),
+                turn_number,
+                entry_timestamp,
+                resulting_tapped,
+            );
+            ObjectIncarnationRef::from_object(obj)
+        });
+
+        // CR 733: journal the settled creation, after the body borrow ends.
+        // Counters, the attacking entry, and any later status change journal
+        // through their OWN families, so this command covers the birth only.
+        if let Some(object) = created_reference {
+            let cause = state.current_or_begin_rules_execution_node();
+            let command = ResolvedTokenCreationCommand {
+                object,
+                owner,
+                entry_timestamp,
+                entry_turn: turn_number,
+                body: ResolvedTokenBody::Spec {
+                    spec: spec.clone(),
+                    token_image_ref: token_image_ref.clone(),
+                },
+                resulting_tapped,
+                resulting_next_object_id: state.next_object_id,
+                cause,
+            };
+            state
+                .resolved_rules_journal
+                .record_token_creation(command)
+                .expect("resolved token creation must have a live journal cause");
         }
 
         // CR 508.4: Token enters attacking — not declared as attacker.
@@ -822,7 +942,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
             }
         }
 
-        // CR 111.4 + CR 707.2a: Predefined abilities first; catalog rules_text
+        // CR 111.3 + CR 111.10: Predefined abilities first; catalog rules_text
         // only when the predefined path contributed nothing.
         inject_resolved_token_abilities(state, obj_id);
         // Battlefield entry: request an incremental layer re-derive for just this
@@ -883,11 +1003,11 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
         // CR 603.7: Tokens with a limited duration get a delayed sacrifice trigger.
         // Used by Mobilize and similar keywords that create temporary attacking tokens.
         if matches!(spec.sacrifice_at, Some(Duration::UntilEndOfCombat)) {
-            state.delayed_triggers.push(DelayedTrigger {
+            let sacrifice_token = DelayedTrigger {
                 condition: DelayedTriggerCondition::AtNextPhase {
                     phase: Phase::EndCombat,
                 },
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::Any,
                         count: QuantityExpr::Fixed { value: 1 },
@@ -896,11 +1016,12 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
                     vec![TargetRef::Object(obj_id)],
                     spec.source_id,
                     spec.controller,
-                ),
+                )),
                 controller: spec.controller,
                 source_id: spec.source_id,
                 one_shot: true,
-            });
+            };
+            crate::game::triggers::install_delayed_trigger(state, sacrifice_token);
         }
     }
 
@@ -908,6 +1029,706 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
     // TargetFilter::LastCreated (e.g., Job select, suspect).
     state.last_created_token_ids = created_ids;
     true
+}
+
+/// Materializes one already-resolved CR 111.1 token creation verbatim.
+///
+/// Unlike every other resolved-command applier, this one CREATES its subject
+/// rather than verifying and installing into an existing one, so its
+/// precondition is inverted: the recorded id must be ABSENT. It re-runs none of
+/// the CR 614 replacement pipeline that decided the token would be created, its
+/// count, or its tapped state — all of that was settled when the command was
+/// recorded.
+///
+/// The body is installed through the same `materialize_token_spec_body` /
+/// `materialize_token_copy_body` the resolve paths use, so they cannot drift.
+///
+/// CR 707.9: one copy case is deliberately NOT replayable — exceptions applied
+/// after the birth by the unjournaled `apply_token_modifications` seam. That
+/// returns `UnreplayableCopyModifications` before anything is materialized,
+/// rather than installing a body that is silently missing them.
+pub fn apply_resolved_token_creation(
+    state: &mut GameState,
+    command: &ResolvedTokenCreationCommand,
+) -> Result<(), ResolvedTokenCreationReplayInvariantError> {
+    let object_id = command.object.object_id;
+    if state.objects.contains_key(&object_id) {
+        return Err(ResolvedTokenCreationReplayInvariantError::ObjectAlreadyExists(object_id));
+    }
+    if !state
+        .players
+        .iter()
+        .any(|player| player.id == command.owner)
+    {
+        return Err(ResolvedTokenCreationReplayInvariantError::UnknownOwner(
+            command.owner,
+        ));
+    }
+    if object_id.0 >= command.resulting_next_object_id {
+        return Err(
+            ResolvedTokenCreationReplayInvariantError::IdAboveHighWater {
+                id: object_id,
+                high_water: command.resulting_next_object_id,
+            },
+        );
+    }
+
+    // CR 707.9: refuse BEFORE materializing anything, so a body we cannot
+    // reproduce exactly never reaches `state.objects`.
+    if let ResolvedTokenBody::Copy {
+        modifications: ResolvedCopyBodyModifications::DeferredToUnjournaledSeam { modifications },
+        ..
+    } = &command.body
+    {
+        return Err(
+            ResolvedTokenCreationReplayInvariantError::UnreplayableCopyModifications {
+                object: object_id,
+                count: modifications.len(),
+            },
+        );
+    }
+
+    let name = match &command.body {
+        ResolvedTokenBody::Spec { spec, .. } => spec.characteristics.display_name.clone(),
+        ResolvedTokenBody::Copy { copy, .. } => copy.values.name.clone(),
+    };
+    let mut object = GameObject::new(object_id, CardId(0), command.owner, name, Zone::Battlefield);
+    match &command.body {
+        ResolvedTokenBody::Spec {
+            spec,
+            token_image_ref,
+        } => materialize_token_spec_body(
+            &mut object,
+            spec,
+            token_image_ref.clone(),
+            command.entry_turn,
+            command.entry_timestamp,
+            command.resulting_tapped,
+        ),
+        ResolvedTokenBody::Copy {
+            copy,
+            modifications,
+        } => materialize_token_copy_body(
+            &mut object,
+            copy,
+            modifications,
+            command.entry_turn,
+            command.entry_timestamp,
+            command.resulting_tapped,
+        ),
+    }
+
+    state.objects.insert(object_id, object);
+    // allow-raw-zone: replay materializes a token birth, which has no from-zone move (CR 111.1 + CR 614.12).
+    zones::add_to_zone(state, object_id, Zone::Battlefield, command.owner);
+    // CR 111.1: replay must not hand the same id out again to a later allocation.
+    state.next_object_id = state.next_object_id.max(command.resulting_next_object_id);
+    // CR 613.7d: the birth drew an entry timestamp alongside the object id, and
+    // the same reasoning applies to it — replay installs the recorded value, so
+    // the timestamp allocator must be carried past it or a later draw reissues
+    // it and the two objects are unordered within their CR 613 layer.
+    state.adopt_replayed_timestamp(command.entry_timestamp);
+    Ok(())
+}
+
+/// CR 111.1 + CR 113.3d: Installs an ordinary token's body onto `object`.
+///
+/// Single authority for the ordinary-token body, shared by the resolve path and
+/// the CR 733 replay applier so the two cannot drift. Operates on a `&mut
+/// GameObject` rather than on `GameState`, so it serves both orderings: the
+/// resolve path inserts first and mutates in place, while replay builds a
+/// detached object and inserts it afterwards.
+pub(crate) fn materialize_token_spec_body(
+    object: &mut GameObject,
+    spec: &TokenSpec,
+    token_image_ref: Option<crate::types::card::TokenImageRef>,
+    turn_number: u32,
+    entry_timestamp: u64,
+    tapped: bool,
+) {
+    let ch = &spec.characteristics;
+    // CR 111.1: Mark as token for SBA cleanup (CR 704.5d)
+    object.is_token = true;
+    // True token from a TokenSpec — image lives in the generic-token
+    // database (Treasure, Spirit, Saproling, Soldier, etc.).
+    object.display_source = DisplaySource::Token;
+    object.token_image_ref = token_image_ref;
+    let has_attrs = ch.power.is_some()
+        || ch.toughness.is_some()
+        || !ch.core_types.is_empty()
+        || !ch.subtypes.is_empty()
+        || !ch.supertypes.is_empty()
+        || !ch.colors.is_empty()
+        || !ch.keywords.is_empty();
+    if has_attrs {
+        object.power = ch.power;
+        object.toughness = ch.toughness;
+        object.base_name = ch.display_name.clone();
+        object.base_power = ch.power;
+        object.base_toughness = ch.toughness;
+        object.card_types = CardType {
+            supertypes: ch.supertypes.clone(),
+            core_types: ch.core_types.clone(),
+            subtypes: ch.subtypes.clone(),
+        };
+        object.base_card_types = object.card_types.clone();
+        object.color = ch.colors.clone();
+        object.base_color = ch.colors.clone();
+        object.keywords = ch.keywords.clone();
+        object.base_keywords = ch.keywords.clone();
+    }
+    // CR 400.7 + CR 302.6: Tokens enter the battlefield as new objects
+    // and must run the same ETB-state reset as any other permanent
+    // (summoning sickness, echo, damage, loyalty-activated flags).
+    // Delegate to the single authority for summoning sickness and
+    // related transient flags rather than setting them ad-hoc.
+    object.reset_for_battlefield_entry(turn_number, entry_timestamp);
+    object.tapped = tapped;
+
+    // CR 113.3d + CR 613.1: Apply static abilities from the token
+    // definition. Mirror onto `base_static_definitions` so the
+    // layers-reset (`base_*` → `*`) at the start of each layers pass
+    // doesn't wipe them before layer 7 reads dynamic P/T grants.
+    if !spec.static_abilities.is_empty() {
+        let static_abilities: Vec<_> = spec
+            .static_abilities
+            .iter()
+            .cloned()
+            .map(normalized_token_static_definition)
+            .collect();
+        Arc::make_mut(&mut object.base_static_definitions).extend(static_abilities.iter().cloned());
+        for static_def in static_abilities {
+            object.static_definitions.push(static_def);
+        }
+        // CR 702.6a + CR 111.4: Only intrinsic Equip activated abilities
+        // (unconditional SelfRef `GrantAbility(Attach SelfRef → …)`)
+        // are copied onto the token object. Other grants stay in the
+        // static/layer path only.
+        let equip_abilities = intrinsic_equip_abilities_from_token_statics(&spec.static_abilities);
+        if !equip_abilities.is_empty() {
+            Arc::make_mut(&mut object.abilities).extend(equip_abilities.iter().cloned());
+            Arc::make_mut(&mut object.base_abilities).extend(equip_abilities);
+        }
+    }
+}
+
+/// CR 707.2 + CR 707.5: Installs a copy token's body onto `object`.
+///
+/// Single authority for the copy-token body, shared by BOTH production copy
+/// seams (the liminal build in `token_copy::apply_copy_token_*` and the direct
+/// `create_object` path) and by the CR 733 replay applier, so no two of them can
+/// drift. Like `materialize_token_spec_body` it operates on a `&mut GameObject`
+/// rather than on `GameState`, which is what lets one implementation serve the
+/// liminal build-then-insert ordering and the direct insert-then-build ordering.
+///
+/// `reset_for_battlefield_entry` touches no copiable characteristic, so running
+/// it after the keyword grant (the liminal order) is equivalent to running it
+/// before (the former direct order).
+pub(crate) fn materialize_token_copy_body(
+    object: &mut GameObject,
+    copy: &CopyTokenSpec,
+    modifications: &ResolvedCopyBodyModifications,
+    turn_number: u32,
+    entry_timestamp: u64,
+    tapped: bool,
+) {
+    // CR 111.1: Mark as token for SBA cleanup (CR 704.5d)
+    object.is_token = true;
+    // CR 707.2: the copiable values, plus the display metadata that is not
+    // itself copiable. `install_copiable_values_as_base` already installs
+    // `loyalty`/`base_loyalty` from `values.loyalty` (CR 306.5b), so no separate
+    // loyalty seed is needed here.
+    apply_copiable_values_to_liminal_object(
+        object,
+        &copy.values,
+        copy.display_source,
+        copy.printed_ref.clone(),
+        copy.token_image_ref.clone(),
+    );
+
+    // CR 707.9a + CR 702: "except it has [keyword]" — grant additional keywords
+    // on top of the copied characteristics. Twinflame's haste copies are the
+    // canonical case. Idempotent under repeats.
+    for kw in &copy.extra_keywords {
+        let already_live = object.keywords.contains(kw); // allow-raw-authority: structural live keyword insertion de-dupe, not an effective keyword query
+        if !already_live {
+            object.keywords.push(kw.clone());
+        }
+        if !object.base_keywords.contains(kw) {
+            object.base_keywords.push(kw.clone());
+        }
+    }
+
+    match modifications {
+        // CR 707.2: the copiable values are the whole body.
+        ResolvedCopyBodyModifications::NoExceptions => {}
+        // CR 707.9b/9c: exceptions stamped onto the copiable values before entry.
+        ResolvedCopyBodyModifications::Folded {
+            modifications,
+            all_creature_types,
+        } => {
+            super::token_copy::apply_immediate_copy_token_modifications_to_object(
+                object,
+                modifications,
+                all_creature_types,
+            );
+        }
+        // Owned by the unjournaled `apply_token_modifications` seam and applied
+        // after the birth, so the body here is deliberately without them. Replay
+        // refuses this case up front in `apply_resolved_token_creation`.
+        ResolvedCopyBodyModifications::DeferredToUnjournaledSeam { .. } => {}
+    }
+
+    // CR 400.7 + CR 302.6: Single authority for ETB state. Haste granted via
+    // `extra_keywords` is folded in at query time by `has_summoning_sickness`.
+    object.reset_for_battlefield_entry(turn_number, entry_timestamp);
+    object.tapped = tapped;
+}
+
+pub(crate) fn reserve_liminal_token_object(
+    state: &mut GameState,
+    owner: PlayerId,
+    name: String,
+) -> (ObjectId, GameObject) {
+    let id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+    (
+        id,
+        GameObject::new(id, CardId(0), owner, name, Zone::Battlefield),
+    )
+}
+
+pub(crate) fn apply_copiable_values_to_liminal_object(
+    object: &mut GameObject,
+    values: &CopiableValues,
+    display_source: DisplaySource,
+    printed_ref: Option<crate::types::card::PrintedCardRef>,
+    token_image_ref: Option<crate::types::card::TokenImageRef>,
+) {
+    object.display_source = display_source;
+    object.printed_ref = printed_ref.clone();
+    object.base_printed_ref = printed_ref;
+    object.token_image_ref = token_image_ref;
+    crate::game::printed_cards::install_copiable_values_as_base(object, values);
+}
+
+/// Commit ONE liminal copy-token to the battlefield WITHOUT driving the rest of
+/// the batch. Returns `false` if an ETB-counter replacement paused mid-commit (a
+/// `ContinueLiminalCopyTokenBatch` post-action was stashed to resume). The
+/// per-token batch loop in `apply_copy_token_after_replacement_with_created_ids`
+/// calls this and iterates, so minting N copies uses O(1) stack depth — the old
+/// commit->continue->apply recursion built one large `im::HashMap` COW frame per
+/// token. CR 707.2: shared by every liminal copy-token batch.
+pub(crate) fn commit_liminal_copy_token_entry(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    commit_liminal_copy_token_entry_with_continuation(state, event, continuation, events)
+}
+
+fn commit_liminal_copy_token_entry_with_continuation(
+    state: &mut GameState,
+    event: ProposedEvent,
+    continuation: Option<LiminalCopyTokenContinuation>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let post_actions = continuation
+        .map(liminal_copy_token_continuation_post_action)
+        .into_iter()
+        .collect();
+    commit_liminal_token_entry_with_post_actions(
+        state,
+        event,
+        events,
+        TokenEntryEventEmission::Emit,
+        post_actions,
+    )
+}
+
+pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    if !commit_liminal_copy_token_entry_with_continuation(
+        state,
+        event,
+        continuation.clone(),
+        events,
+    ) {
+        return false;
+    }
+    continue_liminal_copy_token_batch(state, continuation, events)
+}
+
+#[derive(Clone)]
+struct LiminalCopyTokenContinuation {
+    owner: PlayerId,
+    copy: Box<CopyTokenSpec>,
+    enter_tapped: EtbTapState,
+    enter_with_counters: Vec<(CounterType, u32)>,
+    remaining_count: u32,
+}
+
+fn liminal_copy_token_continuation_for_event(
+    state: &GameState,
+    event: &ProposedEvent,
+) -> Option<LiminalCopyTokenContinuation> {
+    let ProposedEvent::TokenEntry { entry_ref, .. } = event else {
+        return None;
+    };
+    let entry = state.liminal_entries.get(entry_ref)?;
+    let copy = entry.copy_resume.clone()?;
+    Some(LiminalCopyTokenContinuation {
+        owner: entry.object.owner,
+        copy,
+        enter_tapped: entry.enter_tapped,
+        enter_with_counters: entry.enter_with_counters.clone(),
+        remaining_count: entry.remaining_count,
+    })
+}
+
+fn continue_liminal_copy_token_batch(
+    state: &mut GameState,
+    continuation: Option<LiminalCopyTokenContinuation>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    let created_ids = state.last_created_token_ids.clone();
+    if let Some(pending) = state.active_copy_token_mut() {
+        pending.created_ids = created_ids;
+    }
+    let Some(continuation) = continuation else {
+        if state.active_copy_token().is_some() {
+            super::token_copy::drain_pending_copy_token_resolution(state, events);
+        }
+        return !state.active_copy_token().is_some()
+            || matches!(state.waiting_for, WaitingFor::Priority { .. });
+    };
+    if continuation.remaining_count > 0 {
+        let initial_created_ids = state.last_created_token_ids.clone();
+        let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
+            state,
+            continuation.owner,
+            *continuation.copy,
+            continuation.enter_tapped,
+            continuation.enter_with_counters,
+            continuation.remaining_count,
+            initial_created_ids,
+            events,
+        );
+        state.last_created_token_ids = status.created_ids;
+        if matches!(
+            status.completion,
+            super::token_copy::CopyTokenApplyCompletion::Paused
+        ) {
+            return false;
+        }
+    }
+    let created_ids = state.last_created_token_ids.clone();
+    if let Some(pending) = state.active_copy_token_mut() {
+        pending.created_ids = created_ids;
+    }
+    if state.active_copy_token().is_some() {
+        super::token_copy::drain_pending_copy_token_resolution(state, events);
+    }
+    !state.active_copy_token().is_some() || matches!(state.waiting_for, WaitingFor::Priority { .. })
+}
+
+fn liminal_copy_token_continuation_post_action(
+    continuation: LiminalCopyTokenContinuation,
+) -> PendingCounterPostAction {
+    PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
+        owner: continuation.owner,
+        copy: continuation.copy,
+        enter_tapped: continuation.enter_tapped,
+        enter_with_counters: continuation.enter_with_counters,
+        remaining_count: continuation.remaining_count,
+    }
+}
+
+pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
+    state: &mut GameState,
+    owner: PlayerId,
+    copy: Box<CopyTokenSpec>,
+    enter_tapped: EtbTapState,
+    enter_with_counters: Vec<(CounterType, u32)>,
+    remaining_count: u32,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    continue_liminal_copy_token_batch(
+        state,
+        Some(LiminalCopyTokenContinuation {
+            owner,
+            copy,
+            enter_tapped,
+            enter_with_counters,
+            remaining_count,
+        }),
+        events,
+    )
+}
+
+pub(crate) fn commit_liminal_token_entry_with_event_emission(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+    entry_events: TokenEntryEventEmission,
+) -> bool {
+    commit_liminal_token_entry_with_post_actions(state, event, events, entry_events, Vec::new())
+}
+
+pub(crate) fn commit_liminal_token_entry_with_post_actions(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+    entry_events: TokenEntryEventEmission,
+    post_actions_after_finalize: Vec<PendingCounterPostAction>,
+) -> bool {
+    let ProposedEvent::TokenEntry {
+        entry_ref,
+        enter_tapped,
+        enter_with_counters,
+        ..
+    } = event
+    else {
+        return true;
+    };
+    let Some(mut entry) = state.liminal_entries.remove(&entry_ref) else {
+        return true;
+    };
+    let finalization = liminal_token_entry_finalization_action(entry_ref, &entry, entry_events);
+    let counters_to_apply: Vec<_> = enter_with_counters
+        .iter()
+        .chain(entry.enter_with_counters.iter())
+        .cloned()
+        .collect();
+    entry.object.tapped = enter_tapped.resolve(entry.object.tapped);
+    let owner = entry.object.owner;
+
+    // CR 733: journal the settled copy-token birth at the single liminal insert
+    // seam. `copy_resume` is `Some` for every production liminal entry of kind
+    // Token (`token_copy.rs` is the only production constructor), so this covers
+    // the whole liminal copy path. Counters, the attacking entry, and later
+    // status changes journal through their OWN families — this command is the
+    // birth only, exactly as the ordinary CR 111.1 birth is.
+    if let Some(copy) = entry.copy_resume.clone() {
+        // CR 707.9b/9c: the liminal seam folds its immediate exceptions into the
+        // copiable values BEFORE entry, so the body is complete here and replay
+        // can reapply them from this record.
+        let modifications = if copy.additional_modifications.is_empty() {
+            ResolvedCopyBodyModifications::NoExceptions
+        } else {
+            ResolvedCopyBodyModifications::Folded {
+                modifications: copy.additional_modifications.clone(),
+                // Only the CR 614 replacement consult runs between the build and
+                // this commit, and it cannot resolve a type-changing effect, so
+                // the live list still matches the one the build folded against.
+                all_creature_types: state.all_creature_types.clone(),
+            }
+        };
+        let command = ResolvedTokenCreationCommand {
+            object: ObjectIncarnationRef::from_object(&entry.object),
+            owner,
+            entry_timestamp: entry.object.timestamp,
+            // CR 302.6: the entered-turn the liminal build already stamped, read
+            // back off the object rather than re-read from the live turn.
+            entry_turn: entry
+                .object
+                .entered_battlefield_turn
+                .unwrap_or(state.turn_number),
+            body: ResolvedTokenBody::Copy {
+                copy,
+                modifications,
+            },
+            resulting_tapped: entry.object.tapped,
+            // `reserve_liminal_token_object` advanced the allocator to exactly
+            // one past this id when it drew it, however many were drawn since.
+            resulting_next_object_id: entry_ref.0 + 1,
+            cause: state.current_or_begin_rules_execution_node(),
+        };
+        state
+            .resolved_rules_journal
+            .record_token_creation(command)
+            .expect("resolved copy-token creation must have a live journal cause");
+    }
+
+    state.objects.insert(entry_ref, entry.object);
+    // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
+    zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
+
+    for (counter_index, (counter_type, counter_count)) in counters_to_apply.iter().enumerate() {
+        if *counter_count > 0
+            && !super::counters::add_counter_with_replacement(
+                state,
+                owner,
+                entry_ref,
+                counter_type.clone(),
+                *counter_count,
+                events,
+            )
+        {
+            state.last_created_token_ids = entry.created_ids.clone();
+            let remaining_counters = counters_to_apply[counter_index + 1..]
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(counter_type, count)| PendingCounterAddition::Object {
+                    actor: owner,
+                    object_id: entry_ref,
+                    counter_type: counter_type.clone(),
+                    count: *count,
+                })
+                .collect();
+            let mut post_actions = vec![finalization];
+            post_actions.extend(post_actions_after_finalize);
+            super::counters::stash_pending_counter_additions(
+                state,
+                remaining_counters,
+                crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
+                    if entry.copy_resume.is_some() {
+                        EffectKind::CopyTokenOf
+                    } else {
+                        EffectKind::Token
+                    },
+                    entry.source_id,
+                    post_actions,
+                ),
+            );
+            return false;
+        }
+    }
+
+    finalize_committed_liminal_token_entry_from_action(state, finalization, events);
+    true
+}
+
+fn liminal_token_entry_finalization_action(
+    entry_ref: ObjectId,
+    entry: &LiminalEntry,
+    entry_events: TokenEntryEventEmission,
+) -> PendingCounterPostAction {
+    PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+        object_id: entry_ref,
+        name: entry.name.clone(),
+        source_id: entry.source_id,
+        controller: entry.controller,
+        enters_attacking: entry.enters_attacking,
+        attach_to: entry.attach_to,
+        sacrifice_at: entry.sacrifice_at.clone(),
+        created_ids: entry.created_ids.clone(),
+        ability_injection: if entry.copy_resume.is_some() {
+            LiminalTokenAbilityInjection::PredefinedToken
+        } else {
+            LiminalTokenAbilityInjection::ResolvedToken
+        },
+        entry_events,
+    }
+}
+
+pub(crate) fn finalize_committed_liminal_token_entry_from_action(
+    state: &mut GameState,
+    action: PendingCounterPostAction,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+        object_id,
+        name,
+        source_id,
+        controller,
+        enters_attacking,
+        attach_to,
+        sacrifice_at,
+        mut created_ids,
+        ability_injection,
+        entry_events,
+    } = action
+    else {
+        return true;
+    };
+
+    match ability_injection {
+        LiminalTokenAbilityInjection::PredefinedToken => {
+            super::token_copy::finalize_copied_token(state, source_id, object_id);
+            inject_predefined_token_abilities(state, object_id);
+        }
+        LiminalTokenAbilityInjection::ResolvedToken => {
+            inject_resolved_token_abilities(state, object_id);
+        }
+    }
+    crate::game::layers::mark_layers_entered(state, object_id);
+    crate::game::restrictions::record_battlefield_entry(state, object_id);
+    crate::game::restrictions::record_token_created(state, object_id);
+
+    if enters_attacking {
+        crate::game::combat::enter_attacking(state, object_id, source_id, controller);
+    }
+    if let Some(host) = attach_to {
+        match host {
+            AttachTarget::Object(id) => {
+                super::attach::attach_to(state, object_id, id);
+            }
+            AttachTarget::Player(pid) => {
+                super::attach::attach_to_player(state, object_id, pid);
+            }
+        };
+    }
+
+    if matches!(entry_events, TokenEntryEventEmission::Emit) {
+        push_committed_token_entry_events(state, object_id, name, source_id, events);
+    }
+    if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
+        let sacrifice_token = DelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat,
+            },
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Sacrifice {
+                    target: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
+                },
+                vec![TargetRef::Object(object_id)],
+                source_id,
+                controller,
+            )),
+            controller,
+            source_id,
+            one_shot: true,
+        };
+        crate::game::triggers::install_delayed_trigger(state, sacrifice_token);
+    }
+
+    created_ids.push(object_id);
+    state.last_created_token_ids = created_ids;
+    true
+}
+
+pub(crate) fn push_committed_token_entry_events(
+    state: &GameState,
+    object_id: ObjectId,
+    name: String,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    if let Some(token) = state.objects.get(&object_id) {
+        let zone_change_record = token.snapshot_for_zone_change(object_id, None, Zone::Battlefield);
+        events.push(GameEvent::ZoneChanged {
+            object_id,
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(zone_change_record),
+        });
+    }
+    events.push(GameEvent::TokenCreated {
+        object_id,
+        name,
+        source_id,
+    });
 }
 
 // ── Layer B: token-handler batch purity gate (Tier 3) ────────────────────
@@ -1006,7 +1827,7 @@ fn token_creation_needs_choice(
     enter_tapped: crate::types::proposed_event::EtbTapState,
     count: u32,
 ) -> bool {
-    let registry = replacement::build_replacement_registry();
+    let registry = replacement::replacement_registry();
     let proposed = ProposedEvent::CreateToken {
         owner,
         spec: Box::new(spec.clone()),
@@ -1015,7 +1836,7 @@ fn token_creation_needs_choice(
         count,
         applied: HashSet::new(),
     };
-    let candidates = replacement::find_applicable_replacements(state, &proposed, &registry);
+    let candidates = replacement::find_applicable_replacements(state, &proposed, registry);
     if candidates.is_empty() {
         return false;
     }
@@ -1527,16 +2348,7 @@ pub(crate) fn resolve_token_spec(
 
     let parsed = parse_token_script(name).or_else(|| {
         build_token_attrs_from_effect(
-            name,
-            power,
-            toughness,
-            types,
-            colors,
-            keywords,
-            supertypes,
-            state,
-            ability.controller,
-            ability.source_id,
+            name, power, toughness, types, colors, keywords, supertypes, state, ability,
         )
     });
 
@@ -1665,8 +2477,7 @@ fn build_token_attrs_from_effect(
     keywords: &[Keyword],
     supertypes: &[Supertype],
     state: &GameState,
-    controller: crate::types::player::PlayerId,
-    source_id: crate::types::identifiers::ObjectId,
+    ability: &ResolvedAbility,
 ) -> Option<TokenAttrs> {
     if types.is_empty()
         && colors.is_empty()
@@ -1691,8 +2502,8 @@ fn build_token_attrs_from_effect(
         }
     }
 
-    let resolved_power = resolve_pt_value(power, state, controller, source_id);
-    let resolved_toughness = resolve_pt_value(toughness, state, controller, source_id);
+    let resolved_power = resolve_pt_value(power, state, ability);
+    let resolved_toughness = resolve_pt_value(toughness, state, ability);
     if core_types.is_empty() && (resolved_power != 0 || resolved_toughness != 0) {
         core_types.push(CoreType::Creature);
     }
@@ -1714,16 +2525,11 @@ fn build_token_attrs_from_effect(
     })
 }
 
-fn resolve_pt_value(
-    value: &PtValue,
-    state: &GameState,
-    controller: crate::types::player::PlayerId,
-    source_id: crate::types::identifiers::ObjectId,
-) -> i32 {
+fn resolve_pt_value(value: &PtValue, state: &GameState, ability: &ResolvedAbility) -> i32 {
     match value {
         PtValue::Fixed(n) => *n,
         PtValue::Variable(_) => 0,
-        PtValue::Quantity(expr) => resolve_quantity(state, expr, controller, source_id),
+        PtValue::Quantity(expr) => resolve_quantity_with_targets(state, expr, ability),
     }
 }
 
@@ -1896,7 +2702,7 @@ fn powerstone_ability() -> AbilityDefinition {
             },
             restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                ability: crate::types::mana::AbilityActivationScope::Any,
             }],
             grants: vec![],
             expiry: None,
@@ -1968,7 +2774,9 @@ fn lander_ability() -> AbilityDefinition {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )
         // CR 111.10u: then shuffle the controller's library.
@@ -2030,6 +2838,7 @@ fn junk_ability() -> AbilityDefinition {
         Effect::ExileTop {
             player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 1 },
+            position: crate::types::ability::LibraryPosition::Top,
             face_down: false,
         },
     )
@@ -2041,6 +2850,7 @@ fn junk_ability() -> AbilityDefinition {
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
                 source_id: None,
+                invalidation: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
@@ -2071,6 +2881,7 @@ fn incubator_ability() -> AbilityDefinition {
         AbilityKind::Activated,
         Effect::Transform {
             target: TargetFilter::SelfRef,
+            scope: crate::types::ability::EffectScope::Single,
         },
     )
     .cost(AbilityCost::Mana {
@@ -2088,6 +2899,7 @@ fn incubator_phyrexian_back_face() -> BackFaceData {
         power: Some(0),
         toughness: Some(0),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![],
@@ -2444,8 +3256,14 @@ fn wicked_role_spec() -> RoleSpec {
 ///
 /// All Role tokens share the `Role` subtype, so dispatch must be by display
 /// name — subtype alone cannot distinguish the seven variants.
+///
+/// CR 111.10: a Role token's printed name is "<Role> Role" (e.g. "Monster Role"),
+/// which is exactly what the parser/token creation assigns as the display name.
+/// Strip that trailing " Role" before matching so real tokens dispatch correctly;
+/// the bare role word ("Monster") is also accepted for internal/test callers.
 fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
-    match name {
+    let role = name.strip_suffix(" Role").unwrap_or(name);
+    match role {
         "Cursed" => Some(RoleSpec::statics_only(cursed_role_statics())),
         "Monster" => Some(RoleSpec::statics_only(monster_role_statics())),
         "Royal" => Some(RoleSpec::statics_only(royal_role_statics())),
@@ -2473,162 +3291,198 @@ fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
 /// the layer pass rebuilds live from base on each pass, but several code
 /// paths (SBAs, action enumeration) consult the live set directly between
 /// passes so keeping them in sync here avoids a one-frame lag.
-/// CR 111.4 + CR 707.2a: Apply predefined token abilities first; fall back to
+/// CR 111.3 + CR 111.10: Apply predefined token abilities first; fall back to
 /// catalog `rules_text` only when the predefined path contributed nothing
 /// (artifacts, Roles, Incubator, …).
 pub(super) fn inject_resolved_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
-    let predefined_injected = inject_predefined_token_abilities(state, obj_id);
-    if !predefined_injected {
-        inject_catalog_token_abilities(state, obj_id);
+    let Some(materialized) = materialize_token_ability_payload_for_object(state, obj_id) else {
+        return;
+    };
+    if materialized.source == TokenAbilitySource::CatalogRulesText
+        && !materialized.has_functional_payload()
+    {
+        return;
     }
+    apply_token_ability_materialization(state, obj_id, materialized, true);
 }
 
-/// CR 111.4 + CR 707.2a: Grant catalog `rules_text` when token creation resolved
+/// CR 111.3 + CR 111.4: Grant catalog `rules_text` when token creation resolved
 /// a `token_image_ref` preset whose abilities are not already covered by the
 /// predefined path (e.g. SOS Pest attack life gain).
-pub(super) fn inject_catalog_token_abilities(
+pub(crate) fn inject_catalog_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
-    let Some(obj) = state.objects.get_mut(&obj_id) else {
-        return;
-    };
-    let Some(preset) = obj.token_image_ref.as_ref().and_then(|image_ref| {
-        crate::game::token_presets::known_token_preset_by_id(&image_ref.preset_id)
+    let Some(preset) = state.objects.get(&obj_id).and_then(|obj| {
+        obj.token_image_ref.as_ref().and_then(|image_ref| {
+            crate::game::token_presets::known_token_preset_by_id(&image_ref.preset_id)
+        })
     }) else {
         return;
     };
-    let Some(rules_text) = preset.rules_text.as_deref().filter(|text| !text.is_empty()) else {
-        return;
+    let materialized = materialize_catalog_token_payload(preset);
+    if materialized.source == TokenAbilitySource::CatalogRulesText
+        && materialized.has_functional_payload()
+    {
+        apply_token_ability_materialization(state, obj_id, materialized, true);
+    }
+}
+
+fn apply_token_ability_materialization(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+    materialized: TokenAbilityMaterialization,
+    suppress_catalog_if_existing_statics: bool,
+) -> bool {
+    let Some(obj) = state.objects.get_mut(&obj_id) else {
+        return false;
     };
-    // CR 113.3 + CR 707.2a: a token's abilities are derived from its rules text, and
-    // a catalog rules_text can pack independent abilities of different categories on
-    // separate lines (an Equipment token's static buff line + its "Equip {N}" line).
-    // Classifying the whole blob lets the static splitter swallow the trailing equip
-    // line, so classify per line and aggregate. A preset with no newline yields a
-    // single segment — identical to the previous single-blob behavior (no regression).
-    let modifications: Vec<ContinuousModification> = rules_text
-        .split('\n')
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .flat_map(crate::parser::oracle_static::classify_quoted_inner)
-        .collect();
-    if modifications.is_empty() {
-        return;
+    // CR 111.3: A token's abilities are defined by the effect that creates it, so
+    // when the creating effect already granted this token abilities via a
+    // `with "..."` clause (parsed into `static_definitions` at creation, before
+    // this fallback runs), those are authoritative and complete. The catalog
+    // preset's `rules_text` is then only a display/art mirror and MUST NOT inject
+    // functional abilities — critically, the matched art preset can be a
+    // different printing whose text lists extra keyword actions (a Kamigawa
+    // "crews Vehicles as though its power were 2 greater" Pilot token rendered
+    // with the Aetherdrift "saddles Mounts and crews Vehicles …" art), so
+    // injecting it grants a second crew static and doubles the contribution (a
+    // 1/1 Pilot crews for 5 instead of 3). Skip functional injection whenever the
+    // token already carries granted statics; still record the display rules text.
+    // Tokens created by name with no explicit ability clause (Treasure, Pest,
+    // Equipment presets) reach here with no prior statics and inject normally.
+    if suppress_catalog_if_existing_statics
+        && materialized.source == TokenAbilitySource::CatalogRulesText
+        && !obj.static_definitions.is_empty()
+    {
+        if obj.token_rules_text.is_none() {
+            obj.token_rules_text = materialized.rules_text;
+        }
+        return true;
     }
 
-    let mut static_mods = Vec::new();
-    let mut triggers = Vec::new();
-    let mut abilities = Vec::new();
-    let mut keywords = Vec::new();
-    for modification in modifications {
-        match modification {
-            ContinuousModification::GrantTrigger { trigger } => {
-                let mut trigger = *trigger;
-                normalize_token_self_lki_trigger(&mut trigger);
-                triggers.push(trigger);
-            }
-            ContinuousModification::AddKeyword { keyword } => keywords.push(keyword),
-            ContinuousModification::GrantAbility { definition } => abilities.push(*definition),
-            other => static_mods.push(other),
+    apply_token_ability_payload(obj, materialized);
+    true
+}
+
+fn apply_token_ability_payload(obj: &mut GameObject, materialized: TokenAbilityMaterialization) {
+    if !materialized.static_definitions.is_empty() {
+        Arc::make_mut(&mut obj.base_static_definitions)
+            .extend(materialized.static_definitions.iter().cloned());
+        for static_def in materialized.static_definitions {
+            obj.static_definitions.push(static_def);
         }
     }
-
-    if !static_mods.is_empty() {
+    if !materialized.modifications.is_empty() {
+        let rules_text = materialized.rules_text.clone().unwrap_or_default();
         let static_def = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
-            .modifications(static_mods)
-            .description(rules_text.to_string());
+            .modifications(materialized.modifications)
+            .description(rules_text);
         Arc::make_mut(&mut obj.base_static_definitions).push(static_def.clone());
         obj.static_definitions.push(static_def);
     }
-    if !triggers.is_empty() {
-        Arc::make_mut(&mut obj.base_trigger_definitions).extend(triggers.iter().cloned());
-        for trigger in triggers {
-            obj.trigger_definitions.push(trigger);
+    if !materialized.trigger_definitions.is_empty() {
+        // CR 111.3: A token's abilities are defined as it is created, so these
+        // entries are printed slots of the token's own base set — not grants.
+        // They must carry a real `Printed` occurrence ref: pushing the bare
+        // `TriggerDefinition` would go through `From<TriggerDefinition>` and
+        // stamp `TriggerDefinitionOccurrenceRef::Unmaterialized`, which
+        // `validate_trigger_definitions` rejects from an observable state and
+        // which `#[serde(skip_serializing)]` turns into a hard serialization
+        // failure the moment the state crosses the WASM bridge.
+        for trigger in materialized.trigger_definitions {
+            obj.push_printed_trigger(trigger);
         }
     }
-    if !abilities.is_empty() {
-        Arc::make_mut(&mut obj.abilities).extend(abilities.iter().cloned());
-        Arc::make_mut(&mut obj.base_abilities).extend(abilities);
+    if !materialized.abilities.is_empty() {
+        Arc::make_mut(&mut obj.abilities).extend(materialized.abilities.iter().cloned());
+        Arc::make_mut(&mut obj.base_abilities).extend(materialized.abilities);
     }
-    if !keywords.is_empty() {
-        obj.keywords.extend(keywords);
+    if !materialized.keywords.is_empty() {
+        for keyword in materialized.keywords {
+            if !obj.base_keywords.contains(&keyword) {
+                obj.base_keywords.push(keyword.clone());
+            }
+            let already_live = obj.keywords.contains(&keyword); // allow-raw-authority: structural live keyword insertion de-dupe, not an effective keyword query
+            if !already_live {
+                obj.keywords.push(keyword);
+            }
+        }
+    }
+    if obj.back_face.is_none() {
+        obj.back_face = materialized.back_face;
     }
     if obj.token_rules_text.is_none() {
-        obj.token_rules_text = Some(rules_text.to_string());
+        obj.token_rules_text = materialized.rules_text;
     }
+}
+
+fn catalog_rules_text_abilities(
+    rules_text: &str,
+) -> (
+    Vec<StaticDefinition>,
+    Vec<ContinuousModification>,
+    Vec<String>,
+) {
+    let mut static_definitions = Vec::new();
+    let mut modifications = Vec::new();
+    let mut unparsed_lines = Vec::new();
+    for line in rules_text
+        .split('\n')
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let parsed_statics = crate::parser::oracle_static::parse_static_line_multi(line);
+        if parsed_statics.is_empty() {
+            let parsed_modifications = crate::parser::oracle_static::classify_quoted_inner(line);
+            if parsed_modifications.is_empty() {
+                unparsed_lines.push(line.to_string());
+            } else {
+                modifications.extend(parsed_modifications);
+            }
+        } else {
+            static_definitions.extend(
+                parsed_statics
+                    .into_iter()
+                    .map(normalized_token_static_definition),
+            );
+        }
+    }
+    (static_definitions, modifications, unparsed_lines)
 }
 
 pub(super) fn inject_predefined_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) -> bool {
-    let (subtypes, name) = match state.objects.get(&obj_id) {
-        Some(obj) => (obj.card_types.subtypes.clone(), obj.name.clone()),
-        None => return false,
-    };
-    let mut abilities_to_add = Vec::new();
-    for subtype in &subtypes {
-        abilities_to_add.extend(predefined_token_abilities(subtype));
-    }
-    let role_spec = if subtypes.iter().any(|s| s == "Role") {
-        predefined_role_token_spec(&name)
-    } else {
-        None
-    };
-    let is_incubator = subtypes.iter().any(|s| s == "Incubator");
-
-    if abilities_to_add.is_empty() && role_spec.is_none() && !is_incubator {
-        return false;
-    }
-
-    let Some(obj) = state.objects.get_mut(&obj_id) else {
+    let Some(obj) = state.objects.get(&obj_id) else {
         return false;
     };
-
-    if !abilities_to_add.is_empty() {
-        Arc::make_mut(&mut obj.abilities).extend(abilities_to_add.clone());
-        Arc::make_mut(&mut obj.base_abilities).extend(abilities_to_add);
+    let materialized = materialize_predefined_token_payload(&obj.name, &obj.card_types.subtypes);
+    if materialized.source != TokenAbilitySource::Predefined {
+        return false;
     }
+    apply_token_ability_materialization(state, obj_id, materialized, false)
+}
 
-    // CR 111.10i: Incubator tokens are double-faced; attach the Phyrexian back face
-    // when predefined abilities are injected (incubate.rs and generic token create).
-    if subtypes.iter().any(|s| s == "Incubator") && obj.back_face.is_none() {
-        obj.back_face = Some(incubator_phyrexian_back_face());
-    }
+fn materialize_token_ability_payload_for_object(
+    state: &GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) -> Option<TokenAbilityMaterialization> {
+    let obj = state.objects.get(&obj_id)?;
+    let preset = obj.token_image_ref.as_ref().and_then(|image_ref| {
+        crate::game::token_presets::known_token_preset_by_id(&image_ref.preset_id)
+    });
 
-    // CR 111.10: expose the predefined token's printed rules text so the
-    // frontend can render alt-text when the Scryfall token image is missing.
-    if obj.token_rules_text.is_none() {
-        for subtype in &subtypes {
-            if let Some(text) = predefined_token_rules_text(subtype) {
-                obj.token_rules_text = Some(text.to_string());
-                break;
-            }
-        }
-    }
-
-    if let Some(spec) = role_spec {
-        let RoleSpec { statics, triggers } = spec;
-        if !statics.is_empty() {
-            Arc::make_mut(&mut obj.base_static_definitions).extend(statics.iter().cloned());
-            for s in statics {
-                obj.static_definitions.push(s);
-            }
-        }
-        if !triggers.is_empty() {
-            Arc::make_mut(&mut obj.base_trigger_definitions).extend(triggers.iter().cloned());
-            for t in triggers {
-                obj.trigger_definitions.push(t);
-            }
-        }
-    }
-
-    true
+    Some(materialize_token_ability_payload(
+        &obj.name,
+        &obj.card_types.subtypes,
+        preset,
+    ))
 }
 
 #[cfg(test)]
@@ -2638,14 +3492,18 @@ mod tests {
         build_resolved_from_def, build_resolved_from_def_with_targets,
     };
     use crate::game::engine::apply_as_current;
+    use crate::game::printed_cards::intrinsic_copiable_values;
     use crate::game::zones::create_object;
+    use crate::types::ability::TriggerDefinition;
     use crate::types::actions::GameAction;
     use crate::types::card_type::CardType;
     use crate::types::game_state::WaitingFor;
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaType;
     use crate::types::player::PlayerId;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+    use std::sync::Arc;
 
     // ── Parser unit tests ───────────────────────────────────────────────
 
@@ -2658,6 +3516,39 @@ mod tests {
         assert!(a.core_types.contains(&CoreType::Creature));
         assert_eq!(a.colors, vec![ManaColor::White]);
         assert_eq!(a.subtypes, vec!["Soldier"]);
+    }
+
+    #[test]
+    fn liminal_copy_token_trigger_state_serializes() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Trigger Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_trigger_definitions =
+                Arc::new(vec![TriggerDefinition::new(TriggerMode::ChangesZone)]);
+            source.materialize_base_trigger_definitions();
+        }
+        let values = intrinsic_copiable_values(state.objects.get(&source_id).unwrap());
+        let (token_id, mut token) =
+            reserve_liminal_token_object(&mut state, PlayerId(0), values.name.clone());
+        token.is_token = true;
+        apply_copiable_values_to_liminal_object(
+            &mut token,
+            &values,
+            DisplaySource::Token,
+            None,
+            None,
+        );
+        state.objects.insert(token_id, token);
+
+        serde_json::to_string(&state)
+            .expect("a liminal copy token with triggered abilities must serialize");
     }
 
     #[test]
@@ -3273,7 +4164,8 @@ mod tests {
         assert!(matches!(
             *abilities[0].effect,
             Effect::Transform {
-                target: TargetFilter::SelfRef
+                target: TargetFilter::SelfRef,
+                ..
             }
         ));
         assert!(matches!(
@@ -3518,7 +4410,19 @@ mod tests {
     fn predefined_powerstone_has_colorless_mana() {
         let abilities = predefined_token_abilities("Powerstone");
         assert_eq!(abilities.len(), 1);
-        assert!(matches!(*abilities[0].effect, Effect::Mana { .. }));
+        assert!(matches!(
+            *abilities[0].effect,
+            Effect::Mana {
+                ref restrictions,
+                ..
+            } if matches!(
+                restrictions.as_slice(),
+                [crate::types::ability::ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type,
+                    ability: crate::types::mana::AbilityActivationScope::Any,
+                }] if spell_type == "Artifact"
+            )
+        ));
     }
 
     #[test]
@@ -3779,11 +4683,14 @@ mod tests {
             1,
             "catalog rules_text must install the attacks life trigger intrinsically"
         );
-        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::Attacks);
+        assert_eq!(
+            obj.trigger_definitions[0].definition.mode,
+            TriggerMode::Attacks
+        );
         assert!(
             !obj.trigger_definitions
                 .iter_all()
-                .any(|trigger| trigger.mode == TriggerMode::ChangesZone),
+                .any(|trigger| trigger.definition.mode == TriggerMode::ChangesZone),
             "SOS Pest must keep its printed attack trigger, not the older Pest dies trigger"
         );
         assert_eq!(
@@ -3817,14 +4724,78 @@ mod tests {
         let obj = &state.objects[&obj_id];
         assert_eq!(obj.trigger_definitions.len(), 1);
         let trigger = &obj.trigger_definitions[0];
-        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
-        assert_eq!(trigger.origin, Some(Zone::Battlefield));
-        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert_eq!(trigger.definition.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.definition.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.definition.destination, Some(Zone::Graveyard));
         assert_eq!(
-            trigger.trigger_zones,
+            trigger.definition.trigger_zones,
             vec![Zone::Battlefield],
             "CR 603.10a LKI scans a dying token as a Battlefield source"
         );
+    }
+
+    /// CR 111.3: A catalog-materialized token ability is a printed slot of the
+    /// token's own base set, so its live entry must carry a real `Printed`
+    /// occurrence ref.
+    ///
+    /// RED before the fix: `apply_token_ability_payload` pushed the bare
+    /// `TriggerDefinition`, which `Definitions::push<U: Into<T>>` routed through
+    /// `From<TriggerDefinition> for TriggerEntry` and stamped
+    /// `TriggerDefinitionOccurrenceRef::Unmaterialized`. That variant is
+    /// `#[serde(skip_serializing)]`, so the first time the state crossed the
+    /// WASM bridge `to_js` panicked ("the enum variant
+    /// `TriggerDefinitionOccurrenceRef::Unmaterialized` cannot be serialized"),
+    /// killing the worker — the engine computed the right tokens and then died
+    /// handing them to the UI. No in-process test caught it because engine tests
+    /// never serialize.
+    #[test]
+    fn catalog_token_trigger_carries_printed_occurrence_and_serializes() {
+        use crate::types::ability::TriggerDefinitionOccurrenceRef;
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "14c28cbd-1740-5c17-98ea-4aea094067f1",
+        )
+        .expect("BLC Pest preset");
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+        }
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        let obj = &state.objects[&obj_id];
+        assert_eq!(obj.trigger_definitions.len(), 1);
+
+        let entry = obj.trigger_definitions.iter_all().next().unwrap();
+        assert!(
+            matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Printed { .. }
+            ),
+            "CR 111.3: a catalog token trigger is a printed slot of the token's own \
+             base set, got {:?}",
+            entry.occurrence
+        );
+
+        // The object-local provenance invariant must hold: `Unmaterialized` is
+        // explicitly rejected from an observable game state.
+        obj.validate_trigger_definitions()
+            .expect("catalog token trigger must have observable occurrence provenance");
+
+        // The bridge check. `engine-wasm`'s `to_js` panics on serialization
+        // failure, so an unserializable entry is fatal, not degraded.
+        serde_json::to_string(obj)
+            .expect("catalog token object must serialize for the WASM bridge");
+        serde_json::to_string(&state).expect("full game state must serialize for the WASM bridge");
     }
 
     #[test]
@@ -3866,6 +4837,212 @@ mod tests {
             1,
             "the Pest's own dies trigger must fire from CR 603.10a LKI"
         );
+    }
+
+    #[test]
+    fn catalog_pest_dies_trigger_fires_after_lethal_damage_sba() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::game::triggers::process_triggers;
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "14c28cbd-1740-5c17-98ea-4aea094067f1",
+        )
+        .expect("BLC Pest preset");
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        state.objects.get_mut(&obj_id).unwrap().damage_marked = 1;
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        process_triggers(&mut state, &events);
+
+        assert!(
+            !state.objects.contains_key(&obj_id),
+            "token destroyed by lethal damage must cease to exist after moving zones"
+        );
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "the Pest's dies trigger must fire when lethal damage SBAs move it to the graveyard"
+        );
+        let lki_token_ref = state
+            .lki_cache
+            .get(&obj_id)
+            .and_then(|lki| lki.token_image_ref.as_ref())
+            .expect("LKI must preserve the token image ref for dead-token stack display");
+        assert_eq!(
+            Some(lki_token_ref.preset_id.as_str()),
+            preset
+                .token_image_ref
+                .as_ref()
+                .map(|image| image.preset_id.as_str())
+        );
+    }
+
+    #[test]
+    fn catalog_pest_dies_trigger_fires_after_tragic_slip_zero_toughness() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::events::GameEvent;
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "14c28cbd-1740-5c17-98ea-4aea094067f1",
+        )
+        .expect("BLC Pest preset");
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        let slip = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Tragic Slip",
+                true,
+                "Target creature gets -1/-1 until end of turn.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let pest = create_object(
+            runner.state_mut(),
+            CardId(0),
+            P0,
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = runner.state_mut().objects.get_mut(&pest).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        inject_catalog_token_abilities(runner.state_mut(), pest);
+
+        let outcome = runner.cast(slip).target_object(pest).resolve();
+
+        assert!(
+            outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    to: Zone::Graveyard,
+                    ..
+                } if *object_id == pest
+            )),
+            "Tragic Slip's -1/-1 must create a zero-toughness battlefield-to-graveyard event"
+        );
+        assert!(
+            !outcome.state().objects.contains_key(&pest),
+            "zero-toughness Pest token must cease to exist"
+        );
+        assert!(
+            outcome.state().stack.len() == 1 || outcome.life_delta(P0) == 1,
+            "the Pest dies trigger must either remain on the stack or resolve to gain 1 life"
+        );
+    }
+
+    #[test]
+    fn pest_infestation_linked_create_token_grants_catalog_dies_trigger() {
+        use crate::types::proposed_event::TokenCharacteristics;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Pest Infestation".to_string(),
+            Zone::Battlefield,
+        );
+        let source_obj = state.objects.get_mut(&source).unwrap();
+        source_obj.printed_ref = Some(crate::types::card::PrintedCardRef {
+            oracle_id: "1b704798-0c69-4c18-ac7e-42933ce90028".to_string(),
+            face_name: "Pest Infestation".to_string(),
+        });
+        source_obj.source_related_token_ids.extend(
+            [
+                "5d96727f-b037-5af6-a854-b39b4bc4b5ea",
+                "be7c7de8-06e4-5ea4-8faf-18881dbcee45",
+                "fda6f4a3-6734-5347-8712-e449ed76e0a8",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Pest".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Pest".to_string()],
+                supertypes: vec![],
+                colors: vec![ManaColor::Black, ManaColor::Green],
+                keywords: vec![],
+            },
+            script_name: "Pest".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: std::collections::HashSet::new(),
+        };
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let pest_id = state.last_created_token_ids[0];
+        let obj = &state.objects[&pest_id];
+        assert_eq!(
+            obj.token_image_ref
+                .as_ref()
+                .map(|image| image.preset_id.as_str()),
+            Some("5d96727f-b037-5af6-a854-b39b4bc4b5ea"),
+            "Pest Infestation's multiple equivalent source-linked token ids must resolve to the first matching Pest preset, not fall back to an unrelated Pest"
+        );
+        assert_eq!(obj.trigger_definitions.len(), 1);
+        let trigger = &obj.trigger_definitions[0];
+        assert_eq!(trigger.definition.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.definition.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.definition.destination, Some(Zone::Graveyard));
+        let execute = trigger
+            .definition
+            .execute
+            .as_ref()
+            .expect("Pest dies trigger effect");
+        assert!(matches!(
+            *execute.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            }
+        ));
     }
 
     #[test]
@@ -4011,6 +5188,259 @@ mod tests {
         assert!(
             obj.trigger_definitions.is_empty(),
             "catalog injection must not double-grant predefined Royal Role statics"
+        );
+    }
+
+    /// CR 111.10k: A Role token created by a real card ("Create a Monster Role
+    /// token …") is named "Monster Role" — the parser's `known_role_token_identity`
+    /// produces the full "<Role> Role" name, which is the printed token name. The
+    /// predefined-ability dispatch MUST recognize that full name; matching only the
+    /// bare "Monster" left the token with no +1/+1-and-trample static. Regression
+    /// for Role tokens (Monstrous Rage, Royal Treatment, …) granting nothing.
+    #[test]
+    fn predefined_monster_role_full_name_grants_role_static() {
+        use crate::types::proposed_event::TokenCharacteristics;
+        use std::collections::HashSet;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Monstrous Rage".to_string(),
+            Zone::Battlefield,
+        );
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                // The name the parser actually produces for "a Monster Role token".
+                display_name: "Monster Role".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Aura".to_string(), "Role".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
+            script_name: "Monster Role".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let role_id = state.last_created_token_ids[0];
+        let obj = &state.objects[&role_id];
+        assert_eq!(
+            obj.static_definitions.len(),
+            1,
+            "Monster Role must carry its enchanted-creature +1/+1-and-trample static"
+        );
+    }
+
+    /// CR 111.10k + CR 704.5m: a Monster Role has enchant creature, so it
+    /// must be put into its owner's graveyard when an animated Mishra's
+    /// Foundry stops being a creature during cleanup. The token then ceases
+    /// to exist, but the battlefield-to-graveyard event still occurs.
+    #[test]
+    fn monster_role_on_animated_foundry_dies_during_cleanup() {
+        let mut state = GameState::new_two_player(42);
+        let foundry = create_object(
+            &mut state,
+            CardId(98),
+            PlayerId(0),
+            "Mishra's Foundry".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&foundry).unwrap();
+            object.card_types.core_types.push(CoreType::Land);
+            object.base_card_types = object.card_types.clone();
+        }
+
+        let animate = ResolvedAbility::new(
+            Effect::Animate {
+                power: Some(PtValue::Fixed(2)),
+                toughness: Some(PtValue::Fixed(2)),
+                types: vec!["Artifact".to_string(), "Creature".to_string()],
+                remove_types: vec![],
+                keywords: vec![],
+                target: TargetFilter::None,
+            },
+            vec![],
+            foundry,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::animate::resolve(&mut state, &animate, &mut events).unwrap();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            state.objects[&foundry]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "Mishra's Foundry must be a creature before the Role is created"
+        );
+
+        let create_role = ResolvedAbility::new(
+            Effect::Token {
+                name: "Monster Role".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec![
+                    "Enchantment".to_string(),
+                    "Aura".to_string(),
+                    "Role".to_string(),
+                ],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: Some(TargetFilter::ParentTarget),
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(foundry)],
+            foundry,
+            PlayerId(0),
+        );
+        resolve(&mut state, &create_role, &mut events).unwrap();
+        let role = state.last_created_token_ids[0];
+        assert_eq!(
+            state.objects[&role].attached_to,
+            Some(AttachTarget::Object(foundry)),
+            "Monster Role must enter attached to Mishra's Foundry"
+        );
+        assert!(
+            // allow-raw-authority: the test verifies the exact intrinsic Enchant filter, which the keyword-kind authority cannot inspect
+            state.objects[&role].keywords.iter().any(|keyword| matches!(
+                keyword,
+                Keyword::Enchant(TargetFilter::Typed(filter))
+                    if filter.type_filters.contains(&TypeFilter::Creature)
+            )),
+            "Monster Role must have the intrinsic enchant creature ability"
+        );
+
+        events.clear();
+        assert!(crate::game::turns::execute_cleanup(&mut state, &mut events).is_none());
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.objects[&foundry]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "Mishra's Foundry must stop being a creature during cleanup"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    to: Zone::Graveyard,
+                    ..
+                } if *object_id == role
+            )),
+            "the illegal Aura must move from the battlefield to its owner's graveyard"
+        );
+        assert!(
+            !state.objects.contains_key(&role),
+            "a Role token put into a graveyard must cease to exist"
+        );
+    }
+
+    /// CR 111.3: A Role token is one face of a two-Role DFC ("Monster // Sorcerer"),
+    /// so its source card links to BOTH face presets — the single-preset fast path
+    /// in `find_exact_token_ref` is skipped and art resolves via body match. The
+    /// token is named "Monster Role" but the face preset is "Monster", so the name
+    /// comparison must reconcile the trailing " Role"; otherwise the token gets no
+    /// image ref and renders with no art (reported for Monstrous Rage). The match
+    /// must also select the correct face (Monster, not Sorcerer).
+    #[test]
+    fn dfc_monster_role_resolves_the_monster_face_art() {
+        use crate::types::card::PrintedCardRef;
+        use crate::types::proposed_event::TokenCharacteristics;
+        use std::collections::HashSet;
+
+        // Monster face of the "Monster // Sorcerer" DFC (WOE), and the Sorcerer face.
+        const MONSTER_PRESET: &str = "246f948c-eea9-5f6a-8d19-f8c11c51de94";
+        const SORCERER_PRESET: &str = "dd6f5274-9bb4-5acc-9855-55815f497831";
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Monstrous Rage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.printed_ref = Some(PrintedCardRef {
+                oracle_id: "646a2371-54c0-4492-ac2f-20f109d6108c".to_string(),
+                face_name: "Monstrous Rage".to_string(),
+            });
+            obj.source_related_token_ids =
+                vec![MONSTER_PRESET.to_string(), SORCERER_PRESET.to_string()];
+        }
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Monster Role".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Aura".to_string(), "Role".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
+            script_name: "Monster Role".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let role_id = state.last_created_token_ids[0];
+        let image_ref = state.objects[&role_id]
+            .token_image_ref
+            .clone()
+            .expect("DFC Monster Role must resolve an image ref, not render artless");
+        assert_eq!(
+            image_ref.preset_id, MONSTER_PRESET,
+            "must resolve the Monster face preset, not the Sorcerer face"
         );
     }
 
@@ -4582,13 +6012,13 @@ mod tests {
 
     #[test]
     fn apply_create_token_materializes_intrinsic_equip_ability() {
-        use crate::parser::oracle::try_parse_equip;
+        use crate::parser::oracle::try_parse_equip_lowered;
         use crate::types::ability::{ContinuousModification, StaticDefinition};
         use crate::types::card_type::CoreType;
         use crate::types::proposed_event::TokenSpec;
         use std::collections::HashSet;
 
-        let equip = try_parse_equip("Equip {0}").expect("equip static");
+        let equip = try_parse_equip_lowered("Equip {0}").expect("equip static");
         let equip_static = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .modifications(vec![ContinuousModification::GrantAbility {
@@ -4649,13 +6079,13 @@ mod tests {
 
     #[test]
     fn apply_create_token_does_not_materialize_conditional_grant_ability() {
-        use crate::parser::oracle::try_parse_equip;
+        use crate::parser::oracle::try_parse_equip_lowered;
         use crate::types::ability::{ContinuousModification, StaticCondition, StaticDefinition};
         use crate::types::card_type::CoreType;
         use crate::types::proposed_event::TokenSpec;
         use std::collections::HashSet;
 
-        let equip = try_parse_equip("Equip {0}").expect("equip static");
+        let equip = try_parse_equip_lowered("Equip {0}").expect("equip static");
         let conditional_equip = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .condition(StaticCondition::IsPresent { filter: None })
@@ -4915,11 +6345,164 @@ mod tests {
                     GameEvent::EffectResolved {
                         kind: EffectKind::Token,
                         source_id: ObjectId(100),
+                        ..
                     }
                 ))
                 .count(),
             1,
             "the token effect should resolve once after the paused batch finishes"
+        );
+    }
+
+    #[test]
+    fn paused_liminal_copy_token_counter_finalizes_entry_after_choice() {
+        use std::sync::Arc;
+
+        use crate::game::printed_cards::intrinsic_copiable_values;
+        use crate::types::ability::{QuantityModification, ReplacementDefinition, ReplacementMode};
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::LiminalEntry;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Choice".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .valid_card(TargetFilter::Any)
+                .quantity_modification(QuantityModification::Prevent);
+            def.mode = ReplacementMode::Optional { decline: None };
+            let obj = state.objects.get_mut(&replacement_source).unwrap();
+            obj.base_replacement_definitions = Arc::new(vec![def.clone()]);
+            obj.replacement_definitions = vec![def].into();
+        }
+
+        let copied_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let copied = state.objects.get_mut(&copied_id).unwrap();
+            copied.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+            };
+            copied.card_types = copied.base_card_types.clone();
+            copied.base_name = "Treasure".to_string();
+            copied.name = "Treasure".to_string();
+        }
+        let values = intrinsic_copiable_values(state.objects.get(&copied_id).unwrap());
+        let source_id = ObjectId(100);
+        let (entry_ref, mut token) =
+            reserve_liminal_token_object(&mut state, PlayerId(0), values.name.clone());
+        token.is_token = true;
+        apply_copiable_values_to_liminal_object(
+            &mut token,
+            &values,
+            DisplaySource::Token,
+            None,
+            None,
+        );
+        let timestamp = state.next_timestamp();
+        token.reset_for_battlefield_entry(state.turn_number, timestamp);
+        state.liminal_entries.insert(
+            entry_ref,
+            LiminalEntry {
+                object: token,
+                name: values.name.clone(),
+                source_id,
+                controller: PlayerId(0),
+                enters_attacking: false,
+                attach_to: None,
+                sacrifice_at: Some(Duration::UntilEndOfCombat),
+                remaining_count: 0,
+                created_ids: Vec::new(),
+                copy_resume: Some(Box::new(CopyTokenSpec {
+                    values: Box::new(values.clone()),
+                    display_source: DisplaySource::Token,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    extra_keywords: Vec::new(),
+                    additional_modifications: Vec::new(),
+                    tapped: false,
+                    enters_attacking: false,
+                    sacrifice_at: Some(Duration::UntilEndOfCombat),
+                    source_id,
+                    controller: PlayerId(0),
+                })),
+                spec_resume: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enter_with_counters: Vec::new(),
+                kind: crate::types::game_state::LiminalEntryKind::Token,
+                replacement_applied: std::collections::HashSet::new(),
+            },
+        );
+
+        let event = ProposedEvent::TokenEntry {
+            entry_ref,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: vec![(CounterType::Plus1Plus1, 1)],
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        assert!(
+            !commit_liminal_token_entry_and_continue_copy_batch(&mut state, event, &mut events),
+            "counter replacement choice should pause liminal entry"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(
+            state.objects.contains_key(&entry_ref),
+            "liminal entry has already committed its object before the counter choice"
+        );
+        assert!(
+            !state.liminal_entries.contains_key(&entry_ref),
+            "the resume path must not depend on the removed liminal entry"
+        );
+
+        let result =
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+        events.extend(result.events);
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.last_created_token_ids, vec![entry_ref]);
+        let token = state.objects.get(&entry_ref).unwrap();
+        assert!(
+            token
+                .abilities
+                .iter()
+                .any(|ability| matches!(*ability.effect, Effect::Mana { .. })),
+            "Treasure copy must receive predefined token abilities after the counter choice"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == entry_ref)),
+            "finalization must emit the liminal token's battlefield entry event"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::TokenCreated { object_id, .. } if *object_id == entry_ref)),
+            "finalization must emit the token-created event"
+        );
+        assert!(
+            state
+                .delayed_triggers
+                .iter()
+                .any(|trigger| trigger.source_id == source_id),
+            "Mishra-style until-end-of-combat sacrifice must be registered after resume"
         );
     }
 
@@ -5307,6 +6890,152 @@ mod tests {
         }
         inject_catalog_token_abilities(state, obj_id);
         obj_id
+    }
+
+    #[test]
+    fn catalog_rules_text_routes_all_ability_kinds() {
+        let (statics, modifications, unparsed_lines) = catalog_rules_text_abilities(
+            "Flying\n\
+             This creature can't block.\n\
+             {T}: Add {G}.\n\
+             When this creature dies, you gain 1 life.",
+        );
+        assert!(unparsed_lines.is_empty());
+
+        assert!(
+            statics
+                .iter()
+                .any(|def| { matches!(def.mode, crate::types::statics::StaticMode::CantBlock) }),
+            "static rules text must parse as a full StaticDefinition, got {statics:?}"
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying
+                }
+            )),
+            "keyword rules text must route to AddKeyword, got {modifications:?}"
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantAbility { definition }
+                    if matches!(*definition.effect, Effect::Mana { .. })
+            )),
+            "activated rules text must route to GrantAbility, got {modifications:?}"
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantTrigger { .. }
+            )),
+            "trigger rules text must route to GrantTrigger, got {modifications:?}"
+        );
+    }
+
+    #[test]
+    fn catalog_pilot_preset_grants_crew_contribution_static() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id =
+            build_catalog_token(&mut state, "Pilot", "6c112277-fd0b-5566-a5f5-0f59216e0444");
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+        }
+
+        assert!(
+            state.objects[&obj_id]
+                .static_definitions
+                .iter_all()
+                .any(|def| matches!(
+                    def.mode,
+                    crate::types::statics::StaticMode::CrewContribution {
+                        kind: crate::types::statics::CrewContributionKind::PowerDelta { delta: 2 },
+                        ..
+                    }
+                )),
+            "Shorikai Pilot catalog rules_text must inject CrewContribution"
+        );
+        assert_eq!(
+            crate::game::static_abilities::object_crew_power_contribution(
+                &state,
+                obj_id,
+                crate::types::statics::CrewAction::Crew,
+            ),
+            3,
+            "1/1 Shorikai Pilot must contribute 3 power toward crew"
+        );
+    }
+
+    /// CR 111.3: A Kamigawa Shorikai/Kotori Pilot token ("crews Vehicles as
+    /// though its power were 2 greater", a `[Crew]`-only contribution) whose body
+    /// matches — and is rendered with — the Aetherdrift Pilot art preset ("saddles
+    /// Mounts and crews Vehicles …", a `[Saddle, Crew]` contribution) must NOT
+    /// pick up the art preset's static on top of its own. The creating effect's
+    /// `with "..."` grant is authoritative; the catalog is display-only here.
+    /// Regression: the token was crewing for 5 (1 + 2 + 2) instead of 3 because
+    /// the two statics have different `actions` and slipped past an exact-match
+    /// de-dupe.
+    #[test]
+    fn catalog_skips_functional_injection_when_effect_already_granted_crew_static() {
+        use crate::types::statics::{CrewAction, CrewContributionKind, StaticMode};
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pilot".to_string(),
+            Zone::Battlefield,
+        );
+        // Aetherdrift Pilot preset — a *different* printing than the creating
+        // card, carrying a `[Saddle, Crew]` contribution in its rules_text.
+        let aetherdrift_pilot = crate::game::token_presets::known_token_preset_by_id(
+            "648bee61-604f-58a2-8beb-11faa77a89af",
+        )
+        .expect("Aetherdrift Pilot preset must exist");
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.token_image_ref = aetherdrift_pilot.token_image_ref.clone();
+            // The creating effect (Shorikai/Kotori) already granted the crew-only
+            // static via its `with "..."` clause.
+            let with_clause = StaticDefinition::new(StaticMode::CrewContribution {
+                kind: CrewContributionKind::PowerDelta { delta: 2 },
+                actions: vec![CrewAction::Crew],
+            })
+            .affected(TargetFilter::SelfRef);
+            Arc::make_mut(&mut obj.base_static_definitions).push(with_clause.clone());
+            obj.static_definitions.push(with_clause);
+        }
+
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        let crew_statics = state.objects[&obj_id]
+            .static_definitions
+            .iter_all()
+            .filter(|def| matches!(def.mode, StaticMode::CrewContribution { .. }))
+            .count();
+        assert_eq!(
+            crew_statics, 1,
+            "the art preset's crew static must not stack on the effect's own grant"
+        );
+        assert_eq!(
+            crate::game::static_abilities::object_crew_power_contribution(
+                &state,
+                obj_id,
+                CrewAction::Crew,
+            ),
+            3,
+            "1/1 Pilot with a single +2 crew delta must contribute 3, not 5"
+        );
     }
 
     #[test]

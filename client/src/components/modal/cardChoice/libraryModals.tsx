@@ -7,11 +7,16 @@ import { CardImage } from "../../card/CardImage";
 import { objectImageProps } from "../../../services/cardImageLookup";
 import { useGameStore } from "../../../stores/gameStore";
 import { useGameDispatch } from "../../../hooks/useGameDispatch";
+import { useHorizontalScroll } from "../../../hooks/useHorizontalScroll.ts";
 import { useInspectHoverProps } from "../../../hooks/useInspectHoverProps";
 import { ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "../ChoiceOverlay";
 import { CHOICE_CARD_IMAGE_CLASS } from "./shared";
 
 type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
+type ArrangePlanarDeckTopChoice = Extract<
+  WaitingFor,
+  { type: "ArrangePlanarDeckTopChoice" }
+>;
 type CoinFlipKeepChoice = Extract<WaitingFor, { type: "CoinFlipKeepChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
@@ -25,6 +30,7 @@ export function ReorderableTopChoice({
   restLabel,
   reorderHint,
   keepTone,
+  exactKeepCount,
 }: {
   cards: ObjectId[];
   title: string;
@@ -33,12 +39,14 @@ export function ReorderableTopChoice({
   restLabel: string;
   reorderHint: string;
   keepTone: "emerald" | "blue";
+  exactKeepCount?: number;
 }) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [order, setOrder] = useState<ObjectId[]>(cards);
   const [restSet, setRestSet] = useState<Set<ObjectId>>(new Set());
+  const scrollRef = useHorizontalScroll<HTMLDivElement>({ drag: false });
 
   const toggleRest = useCallback((id: ObjectId) => {
     setRestSet((prev) => {
@@ -51,8 +59,11 @@ export function ReorderableTopChoice({
 
   const handleConfirm = useCallback(() => {
     const keep = order.filter((id) => !restSet.has(id));
+    if (exactKeepCount !== undefined && keep.length !== exactKeepCount) {
+      return;
+    }
     dispatch({ type: "SelectCards", data: { cards: keep } });
-  }, [dispatch, order, restSet]);
+  }, [dispatch, exactKeepCount, order, restSet]);
 
   if (!objects) return null;
 
@@ -78,14 +89,16 @@ export function ReorderableTopChoice({
       maxWidthClassName={overlayWidthClassName}
       footer={<ConfirmButton onClick={handleConfirm} />}
     >
-      <Reorder.Group
-        as="div"
-        axis="x"
-        values={order}
-        onReorder={setOrder}
-        className="mx-auto flex min-h-0 flex-1 items-center justify-center gap-2 overflow-x-auto px-1 py-2 lg:gap-3"
-      >
-        {order.map((id) => {
+      <div ref={scrollRef} className="flex min-h-0 flex-1 overflow-x-auto">
+        <Reorder.Group
+          as="div"
+          axis="x"
+          values={order}
+          onReorder={setOrder}
+          layoutScroll
+          className="mx-auto flex w-max items-center gap-2 px-1 py-2 lg:gap-3"
+        >
+          {order.map((id) => {
           const obj = objects[id];
           if (!obj) return null;
           const isRest = restSet.has(id);
@@ -128,7 +141,8 @@ export function ReorderableTopChoice({
             </Reorder.Item>
           );
         })}
-      </Reorder.Group>
+        </Reorder.Group>
+      </div>
       <p className="mt-1 shrink-0 text-center text-xs text-slate-400">{reorderHint}</p>
     </ChoiceOverlay>
   );
@@ -146,6 +160,27 @@ export function ScryModal({ data }: { data: ScryChoice["data"] }) {
       restLabel={t("cardChoice.badges.bottom")}
       reorderHint={t("cardChoice.reorderHint")}
       keepTone="emerald"
+    />
+  );
+}
+
+export function ArrangePlanarDeckTopModal({
+  data,
+}: {
+  data: ArrangePlanarDeckTopChoice["data"];
+}) {
+  const { t } = useTranslation("game");
+  return (
+    <ReorderableTopChoice
+      key={data.cards.join("-")}
+      cards={data.cards}
+      title={t("cardChoice.scry.title")}
+      subtitle={t("cardChoice.scry.subtitle", { count: data.cards.length })}
+      keepLabel={t("cardChoice.badges.top")}
+      restLabel={t("cardChoice.badges.bottom")}
+      reorderHint={t("cardChoice.reorderHint")}
+      keepTone="emerald"
+      exactKeepCount={data.keep_on_top}
     />
   );
 }

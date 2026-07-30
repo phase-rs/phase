@@ -1,7 +1,7 @@
 ---
 name: engine-implementation-executor
 description: Execute an already-reviewed phase.rs implementation plan surgically. Receives the approved plan + scope, edits files, runs Tilt-first verification, and returns a diff summary with any judgement-call notes. Does NOT plan, does NOT review, does NOT commit. Spawned by the `/engine-implementer` skill.
-tools: Read, Edit, Write, Bash, Grep, Glob, SendMessage
+tools: Read, Edit, Write, Bash, Grep, Glob, SendMessage, mcp__serena, mcp__ast-grep
 model: opus
 ---
 
@@ -101,7 +101,7 @@ if tilt get uiresource clippy >/dev/null 2>&1; then
   ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
 else
   cargo clippy --all-targets -- -D warnings
-  cargo test -p engine
+  cargo test -p phase-engine
   ./scripts/gen-card-data.sh
 fi
 ```
@@ -144,6 +144,11 @@ cargo semantic-audit
 
 Every behavioral change MUST ship at least one test that drives the real pipeline (`apply()` / the scenario runner / the cast-pipeline harness) and **would fail if the fix were reverted**. A test that only asserts the parsed AST shape — an `assert_eq!` on a parsed `AbilityDefinition` / `Effect` / `StaticMode` without resolving it through the engine — does NOT satisfy this gate. It is a shape test, not a regression test.
 
+Write cast-pipeline tests via the `/card-test` recipe (`GameScenario` + `GameRunner::cast(..).resolve()` + `CastOutcome` deltas) — it structurally prevents the six recurring test-harness foot-guns. Two of its rules bear repeating here:
+
+- **No vacuous negatives.** A negative assertion must be paired with a positive reach-guard in the same test proving the input got past any upstream short-circuit (e.g. `check_swallowed_clauses` early-returns on `Effect::Unimplemented`, making bare `!has_swallowed_clause(...)` assertions vacuous).
+- **Verbatim Oracle text.** Build test cards from the real card's exact Oracle text, never a paraphrase — paraphrases can take a different parser branch and go green while the real card stays broken.
+
 Confirm discrimination concretely before returning:
 
 - For the primary fix, name the assertion that flips when the fix is reverted. If you cannot name one, the test does not discriminate — add one that does.
@@ -165,6 +170,10 @@ Hard failures:
 - If any changed behavioral seam has no mapped production-path test, add one or return it as a stop-and-return item.
 
 This is the single most common defect the `/review-impl` loop catches (shape-only tests on keyword and parser PRs). Catch it here, before review.
+
+### New-field threading sweep
+
+If the diff adds a field to an existing enum variant or struct, grep the variant/struct name across the workspace and list **every** construction and consumption site with a status: `threads the field` or `defaults intentionally because <reason>`. The recurring drop points are resume/continuation paths, single-pick vs multi-pick branches, batch handlers, and WASM/adapter/serialization payload constructors — a field that parses but is dropped at one of these seams is a silent no-op in production. An unlisted site is a stop-and-return item.
 
 ### Maintainer-simulation matrix
 

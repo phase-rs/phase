@@ -26,9 +26,11 @@ client/src/wasm/*.wasm.d.ts
 .claude/worktrees/
 .claude/scheduled_tasks.lock
 .claude/projects/
+.pr-review/
 
 # Build output
 client/dist/
+client/bootstrap/dist/
 
 # Locally-generated SSL certs (./scripts/setup-ssl.sh) — per-machine, never committed.
 certs/
@@ -66,6 +68,7 @@ data/mtgjson/AtomicCards.json
 data/mtgjson/CardTypes.json
 data/mtgjson/Meta.json
 data/mtgjson/SetList.json
+data/mtgjson/.refresh-week
 data/mtgjson/decks/
 data/mtgjson/sets/
 !data/abilities/

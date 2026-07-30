@@ -208,10 +208,7 @@ mod tests {
 
         let candidate = CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
         };
         let decision = engine::ai_support::AiDecisionContext {
             waiting_for: state.waiting_for.clone(),
@@ -225,6 +222,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = policy.verdict(&ctx);
         match verdict {
@@ -293,6 +291,7 @@ mod tests {
             config,
             context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         }
     }
 
@@ -308,10 +307,7 @@ mod tests {
                 source_id: heliod_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Ability),
         };
         let decision = engine::ai_support::AiDecisionContext {
             waiting_for: state.waiting_for.clone(),
@@ -343,10 +339,7 @@ mod tests {
                 source_id: ballista_id,
                 ability_index: 1,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Ability),
         };
         let decision = engine::ai_support::AiDecisionContext {
             waiting_for: state.waiting_for.clone(),
@@ -375,10 +368,7 @@ mod tests {
         // PassPriority is never in any combo line's required_actions.
         let candidate = CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
         };
         let decision = engine::ai_support::AiDecisionContext {
             waiting_for: state.waiting_for.clone(),

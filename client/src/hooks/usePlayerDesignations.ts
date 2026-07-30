@@ -7,6 +7,7 @@ import type {
   PendingSpellCostReduction,
   PlayerId,
   PlayerStatusView,
+  UnboundedResourceView,
 } from "../adapter/types.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 
@@ -31,6 +32,9 @@ export interface PlayerDesignations {
   pendingSpellModifiers: PendingNextSpellModifier[];
   /** CR 601.2f: pending one-shot cost reductions for this player's next spell. */
   pendingSpellReductions: PendingSpellCostReduction[];
+  /** CR 732.2a: engine-attributed unbounded-resource (`∞`) rows for this player.
+   *  Shared empty array when none, so the memoized result stays stable. */
+  unboundedResources: UnboundedResourceView[];
   hasAny: boolean;
 }
 
@@ -45,6 +49,7 @@ const playerKey = (id: PlayerId): string => String(id);
 const NO_CONDITIONS: PlayerStatusView[] = [];
 const NO_MODIFIERS: PendingNextSpellModifier[] = [];
 const NO_REDUCTIONS: PendingSpellCostReduction[] = [];
+const NO_UNBOUNDED: UnboundedResourceView[] = [];
 
 const EMPTY: PlayerDesignations = {
   isMonarch: false,
@@ -59,6 +64,7 @@ const EMPTY: PlayerDesignations = {
   statusConditions: NO_CONDITIONS,
   pendingSpellModifiers: NO_MODIFIERS,
   pendingSpellReductions: NO_REDUCTIONS,
+  unboundedResources: NO_UNBOUNDED,
   hasAny: false,
 };
 
@@ -99,6 +105,11 @@ export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
       playerId,
       NO_REDUCTIONS,
     );
+    const unboundedResources = forPlayer(
+      gs.derived?.unbounded_resources,
+      playerId,
+      NO_UNBOUNDED,
+    );
     const hasAny =
       isMonarch
       || hasInitiative
@@ -108,7 +119,8 @@ export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
       || energy > 0
       || statusConditions.length > 0
       || pendingSpellModifiers.length > 0
-      || pendingSpellReductions.length > 0;
+      || pendingSpellReductions.length > 0
+      || unboundedResources.length > 0;
     return {
       isMonarch,
       hasInitiative,
@@ -122,6 +134,7 @@ export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
       statusConditions,
       pendingSpellModifiers,
       pendingSpellReductions,
+      unboundedResources,
       hasAny,
     };
   }, [gameState, playerId]);

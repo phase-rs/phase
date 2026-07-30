@@ -1,15 +1,17 @@
 use crate::parser::oracle_nom::bridge::nom_on_lower;
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{opt, value, verify};
+use nom::combinator::{opt, peek, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::scan_contains;
 use super::oracle_util::parse_mana_symbols;
-use crate::parser::oracle_effect::{split_leading_conditional, try_parse_named_choice};
+use crate::parser::oracle_effect::{
+    split_leading_conditional, try_parse_named_choice, try_parse_named_choice_conjunction,
+};
 
 pub(crate) fn is_cant_win_lose_compound(lower: &str) -> bool {
     scan_contains(lower, "can't win the game") && scan_contains(lower, "can't lose the game")
@@ -97,10 +99,17 @@ pub(crate) fn is_defiler_cost_pattern(lower: &str) -> bool {
 /// structural pre-filter; the lowering (`parse_spells_alternative_cost`)
 /// re-parses with combinators and strict-fails on non-mana / unparsed filters.
 pub(crate) fn is_spells_alternative_cost_pattern(lower: &str) -> bool {
-    lower_starts_with(lower, "you may pay ")
+    // CR 118.9 + CR 601.2b: an optional once-per-turn frequency prefix (As
+    // Foretold: "Once each turn, ...") precedes the "you may pay ..." grant.
+    // Strip it via the shared lowering combinator before the structural gate.
+    let after_frequency = opt(crate::parser::oracle_static::parse_alt_cost_frequency_prefix)
+        .parse(lower)
+        .map_or(lower, |(rest, _)| rest);
+    lower_starts_with(after_frequency, "you may pay ")
         && scan_contains(lower, "rather than pay")
         && scan_contains(lower, "mana cost for")
-        && scan_contains(lower, "spells you cast")
+        // Accept singular ("a spell you cast") and plural ("spells you cast").
+        && (scan_contains(lower, "spell you cast") || scan_contains(lower, "spells you cast"))
 }
 
 /// CR 118.9 + CR 701.59a: Collect-evidence alternative-cost grant static —
@@ -180,6 +189,17 @@ pub(crate) fn is_damage_prevention_pattern(lower: &str) -> bool {
 }
 
 pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
+    // CR 114.1: An emblem-granting instant/sorcery ("You get an emblem with
+    // \"…\"") whose quoted body contains static text (Gideon of the Trials'
+    // can't-lose/win locks) matches `is_static_pattern` on the unmasked view, so
+    // the spell IR loop would otherwise consume the whole line through the static
+    // classifier — splitting the quoted body mid-sentence. Defer it to the
+    // effect-chain parser, whose `try_parse_emblem_creation` seam produces a
+    // single `Effect::CreateEmblem`. Reuses the emblem-head prefix combinator.
+    if super::oracle_effect::sequence::is_emblem_creation_head(lower) {
+        return true;
+    }
+
     if is_self_spell_cost_modification(lower) {
         return false;
     }
@@ -330,6 +350,7 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // quote is required: scan_contains only matches at word starts, and "legend"
     // is glued to its opening quote ("legend) in the Oracle text.
     "\"legend rule\" doesn't apply",
+    "play any number of lands",
     "play an additional land",
     "play two additional lands",
     "triggers an additional time",
@@ -363,12 +384,15 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // The "of ..." infix between "abilities" and "can't be activated" blocks the contiguous
     // scan above; recognize the dispatched prefix separately so parse_static_line is reached.
     "activated abilities of ",
-    // CR 701.23 + CR 609.3: Ashiok-class search prohibition.
+    // CR 701.23 + CR 101.2: Ashiok-class search prohibition — a "can't search"
+    // effect takes precedence over any effect directing a search.
     "can't cause their controller to search their library",
-    // CR 603.2 + CR 609.3: The Master, Multiplied-class sacrifice/exile prohibition.
+    // CR 603.2 + CR 101.2: The Master, Multiplied-class sacrifice/exile prohibition —
+    // the "can't" effect takes precedence over the triggered ability directing it.
     "triggered abilities ",
     "can't cause you to sacrifice or exile",
-    // CR 701.23 + CR 609.3: Mindlock Orb-class search prohibition.
+    // CR 701.23 + CR 101.2: Mindlock Orb-class search prohibition — the "can't"
+    // effect takes precedence over any effect directing a search.
     "can't search libraries",
     "cannot search libraries",
     "may not search libraries",
@@ -474,11 +498,27 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
         return false;
     }
 
+    if super::oracle_static::is_control_players_during_own_library_search(lower) {
+        return true;
+    }
+
     if super::oracle_static::is_tiered_enters_with_additional_counters_static(lower) {
         return true;
     }
 
     if super::oracle_static::is_extra_blockers_static_candidate(lower) {
+        return true;
+    }
+
+    if super::oracle_static::is_unspent_mana_loss_causes_life_loss_static(lower) {
+        return true;
+    }
+
+    // CR 509.1c: A printed permanent forced-block ("lure") static, "All creatures
+    // able to block <self/enchanted creature> do so" (Ochran Assassin, Breaker of
+    // Armies, Lure), routes to the static parser — NOT the one-shot spell form
+    // "… target creature this turn do so", which stays an effect.
+    if super::oracle_static::is_forced_block_static_candidate(lower) {
         return true;
     }
 
@@ -536,6 +576,14 @@ fn is_static_compound_pattern(lower: &str) -> bool {
         opt(alt((
             tag::<_, _, OracleError<'_>>("once during each of your turns, "),
             tag("once each turn, "),
+            // CR 117.1c: "During your turn, you may [cast|play] … from <zone>"
+            // — the timing qualifier gates a standing cast-from-zone permission
+            // (Leonardo, Sewer Samurai; Festival of Embers). Route to the static
+            // parser ahead of the Priority-8 "enters … counter" replacement gate;
+            // the graveyard/exile builder honors the qualifier via a
+            // `DuringYourTurn` condition. Narrowly widens only the leading
+            // frequency/timing qualifier, not the zone anchors below.
+            tag("during your turn, "),
         ))),
         alt((tag("you may play"), tag("you may cast"))),
     )
@@ -555,7 +603,14 @@ fn is_static_compound_pattern(lower: &str) -> bool {
             // permission (The Matrix of Time). Routes to `parse_static_line` so
             // it lowers to `StaticMode::ExileCastPermission { pool: Persistent }`
             // instead of falling through to the imperative impulse-draw flow.
-            || scan_contains(lower, "from among cards exiled with"))
+            || scan_contains(lower, "from among cards exiled with")
+            // CR 108.3 + CR 113.6b: The "cards you own exiled with ~" variant
+            // (Intrepid Paleontologist; Dawnhand Dissident) carries a "you own"
+            // ownership infix between "cards" and "exiled with". Tolerate it so
+            // the ExileCastPermission line routes to the static parser instead
+            // of the Priority-8 replacement gate. Narrowly widens the exile
+            // anchor to accept the ownership infix.
+            || scan_contains(lower, "from among cards you own exiled with"))
     {
         return true;
     }
@@ -611,6 +666,29 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     // `GrantsExtraVote`). Route it to Priority 7 static dispatch — which runs
     // before the Priority 8 replacement gate — so it lowers to the static.
     if scan_contains(lower, "face a villainous choice") && scan_contains(lower, "additional time") {
+        return true;
+    }
+    // CR 701.23f + CR 614.1a: "If an opponent/a player would search a library,
+    // that player searches the top N cards of that library instead." (Aven
+    // Mindcensor) leads with "...would search...", which the Priority-8 "would "
+    // replacement gate would otherwise swallow (there is no Search replacement
+    // event). Route to Priority-7 static. Specific conjunction avoids false hits.
+    if scan_contains(lower, "would search a library") && scan_contains(lower, "instead") {
+        return true;
+    }
+    // CR 121.1 / CR 613.11: "[subject] draw(s) cards from the bottom of [your|
+    // their] library rather than/instead of the top." — River Song's draw-source
+    // redirection static (Meet in Reverse). The body verb is "draw", so none of
+    // the generic static keywords (get/have/can't) anchor it; without this gate
+    // the (ability-word-prefixed) line never reaches Priority 7 and falls to the
+    // spell catch-all as Unimplemented. The "from the bottom of" + "library" +
+    // top-reference combination is the diagnostic; extraction is delegated to
+    // `parse_draw_from_bottom`, which lowers it to `StaticMode::DrawFromBottom`.
+    if scan_contains(lower, "from the bottom of")
+        && scan_contains(lower, "library")
+        && (scan_contains(lower, "rather than the top")
+            || scan_contains(lower, "instead of the top"))
+    {
         return true;
     }
     false
@@ -674,6 +752,17 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
 ];
 
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
+    if super::oracle_replacement::is_search_found_replacement_pattern(lower) {
+        return true;
+    }
+
+    // CR 608.2c: reflexive "enters this way" riders on triggered abilities
+    // (Winter Soldier, Reborn Avenger) contain "enters" + "counter" but are
+    // not CR 614.1c ETB replacements.
+    if has_trigger_prefix(lower) && scan_contains(lower, "enters this way,") {
+        return false;
+    }
+
     if is_counter_prohibition_replacement_pattern(lower) {
         return true;
     }
@@ -705,6 +794,28 @@ pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
 
 fn is_replacement_compound_pattern(lower: &str) -> bool {
     if is_as_enters_choose_pattern(lower) {
+        return true;
+    }
+    // CR 701.3a + CR 614.1: "As ~ becomes attached [to X], choose …" — the
+    // attach-time analogue of `is_as_enters_choose_pattern` (Psychic Paper).
+    if is_as_becomes_attached_choose_pattern(lower) {
+        return true;
+    }
+    // CR 614.1c + CR 614.12: "As a [filter] enters, it becomes a [P/T] [type]
+    // creature in addition to its other types" — a replacement from another
+    // source affecting a subset of entrants (Displaced Dinosaurs). Routes to
+    // `parse_replacement_line`. The line does not match `is_static_pattern`
+    // (no "becomes"/"in addition" static-contains entry; the "as " prefix is
+    // not a static-prefix entry), so no Priority-7 reroute is required.
+    if is_as_enters_becomes_in_addition_pattern(lower) {
+        return true;
+    }
+    // CR 614.1c + CR 208.2b: modal "As ~ enters, it becomes your choice of
+    // [P/T profiles]" as-enters replacement (Primal Plasma / Primal Clay /
+    // Corrupted Shapeshifter / Aquamorph Entity). The self-anchored modal
+    // form is claimed here so the Priority-8 modal-lowering branch fires
+    // before the generic replacement/static parsers.
+    if is_as_enters_becomes_choice_pattern(lower) {
         return true;
     }
     // CR 614.1c: "enters with [counters]" replacement effects. The plural-subject
@@ -765,6 +876,88 @@ pub(crate) fn is_enters_with_counter_replacement_line(lower: &str) -> bool {
         && scan_contains(lower, "for each")
 }
 
+/// CR 614.1c + CR 614.12: nom recognizer for the non-self "As a [filter] enters,
+/// it becomes a [P/T] [type] creature in addition to its other types" replacement
+/// template (Displaced Dinosaurs). The subject is a non-empty external permanent
+/// filter (never the bare self anaphor), and the additive "in addition to its
+/// other types" tail (CR 205.1b) is required so this never claims a set-replacing
+/// "becomes" line. Self / copy "enter as a copy" lines are claimed by earlier
+/// handlers and additionally fail the handler's `Typed`-subject guard.
+fn parse_as_enters_becomes_in_addition(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("as ").parse(input)?;
+    let (input, subject) = take_until(" enters").parse(input)?;
+    if subject.trim().is_empty() || subject.trim() == "~" {
+        return Err(oracle_err(input));
+    }
+    let (input, _) = alt((
+        tag(" enters, it becomes a "),
+        tag(" enters, it becomes an "),
+        tag(" enters the battlefield, it becomes a "),
+        tag(" enters the battlefield, it becomes an "),
+    ))
+    .parse(input)?;
+    // CR 205.1b + CR 105.3: require the full additive marker via the shared
+    // animation combinator so this recognizer covers the entire marker class
+    // (possessive variants, "creature types", "colors and types") rather than
+    // the single hardcoded Displaced Dinosaurs literal.
+    let (input, _) =
+        crate::parser::oracle_effect::animation::locate_in_addition_other_types_marker(input)?;
+    Ok((input, ()))
+}
+
+pub(crate) fn is_as_enters_becomes_in_addition_pattern(lower: &str) -> bool {
+    parse_as_enters_becomes_in_addition(lower).is_ok()
+}
+
+/// CR 614.1c + CR 208.2b: modal "As ~ enters, it becomes your choice of
+/// [P/T profiles]" as-enters replacement recognizer. Mirrors
+/// [`parse_as_enters_becomes_in_addition`] but inverts its self-anchor gate: the
+/// modal-choice form is always self-anchored (the entering creature becomes one
+/// of two-or-more profiles it chooses for itself), so the subject MUST be the
+/// bare `~` anaphor — the exact opposite of the non-self "in addition" subset
+/// template. The "your choice of " pivot plus a required following fixed `<n>/<n>`
+/// power/toughness token distinguishes this modal-P/T class from anchor-word
+/// modals (bullet blocks) and from generic "choose a color" as-enters lines.
+fn parse_as_enters_becomes_choice(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("as ").parse(input)?;
+    let (input, subject) = take_until(" enters").parse(input)?;
+    if subject.trim() != "~" {
+        return Err(oracle_err(input));
+    }
+    let (input, _) = alt((
+        tag(" enters, it becomes your choice of "),
+        tag(" enters the battlefield, it becomes your choice of "),
+        tag(" enters or is turned face up, it becomes your choice of "),
+    ))
+    .parse(input)?;
+    // Strip an optional leading article so the fixed-P/T peek reaches the token
+    // ("a 3/3 creature" / "5/1"). `opt` never fails, preserving the slice when
+    // absent.
+    let (input, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
+    // Require a following fixed `<n>/<n>` power/toughness token: the modal
+    // as-enters replacement (CR 208.2b) always lists specific P/T values. This
+    // excludes non-P/T "becomes your choice of" phrasings from claiming the
+    // modal-P/T lowering path.
+    peek(verify(
+        nom_primitives::parse_pt_value,
+        |(power, toughness)| {
+            matches!(
+                (power, toughness),
+                (
+                    crate::types::ability::PtValue::Fixed(_),
+                    crate::types::ability::PtValue::Fixed(_)
+                )
+            )
+        },
+    ))
+    .parse(input)?;
+    Ok((input, ()))
+}
+
+pub(crate) fn is_as_enters_becomes_choice_pattern(lower: &str) -> bool {
+    parse_as_enters_becomes_choice(lower).is_ok()
+}
+
 fn is_counter_prohibition_replacement_pattern(lower: &str) -> bool {
     // CR 614.17 + CR 122.1: Counter-prohibition effects lack "would" or
     // "instead" but still route through the replacement pipeline.
@@ -788,6 +981,13 @@ fn is_as_enters_choose_pattern(lower: &str) -> bool {
         tag::<_, _, OracleError<'_>>("enters").parse(i)
     })
     .is_some();
+    // Named-attribute choices only ("choose a creature type", "choose a color").
+    // Object choices ("choose a creature" — Metamorphic Alteration, Dauntless
+    // Bodyguard, Scheming Fence) are NOT replacement-classified here: claiming
+    // them as Moved without a proven CopyChosen consumer changes unsupported
+    // card shape for the whole class. Metamorphic's ChoosePermanent is injected
+    // only by `LinkedChoiceKind::CopyChosenHost` after the companion static
+    // parses.
     let has_choose = nom_primitives::scan_at_word_boundaries(lower, |i| {
         verify(tag::<_, _, OracleError<'_>>("choose "), |_: &&str| {
             try_parse_named_choice(i).is_some()
@@ -796,6 +996,29 @@ fn is_as_enters_choose_pattern(lower: &str) -> bool {
     })
     .is_some();
     has_as && has_enters && has_choose
+}
+
+/// CR 701.3a + CR 614.1: the attach-time analogue of `is_as_enters_choose_pattern`
+/// (Psychic Paper: "As this Equipment becomes attached to a creature, choose a
+/// creature card name and a creature type."). Accepts both a single choice and
+/// a conjunction ("choose X and Y") sharing one "choose".
+fn is_as_becomes_attached_choose_pattern(lower: &str) -> bool {
+    let has_as = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("as ").parse(i)
+    })
+    .is_some();
+    let has_becomes_attached = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("becomes attached").parse(i)
+    })
+    .is_some();
+    let has_choose = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        verify(tag::<_, _, OracleError<'_>>("choose "), |_: &&str| {
+            try_parse_named_choice(i).is_some() || try_parse_named_choice_conjunction(i).is_some()
+        })
+        .parse(i)
+    })
+    .is_some();
+    has_as && has_becomes_attached && has_choose
 }
 
 /// CR 603.2 vs CR 614.1c: "Whenever <subject> enters with a counter on it, <consequence>"

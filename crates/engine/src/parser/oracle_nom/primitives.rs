@@ -11,10 +11,12 @@ use nom::sequence::{delimited, preceded};
 use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
-use crate::types::ability::PtValue;
+use crate::types::ability::{AggregateFunction, ObjectProperty, PtValue};
+use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterType, KEYWORD_COUNTERS};
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use crate::types::player::PlayerCounterKind;
 
 /// Parse a number from Oracle text: digit string OR English words (one through twenty).
 ///
@@ -72,7 +74,7 @@ fn parse_digit_number(input: &str) -> OracleResult<'_, u32> {
 fn parse_english_number(input: &str) -> OracleResult<'_, u32> {
     // Longest-match-first ordering within shared prefixes (e.g. "fourteen" before "four").
     // Split into multiple alt groups to stay within nom's 21-element tuple limit.
-    alt((
+    let (rest, matched) = alt((
         value(100u32, tag("one hundred")),
         parse_hyphenated_english_number,
         parse_english_tens,
@@ -101,7 +103,22 @@ fn parse_english_number(input: &str) -> OracleResult<'_, u32> {
         value(1, tag("one")),
         parse_article_number,
     )))
-    .parse(input)
+    .parse(input)?;
+
+    // Require a word boundary after the number word so a cardinal isn't matched
+    // inside a longer word ("sixth" → "six", "tenfold" → "ten", "nineteenth" →
+    // "nineteen"). This mirrors the boundary guard `parse_article_number` already
+    // applies to "a"/"an"; the multi-character number words previously lacked it
+    // because the `oracle_util::parse_number` wrapper only guards matches of ≤2
+    // characters. A following ASCII alphanumeric means the token continues, so
+    // the match was a spurious substring.
+    match rest.chars().next() {
+        Some(c) if c.is_ascii_alphanumeric() => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
+        _ => Ok((rest, matched)),
+    }
 }
 
 fn parse_english_tens(input: &str) -> OracleResult<'_, u32> {
@@ -321,6 +338,140 @@ pub fn parse_color(input: &str) -> OracleResult<'_, ManaColor> {
         value(ManaColor::Black, tag("black")),
         value(ManaColor::Red, tag("red")),
         value(ManaColor::Green, tag("green")),
+    ))
+    .parse(input)
+}
+
+/// CR 205.2a: Parse a single printed card-type word into its [`CoreType`].
+///
+/// Enumerates the CR 205.2a card-type list ("artifact, battle, conspiracy,
+/// creature, dungeon, enchantment, instant, kindred, land, phenomenon, plane,
+/// planeswalker, scheme, sorcery, and vanguard") plus the errata'd legacy
+/// "tribal" spelling of kindred (CR 308.3). Operates on already-lowercased text.
+///
+/// "vanguard" is absent because [`CoreType`] models no Vanguard variant — the
+/// Vanguard variant's avatar cards are out of scope for the engine, so there is
+/// nothing to map the word onto.
+///
+/// Ordering note: "planeswalker" MUST precede "plane" — they share a prefix and
+/// `alt` commits to the first success, so the reverse order would parse
+/// "planeswalker" as `Plane` with a stray "swalker" remainder.
+///
+/// This combinator matches a bare word with no trailing word-boundary check, so
+/// callers that parse a full phrase must verify the remainder themselves (e.g.
+/// via `all_consuming`) rather than accepting a prefix match.
+pub fn parse_core_type(input: &str) -> OracleResult<'_, CoreType> {
+    alt((
+        value(CoreType::Artifact, tag("artifact")),
+        value(CoreType::Battle, tag("battle")),
+        value(CoreType::Conspiracy, tag("conspiracy")),
+        value(CoreType::Creature, tag("creature")),
+        value(CoreType::Dungeon, tag("dungeon")),
+        value(CoreType::Enchantment, tag("enchantment")),
+        value(CoreType::Instant, tag("instant")),
+        value(CoreType::Kindred, tag("kindred")),
+        value(CoreType::Tribal, tag("tribal")),
+        value(CoreType::Land, tag("land")),
+        value(CoreType::Phenomenon, tag("phenomenon")),
+        value(CoreType::Planeswalker, tag("planeswalker")),
+        value(CoreType::Plane, tag("plane")),
+        value(CoreType::Scheme, tag("scheme")),
+        value(CoreType::Sorcery, tag("sorcery")),
+    ))
+    .parse(input)
+}
+
+/// CR 205.2a + CR 205.2b: Parse a disjunction of printed card-type words into
+/// the set of types that satisfy the gate — "instant or sorcery", "artifact or
+/// enchantment", "artifact, creature, or enchantment".
+///
+/// CR 205.2b ("objects satisfy the criteria for any effect that applies to any
+/// of their card types") is why a disjunction lowers to a *set*: consumers such
+/// as `AbilityCondition::RevealedHasCardType` match with `any`, so listing every
+/// printed leg is exactly the OR semantics the Oracle text prints.
+///
+/// An explicit `or` boundary is REQUIRED for a multi-leg result, because CR
+/// 205.2b describes TWO different things this grammar must not conflate. Its
+/// first sentence — "Some objects have more than one card type (for example, an
+/// artifact creature)" — is a CONJUNCTIVE type stack: ONE object bearing every
+/// listed type. Its second sentence — "Such objects satisfy the criteria for any
+/// effect that applies to any of their card types" — is the `any` match that
+/// makes a printed DISJUNCTION lower to a set.
+///
+/// Only the printed "or" tells the two apart. A bare comma list ("land,
+/// instant") or a printed "and" ("artifact and creature") is the conjunctive
+/// reading, so lowering it to a set that consumers evaluate with `any` would
+/// silently widen a both-types gate into an either-type gate. Comma legs are
+/// therefore buffered and only committed once a terminal `", or "` / `" or "`
+/// leg proves the list really was disjunctive:
+///
+/// - `"instant or sorcery"` → `[Instant, Sorcery]`
+/// - `"artifact, creature, or enchantment"` → `[Artifact, Creature, Enchantment]`
+/// - `"land, instant"` → `[Land]`, remainder `", instant"` (rejected upstream by
+///   the caller's `all_consuming`)
+/// - `"artifact and creature"` → `[Artifact]`, remainder `" and creature"`
+///
+/// A single type word is a well-formed one-element disjunction, so this is a
+/// drop-in superset of [`parse_core_type`].
+pub fn parse_core_type_disjunction(input: &str) -> OracleResult<'_, Vec<CoreType>> {
+    let (after_first, first) = parse_core_type(input)?;
+
+    // Comma legs are provisional until an `or` boundary appears. `pending` holds
+    // them; `probe` walks the candidate list without committing the remainder.
+    let mut pending: Vec<CoreType> = Vec::new();
+    let mut probe = after_first;
+
+    loop {
+        // Terminal disjunctive leg — commits every buffered comma leg with it.
+        // ", or " is tried before " or " because the Oxford comma must be
+        // consumed whole rather than leaving a dangling ", ".
+        if let Ok((after_last, last)) = alt((
+            preceded(tag::<_, _, OracleError<'_>>(", or "), parse_core_type),
+            preceded(tag(" or "), parse_core_type),
+        ))
+        .parse(probe)
+        {
+            let mut types = Vec::with_capacity(pending.len() + 2);
+            types.push(first);
+            types.append(&mut pending);
+            types.push(last);
+            return Ok((after_last, types));
+        }
+
+        // Intermediate ", " leg — buffer it and keep looking for the `or`.
+        match preceded(tag::<_, _, OracleError<'_>>(", "), parse_core_type).parse(probe) {
+            Ok((after_mid, mid)) => {
+                pending.push(mid);
+                probe = after_mid;
+            }
+            // No `or` boundary anywhere in the list — not a disjunction. Yield
+            // the single leading type and leave the comma tail unconsumed so a
+            // full-consumption caller rejects the phrase outright.
+            Err(_) => return Ok((after_first, vec![first])),
+        }
+    }
+}
+
+/// CR 122.1: Combinator mapping a player-counter kind word to its typed
+/// [`PlayerCounterKind`].
+///
+/// Poison, experience, rad, and ticket are the counters a *player* accumulates
+/// (CR 122.1 — a counter is a marker placed on an object or player). Energy is
+/// deliberately EXCLUDED: energy is spent/gained through the dedicated
+/// `Effect::GainEnergy` path, not `GivePlayerCounter`. Any object-counter word
+/// (`+1/+1`, `charge`, …) fails the `alt`, so callers reject it as a player
+/// counter.
+///
+/// Single authority shared by the imperative "get N <kind> counters" parser
+/// (`oracle_effect::imperative::try_parse_player_counter`) and the oracle_nom
+/// threshold rider (`oracle_nom::player_counter_difference`). Operates on
+/// already-lowercased text.
+pub fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind> {
+    alt((
+        value(PlayerCounterKind::Poison, tag("poison")),
+        value(PlayerCounterKind::Experience, tag("experience")),
+        value(PlayerCounterKind::Rad, tag("rad")),
+        value(PlayerCounterKind::Ticket, tag("ticket")),
     ))
     .parse(input)
 }
@@ -692,6 +843,7 @@ pub fn parse_alt_cost_keyword_name_to_kind(input: &str) -> OracleResult<'_, Keyw
         value(KeywordKind::Mutate, tag("mutate")),
         value(KeywordKind::Bestow, tag("bestow")),
         value(KeywordKind::Harmonize, tag("harmonize")),
+        value(KeywordKind::Madness, tag("madness")),
     ))
     .parse(input)
 }
@@ -869,6 +1021,86 @@ where
     None
 }
 
+/// Like [`scan_at_word_boundaries`] but returns the **last** successful match,
+/// together with the byte offset where that match began.
+pub fn scan_last_at_word_boundaries_with_offset<'a, O, F>(
+    text: &'a str,
+    mut combinator: F,
+) -> Option<(usize, O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+{
+    let mut remaining = text;
+    let mut offset = 0;
+    let mut last = None;
+    while !remaining.is_empty() {
+        if let Ok((rest, val)) = combinator(remaining) {
+            last = Some((offset, val, rest));
+        }
+        if let Some(rel) = remaining.find(' ') {
+            offset += rel + 1;
+            remaining = remaining[rel + 1..].trim_start();
+        } else {
+            break;
+        }
+    }
+    last
+}
+
+/// Like [`scan_last_at_word_boundaries_with_offset`] but only retains matches
+/// whose offset passes `accept_offset`.
+pub fn scan_last_valid_at_word_boundaries_with_offset<'a, O, F, P>(
+    text: &'a str,
+    mut combinator: F,
+    mut accept_offset: P,
+) -> Option<(usize, O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+    P: FnMut(usize) -> bool,
+{
+    let mut remaining = text;
+    let mut offset = 0;
+    let mut last = None;
+    while !remaining.is_empty() {
+        if let Ok((rest, val)) = combinator(remaining) {
+            if accept_offset(offset) {
+                last = Some((offset, val, rest));
+            }
+        }
+        if let Some(rel) = remaining.find(' ') {
+            offset += rel + 1;
+            remaining = remaining[rel + 1..].trim_start();
+        } else {
+            break;
+        }
+    }
+    last
+}
+
+/// Like [`scan_at_word_boundaries`] but returns the **last** successful match.
+///
+/// Use for terminal riders ("... if <condition>", "... as long as <condition>")
+/// where an earlier `as if` phrase must not steal the gate.
+pub fn scan_last_at_word_boundaries<'a, O, F>(
+    text: &'a str,
+    mut combinator: F,
+) -> Option<(O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+{
+    let mut remaining = text;
+    let mut last = None;
+    while !remaining.is_empty() {
+        if let Ok((rest, val)) = combinator(remaining) {
+            last = Some((val, rest));
+        }
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    last
+}
+
 /// Check whether `phrase` appears at any word boundary in `text`.
 ///
 /// More precise than `str::contains()` — matches complete phrases at word
@@ -938,6 +1170,59 @@ pub fn strip_double_quoted_spans(text: &str) -> Cow<'_, str> {
             }
         }
     }
+    Cow::Owned(out)
+}
+
+/// Byte-length-preserving variant of [`strip_double_quoted_spans`]: masks the
+/// contents of every complete double-quoted span with ASCII spaces while keeping
+/// the total byte length identical to the input, so an offset found in the masked
+/// text maps directly onto the original. The quote characters are masked too. Use
+/// this when a scanner must ignore text inside a quoted granted ability but the
+/// caller slices the ORIGINAL string by the matched offset (e.g. resolution-time
+/// "unless … pays" extraction that returns the pre-`unless` effect text).
+///
+/// An unterminated quote passes the remainder through unchanged, mirroring
+/// [`strip_double_quoted_spans`] — so a legitimate resolution-level clause that
+/// follows a malformed span is still visible to the scanner.
+pub fn mask_double_quoted_spans_preserving_len(text: &str) -> Cow<'_, str> {
+    if text.find('"').is_none() {
+        return Cow::Borrowed(text);
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        match remaining.find('"') {
+            None => {
+                out.push_str(remaining);
+                break;
+            }
+            Some(open) => {
+                out.push_str(&remaining[..open]);
+                let after_open = &remaining[open..];
+                match delimited(char::<_, OracleError<'_>>('"'), take_until("\""), char('"'))
+                    .parse(after_open)
+                {
+                    Ok((rest, _span)) => {
+                        // Replace the whole span (quotes + contents) with spaces
+                        // of the SAME byte length so downstream offsets are stable.
+                        let span_len = after_open.len() - rest.len();
+                        out.extend(std::iter::repeat_n(' ', span_len));
+                        remaining = rest;
+                    }
+                    Err(_) => {
+                        out.push_str(after_open);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    debug_assert_eq!(
+        out.len(),
+        text.len(),
+        "mask must preserve byte length for offset mapping"
+    );
     Cow::Owned(out)
 }
 
@@ -1037,6 +1322,40 @@ pub fn split_once_on<'a>(
     Ok(("", (before, after)))
 }
 
+/// Parse a superlative adjective into its corresponding `AggregateFunction`.
+///
+/// CR 208.1 (a creature's power and toughness) + CR 202.3 (an object's mana
+/// value): greatest/highest select the maximum of the population, least/lowest/
+/// smallest the minimum.
+///
+/// Relocated here from `oracle_nom/condition.rs` so the condition layer and the
+/// target/filter layer share ONE atom rather than maintaining parallel tables.
+pub(crate) fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
+    alt((
+        value(AggregateFunction::Max, tag("greatest")),
+        value(AggregateFunction::Max, tag("highest")),
+        value(AggregateFunction::Min, tag("lowest")),
+        value(AggregateFunction::Min, tag("least")),
+        // Parity with the target-suffix table this consolidation absorbs. ZERO
+        // corpus attestation (0 hits over 35,679 MTGJSON faces), so it adds no
+        // card coverage — it exists so the consolidation loses no grammar that
+        // either predecessor table recognized.
+        value(AggregateFunction::Min, tag("smallest")),
+    ))
+    .parse(input)
+}
+
+/// Property keyword → [`ObjectProperty`]. Shared by the condition layer's
+/// comparison grammar and the target/filter layer's superlative head.
+pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
+    alt((
+        value(ObjectProperty::Power, tag("power")),
+        value(ObjectProperty::Toughness, tag("toughness")),
+        value(ObjectProperty::ManaValue, tag("mana value")),
+    ))
+    .parse(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1055,6 +1374,57 @@ mod tests {
         let out = strip_double_quoted_spans(r#"a "b c" d"#);
         assert_eq!(out, "a   d");
         assert!(matches!(out, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn mask_preserving_len_masks_span_and_keeps_byte_length() {
+        let input = r#"a "b c" d"#;
+        let out = mask_double_quoted_spans_preserving_len(input);
+        // Quotes + contents become spaces of equal length; surrounding text intact.
+        assert_eq!(out, "a       d");
+        assert_eq!(out.len(), input.len(), "byte length must be preserved");
+    }
+
+    #[test]
+    fn mask_preserving_len_no_quote_borrows_unchanged() {
+        let out = mask_double_quoted_spans_preserving_len("owner's creatures can't block");
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out, "owner's creatures can't block");
+    }
+
+    #[test]
+    fn mask_preserving_len_offset_maps_to_original() {
+        // A word after a quoted span must be findable at the SAME byte offset in
+        // both the mask and the original — the property the unless-extractor relies
+        // on to slice the original effect text.
+        let input = r#"destroy it "gains unless you pay {2}" unless its controller pays {1}"#;
+        let masked = mask_double_quoted_spans_preserving_len(input);
+        let outer = masked
+            // allow-noncombinator: test-only structural offset assertion on masked output.
+            .find("unless its controller")
+            .expect("outer unless in mask");
+        assert_eq!(
+            &input[outer..outer + "unless its controller".len()],
+            "unless its controller",
+            "offset in mask must index the same bytes in the original"
+        );
+        // The INNER unless is masked away.
+        assert_eq!(
+            masked.matches("unless").count(),
+            1,
+            "inner unless is masked"
+        );
+    }
+
+    #[test]
+    fn mask_preserving_len_unterminated_passes_through() {
+        // Mirror strip_double_quoted_spans: an unterminated quote leaves the
+        // remainder (including a following clause) visible.
+        let input = r#"destroy it unless you pay {1}. "unterminated"#;
+        let out = mask_double_quoted_spans_preserving_len(input);
+        // allow-noncombinator: test-only assertion that masking preserves the tail.
+        assert!(out.contains("unless you pay"), "outer clause stays visible");
+        assert_eq!(out.len(), input.len());
     }
 
     #[test]
@@ -1096,6 +1466,43 @@ mod tests {
         assert_eq!(parse_number("ninety-nine").unwrap().1, 99);
         assert_eq!(parse_number("ninety").unwrap().1, 90);
         assert_eq!(parse_number("one hundred").unwrap().1, 100);
+    }
+
+    /// A cardinal number word must not be matched inside a longer word (e.g.
+    /// the ordinal "sixth" or "tenfold"). The multi-character words previously
+    /// lacked the word-boundary guard that `parse_article_number` applies to
+    /// "a"/"an", and the `oracle_util::parse_number` wrapper only guarded
+    /// matches of ≤2 characters — so "sixth" parsed as 6, "tenth" as 10, etc.
+    #[test]
+    fn test_parse_english_number_requires_word_boundary() {
+        // Longer words that merely start with a cardinal must NOT parse.
+        for embedded in [
+            "sixth",
+            "tenth",
+            "tenfold",
+            "threefold",
+            "nineteenth",
+            "fourteener",
+        ] {
+            assert!(
+                parse_number(embedded).is_err(),
+                "{embedded:?} must not parse as an embedded cardinal"
+            );
+        }
+        // Genuine cardinals with a trailing boundary still parse, remainder intact.
+        assert_eq!(parse_number("six cards").unwrap(), (" cards", 6));
+        assert_eq!(parse_number("ten").unwrap(), ("", 10));
+        assert_eq!(
+            parse_number("nineteen creatures").unwrap(),
+            (" creatures", 19)
+        );
+        assert_eq!(
+            parse_number("three, then draw").unwrap(),
+            (", then draw", 3)
+        );
+        // Distinct number words that merely share a prefix are unaffected.
+        assert_eq!(parse_number("sixteen").unwrap(), ("", 16));
+        assert_eq!(parse_number("sixty").unwrap(), ("", 60));
     }
 
     /// `parse_strict_counter_type` accepts recognized counter tokens (keyword
@@ -1185,6 +1592,44 @@ mod tests {
         let result = scan_preceded("the creature enters", |i| {
             tag::<_, _, OracleError<'_>>("dies").parse(i)
         });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_scan_last_at_word_boundaries_picks_terminal_if_gate() {
+        let (_, tail) = scan_last_at_word_boundaries(
+            "you may cast as if they had flash if you control a zombie",
+            |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+        )
+        .expect("terminal if gate");
+        assert_eq!(tail, "you control a zombie");
+    }
+
+    #[test]
+    fn test_scan_last_at_word_boundaries_with_offset_picks_terminal_if_gate() {
+        let (_, _, tail) = scan_last_at_word_boundaries_with_offset(
+            "you can't play lands as if there were no rule if ten or more lands are on the battlefield",
+            |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+        )
+        .expect("terminal if gate");
+        assert_eq!(tail, "ten or more lands are on the battlefield");
+    }
+
+    #[test]
+    fn test_scan_last_at_word_boundaries_with_offset_skips_as_if() {
+        let result = scan_last_valid_at_word_boundaries_with_offset(
+            "you can't play lands as if there were no rule",
+            |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+            |if_offset| {
+                let Some(start) = if_offset.checked_sub(3) else {
+                    return true;
+                };
+                !"you can't play lands as if there were no rule".is_char_boundary(start)
+                    || tag::<_, _, OracleError<'_>>("as ")
+                        .parse(&"you can't play lands as if there were no rule"[start..if_offset])
+                        .is_err()
+            },
+        );
         assert!(result.is_none());
     }
 
@@ -1667,11 +2112,130 @@ mod tests {
             ("mutate ability", KeywordKind::Mutate),
             ("bestow ability", KeywordKind::Bestow),
             ("harmonize ability", KeywordKind::Harmonize),
+            ("madness", KeywordKind::Madness),
         ];
         for (input, expected) in cases {
             let (_, kind) = parse_alt_cost_keyword_name_to_kind(input).unwrap();
             assert_eq!(kind, expected, "input: {input:?}");
         }
         assert!(parse_alt_cost_keyword_name_to_kind("unknown").is_err());
+    }
+
+    /// CR 205.2a: every card-type word the enum models maps to its `CoreType`.
+    #[test]
+    fn test_parse_core_type_covers_cr_205_2a_words() {
+        let cases = [
+            ("artifact", CoreType::Artifact),
+            ("battle", CoreType::Battle),
+            ("conspiracy", CoreType::Conspiracy),
+            ("creature", CoreType::Creature),
+            ("dungeon", CoreType::Dungeon),
+            ("enchantment", CoreType::Enchantment),
+            ("instant", CoreType::Instant),
+            ("kindred", CoreType::Kindred),
+            ("tribal", CoreType::Tribal),
+            ("land", CoreType::Land),
+            ("phenomenon", CoreType::Phenomenon),
+            ("plane", CoreType::Plane),
+            ("scheme", CoreType::Scheme),
+            ("sorcery", CoreType::Sorcery),
+        ];
+        for (input, expected) in cases {
+            let (rest, parsed) = parse_core_type(input).unwrap();
+            assert_eq!(parsed, expected, "input: {input:?}");
+            assert!(rest.is_empty(), "input {input:?} left remainder {rest:?}");
+        }
+        assert!(parse_core_type("goblin").is_err());
+    }
+
+    /// "planeswalker" shares a prefix with "plane"; `alt` commits to its first
+    /// success, so the longer word must win or the remainder is corrupted.
+    #[test]
+    fn test_parse_core_type_prefers_planeswalker_over_plane() {
+        let (rest, parsed) = parse_core_type("planeswalker").unwrap();
+        assert_eq!(parsed, CoreType::Planeswalker);
+        assert!(rest.is_empty(), "planeswalker left remainder {rest:?}");
+    }
+
+    /// CR 205.2a + CR 205.2b: a printed disjunction carries every leg.
+    #[test]
+    fn test_parse_core_type_disjunction_carries_every_leg() {
+        let cases: [(&str, Vec<CoreType>); 4] = [
+            ("sorcery", vec![CoreType::Sorcery]),
+            (
+                "instant or sorcery",
+                vec![CoreType::Instant, CoreType::Sorcery],
+            ),
+            (
+                "artifact, creature, or enchantment",
+                vec![
+                    CoreType::Artifact,
+                    CoreType::Creature,
+                    CoreType::Enchantment,
+                ],
+            ),
+            (
+                "artifact, creature, enchantment, or land",
+                vec![
+                    CoreType::Artifact,
+                    CoreType::Creature,
+                    CoreType::Enchantment,
+                    CoreType::Land,
+                ],
+            ),
+        ];
+        for (input, expected) in cases {
+            let (rest, parsed) = parse_core_type_disjunction(input).unwrap();
+            assert_eq!(parsed, expected, "input: {input:?}");
+            assert!(rest.is_empty(), "input {input:?} left remainder {rest:?}");
+        }
+    }
+
+    /// A bare comma is NOT an `or` boundary. Without a printed "or" the phrase is
+    /// an enumerated/conjunctive type stack, and lowering it to a set that
+    /// consumers evaluate with `any` would widen a both-types gate into an
+    /// either-type gate. Only the leading type is yielded, and the comma tail is
+    /// left unconsumed so a full-consumption caller rejects the phrase outright.
+    #[test]
+    fn test_parse_core_type_disjunction_rejects_bare_comma_list() {
+        for input in ["land, instant", "artifact, creature", "land, instant, land"] {
+            let (rest, parsed) = parse_core_type_disjunction(input).unwrap();
+            assert_eq!(
+                parsed.len(),
+                1,
+                "input {input:?} must not yield a multi-leg disjunction, got {parsed:?}"
+            );
+            assert!(
+                !rest.is_empty(),
+                "input {input:?} must leave its comma tail unconsumed"
+            );
+            // The guard that actually protects callers: full consumption fails,
+            // so such a phrase can never reach a multi-type `RevealedHasCardType`.
+            assert!(
+                all_consuming(parse_core_type_disjunction)
+                    .parse(input)
+                    .is_err(),
+                "input {input:?} must be rejected under all_consuming"
+            );
+        }
+    }
+
+    /// A printed "and" between card types is a conjunction naming one object
+    /// with BOTH types, not the `any`-match set this combinator builds — it must
+    /// not be swallowed as a disjunction separator.
+    #[test]
+    fn test_parse_core_type_disjunction_rejects_and_conjunction() {
+        let (rest, parsed) = parse_core_type_disjunction("artifact and creature").unwrap();
+        assert_eq!(parsed, vec![CoreType::Artifact]);
+        assert_eq!(rest, " and creature");
+    }
+
+    /// A trailing non-type clause must not be consumed: the comma-leg probe has
+    /// to rewind to the leading type rather than failing the whole parse.
+    #[test]
+    fn test_parse_core_type_disjunction_backtracks_over_trailing_clause() {
+        let (rest, parsed) = parse_core_type_disjunction("instant, then draw a card").unwrap();
+        assert_eq!(parsed, vec![CoreType::Instant]);
+        assert_eq!(rest, ", then draw a card");
     }
 }

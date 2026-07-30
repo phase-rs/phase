@@ -45,6 +45,7 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
             // turn.
             duration: Some(Duration::UntilEndOfTurn),
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
         },
         vec![TargetRef::Object(exiled_id)],
         exiled_id,
@@ -53,13 +54,14 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
     // CR 702.88a: "you may cast" is an optional effect.
     inner.optional = true;
 
-    state.delayed_triggers.push(DelayedTrigger {
+    let rebound_cast = DelayedTrigger {
         // CR 603.7b: fires once at the controller's next upkeep.
         condition: crate::types::ability::DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::Upkeep,
             player: controller,
+            gate: crate::types::ability::TurnGate::None,
         },
-        ability: inner,
+        ability: Box::new(inner),
         // CR 603.7d: controller of the delayed trigger is the player who
         // controlled the resolving Rebound spell.
         controller,
@@ -69,7 +71,8 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
         source_id: exiled_id,
         // CR 603.7b: one-shot — removed after it fires.
         one_shot: true,
-    });
+    };
+    crate::game::triggers::install_delayed_trigger(state, rebound_cast);
     true
 }
 
@@ -89,7 +92,7 @@ mod tests {
         let trig = &state.delayed_triggers[0];
         // CR 603.7b: keyed on the controller's next upkeep.
         match &trig.condition {
-            DelayedTriggerCondition::AtNextPhaseForPlayer { phase, player } => {
+            DelayedTriggerCondition::AtNextPhaseForPlayer { phase, player, .. } => {
                 assert_eq!(phase, &Phase::Upkeep);
                 assert_eq!(player, &controller);
             }
@@ -176,6 +179,7 @@ mod tests {
                 constraint: None,
                 duration: Some(Duration::UntilEndOfTurn),
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![TargetRef::Object(exiled)],
             exiled,

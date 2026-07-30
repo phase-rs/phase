@@ -1,0 +1,62 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 5
+        },
+        "target": {
+          "type": "Player"
+        }
+      },
+      "cost": null,
+      "sub_ability": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Draw",
+          "count": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "target": {
+            "type": "Player"
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": {
+          "type": "Not",
+          "condition": {
+            "type": "EffectOutcome",
+            "signal": "OptionalEffectPerformed"
+          }
+        },
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "duration": null,
+      "description": "Any player may have ~ deal 5 damage to them. If no one does, target player draws three cards.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": true,
+      "optional_for": "AnyPlayer",
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

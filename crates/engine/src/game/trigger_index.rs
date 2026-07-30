@@ -178,6 +178,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::SpellAbilityCast
         | TriggerMode::SpellAbilityCopy
         | TriggerMode::AbilityActivated
+        | TriggerMode::LoyaltyAbilityActivated
         | TriggerMode::NinjutsuActivated
         | TriggerMode::KeywordAbilityActivated(_) => push(TriggerEventKey::AbilityOrCopyActivated),
         TriggerMode::Countered => {
@@ -203,6 +204,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::YouAttackUnblocked
         | TriggerMode::Blocks
         | TriggerMode::BlockersDeclared
+        | TriggerMode::BlocksOrBecomesBlocked
         | TriggerMode::BecomesBlocked => {
             push(TriggerEventKey::Blocks);
         }
@@ -331,10 +333,9 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::CaseSolved => push(TriggerEventKey::DungeonOrClassOrCase),
 
         // --- Planar ---
-        TriggerMode::PlanarDice
-        | TriggerMode::PlaneswalkedFrom
-        | TriggerMode::PlaneswalkedTo
-        | TriggerMode::ChaosEnsues => return (keys, true),
+        TriggerMode::PlanarDice | TriggerMode::Planeswalked { .. } | TriggerMode::ChaosEnsues => {
+            return (keys, true)
+        }
 
         // --- Dice / coin ---
         TriggerMode::RolledDie | TriggerMode::RolledDieOnce | TriggerMode::FlippedCoin => {
@@ -416,6 +417,10 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
             push(TriggerEventKey::EnterBattlefield(narrow));
             push(TriggerEventKey::Attacks);
         }
+        // CR 702.55c: Haunt creature ETB half fires on entering the battlefield.
+        TriggerMode::EntersOrHauntedCreatureDies => {
+            push(TriggerEventKey::EnterBattlefield(narrow));
+        }
         TriggerMode::AttacksOrBlocks => {
             push(TriggerEventKey::Attacks);
             push(TriggerEventKey::Blocks);
@@ -454,14 +459,21 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
 
     match event {
         // CR 732.2: a halted-resolution notification produces no trigger keys.
-        GameEvent::GameStarted | GameEvent::ResolutionHalted { .. } => {}
+        GameEvent::GameStarted
+        | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::ResolutionHalted { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
         GameEvent::StickerPlaced { .. } => {}
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),
         GameEvent::CreatureEnlisted { .. } => push(TriggerEventKey::Enlisted),
+        GameEvent::ArmyAmassed { .. } => {}
         GameEvent::Foretold { .. } => push(TriggerEventKey::Foretold),
+        // CR 702.143c: "becomes foretold" via an effect is NOT the foretell
+        // special action, so it produces no trigger key (a "whenever you
+        // foretell a card" trigger must not fire).
+        GameEvent::BecameForetold { .. } => {}
         GameEvent::SpellCast { object_id, .. } => {
             push(TriggerEventKey::SpellCast(None));
             if let Some(obj) = state.objects.get(object_id) {
@@ -582,17 +594,39 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::PermanentSacrificed { .. } => push(TriggerEventKey::Sacrificed),
         GameEvent::EffectResolved { kind, .. } => keys_from_effect_kind(*kind, &mut push),
         GameEvent::Unattached { .. } => push(TriggerEventKey::AttachmentChanged),
+        // CR 116.2c + CR 116.1: no printed trigger condition matches "a
+        // continuous effect ended". The special action doesn't use the stack, and
+        // any consequential board change (a Licid reverting to a creature and
+        // being unattached under CR 704.5p) emits its OWN indexed event.
+        // Explicitly inert rather than absent, so a future trigger family must
+        // classify it.
+        GameEvent::ContinuousEffectEnded { .. } => {}
         GameEvent::AttackersDeclared { .. } => push(TriggerEventKey::Attacks),
         GameEvent::BlockersDeclared { .. } => push(TriggerEventKey::Blocks),
+        // CR 509.3c: an effect-driven "becomes blocked" is a Blocks-key event so
+        // "whenever ~ becomes blocked" triggers are indexed for it.
+        GameEvent::AttackerBecameBlockedByEffect { .. } => push(TriggerEventKey::Blocks),
+        GameEvent::AttackerBecameBlockedByFilteredBlocker { .. } => push(TriggerEventKey::Blocks),
         GameEvent::CombatTaxPaid { .. } | GameEvent::CombatTaxDeclined { .. } => {}
         GameEvent::BecomesTarget { .. } => push(TriggerEventKey::BecomesTarget),
         GameEvent::VehicleCrewed { .. }
         | GameEvent::Stationed { .. }
         | GameEvent::Saddled { .. } => {}
         GameEvent::ReplacementApplied { .. } => {}
-        GameEvent::Transformed { .. } | GameEvent::TurnedFaceUp { .. } => {
+        GameEvent::Transformed { .. }
+        | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. } => {
             push(TriggerEventKey::FaceOrTransform);
         }
+        // CR 701.27b (by analogy): transforming and turning a permanent face
+        // up/down are distinct game actions that don't share triggers even
+        // though they use the same physical action; flipping is likewise its
+        // own game action. No printed flip card has a trigger that fires on
+        // flipping (a design fact about the card pool, not a CR statement).
+        // Deliberately dispatches NO trigger key — folding it into
+        // `FaceOrTransform` would consult transform/face-change triggers for an
+        // event none of them can match.
+        GameEvent::Flipped { .. } => {}
         GameEvent::DayNightChanged { .. } => push(TriggerEventKey::DayNightChanged),
         GameEvent::CardsRevealed { .. } => push(TriggerEventKey::Revealed),
         GameEvent::CrimeCommitted { .. } => push(TriggerEventKey::PlayerActionPerformed),
@@ -618,7 +652,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::RoomEntered { .. } | GameEvent::DungeonCompleted { .. } => {
             push(TriggerEventKey::DungeonOrClassOrCase);
         }
-        // Planechase trigger modes (PlaneswalkedFrom/To, ChaosEnsues) route to the
+        // Planechase trigger modes (Planeswalked { role }, ChaosEnsues) route to the
         // always-checked unclassified bucket in `keys_from_trigger_def`, so these
         // events need no dedicated index key — their matchers are always consulted.
         GameEvent::Planeswalked { .. }
@@ -662,6 +696,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         }
         GameEvent::PowerToughnessChanged { .. } => {}
         GameEvent::CascadeMissed { .. }
+        | GameEvent::CardPredicateGuessMade { .. }
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
         | GameEvent::DebugPermissionRevoked { .. } => {}
@@ -708,6 +743,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::DealDamage
         | EffectKind::ApplyPostReplacementDamage
         | EffectKind::EachDealsDamageEqualToPower
+        | EffectKind::EachSourceDealsDamage
         | EffectKind::Draw
         | EffectKind::Pump
         | EffectKind::PairWith
@@ -750,6 +786,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::EndCombatPhase
         | EffectKind::Populate
         | EffectKind::Clash
+        | EffectKind::Behold
         | EffectKind::Vote
         | EffectKind::SeparateIntoPiles
         | EffectKind::SwitchPT
@@ -782,8 +819,11 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SearchLibrary
         | EffectKind::SearchOutsideGame
         | EffectKind::ExileTop
+        | EffectKind::ExileFaceDownPile
         | EffectKind::TargetOnly
         | EffectKind::Choose
+        | EffectKind::ChoosePermanent
+        | EffectKind::OpponentGuess
         | EffectKind::ChooseDamageSource
         | EffectKind::Suspect
         | EffectKind::Unsuspect
@@ -801,6 +841,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ReduceNextSpellCost
         | EffectKind::GrantNextSpellAbility
         | EffectKind::AddPendingETBCounters
+        | EffectKind::AddPendingEntersModifications
         | EffectKind::CreateEmblem
         | EffectKind::PayCost
         | EffectKind::CastFromZone
@@ -808,6 +849,8 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ExileResolvingSpellInsteadOfGraveyard
         | EffectKind::PreventDamage
         | EffectKind::CreateDamageReplacement
+        | EffectKind::CreateDrawReplacement
+        | EffectKind::CreatePlaneswalkReplacement
         | EffectKind::Regenerate
         | EffectKind::RemoveAllDamage
         | EffectKind::LoseTheGame
@@ -820,14 +863,27 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::VentureIntoDungeon
         | EffectKind::VentureInto
         | EffectKind::TakeTheInitiative
+        | EffectKind::ArrangePlanarDeckTop
         | EffectKind::Planeswalk
+        | EffectKind::ChaosEnsues
+        // Redistribute emits LifeChanged handled by that event's own arm; no
+        // EffectResolved-dispatching matcher. No-op here.
+        | EffectKind::RedistributeLifeTotals
+        | EffectKind::ReverseTurnOrder
         | EffectKind::OpenAttractions
         | EffectKind::RollToVisitAttractions
         | EffectKind::ProcessRadCounters
         | EffectKind::GrantCastingPermission
         | EffectKind::ChooseFromZone
+        | EffectKind::RememberCard
         | EffectKind::ChooseObjectsIntoTrackedSet
+        // CR 608.2d + CR 122.1: counter-kind choice / consume — the actual
+        // counter placement fires `GameEvent::CounterAdded`, so no matcher
+        // dispatches on these `EffectResolved` kinds directly.
+        | EffectKind::ChooseCounterKind
+        | EffectKind::PutChosenCounter
         | EffectKind::ChooseAndSacrificeRest
+        | EffectKind::EachPlayerCopyChosen
         | EffectKind::Exploit
         | EffectKind::GainEnergy
         | EffectKind::GivePlayerCounter
@@ -873,11 +929,16 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SetDayNight
         | EffectKind::GiveControl
         | EffectKind::RemoveFromCombat
+        // CR 509.3c: the "becomes blocked" trigger from an effect-block is keyed
+        // off the `AttackerBecameBlockedByEffect` GameEvent (see the event→key
+        // map above), not off `EffectResolved`, so this kind emits no key here.
+        | EffectKind::BecomeBlocked
         | EffectKind::Conjure
         | EffectKind::Intensify
         | EffectKind::ApplyPerpetual
         | EffectKind::DraftFromSpellbook
         | EffectKind::ChooseOneOf
+        | EffectKind::ChooseCounterAdjustment
         | EffectKind::Specialize
         | EffectKind::Unimplemented
         | EffectKind::Crew
@@ -888,7 +949,17 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // action; its own `EffectResolved` dispatches no trigger key.
         | EffectKind::BecomeSaddled
         | EffectKind::Transform
+        // No printed flip card has a trigger that fires on flipping (a design
+        // fact about the card pool, not a CR statement), so — mirroring
+        // `Transform` above — this effect's `EffectResolved` dispatches no key;
+        // `GameEvent::Flipped` is a log/display notification and dispatches no
+        // key either.
+        | EffectKind::FlipPermanent
         | EffectKind::TurnFaceUp
+        // CR 701.27b: a turned-face-down permanent fires any face-down trigger
+        // via the dedicated `GameEvent::TurnedFaceDown`, not via this effect's
+        // `EffectResolved`. No-op here, mirroring `TurnFaceUp`.
+        | EffectKind::TurnFaceDown
         // Added on origin/main after this branch point. No production
         // EffectResolved-dispatching matcher consumes either: cast-copy fires
         // on cast events (CastCopyOfCard, Mizzix's Mastery), and life/P-T
@@ -947,8 +1018,12 @@ pub fn reindex_object_triggers(state: &mut GameState, object_id: ObjectId) {
         state.trigger_index.remove(object_id);
         return;
     }
-    let defs: SmallVec<[TriggerDefinition; 4]> =
-        obj.trigger_definitions.as_slice().iter().cloned().collect();
+    let defs: SmallVec<[TriggerDefinition; 4]> = obj
+        .trigger_definitions
+        .as_slice()
+        .iter()
+        .map(|entry| entry.definition.clone())
+        .collect();
     let synthetic = has_synthetic_keyword_trigger_for(obj);
     state.trigger_index.remove(object_id);
     state.trigger_index.add(object_id, &defs, synthetic);
@@ -1021,10 +1096,29 @@ impl TriggerIndex {
                 // matcher gating in `active_trigger_definitions` runs at
                 // consult time — classification can register on the full set.
                 let synthetic = has_synthetic_keyword_trigger_for(obj);
-                fresh.add(obj_id, obj.trigger_definitions.as_slice(), synthetic);
+                let defs: SmallVec<[TriggerDefinition; 4]> = obj
+                    .trigger_definitions
+                    .as_slice()
+                    .iter()
+                    .map(|entry| entry.definition.clone())
+                    .collect();
+                fresh.add(obj_id, &defs, synthetic);
             }
         }
         state.trigger_index = fresh;
+    }
+}
+
+/// CR 603.2 + CR 611.2e: Ensure the serde-skipped candidate index is available
+/// before a consult. The layer pipeline remains the authoritative rebuild path
+/// for live granted and removed definitions; this only restores the empty
+/// derived index after deserialize when battlefield state is already present.
+pub fn ensure_ready(state: &mut GameState) {
+    if state.trigger_index.by_key.is_empty()
+        && state.trigger_index.unclassified.is_empty()
+        && !state.battlefield.is_empty()
+    {
+        TriggerIndex::rebuild_from_battlefield(state);
     }
 }
 
@@ -1065,9 +1159,12 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::GameObject;
     use crate::types::ability::{TargetFilter, TypedFilter};
     use crate::types::game_state::ZoneChangeRecord;
-    use crate::types::triggers::TriggerEventKey;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+    use crate::types::triggers::{TriggerEventKey, TriggerMode};
 
     fn etb_creature_def() -> TriggerDefinition {
         TriggerDefinition::new(TriggerMode::ChangesZone)
@@ -1196,5 +1293,120 @@ mod tests {
 
         let candidates = candidates_for_event(&state, &event);
         assert!(candidates.contains(&watcher));
+    }
+
+    #[test]
+    fn rebuild_preserves_materialized_trigger_occurrence_refs() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(77);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(77),
+            PlayerId(0),
+            "Indexed Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions = std::sync::Arc::new(vec![etb_creature_def()]);
+        object.materialize_base_trigger_definitions();
+        let before = object.trigger_definition_ref(&object.trigger_definitions[0]);
+        state.objects.insert(object_id, object);
+        state.battlefield.push_back(object_id);
+
+        TriggerIndex::rebuild_from_battlefield(&mut state);
+
+        let object = &state.objects[&object_id];
+        assert_eq!(
+            before,
+            object.trigger_definition_ref(&object.trigger_definitions[0]),
+            "index rebuild is classification-only and must not reallocate trigger identity"
+        );
+    }
+
+    #[test]
+    fn ensure_ready_rebuilds_deserialized_taps_for_mana_index() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(78);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(78),
+            PlayerId(0),
+            "Deserialized Mana Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions =
+            std::sync::Arc::new(vec![TriggerDefinition::new(TriggerMode::TapsForMana)]);
+        object.materialize_base_trigger_definitions();
+        state.objects.insert(object_id, object);
+        state.battlefield.push_back(object_id);
+
+        let serialized = serde_json::to_value(&state).expect("state serializes");
+        let mut restored: GameState = serde_json::from_value(serialized).expect("state restores");
+        assert!(restored.trigger_index.by_key.is_empty());
+        assert!(restored.trigger_index.unclassified.is_empty());
+
+        ensure_ready(&mut restored);
+
+        let event = GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: ObjectId(79),
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: crate::types::events::ManaTapState::FromTap,
+        };
+        assert_eq!(
+            candidates_for_event(&restored, &event).as_slice(),
+            &[object_id],
+            "the first post-deserialize inline-mana consult must restore its candidate"
+        );
+    }
+
+    #[test]
+    fn tapped_for_mana_candidates_exclude_irrelevant_battlefield_objects() {
+        let mut state = GameState::new_two_player(42);
+        for id in 0..64 {
+            let object_id = ObjectId(id);
+            state.objects.insert(
+                object_id,
+                GameObject::new(
+                    object_id,
+                    CardId(id),
+                    PlayerId(0),
+                    format!("Irrelevant {id}"),
+                    Zone::Battlefield,
+                ),
+            );
+            state.battlefield.push_back(object_id);
+        }
+        let relevant = [ObjectId(100), ObjectId(101)];
+        for object_id in relevant {
+            let mut object = GameObject::new(
+                object_id,
+                CardId(object_id.0),
+                PlayerId(0),
+                format!("Mana Trigger {}", object_id.0),
+                Zone::Battlefield,
+            );
+            object.base_trigger_definitions =
+                std::sync::Arc::new(vec![TriggerDefinition::new(TriggerMode::TapsForMana)]);
+            object.materialize_base_trigger_definitions();
+            state.objects.insert(object_id, object);
+            state.battlefield.push_back(object_id);
+        }
+        TriggerIndex::rebuild_from_battlefield(&mut state);
+
+        let event = GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: ObjectId(999),
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: crate::types::events::ManaTapState::FromTap,
+        };
+        let candidates = candidates_for_event(&state, &event);
+
+        assert_eq!(state.battlefield.len(), 66);
+        assert_eq!(candidates.as_slice(), &relevant);
+        assert_eq!(
+            candidates.len(),
+            2,
+            "only TapsForMana candidates are visited"
+        );
     }
 }

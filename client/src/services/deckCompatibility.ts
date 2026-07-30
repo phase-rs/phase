@@ -55,6 +55,7 @@ interface DeckCompatibilityRequest {
   scheme_deck: string[];
   /** Oathbreaker RC: signature spell card name (empty for non-Oathbreaker formats). */
   signature_spell: string[];
+  companion: string[];
   selected_format?: GameFormat | null;
   selected_match_type?: MatchType | null;
   player_count?: number;
@@ -93,6 +94,7 @@ function compatibilityCacheKey(request: DeckCompatibilityRequest): string {
     planar_deck: request.planar_deck,
     scheme_deck: request.scheme_deck,
     signature_spell: request.signature_spell,
+    companion: request.companion,
     selected_format: request.selected_format ?? null,
     selected_match_type: request.selected_match_type ?? null,
     player_count: request.player_count ?? 2,

@@ -147,7 +147,7 @@ fn issue_3260_phantasmal_image_copy_of_kitchen_finks_persists() {
             .iter()
             .any(|trigger| {
                 engine::database::synthesis::KeywordTriggerInstaller::trigger_matches_keyword_kind(
-                    trigger,
+                    trigger.definition(),
                     &engine::types::keywords::Keyword::Persist,
                 )
             }),

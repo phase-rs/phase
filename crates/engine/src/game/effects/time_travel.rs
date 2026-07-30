@@ -67,6 +67,7 @@ pub(crate) fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::TimeTravel,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }

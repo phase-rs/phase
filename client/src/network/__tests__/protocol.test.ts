@@ -1,20 +1,81 @@
 import { describe, it, expect } from "vitest";
 
-import type { GameState } from "../../adapter/types";
+import type { EndContinuousEffectOffer } from "../../adapter/types";
+import { buildGameState } from "../../test/factories/gameStateFactory";
 import {
   WIRE_PROTOCOL_VERSION,
   decodeWireMessage,
   encodeWireMessage,
+  legalActionsFromWire,
   validateMessage,
 } from "../protocol";
 import type { P2PMessage } from "../protocol";
 
+const viewerInteractionWithProducedMana = {
+  waitingForKind: { simultaneous: null, terminal: false, code: "choose" },
+  authorizedSubmitters: [1],
+  canSubmit: true,
+  autoPassRecommended: false,
+  opportunities: [{
+    interactionId: "interaction-1",
+    response: {
+      type: "exactChoices",
+      data: { choices: [{
+        id: "choice-1",
+        status: { type: "available" },
+        surfaces: [
+          { type: "action", data: { code: "tapLandForMana", actionId: "action-1" } },
+          { type: "mana", data: { role: "producedMana", index: 0, symbols: ["G"], restrictions: [] } },
+        ],
+      }] },
+    },
+    surfaces: [],
+    progress: { selected: 0, minimum: 1, maximum: 1, aggregate: null, confirmable: false },
+  }],
+  availability: { type: "inputRequired" },
+} as never;
+
 describe("encodeWireMessage / decodeWireMessage", () => {
+  it("pins the P2P wire protocol to v17", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(17);
+  });
+
+  it("defaults shortcut actions for a legacy payload created before the additive field", () => {
+    expect(legalActionsFromWire({ legalActions: [] }).manaPaymentShortcutActions).toEqual([]);
+  });
+
+  it("preserves the engine-authored pay-to-end offer order and display payload", () => {
+    const first: EndContinuousEffectOffer = {
+      type: "EndContinuousEffect",
+      data: {
+        group: 8,
+        source_name: "Calming Licid",
+        cost: { type: "Cost", shards: ["W"], generic: 0 },
+      },
+    };
+    const second: EndContinuousEffectOffer = {
+      type: "EndContinuousEffect",
+      data: {
+        group: 13,
+        source_name: "Convulsing Licid",
+        cost: { type: "Cost", shards: ["R"], generic: 0 },
+      },
+    };
+
+    expect(
+      legalActionsFromWire({
+        legalActions: [first, second],
+        endContinuousEffectOffers: [second, first],
+      }).endContinuousEffectOffers,
+    ).toEqual([second, first]);
+  });
+
   // (a) Round-trip across P2PMessage variants.
   const variants: P2PMessage[] = [
     { type: "ping", timestamp: 12345 },
     { type: "pong", timestamp: 12345 },
     { type: "concede" },
+    { type: "match_concede" },
     { type: "disconnect", reason: "Page closed" },
     { type: "kick", reason: "Removed" },
     { type: "host_left", reason: "Host left" },
@@ -29,6 +90,8 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     { type: "reconnect", playerToken: "token-123" },
     { type: "reconnect_rejected", reason: "Unknown token" },
     { type: "action_rejected", reason: "Player kicked" },
+    { type: "mana_payment_preview", requestId: 4, sourceIds: [12] },
+    { type: "mana_payment_preview_rejected", requestId: 4, reason: "Not your turn" },
     {
       type: "action",
       senderPlayerId: 0,
@@ -37,23 +100,79 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     {
       type: "action",
       senderPlayerId: 0,
+      action: {
+        type: "SetPriorityPassingMode",
+        data: { mode: "SkipLowUseWindows" },
+      },
+    },
+    {
+      type: "action",
+      senderPlayerId: 0,
       action: { type: "TapForConvoke", data: { object_id: 42, mana_type: "Green" } },
+    },
+    {
+      type: "preview_mana_payment",
+      requestId: 4,
+      action: { type: "PassPriority" },
+    },
+    {
+      type: "action",
+      senderPlayerId: 0,
+      action: { type: "ChooseMeldPair", data: { source_id: 42, partner_id: 43 } },
+    },
+    {
+      type: "action",
+      senderPlayerId: 0,
+      action: {
+        type: "ChooseEntryAttackTarget",
+        data: { target: { type: "Battle", data: 44 } },
+      },
     },
     {
       type: "game_setup",
       wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       assignedPlayerId: 1,
       playerToken: "token-123",
-      state: { derived: { planechase: { can_roll: true } } } as unknown as GameState,
+      state: buildGameState({
+        priority_passing_modes: { 1: "SkipLowUseWindows" },
+        derived: {
+          planechase: {
+            can_roll: true,
+            current_roll_cost: { type: "NoCost" },
+            planar_deck_count: 1,
+          },
+        },
+      }),
       events: [],
       legalActions: [{ type: "RollPlanarDie" }],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    },
+    {
+      type: "state_update",
+      state: buildGameState(),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
     },
     {
       type: "reconnect_ack",
       wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       assignedPlayerId: 1,
-      state: { derived: { planechase: { active_plane: 7 } } } as unknown as GameState,
+      state: buildGameState({
+        derived: {
+          planechase: {
+            active_plane: 7,
+            can_roll: false,
+            current_roll_cost: { type: "NoCost" },
+            planar_deck_count: 1,
+          },
+        },
+      }),
       legalActions: [{ type: "RollPlanarDie" }],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
     },
   ];
 
@@ -97,12 +216,13 @@ describe("encodeWireMessage / decodeWireMessage", () => {
   it("rejects stale setup wire protocol versions", () => {
     expect(() => validateMessage({
       type: "game_setup",
-      wireProtocolVersion: 3,
+      wireProtocolVersion: 4,
       assignedPlayerId: 1,
       playerToken: "token-123",
-      state: {} as GameState,
+      state: buildGameState(),
       events: [],
       legalActions: [],
+      manaPaymentShortcutActions: [],
     })).toThrow(/Wire protocol mismatch/);
   });
 
@@ -131,5 +251,9 @@ describe("validateMessage", () => {
   });
   it("rejects unknown type", () => {
     expect(() => validateMessage({ type: "nope" })).toThrow(/Invalid message type/);
+  });
+
+  it("rejects raw unbound match concessions", () => {
+    expect(() => validateMessage({ type: "concede_match" })).toThrow(/Invalid message type/);
   });
 });

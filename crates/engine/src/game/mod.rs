@@ -1,3 +1,5 @@
+pub mod ability_rw;
+pub mod ability_scan;
 pub mod ability_utils;
 pub mod arithmetic;
 pub mod attractions;
@@ -32,6 +34,7 @@ mod contraptions_tests;
 pub mod cost_payability;
 pub(crate) mod costs;
 pub mod coverage;
+pub mod crew_payment;
 pub mod dash;
 #[cfg(test)]
 #[path = "dash_tests.rs"]
@@ -56,12 +59,17 @@ pub(crate) mod engine_replacement;
 pub(crate) mod engine_resolution_choices;
 pub mod engine_resolve_batch;
 pub(crate) mod engine_stack;
+// CR 116.2c: the "pay a cost to end a continuous effect" special action.
+pub mod end_continuous_effect;
 pub(crate) mod exile_links;
 pub mod filter;
+// CR 710: Kamigawa flip cards (flipping, alternative-face application).
+pub mod flip;
 pub mod functioning_abilities;
 pub mod game_object;
 pub mod gap_analysis;
 pub mod haunt;
+pub mod interaction;
 // Tests for `haunt` live in a sibling file (declared here, not in `haunt.rs`,
 // so `haunt.rs` stays implementation-only).
 #[cfg(test)]
@@ -69,6 +77,8 @@ pub mod haunt;
 mod haunt_tests;
 pub mod keywords;
 pub mod layers;
+pub mod ledger;
+pub mod library;
 pub mod life_costs;
 pub mod log;
 pub mod mana_abilities;
@@ -85,6 +95,9 @@ mod marksman_tests;
 #[path = "meld_tests.rs"]
 mod meld_tests;
 pub mod merge;
+#[cfg(test)]
+#[path = "omnath_tests.rs"]
+mod omnath_tests;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
 pub mod archenemy;
@@ -99,6 +112,7 @@ mod conspiracy_tests;
 mod merge_tests;
 pub mod morph;
 pub mod mulligan;
+pub mod object_state;
 pub(crate) mod off_zone_characteristics;
 pub mod pairing;
 pub mod perf_counters;
@@ -119,16 +133,23 @@ pub mod planechase;
 mod planechase_tests;
 pub mod planeswalker;
 pub mod players;
+pub(crate) mod precast_copy_shortcut;
+pub use precast_copy_shortcut::normalize_untrusted_restore;
+pub use precast_copy_shortcut::rekey_after_trusted_restore;
+pub mod preview;
 pub mod printed_cards;
 pub mod priority;
 pub mod public_state;
 pub mod quantity;
 pub mod replacement;
+pub mod replay;
 pub mod restrictions;
 pub mod room;
 pub(crate) mod sacrifice;
 pub mod sba;
+#[cfg(any(test, feature = "test-support"))]
 pub mod scenario;
+#[cfg(any(test, feature = "test-support"))]
 pub mod scenario_db;
 pub mod specialize;
 pub mod speed;
@@ -153,7 +174,13 @@ pub mod turn_control;
 pub mod turns;
 pub mod visibility;
 pub mod zone_pipeline;
+// Zone-mutation primitives. Production code outside the engine crate must go
+// through zone_pipeline::move_object — the module is only public to test
+// builds (feature "test-support") so integration tests can place objects.
+#[cfg(any(test, feature = "test-support"))]
 pub mod zones;
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) mod zones;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures;
@@ -162,16 +189,23 @@ pub use bracket_estimate::{
     estimate_bracket, BracketAxis, BracketAxisCounts, BracketContributingCards, BracketEstimate,
     BracketViolation, CommanderBracketTier,
 };
+// Plumbing: read-only re-export of the X-affordability authority
+// (`max_x_value`) so the `phase-ai` consumer crate can price "the only legal X
+// is 0" without duplicating the cost machinery. `casting_costs` is otherwise
+// `pub(crate)`; this exposes exactly that one function from it. The governing
+// rule annotation lives on the function definition in `casting_costs.rs`, not
+// on this visibility re-export.
+pub use casting_costs::max_x_value;
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
 };
 pub use deck_validation::{
-    can_pair_commanders, deck_copy_limit_for, evaluate_deck_compatibility,
-    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
-    validate_deck_for_format, validate_name_deck_for_format, validate_name_deck_for_format_full,
-    CompatibilityCheck, DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage,
-    UnsupportedCard,
+    can_pair_commanders, companion_candidates, deck_copy_limit_for, evaluate_deck_compatibility,
+    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible, max_deck_copies,
+    signature_spell_selection_policy, validate_deck_for_format, validate_name_deck_for_format,
+    validate_name_deck_for_format_full, CompatibilityCheck, DeckCompatibilityRequest,
+    DeckCompatibilityResult, DeckCoverage, SignatureSpellSelectionPolicy, UnsupportedCard,
 };
 pub use engine::{
     apply, apply_as_current, new_game, start_game, start_game_skip_mulligan,
@@ -186,9 +220,7 @@ pub use keywords::parse_keywords;
 pub use mana_payment::{can_pay, pay_from_pool, produce_mana, PaymentError};
 pub use printed_cards::rehydrate_game_from_card_db;
 pub use public_state::finalize_public_state;
+pub use replay::{reconstruct_initial_state, ReplayError, ReplayPlayer};
 pub use triggers::process_triggers;
-pub use visibility::filter_state_for_viewer;
-pub use zones::{
-    add_to_zone, create_object, move_to_library_at_index, move_to_library_position, move_to_zone,
-    remove_from_zone,
-};
+pub use visibility::{filter_events_for_viewer, filter_state_for_viewer};
+pub use zones::create_object;

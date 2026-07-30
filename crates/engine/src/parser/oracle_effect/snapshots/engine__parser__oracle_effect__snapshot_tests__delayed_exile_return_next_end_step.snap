@@ -1,5 +1,5 @@
 ---
-source: crates/engine/src/parser/oracle_effect/mod.rs
+source: crates/engine/src/parser/oracle_effect/snapshot_tests.rs
 expression: def
 ---
 {
@@ -52,8 +52,7 @@ expression: def
         "condition": null,
         "optional_targeting": false,
         "optional": false,
-        "forward_result": false,
-        "sub_link": "SequentialSibling"
+        "forward_result": false
       },
       "uses_tracked_set": true
     },
@@ -65,7 +64,8 @@ expression: def
     "condition": null,
     "optional_targeting": false,
     "optional": false,
-    "forward_result": false
+    "forward_result": false,
+    "sub_link": "SequentialSibling"
   },
   "duration": null,
   "description": null,

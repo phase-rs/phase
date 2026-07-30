@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 import type { CardType } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 
@@ -48,9 +50,28 @@ export function CardTextboxPreview({
   cardName: string;
   cardTypes?: CardType;
 }) {
-  const { src } = useCardImage(cardName, { size: "normal" });
+  const { src, isLoading } = useCardImage(cardName, { size: "normal" });
+  const [artError, setArtError] = useState(false);
+  useEffect(() => setArtError(false), [src]);
 
-  if (!src) return null;
+  // Still resolving — stay absent rather than flash a band into the modal.
+  if (isLoading) return null;
+
+  // Settled with no art (issue #6156), or the art 404'd. Returning null here
+  // erased the card-identification band from the decision modals that host
+  // this (ChoiceModal, PermanentTypeSlotModal, AlternativeCostModal) for
+  // exactly the cards whose identity is hardest to infer. Name it instead.
+  if (!src || artError) {
+    return (
+      <div
+        className="flex w-full items-center justify-center overflow-hidden rounded-[10px] border border-white/10 bg-black/40 px-3 py-2 shadow-inner"
+        role="img"
+        aria-label={cardName}
+      >
+        <span className="truncate text-xs font-medium text-gray-300">{cardName}</span>
+      </div>
+    );
+  }
 
   const { top, bottom } = bandFor(cardTypes);
 
@@ -63,6 +84,7 @@ export function CardTextboxPreview({
         src={src}
         alt=""
         draggable={false}
+        onError={() => setArtError(true)}
         className="absolute inset-x-0 top-0 w-full"
         style={{ transform: `translateY(-${top * 100}%)` }}
       />

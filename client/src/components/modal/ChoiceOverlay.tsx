@@ -28,10 +28,10 @@ export function ChoiceOverlay({
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col px-0 py-0 lg:items-center lg:justify-center lg:px-4 lg:py-6">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+      <div className="absolute inset-0 bg-black/68" />
       <div className={`relative flex h-full flex-col lg:h-auto lg:max-h-[calc(100vh_-_3rem)] ${widthClassName} ${maxWidthClassName}`}>
         <motion.div
-          className="card-scale-reset relative flex h-full min-h-0 flex-col overflow-hidden border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md lg:h-auto lg:rounded-[28px] lg:border"
+          className="card-scale-reset relative flex h-full min-h-0 flex-col overflow-hidden border-white/10 bg-[#0b1020] shadow-[0_18px_48px_rgba(0,0,0,0.48)] lg:h-auto lg:rounded-[12px] lg:border"
           initial={{ opacity: 0, y: 18, scale: 0.98 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           transition={{ duration: 0.24, ease: "easeOut" }}
@@ -129,7 +129,7 @@ export function ScrollableCardStrip({
         {children}
       </div>
 
-      {/* Left scroll button — gradient is pointer-events-none so cards beneath remain clickable */}
+      {/* Left scroll affordance is pointer-events-none so cards beneath remain clickable. */}
       <AnimatePresence>
         {canScrollLeft && (
           <motion.div
@@ -137,11 +137,11 @@ export function ScrollableCardStrip({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            className="pointer-events-none absolute left-0 top-0 z-10 flex h-[calc(100%-8px)] w-14 items-center justify-center bg-gradient-to-r from-black/70 via-black/30 to-transparent lg:w-16"
+            className="pointer-events-none absolute left-0 top-0 z-10 flex h-[calc(100%-8px)] w-14 items-center justify-center bg-black/40 lg:w-16"
           >
             <button
               onClick={() => scroll(-1)}
-              className="pointer-events-auto rounded-full border border-white/20 bg-black/60 p-2 shadow-lg shadow-black/40 backdrop-blur-sm transition hover:bg-white/20 hover:shadow-xl"
+              className="pointer-events-auto rounded-[8px] border border-white/20 bg-slate-950/90 p-2 shadow-lg shadow-black/40 transition hover:bg-slate-900"
               aria-label={t("choiceOverlay.scrollLeft")}
             >
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-6 w-6 text-white">
@@ -160,11 +160,11 @@ export function ScrollableCardStrip({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            className="pointer-events-none absolute right-0 top-0 z-10 flex h-[calc(100%-8px)] w-14 items-center justify-center bg-gradient-to-l from-black/70 via-black/30 to-transparent lg:w-16"
+            className="pointer-events-none absolute right-0 top-0 z-10 flex h-[calc(100%-8px)] w-14 items-center justify-center bg-black/40 lg:w-16"
           >
             <button
               onClick={() => scroll(1)}
-              className="pointer-events-auto rounded-full border border-white/20 bg-black/60 p-2 shadow-lg shadow-black/40 backdrop-blur-sm transition hover:bg-white/20 hover:shadow-xl"
+              className="pointer-events-auto rounded-[8px] border border-white/20 bg-slate-950/90 p-2 shadow-lg shadow-black/40 transition hover:bg-slate-900"
               aria-label={t("choiceOverlay.scrollRight")}
             >
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-6 w-6 text-white">

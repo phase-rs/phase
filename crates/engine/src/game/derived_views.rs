@@ -12,15 +12,20 @@
 //! that composes those helpers into a client-ready shape.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::flatten_targets_in_chain;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
-use crate::game::stack::{stack_display_groups, StackDisplayGroup};
+use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
-    GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
-    TargetRef,
+    ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
+    RestrictionExpiry, RestrictionPlayerScope, TargetRef,
 };
+use crate::types::attribution::EffectRef;
+use crate::types::card::TokenImageRef;
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
@@ -28,10 +33,15 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
+use crate::types::layers::Layer;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 /// A single commander-damage badge the HUD renders: which victim received
 /// `damage` from `commander` (the ObjectId is stable across zone changes
@@ -73,9 +83,15 @@ pub struct TriggerContextDisplay {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackEntryDisplay {
     pub source_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_image_ref: Option<TokenImageRef>,
     pub kind_label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_mode_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_pending: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<StackTargetDisplay>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -132,6 +148,21 @@ pub struct PlayerStatusView {
     pub source: Option<ObjectId>,
 }
 
+/// One rendered `∞` HUD row: a detected/forced unbounded loop pumps `axis`, and
+/// the engine attributes the badge to `player` (the HUD it attaches to). `axis`
+/// is the engine-provided identity the frontend formats to a family label — the
+/// display layer never decides attribution or which axes are unbounded.
+///
+/// `player` is computed by [`attribution_player`] (NOT the raw producing
+/// controller): a payload-keyed axis (`Life(p)`/`DamageDealt(p)`/`LibraryDelta(p)`)
+/// routes to the player it names (the drain/mill victim or the lifegain/self-mill
+/// beneficiary), while aggregate axes route to the loop's controller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnboundedResourceView {
+    pub player: PlayerId,
+    pub axis: ResourceAxis,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanechaseView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,12 +184,83 @@ pub struct ArchenemyView {
     pub hero_player_ids: Vec<PlayerId>,
 }
 
+/// Display-only turn-order chip row. `turns_from_now == 0` is the current
+/// turn; `1` is the next actual turn that would begin; larger values count
+/// future turn starts after that. Duplicate players are intentional when an
+/// extra turn causes the same player to appear in adjacent slots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnOrderSlotView {
+    pub player: PlayerId,
+    pub slot_index: u8,
+    pub turns_from_now: u8,
+    /// One-based display position in the projected turn order. Kept here so
+    /// clients do not turn the engine's zero-based distance into an ordinal.
+    pub turn_number: u8,
+    /// Whether this row belongs to the viewing player. Clients consume this
+    /// display classification rather than comparing player IDs themselves.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_viewer: bool,
+    /// Whether this projected slot is the game's starting player. It is only
+    /// true while that player is also the current turn representative.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_starting_player: bool,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
 /// otherwise have to compute game logic (a CLAUDE.md violation).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedViews {
+    /// The sole player currently authorized to answer the live prompt. Omitted
+    /// when there is no actor or multiple distinct authorized submitters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unique_authorized_submitter: Option<PlayerId>,
+    /// The live (post-layer) keyword badges each battlefield permanent should
+    /// display. The engine classifies the complete keyword list so the client
+    /// can render the compact strip without reinterpreting keyword timing.
+    /// Keyed by object ID; absent when a permanent has no display-relevant
+    /// keyword.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
+
+    /// CR 509.1b + CR 611.2c: creatures with a live, temporary
+    /// `CantBeBlocked` grant. The optional value is the granting source only
+    /// while that source remains a public, phased-in battlefield object; `None`
+    /// retains the badge without exposing an unavailable source.
+    ///
+    /// Keyed by recipient ObjectId; absent when no such grant is active.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub temporary_cant_be_blocked: HashMap<ObjectId, Option<ObjectId>>,
+    /// CR 509.1g: public blocker-to-attacker relationships, flattened as
+    /// `(blocker, attacker)` pairs for combat-line rendering. This is sorted
+    /// deterministically so equivalent combat states have stable wire output.
+    /// The filtered-view projection is explicitly derived from authoritative
+    /// combat state because a transport filter may clear raw combat details.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocker_assignment_pairs: Vec<(ObjectId, ObjectId)>,
+
+    /// CR 613.2a + CR 707.2: battlefield permanents whose copiable values are
+    /// currently supplied by a copy effect (Layer 1a) — Clone, Phantasmal
+    /// Image, Vesuvan Doppelganger, and every "enters as a copy" permanent.
+    ///
+    /// Such a permanent renders pixel-identical to what it copied (the copy
+    /// effect overrides `printed_ref`, so even image lookup follows the copied
+    /// card), leaving the player unable to tell the copy from the original on
+    /// the board. Nothing already serialized distinguishes them: `is_copy`
+    /// means "not represented by a card" (CR 707.10) and is cleared once a copy
+    /// resolves onto the battlefield, and the copy modification lives on a
+    /// transient continuous effect rather than the object. So the engine
+    /// classifies it here rather than leaving the client to infer it.
+    ///
+    /// CR 708.2: face-down permanents are excluded — their characteristics are
+    /// only those the face-down rules grant, so surfacing "copy" on one would
+    /// leak hidden information.
+    ///
+    /// Sorted for stable serialization; absent when nothing is a copy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copied_permanents: Vec<ObjectId>,
+
     /// Commander damage grouped by the attacking commander's current
     /// controller. Each inner entry preserves per-commander identity so
     /// partner commanders under one controller render as separate badges.
@@ -231,6 +333,52 @@ pub struct DerivedViews {
     /// zone objects or recomputing side membership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archenemy: Option<ArchenemyView>,
+
+    /// CR 101.4 + CR 103.1 + CR 500.7 + CR 614.10 + CR 805.4: Compact
+    /// multiplayer turn-order slots. Empty for one-on-one games because the
+    /// existing active-player ring is sufficient; populated by engine-owned
+    /// projection so the frontend never computes extra/skipped/controlled turn
+    /// order from raw state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turn_order: Vec<TurnOrderSlotView>,
+
+    /// One-based projected turn position for the viewing player. This keeps
+    /// player-specific turn-order interpretation in the engine while allowing
+    /// the client to render "You take turn N" directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_turn_number: Option<u8>,
+
+    /// CR 732.2a: the `∞` HUD rows — one per (attributed player, pumped axis) of
+    /// every unbounded-resource loop in `GameState::unbounded_resources`. The
+    /// engine decides both the axis identity and the player attribution
+    /// ([`attribution_player`]); the frontend only formats each axis to a display
+    /// family. Empty (and omitted) in the dominant case where no loop is active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unbounded_resources: Vec<UnboundedResourceView>,
+
+    /// CR 732.2a / CR 110.1: the battlefield objects forming an accepted
+    /// object-growth loop's "∞ pile" — the winning controller's tapped fodder-class
+    /// members (projected from `GameState::unbounded_loop_pile`, filtered to objects
+    /// still on the battlefield). A per-object membership channel mirroring
+    /// `battlefield_keyword_badges`: the frontend renders `∞` (not `×N`) on any
+    /// battlefield group whose members are all in this set. Public board state — no
+    /// viewer filtering. Empty (and omitted) when no object-growth loop is active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unbounded_pile: Vec<ObjectId>,
+
+    /// CR 732.2a / CR 701.34a: the per-object `∞` COUNTER channel — for each
+    /// battlefield object, the counter types whose preserved `Generic` counters an
+    /// accepted counter-growth loop (proliferate charge on Pentad Prism, burden on
+    /// The One Ring) pumps unboundedly (projected from
+    /// `GameState::unbounded_counter_targets`, filtered to objects still on the
+    /// battlefield). The counter analog of `unbounded_pile`: object-growth marks whole
+    /// objects, but a counter-growth loop's unbounded axis is object-agnostic, so this
+    /// keys the specific pumped counter so the frontend renders `∞` (not `×N`) on that
+    /// counter pill and nothing else. Keyed by ObjectId; DISPLAY-only (the real counter
+    /// count is unchanged). Public board state — no viewer filtering. Empty (and
+    /// omitted) when no counter-growth loop is active — the dominant case.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub unbounded_counters: HashMap<ObjectId, Vec<CounterType>>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -244,13 +392,27 @@ pub struct ClientGameStateRef<'a> {
 }
 
 impl<'a> ClientGameStateRef<'a> {
-    /// Wrap a borrowed `GameState` with its derived projections.
-    /// Invoke AFTER any viewer-side filtering (e.g. `filter_state_for_player`)
-    /// so the derived shape reflects what the viewer will actually see.
+    /// Wrap an unfiltered borrowed `GameState` with its derived projections.
+    /// Viewer-filtered paths must use [`Self::wrap_filtered`] so redaction cannot
+    /// erase an authoritative decision projection.
     pub fn wrap(state: &'a GameState, viewer: Option<PlayerId>) -> Self {
         Self {
             state,
             derived: derive_views(state, viewer),
+        }
+    }
+
+    /// Wrap a viewer-filtered state while deriving rules-authoritative fields
+    /// from the pre-filter state. Filtering may redact control/session records;
+    /// it must not change who can submit the current decision.
+    pub fn wrap_filtered(
+        authoritative_state: &GameState,
+        filtered_state: &'a GameState,
+        viewer: Option<PlayerId>,
+    ) -> Self {
+        Self {
+            state: filtered_state,
+            derived: derive_filtered_views(authoritative_state, filtered_state, viewer),
         }
     }
 }
@@ -339,8 +501,97 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
     ))
 }
 
+/// CR 613.2a + CR 707.2: true when a live copy effect is currently supplying
+/// `object_id`'s copiable values.
+///
+/// A copy of a permanent is expressed as a transient continuous effect carrying
+/// `ContinuousModification::CopyValues`, applied in Layer 1a — never as a flag
+/// on the object — so membership is decided by asking the same question the
+/// layer engine asks: does this effect's `affected` filter match the object?
+/// Reusing `matches_target_filter` (rather than special-casing the
+/// `SpecificObject` filter copy effects usually carry) keeps the projection
+/// correct for any filter shape a future copy effect might use.
+fn object_has_copy_effect(state: &GameState, object_id: ObjectId) -> bool {
+    let merge_layer_effect_id = state
+        .objects
+        .get(&object_id)
+        .and_then(|object| object.merge_layer_effect_id);
+
+    state.transient_continuous_effects.iter().any(|effect| {
+        // A lapsed effect stays stored until it is swept, so "is it in the list"
+        // is not the same question as "is it applying". Zygon Infiltrator's copy
+        // ends the instant its target untaps while the effect remains stored —
+        // badging that permanent would claim a copy the layer engine has already
+        // stopped applying. Gated on the layer engine's own predicate so the two
+        // cannot drift apart.
+        crate::game::layers::transient_effect_is_live(state, effect)
+            // CR 730.2a: merge uses a private Layer 1 `CopyValues` effect to
+            // represent its top component, but a merged permanent is not a
+            // copy. Exclude only that recorded representation: a merged object
+            // may still acquire an independent copy effect.
+            && Some(effect.id) != merge_layer_effect_id
+            && effect
+                .modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::CopyValues { .. }))
+            && matches_target_filter(
+                state,
+                object_id,
+                &effect.affected,
+                &FilterContext::from_source(state, effect.source_id),
+            )
+    })
+}
+
+/// CR 509.1b + CR 611.2c + CR 613.1f: return the public source for the first
+/// live, until-end-of-turn `CantBeBlocked` modification attributed to this
+/// recipient in the current ability layer. `Some(None)` means the grant is
+/// active but its source is no longer a public, phased-in battlefield object.
+///
+/// Attribution is the layer engine's authoritative record of modifications
+/// that actually applied. Reading its indexed `EffectRef` avoids re-scanning
+/// raw effect filters, which could disagree with the resolved layer recipient.
+fn temporary_cant_be_blocked_source(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<Option<ObjectId>> {
+    let effects = state
+        .attribution
+        .get(&object_id)?
+        .by_layer
+        .get(&Layer::Ability)?;
+    effects.iter().find_map(|effect_ref| {
+        let EffectRef::Transient { id, mod_index } = effect_ref else {
+            return None;
+        };
+        let effect = state
+            .transient_continuous_effects
+            .iter()
+            .find(|effect| effect.id == *id)?;
+        (effect.duration == Duration::UntilEndOfTurn
+            && crate::game::layers::transient_effect_is_live(state, effect)
+            && matches!(
+                effect.modifications.get(*mod_index),
+                Some(ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeBlocked
+                })
+            ))
+        .then(|| {
+            state
+                .objects
+                .get(&effect.source_id)
+                .filter(|source| source.zone == Zone::Battlefield && source.is_phased_in())
+                .map(|_| effect.source_id)
+        })
+    })
+}
+
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
-    let mut views = DerivedViews::default();
+    let mut views = DerivedViews {
+        unique_authorized_submitter: unique_authorized_submitter(state),
+        blocker_assignment_pairs: blocker_assignment_pairs(state),
+        ..DerivedViews::default()
+    };
 
     // JIT short-circuit: grouping an empty stack is free, but this also
     // avoids the per-entry allocation path entirely for the dominant case
@@ -364,6 +615,26 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         if obj.zone != Zone::Battlefield {
             continue;
         }
+        let badges: Vec<Keyword> = obj
+            .keywords
+            .iter()
+            .filter(|keyword| keyword.is_battlefield_display_relevant())
+            .cloned()
+            .collect();
+        if !badges.is_empty() {
+            views.battlefield_keyword_badges.insert(obj_id, badges);
+        }
+        if let Some(source_id) = temporary_cant_be_blocked_source(state, obj_id) {
+            views.temporary_cant_be_blocked.insert(obj_id, source_id);
+        }
+        // CR 613.2a + CR 707.2 / CR 708.2: see `copied_permanents`. Matched
+        // through the same `matches_target_filter` the layer engine uses to
+        // pick a continuous effect's recipients, so this projection and the
+        // effect that actually rewrote the object's characteristics can never
+        // disagree about who is a copy.
+        if !obj.face_down && object_has_copy_effect(state, obj_id) {
+            views.copied_permanents.push(obj_id);
+        }
         if let Some(AttachTarget::Player(host)) = obj.attached_to {
             views
                 .auras_attached_to_player
@@ -372,6 +643,11 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
                 .push(obj_id);
         }
     }
+    // Collected in `state.battlefield` order above, which reorders as permanents
+    // enter and leave; sort so the serialized payload depends only on WHICH
+    // permanents are copies, not on battlefield churn that never changed the
+    // answer.
+    views.copied_permanents.sort_unstable();
 
     // CR 702.188a + 604.1: viewer-scoped web-slinging costs (own hand only → leak-proof).
     if let Some(viewer) = viewer {
@@ -442,6 +718,54 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // Commander short-circuit below).
     views.player_status = player_status_views(state);
 
+    let (turn_order, viewer_turn_number) = turn_order_views(state, viewer);
+    views.turn_order = turn_order;
+    views.viewer_turn_number = viewer_turn_number;
+
+    // CR 732.2a: project every unbounded-resource loop into per-(player, axis)
+    // `∞` HUD rows. Runs in every format (placed BEFORE the Commander
+    // short-circuit below) and stays empty (field omitted) when no loop is
+    // active — the dominant case. The engine owns attribution
+    // (`attribution_player`); the frontend only formats each axis to a family.
+    for (&controller, axes) in &state.unbounded_resources {
+        for &axis in axes {
+            views.unbounded_resources.push(UnboundedResourceView {
+                player: attribution_player(axis, controller),
+                axis,
+            });
+        }
+    }
+
+    // CR 732.2a / CR 110.1: project the accepted object-growth loop's ∞ pile — the
+    // winning controller's tapped fodder-class members — dropping any that have since
+    // left the battlefield (stale member). Public board state (no viewer filtering);
+    // the frontend renders `∞` on any group whose members are all pile members.
+    for ids in state.unbounded_loop_pile.values() {
+        for id in ids {
+            if state.battlefield.contains(id) {
+                views.unbounded_pile.push(*id);
+            }
+        }
+    }
+
+    // CR 732.2a / CR 701.34a: project the accepted counter-growth loop's per-object ∞
+    // counter targets — the objects whose PRESERVED Generic counters (charge / burden)
+    // the certified-unbounded loop pumps each cycle — dropping any that have since left
+    // the battlefield (stale member). Display-only per-object channel mirroring
+    // `unbounded_pile`; the frontend renders `∞` (not `×N`) on any counter pill whose
+    // type is in this set. Runs in every format (BEFORE the Commander short-circuit).
+    for targets in state.unbounded_counter_targets.values() {
+        for (id, ct) in targets {
+            if state.battlefield.contains(id) {
+                views
+                    .unbounded_counters
+                    .entry(*id)
+                    .or_default()
+                    .push(ct.clone());
+            }
+        }
+    }
+
     if state.format_config.commander_damage_threshold.is_none() {
         return views;
     }
@@ -463,6 +787,152 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
     views
+}
+
+/// Derive a viewer-safe presentation from `filtered_state`, retaining only the
+/// decision-authority projection from the pre-filter rules state. This keeps
+/// rules state pure and makes repeated filtering idempotent.
+pub fn derive_filtered_views(
+    authoritative_state: &GameState,
+    filtered_state: &GameState,
+    viewer: Option<PlayerId>,
+) -> DerivedViews {
+    let mut views = derive_views(filtered_state, viewer);
+    views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    // CR 509.1g: blocking relationships are public information. Preserve this
+    // display projection even when a viewer-safe state intentionally omits raw
+    // combat records unrelated to rendering.
+    views.blocker_assignment_pairs = blocker_assignment_pairs(authoritative_state);
+    views
+}
+
+/// CR 509.1g: flatten each blocking creature's chosen attacking creatures into
+/// stable public display pairs. One blocker may legitimately appear more than
+/// once when an effect permits it to block multiple attackers.
+fn blocker_assignment_pairs(state: &GameState) -> Vec<(ObjectId, ObjectId)> {
+    let mut pairs = state
+        .combat
+        .as_ref()
+        .into_iter()
+        .flat_map(|combat| {
+            combat
+                .blocker_to_attacker
+                .iter()
+                .flat_map(|(&blocker, attackers)| {
+                    attackers
+                        .iter()
+                        .copied()
+                        .map(move |attacker| (blocker, attacker))
+                })
+        })
+        .filter(|&(blocker, attacker)| {
+            is_live_battlefield_object(state, blocker)
+                && is_live_battlefield_object(state, attacker)
+        })
+        .collect::<Vec<_>>();
+    pairs.sort_unstable();
+    pairs
+}
+
+fn is_live_battlefield_object(state: &GameState, object_id: ObjectId) -> bool {
+    state.battlefield.contains(&object_id)
+        && state
+            .objects
+            .get(&object_id)
+            .is_some_and(|object| object.zone == Zone::Battlefield)
+}
+
+fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
+    let mut submitters = crate::game::turn_control::authorized_submitters(state);
+    submitters.sort_unstable_by_key(|player| player.0);
+    submitters.dedup();
+    (submitters.len() == 1).then(|| submitters[0])
+}
+
+fn turn_order_views(
+    state: &GameState,
+    viewer: Option<PlayerId>,
+) -> (Vec<TurnOrderSlotView>, Option<u8>) {
+    let mut seen = BTreeSet::new();
+    let representatives: Vec<PlayerId> = state
+        .seat_order
+        .iter()
+        .copied()
+        .filter(|&player| crate::game::players::is_alive(state, player))
+        .filter_map(|player| {
+            let representative =
+                crate::game::topology::normalize_shared_turn_recipient(state, player);
+            seen.insert(representative).then_some(representative)
+        })
+        .collect();
+
+    if representatives.len() <= 2 {
+        return (Vec::new(), None);
+    }
+
+    let turn_order: Vec<_> = crate::game::turns::projected_turn_order(state, representatives.len())
+        .into_iter()
+        .enumerate()
+        .map(|(index, player)| {
+            let slot_index = index as u8;
+            TurnOrderSlotView {
+                player,
+                slot_index,
+                turns_from_now: slot_index,
+                turn_number: slot_index + 1,
+                is_viewer: viewer == Some(player),
+                is_starting_player: slot_index == 0 && player == state.current_starting_player,
+            }
+        })
+        .collect();
+    let viewer_turn_number = turn_order
+        .iter()
+        .find(|slot| slot.is_viewer)
+        .map(|slot| slot.turn_number);
+
+    (turn_order, viewer_turn_number)
+}
+
+/// CR 732.2a: which player's HUD a pumped `axis` belongs to, given the loop's
+/// `controller`. Exhaustive by design (no wildcard) — a new `ResourceAxis`
+/// variant must make a deliberate attribution choice here, never silently inherit
+/// a default.
+///
+/// A payload-keyed axis names the player it acts on, so the badge follows the
+/// payload, NOT permanent control:
+/// - CR 704.5a: `Life(p)` — a drain drives an opponent's life down (the win
+///   condition is the afflicted player reaching 0 life) and lifegain raises the
+///   controller's own; either way the badge belongs on `p`'s HUD.
+/// - CR 120: `DamageDealt(p)` — damage accrues to the player it is dealt to, so an
+///   opponent-burn loop shows `∞` on the victim's HUD.
+/// - CR 704.5b: `LibraryDelta(p)` — a mill drives an opponent's library toward the
+///   empty-draw loss and a self-mill the controller's own; the badge follows `p`.
+///
+/// - CR 704.5c: `Poison(p)` — a poison ∞ drives the afflicted player toward the
+///   10-poison loss, so the badge belongs on the VICTIM's HUD.
+///
+/// Every aggregate axis carries no victim PlayerId and is attributed to the loop's
+/// `controller` (the player generating the unbounded resource).
+fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
+    match axis {
+        ResourceAxis::Life(p)
+        | ResourceAxis::DamageDealt(p)
+        | ResourceAxis::LibraryDelta(p)
+        | ResourceAxis::Poison(p) => p,
+        ResourceAxis::Mana(_)
+        | ResourceAxis::Counter(_, _)
+        | ResourceAxis::Trigger(_)
+        | ResourceAxis::TokensCreated
+        | ResourceAxis::CardsDrawn
+        | ResourceAxis::Casts
+        | ResourceAxis::LandfallTriggers
+        | ResourceAxis::CombatPhases
+        | ResourceAxis::ExtraTurns
+        | ResourceAxis::DeathTriggers
+        | ResourceAxis::EtbTriggers
+        | ResourceAxis::LtbTriggers
+        | ResourceAxis::SacTriggers => controller,
+    }
 }
 
 /// Aggregate player-affecting conditions into render-ready rows.
@@ -559,6 +1029,13 @@ fn player_status_views(state: &GameState) -> Vec<PlayerStatusView> {
             // declare-attackers gate; it has no cast/activate HUD badge, so no
             // player-status row is produced for it.
             ProhibitedActivity::Attack { .. } => continue,
+            // CR 116.2a: "can't play cards from <zone>" is enforced at the cast
+            // and play-land gates; no dedicated HUD badge yet, so no status row.
+            ProhibitedActivity::ProhibitPlayFromZone { .. } => continue,
+            // CR 305.1: "can't play [matching] lands" is enforced at the
+            // play-land gate; no dedicated HUD badge yet, so no status row —
+            // mirrors `ProhibitPlayFromZone` above.
+            ProhibitedActivity::PlayLands { .. } => continue,
         };
         for pid in restriction_affected_players(state, affected_players, *source) {
             views.push(PlayerStatusView {
@@ -608,8 +1085,11 @@ fn restriction_affected_players(
         // CR 109.5: `add_restriction` resolves the scoped player to
         // `SpecificPlayer` when the restriction is created, so a stored
         // restriction never carries an unresolved placeholder scope here.
+        // CR 109.4: `ParentObjectTargetController` is likewise resolved to
+        // `SpecificPlayer` by `add_restriction` at creation time.
         RestrictionPlayerScope::TargetedPlayer
         | RestrictionPlayerScope::ParentTargetedPlayer
+        | RestrictionPlayerScope::ParentObjectTargetController
         | RestrictionPlayerScope::ScopedPlayer => Vec::new(),
         // CR 508.5a: `add_restriction` resolves the defending player to
         // `SpecificPlayer` when the restriction is created, so a stored
@@ -628,6 +1108,7 @@ fn stack_entry_details(state: &GameState) -> HashMap<ObjectId, StackEntryDisplay
 
 fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDisplay {
     let source_name = stack_source_name(state, entry);
+    let effective_ability = effective_stack_ability(state, entry);
     let (kind_label, ability_description) = match &entry.kind {
         StackEntryKind::Spell { ability, .. } => (
             "Spell".to_string(),
@@ -655,12 +1136,31 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
 
     StackEntryDisplay {
         source_name,
+        token_image_ref: stack_source_token_image_ref(state, entry),
         kind_label,
         ability_description,
+        selected_mode_labels: effective_ability
+            .ability
+            .map(|ability| ability.selected_mode_labels.clone())
+            .unwrap_or_default(),
+        is_pending: effective_ability.is_pending,
         targets: stack_entry_targets(state, entry),
         paid: stack_paid_facts(state.stack_paid_facts.get(&entry.id)),
         trigger_context: stack_trigger_context(state, entry),
     }
+}
+
+fn stack_source_token_image_ref(state: &GameState, entry: &StackEntry) -> Option<TokenImageRef> {
+    state
+        .objects
+        .get(&entry.source_id)
+        .and_then(|obj| obj.token_image_ref.clone())
+        .or_else(|| {
+            state
+                .lki_cache
+                .get(&entry.source_id)
+                .and_then(|lki| lki.token_image_ref.clone())
+        })
 }
 
 fn stack_source_name(state: &GameState, entry: &StackEntry) -> String {
@@ -688,8 +1188,8 @@ fn keyword_action_label(action: &KeywordAction) -> String {
 fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTargetDisplay> {
     let targets = match &entry.kind {
         StackEntryKind::KeywordAction { action } => keyword_action_targets(action),
-        _ => entry
-            .ability()
+        _ => effective_stack_ability(state, entry)
+            .ability
             .map(flatten_targets_in_chain)
             .unwrap_or_default(),
     };
@@ -795,6 +1295,7 @@ fn stack_trigger_context(state: &GameState, entry: &StackEntry) -> Vec<TriggerCo
 
 fn trigger_event_display(state: &GameState, event: &GameEvent) -> Option<TriggerContextDisplay> {
     match event {
+        GameEvent::HiddenSearchViewed { .. } => None,
         GameEvent::ZoneChanged {
             object_id,
             record,
@@ -845,6 +1346,7 @@ fn trigger_event_display(state: &GameState, event: &GameEvent) -> Option<Trigger
         GameEvent::AbilityActivated {
             player_id,
             source_id,
+            ..
         } => Some(TriggerContextDisplay {
             label: format!(
                 "{} ability activated",
@@ -916,19 +1418,25 @@ fn zone_label(zone: Option<Zone>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::combat::CombatState;
+    use crate::game::game_object::DisplaySource;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, ResolvedAbility, RestrictionExpiry, TargetRef};
+    use crate::types::ability::{
+        Duration, Effect, ModalChoice, ResolvedAbility, RestrictionExpiry, StaticCondition,
+        TargetFilter, TargetRef,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
-        ZoneChangeRecord,
+        CommanderDamageEntry, PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot,
+        WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
     use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
+    use std::collections::HashMap;
 
     fn setup_commander_game(num_players: u8) -> GameState {
         let mut state = GameState::new(FormatConfig::commander(), num_players, 42);
@@ -965,6 +1473,486 @@ mod tests {
         assert!(
             views.commander_damage_by_attacker.is_empty(),
             "non-Commander format must short-circuit regardless of stored damage entries"
+        );
+    }
+
+    #[test]
+    fn blocker_assignment_pairs_are_sorted_and_exclude_stale_objects() {
+        let mut state = GameState::new_two_player(42);
+        let blocker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let first_attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "First Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let second_attacker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Second Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let stale_blocker = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Stale Blocker".to_string(),
+            Zone::Graveyard,
+        );
+        let stale_attacker = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Stale Attacker".to_string(),
+            Zone::Graveyard,
+        );
+        let absorbed_component = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Absorbed Component".to_string(),
+            Zone::Battlefield,
+        );
+        state.battlefield.retain(|&id| id != absorbed_component);
+        state.combat = Some(CombatState {
+            blocker_to_attacker: HashMap::from([
+                (
+                    blocker,
+                    vec![second_attacker, stale_attacker, first_attacker],
+                ),
+                (stale_blocker, vec![first_attacker]),
+                (absorbed_component, vec![second_attacker]),
+            ]),
+            ..CombatState::default()
+        });
+        let expected = vec![(blocker, first_attacker), (blocker, second_attacker)];
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(views.blocker_assignment_pairs, expected);
+    }
+
+    #[test]
+    fn blocker_assignment_pairs_survive_filtered_client_wire_serialization() {
+        let mut state = GameState::new_two_player(42);
+        let blocker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state.combat = Some(CombatState {
+            blocker_to_attacker: HashMap::from([(blocker, vec![attacker])]),
+            ..CombatState::default()
+        });
+
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
+        let json = serde_json::to_string(&ClientGameStateRef::wrap_filtered(
+            &state,
+            &filtered,
+            Some(PlayerId(0)),
+        ))
+        .expect("serialize filtered client state");
+        let client: ClientGameState =
+            serde_json::from_str(&json).expect("deserialize filtered client state");
+        assert_eq!(
+            client.derived.blocker_assignment_pairs,
+            vec![(blocker, attacker)],
+            "the authoritative public blocking pair survives the filtered viewer wire path"
+        );
+    }
+
+    #[test]
+    fn empty_blocker_assignment_pairs_omit_the_wire_key() {
+        let empty_json =
+            serde_json::to_string(&DerivedViews::default()).expect("empty derived views serialize");
+        assert!(
+            !empty_json.contains("blocker_assignment_pairs"),
+            "empty blocker pairs omit their wire key"
+        );
+        let empty_round_trip: DerivedViews =
+            serde_json::from_str(&empty_json).expect("empty derived views deserialize");
+        assert!(empty_round_trip.blocker_assignment_pairs.is_empty());
+    }
+
+    #[test]
+    fn derive_views_flags_a_permanent_under_a_live_copy_effect() {
+        // CR 613.2a + CR 707.2: a copy of a permanent is expressed as a Layer 1a
+        // `CopyValues` continuous effect, not a flag on the object — so the
+        // projection has to read the effect list. Issue #5932: a Phantasmal
+        // Image copying a Reveillark renders identically to the real one, and
+        // nothing already serialized told the client which was which.
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let original = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Reveillark".into(),
+            Zone::Battlefield,
+        );
+        let clone = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Phantasmal Image".into(),
+            Zone::Battlefield,
+        );
+
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&original).unwrap(),
+        );
+        state.add_transient_continuous_effect(
+            clone,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: clone },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+
+        let views = derive_views(&state, None);
+
+        assert_eq!(
+            views.copied_permanents,
+            vec![clone],
+            "only the permanent the copy effect applies to is a copy; the \
+             original it copied is not"
+        );
+    }
+
+    #[test]
+    fn derive_views_drops_the_copy_flag_once_a_temporary_copy_effect_lapses() {
+        // CR 611.2b: a `ForAsLongAs` copy ends the moment its condition goes
+        // false, but the effect stays STORED until it is swept. Zygon
+        // Infiltrator copies "for as long as that creature remains tapped", so
+        // untapping the target ends the copy while the TCE is still in the list.
+        // Reading membership alone would keep badging a permanent that is no
+        // longer a copy, so the projection asks the layer engine's own
+        // liveness predicate instead.
+        use crate::types::ability::ObjectScope;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tapped Bear".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&target).unwrap().tapped = true;
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Zygon".into(),
+            Zone::Battlefield,
+        );
+
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&target).unwrap(),
+        );
+        let tce_id = state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::ForAsLongAs {
+                condition: StaticCondition::IsTapped {
+                    scope: ObjectScope::Target,
+                },
+            },
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        // CR 611.2b: the duration tracks the copy TARGET's tap state, not the
+        // source's — the same binding the layer engine uses.
+        state.set_transient_duration_subject(tce_id, target);
+
+        assert_eq!(
+            derive_views(&state, None).copied_permanents,
+            vec![source],
+            "while the target is tapped the copy applies, so the badge shows"
+        );
+
+        // Untap the target: the duration ends and the copy lapses, but the
+        // effect is still stored.
+        state.objects.get_mut(&target).unwrap().tapped = false;
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|t| t.id == tce_id),
+            "precondition: the lapsed effect is still stored, so this test is \
+             exercising liveness rather than removal"
+        );
+        assert!(
+            derive_views(&state, None).copied_permanents.is_empty(),
+            "a lapsed copy must not keep the badge (CR 611.2b)"
+        );
+    }
+
+    #[test]
+    fn derive_views_does_not_flag_a_merged_permanent_as_a_copy() {
+        // CR 730.2a: merge represents the top component with a private
+        // `CopyValues` Layer-1 effect, but the resulting permanent is merged,
+        // not a copy. The projection must exclude that exact effect while
+        // continuing to admit independent copy effects on the same object.
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host".into(),
+            Zone::Battlefield,
+        );
+        let rider = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rider".into(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        crate::game::merge::merge_object_onto(
+            &mut state,
+            rider,
+            host,
+            crate::game::merge::MergeSide::Top,
+            &mut events,
+        );
+
+        let merge_effect_id = state
+            .objects
+            .get(&host)
+            .and_then(|object| object.merge_layer_effect_id);
+        assert!(
+            merge_effect_id.is_some(),
+            "precondition: merge is represented by a CopyValues layer effect"
+        );
+        assert!(
+            derive_views(&state, None).copied_permanents.is_empty(),
+            "a merge representation must not produce a Copy badge"
+        );
+
+        // The exclusion is effect-scoped, not object-scoped: a merged
+        // permanent can still acquire an independent copy effect.
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&host).unwrap(),
+        );
+        let independent_copy_effect_id = state.add_transient_continuous_effect(
+            host,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: host },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        assert_ne!(
+            Some(independent_copy_effect_id),
+            merge_effect_id,
+            "precondition: the independent copy effect is distinct from merge's representation"
+        );
+        assert_eq!(
+            derive_views(&state, None).copied_permanents,
+            vec![host],
+            "a later independent copy effect on a merged permanent must still produce a badge"
+        );
+    }
+
+    #[test]
+    fn derive_views_omits_copy_flag_for_a_face_down_permanent() {
+        // CR 708.2: a face-down permanent's characteristics are only those the
+        // face-down rules grant. Surfacing "copy" on one would leak hidden
+        // information about what it really is.
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let hidden = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Face-Down Copy".into(),
+            Zone::Battlefield,
+        );
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&hidden).unwrap(),
+        );
+        state.objects.get_mut(&hidden).unwrap().face_down = true;
+        state.add_transient_continuous_effect(
+            hidden,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: hidden },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+
+        assert!(
+            derive_views(&state, None).copied_permanents.is_empty(),
+            "a face-down permanent must never be reported as a copy (CR 708.2)"
+        );
+    }
+
+    #[test]
+    fn derive_views_omits_copy_flag_when_no_copy_effect_is_live() {
+        // Discriminating guard: an ordinary board must report nothing, so the
+        // projection cannot degenerate into "every permanent is a copy".
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".into(),
+            Zone::Battlefield,
+        );
+        assert!(derive_views(&state, None).copied_permanents.is_empty());
+    }
+
+    #[test]
+    fn derive_views_projects_only_battlefield_relevant_keyword_badges() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let permanent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Keyword Test Creature".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&permanent).unwrap().keywords = vec![
+            Keyword::Flying,
+            Keyword::Ravenous,
+            Keyword::Evoke(crate::types::keywords::EvokeCost::Mana(ManaCost::NoCost)),
+            Keyword::Fading(3),
+        ];
+
+        let hand_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Off-Battlefield Flyer".into(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&hand_card).unwrap().keywords = vec![Keyword::Flying];
+
+        let views = derive_views(&state, None);
+
+        assert_eq!(
+            views.battlefield_keyword_badges.get(&permanent),
+            Some(&vec![Keyword::Flying, Keyword::Fading(3)]),
+            "the strip keeps live battlefield abilities but hides Ravenous and Evoke"
+        );
+        assert!(
+            !views.battlefield_keyword_badges.contains_key(&hand_card),
+            "only battlefield permanents receive keyword badge entries"
+        );
+    }
+
+    #[test]
+    fn turn_order_hidden_for_two_or_fewer_live_representatives() {
+        let state = GameState::new(FormatConfig::standard(), 2, 42);
+
+        let views = derive_views(&state, None);
+
+        assert!(
+            views.turn_order.is_empty(),
+            "one-on-one games should not emit redundant turn-order chips"
+        );
+
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        assert!(
+            !json.contains("turn_order"),
+            "empty turn order must be omitted from the wire payload"
+        );
+    }
+
+    #[test]
+    fn turn_order_duplicates_survive_wire_round_trip() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.extra_turns.push(crate::types::game_state::ExtraTurn {
+            player: PlayerId(2),
+            anchor: PlayerId(0),
+        });
+        state.extra_turns.push(crate::types::game_state::ExtraTurn {
+            player: PlayerId(0),
+            anchor: PlayerId(0),
+        });
+
+        let views = derive_views(&state, None);
+
+        assert_eq!(
+            views.turn_order[..2],
+            [
+                TurnOrderSlotView {
+                    player: PlayerId(0),
+                    slot_index: 0,
+                    turns_from_now: 0,
+                    turn_number: 1,
+                    is_viewer: false,
+                    is_starting_player: true,
+                },
+                TurnOrderSlotView {
+                    player: PlayerId(0),
+                    slot_index: 1,
+                    turns_from_now: 1,
+                    turn_number: 2,
+                    is_viewer: false,
+                    is_starting_player: false,
+                },
+            ],
+            "same player can be both NOW and NEXT when an extra turn is queued"
+        );
+
+        let viewer_views = derive_views(&state, Some(PlayerId(2)));
+        assert_eq!(viewer_views.viewer_turn_number, Some(3));
+        assert!(viewer_views.turn_order[2].is_viewer);
+        assert_eq!(viewer_views.turn_order[2].turn_number, 3);
+
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        assert!(
+            json.contains("turn_order"),
+            "multiplayer turn-order rows must serialize"
+        );
+
+        let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            round.derived.turn_order[..2],
+            views.turn_order[..2],
+            "duplicate same-player rows must survive the JSON round-trip"
         );
     }
 
@@ -1198,7 +2186,7 @@ mod tests {
 
         // Three colorless pool units, each stamped with a distinct pip id.
         for _ in 0..3 {
-            state.add_mana_to_pool(
+            let _ = state.add_mana_to_pool(
                 p0,
                 ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
             );
@@ -1300,7 +2288,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 2,
             },
@@ -1333,6 +2321,120 @@ mod tests {
     }
 
     #[test]
+    fn pending_modal_spell_details_survive_filtering_and_client_wire_round_trip() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Brotherhood's End".to_string(),
+            Zone::Stack,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let mut pending_ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "destroy".to_string(),
+                description: None,
+            },
+            vec![TargetRef::Object(target)],
+            spell,
+            PlayerId(0),
+        );
+        pending_ability.selected_mode_labels = vec![
+            "Brotherhood's End deals 3 damage to each creature and each planeswalker.".to_string(),
+        ];
+        state.waiting_for = WaitingFor::ModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice::default(),
+            pending_cast: Box::new(PendingCast::new(
+                spell,
+                CardId(1),
+                pending_ability,
+                ManaCost::NoCost,
+            )),
+            unavailable_modes: Vec::new(),
+        };
+
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let json = serde_json::to_string(&ClientGameStateRef::wrap_filtered(
+            &state,
+            &filtered,
+            Some(PlayerId(1)),
+        ))
+        .expect("serialize filtered opponent view");
+        let client: ClientGameState = serde_json::from_str(&json).expect("deserialize client view");
+        let details = client
+            .derived
+            .stack_entry_details
+            .get(&spell)
+            .expect("public pending spell has stack details");
+
+        assert!(
+            details.is_pending,
+            "the engine marks the matching entry pending"
+        );
+        assert_eq!(
+            details.selected_mode_labels,
+            ["Brotherhood's End deals 3 damage to each creature and each planeswalker."],
+            "the public selected mode reaches an opponent through filtering and the client wrapper",
+        );
+        assert_eq!(details.targets[0].label, "Sol Ring");
+    }
+
+    #[test]
+    fn stack_entry_display_selected_modes_are_wire_compatible_and_cloneable() {
+        let empty = StackEntryDisplay {
+            source_name: "Spell".to_string(),
+            token_image_ref: None,
+            kind_label: "Spell".to_string(),
+            ability_description: None,
+            selected_mode_labels: Vec::new(),
+            is_pending: false,
+            targets: Vec::new(),
+            paid: Vec::new(),
+            trigger_context: Vec::new(),
+        };
+        let empty_json = serde_json::to_string(&empty).expect("serialize empty display");
+        assert!(
+            !empty_json.contains("selected_mode_labels") && !empty_json.contains("is_pending"),
+            "empty additions must preserve the legacy wire shape",
+        );
+        let legacy: StackEntryDisplay =
+            serde_json::from_str(r#"{"source_name":"Spell","kind_label":"Spell"}"#)
+                .expect("legacy display payload deserializes");
+        assert!(legacy.selected_mode_labels.is_empty());
+        assert!(!legacy.is_pending);
+
+        let mut selected = empty;
+        selected.selected_mode_labels = vec!["Choose this mode.".to_string()];
+        selected.is_pending = true;
+        let copied = selected.clone();
+        let selected_json = serde_json::to_string(&selected).expect("serialize selected modes");
+        assert!(selected_json.contains("selected_mode_labels"));
+        assert_eq!(
+            copied, selected,
+            "derived display copies retain selected modes"
+        );
+    }
+
+    #[test]
     fn derive_views_uses_filtered_names_for_trigger_context() {
         let mut state = GameState::new_two_player(42);
         let trigger_source = create_object(
@@ -1361,6 +2463,7 @@ mod tests {
                 supertypes: Vec::new(),
                 keywords: Vec::new(),
                 trigger_definitions: Vec::new(),
+                trigger_source_context: None,
                 power: None,
                 toughness: None,
                 base_power: None,
@@ -1381,6 +2484,7 @@ mod tests {
                 attached_to: None,
                 entered_incarnation: None,
                 turn_zone_change_index: 0,
+                is_suspected: false,
             }),
         };
         let ability = ResolvedAbility::new(
@@ -1733,5 +2837,449 @@ mod tests {
             none_views.web_slinging_costs.is_empty(),
             "derive_views(_, None) must not populate web-slinging costs"
         );
+    }
+
+    /// PR-6 test 7: `attribution_player` is exhaustive and routes payload-keyed
+    /// axes both directions — a controller-self payload stays on the controller, a
+    /// victim payload routes to the named victim — while every aggregate axis stays
+    /// on the controller.
+    ///
+    /// REVERT-PROBE: change the `Life | DamageDealt | LibraryDelta | Poison => p` arm to
+    /// `=> controller` → the four victim assertions (`p1` expected) fail.
+    #[test]
+    fn attribution_player_routes_payload_axes_both_directions() {
+        use crate::analysis::resource::{CounterClass, ObjectClass, TriggerKind};
+        use crate::types::mana::ManaType;
+
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+
+        // Controller-self payload axes attribute to the controller.
+        assert_eq!(attribution_player(ResourceAxis::Life(p0), p0), p0);
+        assert_eq!(attribution_player(ResourceAxis::LibraryDelta(p0), p0), p0);
+        assert_eq!(attribution_player(ResourceAxis::DamageDealt(p0), p0), p0);
+
+        // Victim payload axes attribute to the NAMED victim, not the controller.
+        assert_eq!(attribution_player(ResourceAxis::Life(p1), p0), p1);
+        assert_eq!(attribution_player(ResourceAxis::DamageDealt(p1), p0), p1);
+        assert_eq!(attribution_player(ResourceAxis::LibraryDelta(p1), p0), p1);
+        // CR 704.5c: a poison ∞ belongs on the afflicted player's HUD, not the controller's.
+        assert_eq!(attribution_player(ResourceAxis::Poison(p1), p0), p1);
+
+        // Aggregate axes (no victim PlayerId) attribute to the controller.
+        assert_eq!(
+            attribution_player(ResourceAxis::Mana(ManaType::Red), p0),
+            p0
+        );
+        assert_eq!(
+            attribution_player(
+                ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+                p0
+            ),
+            p0
+        );
+        assert_eq!(
+            attribution_player(ResourceAxis::Trigger(TriggerKind::Proliferate), p0),
+            p0
+        );
+        assert_eq!(attribution_player(ResourceAxis::TokensCreated, p0), p0);
+    }
+
+    /// PR-6 test 1: a REAL opponent-burn certificate's axes project into victim-HUD
+    /// rows. The axis set is derived via the SAME authority `detect_loop` uses
+    /// (`ResourceVector::unbounded_axes_for`) from the delta a damage pinger loop
+    /// produces (positive damage to P1, P1's life driven negative), so it is the
+    /// genuine `{DamageDealt(P1), Life(P1)}` cert — both on the victim P1, never a
+    /// controller `Life(P0)`.
+    ///
+    /// REVERT-PROBE: delete the `derive_views` projection loop → `unbounded_resources`
+    /// is empty → both `contains` assertions fail. Without the `mark_unbounded_loop`
+    /// call the projection is also empty.
+    #[test]
+    fn real_certificate_axes_project_to_victim_hud() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+
+        // The delta an opponent-burn pinger loop pumps each cycle.
+        let mut delta = crate::analysis::ResourceVector::default();
+        delta.damage_dealt.insert(PlayerId(1), 1);
+        delta.life.insert(PlayerId(1), -1);
+        // Same single authority that fills LoopCertificate.unbounded (loop_check.rs).
+        let cert_axes = delta.unbounded_axes_for(PlayerId(0));
+        assert!(cert_axes.contains(&ResourceAxis::DamageDealt(PlayerId(1))));
+        assert!(cert_axes.contains(&ResourceAxis::Life(PlayerId(1))));
+        assert!(
+            !cert_axes.contains(&ResourceAxis::Life(PlayerId(0))),
+            "the controller has no Life axis — the drain is on the victim P1"
+        );
+
+        state.mark_unbounded_loop(PlayerId(0), &cert_axes);
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(1),
+                axis: ResourceAxis::DamageDealt(PlayerId(1)),
+            }),
+            "opponent-burn ∞ damage must land on the victim P1's HUD"
+        );
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(1),
+                axis: ResourceAxis::Life(PlayerId(1)),
+            }),
+            "opponent-drain ∞ life must land on the victim P1's HUD"
+        );
+    }
+
+    /// PR-6 test 9 (hostile e2e): a hand-built `{DamageDealt(P1), Life(P1)}` cert
+    /// where the VICTIM P1 ALSO controls a permanent. Attribution must follow the
+    /// axis payload PlayerId, NOT permanent control — both rows land on P1's HUD,
+    /// none on the loop controller P0.
+    ///
+    /// REVERT-PROBE: make `attribution_player` return `controller` for
+    /// `DamageDealt`/`Life` → both rows move to P0 → the P1 assertions fail and the
+    /// "no controller rows" assertion fails.
+    #[test]
+    fn attribution_hostile_victim_controls_permanent() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        // Hostile element: the victim P1 controls a battlefield permanent. If
+        // attribution keyed off permanent control rather than the axis payload, the
+        // routing could be fooled — it must not be.
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Victim's Permanent".into(),
+            Zone::Battlefield,
+        );
+
+        // P0 is the loop controller; the cert names P1 (victim) on both axes.
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[
+                ResourceAxis::DamageDealt(PlayerId(1)),
+                ResourceAxis::Life(PlayerId(1)),
+            ],
+        );
+
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(1),
+                axis: ResourceAxis::DamageDealt(PlayerId(1)),
+            }),
+            "damage ∞ belongs to the victim P1, not the controller"
+        );
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(1),
+                axis: ResourceAxis::Life(PlayerId(1)),
+            }),
+            "drain ∞ belongs to the victim P1, not the controller"
+        );
+        assert!(
+            !views
+                .unbounded_resources
+                .iter()
+                .any(|v| v.player == PlayerId(0)),
+            "no ∞ row may attribute to the controller P0 for victim-keyed axes"
+        );
+    }
+
+    /// PR-6 test 3 (projection half): a NON-mana unbounded axis still projects an
+    /// `∞` row attributed to its controller; the empty map yields no rows (field
+    /// omitted). The mana-vs-non-mana refill gating half lives in
+    /// `mana_payment::refill_infinite_mana_gated_on_mana_axis_only`.
+    ///
+    /// REVERT-PROBE: delete the `derive_views` projection loop → the `TokensCreated`
+    /// row is absent → the `contains` assertion fails.
+    #[test]
+    fn non_mana_axis_projects_to_controller_hud() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::TokensCreated]);
+
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(0),
+                axis: ResourceAxis::TokensCreated,
+            }),
+            "a non-mana unbounded axis must still project an ∞ row on its controller"
+        );
+
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        assert!(
+            derive_views(&empty, None).unbounded_resources.is_empty(),
+            "no unbounded loop → no ∞ rows (field omitted)"
+        );
+    }
+
+    /// DESIGN STEP 4 (∞-pile projection): `GameState::unbounded_loop_pile` projects into
+    /// `DerivedViews::unbounded_pile`, filtered to objects still on the battlefield — a
+    /// registered member that has since left is dropped (stale).
+    ///
+    /// REVERT-PROBE: delete the `derive_views` projection loop → `unbounded_pile` is empty
+    /// → the two positive `contains` assertions fail.
+    #[test]
+    fn derive_views_projects_unbounded_pile() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saproling".into(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Saproling".into(),
+            Zone::Battlefield,
+        );
+        // A registered id that is NOT on the battlefield (already left) — must be dropped.
+        let gone = ObjectId(9999);
+        state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([a, b, gone]));
+
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_pile.contains(&a),
+            "on-battlefield pile member projects"
+        );
+        assert!(
+            views.unbounded_pile.contains(&b),
+            "on-battlefield pile member projects"
+        );
+        assert!(
+            !views.unbounded_pile.contains(&gone),
+            "a member no longer on the battlefield is dropped (stale)"
+        );
+
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        assert!(
+            derive_views(&empty, None).unbounded_pile.is_empty(),
+            "no object-growth loop → no pile (field omitted)"
+        );
+    }
+
+    /// DESIGN STEP 4 (serde wire shape + omission): `unbounded_pile` serializes through
+    /// `ClientGameStateRef` → JSON → `ClientGameState` as an ObjectId array, and the empty
+    /// case omits the key entirely (`skip_serializing_if = "Vec::is_empty"`).
+    #[test]
+    fn unbounded_pile_round_trip_through_wire() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saproling".into(),
+            Zone::Battlefield,
+        );
+        state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([a]));
+
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        assert!(
+            json.contains("unbounded_pile"),
+            "pile key present when non-empty"
+        );
+
+        let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            round.derived.unbounded_pile,
+            vec![a],
+            "the pile ObjectId survives the wire round-trip"
+        );
+
+        // Empty case: skip_serializing_if omits the key entirely.
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        let empty_json = serde_json::to_string(&ClientGameStateRef::wrap(&empty, None))
+            .expect("serialize empty");
+        assert!(
+            !empty_json.contains("unbounded_pile"),
+            "empty pile → key omitted"
+        );
+    }
+
+    /// PR-6 tests 4+5 (serde wire shape + round-trip): the `unbounded_resources`
+    /// projection serializes through `ClientGameStateRef` → JSON → `ClientGameState`
+    /// with the externally-tagged `ResourceAxis` shapes the TS mirror depends on
+    /// (unit → bare string, single-data → `{"Mana":"Red"}`, PlayerId transparent
+    /// `{"Life":1}` / `{"Poison":1}`, tuple → `{"Counter":["Energy","Player"]}`), and the empty case
+    /// omits the key. Exercises the `Serialize`/`Deserialize` derives added to
+    /// `ResourceAxis`/`CounterClass`/`ObjectClass`/`TriggerKind`.
+    ///
+    /// REVERT-PROBE: remove `Deserialize` from `ResourceAxis` → this test fails to
+    /// compile (the wire round-trip can no longer deserialize the axis rows).
+    #[test]
+    fn unbounded_resources_round_trip_through_wire() {
+        use crate::analysis::resource::{CounterClass, ObjectClass, TriggerKind};
+        use crate::types::mana::ManaType;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[
+                ResourceAxis::Mana(ManaType::Red),
+                ResourceAxis::Life(PlayerId(1)),
+                // Victim-keyed poison axis (PlayerId-transparent wire shape).
+                ResourceAxis::Poison(PlayerId(1)),
+                // A non-poison Counter keeps the tuple externally-tagged wire shape covered.
+                ResourceAxis::Counter(CounterClass::Energy, ObjectClass::Player),
+                ResourceAxis::Trigger(TriggerKind::Proliferate),
+                ResourceAxis::TokensCreated,
+            ],
+        );
+
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        // The externally-tagged wire shapes the hand-maintained TS union mirrors.
+        assert!(json.contains(r#"{"Mana":"Red"}"#), "single-data axis shape");
+        assert!(json.contains(r#"{"Life":1}"#), "PlayerId transparent shape");
+        assert!(
+            json.contains(r#"{"Poison":1}"#),
+            "poison PlayerId-transparent wire shape"
+        );
+        assert!(
+            json.contains(r#"{"Counter":["Energy","Player"]}"#),
+            "tuple axis shape"
+        );
+        assert!(
+            json.contains(r#""TokensCreated""#),
+            "unit axis bare-string shape"
+        );
+
+        let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
+        let rows = &round.derived.unbounded_resources;
+        assert_eq!(rows.len(), 6, "all six axis rows survive the round-trip");
+        // CR 704.5c: the victim-keyed poison axis attributes to the afflicted P1, NOT the
+        // controller P0 (the re-key discharge — see attribution_player).
+        assert!(rows
+            .iter()
+            .any(|r| r.player == PlayerId(1) && r.axis == ResourceAxis::Poison(PlayerId(1))));
+        // Victim-keyed life axis attributes to P1.
+        assert!(rows
+            .iter()
+            .any(|r| r.player == PlayerId(1) && r.axis == ResourceAxis::Life(PlayerId(1))));
+
+        // Empty case: skip_serializing_if omits the key entirely.
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        let empty_json = serde_json::to_string(&ClientGameStateRef::wrap(&empty, None))
+            .expect("serialize empty");
+        assert!(
+            !empty_json.contains("unbounded_resources"),
+            "empty unbounded resources must omit the wire key"
+        );
+    }
+
+    #[test]
+    fn unique_submitter_projection_uses_search_latch_and_omits_no_actor() {
+        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::game_state::{
+            ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, WaitingFor,
+        };
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: Vec::new(),
+            count: 0,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint: SearchSelectionConstraint::None,
+            split: None,
+        };
+        state
+            .active_search_decision_controls
+            .insert(ActiveSearchDecisionControl {
+                searcher: PlayerId(0),
+                searched_zone_owner: PlayerId(0),
+                authority: ActiveSearchDecisionAuthority::LatchedController {
+                    controller: PlayerId(1),
+                },
+            });
+        state.turn_decision_controller = Some(PlayerId(2));
+
+        assert_eq!(
+            derive_views(&state, None).unique_authorized_submitter,
+            Some(PlayerId(1))
+        );
+
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        assert_eq!(derive_views(&state, None).unique_authorized_submitter, None);
+    }
+
+    #[test]
+    fn filtered_search_views_preserve_latched_submitter_for_every_audience_role() {
+        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::game_state::{
+            ActiveLibrarySearch, ActiveSearchDecisionAuthority, ActiveSearchDecisionControl,
+            WaitingFor,
+        };
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: Vec::new(),
+            count: 0,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint: SearchSelectionConstraint::None,
+            split: None,
+        };
+        state.active_library_searches.insert(
+            ActiveLibrarySearch::try_new(
+                PlayerId(0),
+                PlayerId(0),
+                Some(PlayerId(0)),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("valid search"),
+        );
+        state
+            .active_search_decision_controls
+            .insert(ActiveSearchDecisionControl {
+                searcher: PlayerId(0),
+                searched_zone_owner: PlayerId(0),
+                authority: ActiveSearchDecisionAuthority::LatchedController {
+                    controller: PlayerId(1),
+                },
+            });
+        // Live turn control has changed since the search decision was latched.
+        state.turn_decision_controller = Some(PlayerId(2));
+
+        for viewer in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+            let filtered = crate::game::visibility::filter_state_for_viewer(&state, viewer);
+            let filtered_twice =
+                crate::game::visibility::filter_state_for_viewer(&filtered, viewer);
+            assert_eq!(filtered_twice, filtered, "filtering must be idempotent");
+            assert_eq!(
+                derive_filtered_views(&state, &filtered, Some(viewer)).unique_authorized_submitter,
+                Some(PlayerId(1)),
+                "searcher, latched controller, and observer must share one authority projection"
+            );
+            let mut mutated_filtered = filtered.clone();
+            mutated_filtered
+                .active_search_decision_controls
+                .remove(&PlayerId(0));
+            mutated_filtered.turn_decision_controller = Some(PlayerId(2));
+            assert_eq!(
+                derive_filtered_views(&state, &mutated_filtered, Some(viewer))
+                    .unique_authorized_submitter,
+                Some(PlayerId(1)),
+                "filtered-state mutation must not alter authoritative submission rights"
+            );
+            let wire = serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                &state,
+                &filtered,
+                Some(viewer),
+            ))
+            .expect("serialize filtered search view");
+            assert_eq!(wire["derived"]["unique_authorized_submitter"], 1);
+        }
     }
 }

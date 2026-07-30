@@ -78,6 +78,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::SearchOutsideGame,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -95,6 +96,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::SearchOutsideGame,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -171,11 +173,15 @@ pub(crate) fn put_face_up_exile_into(
         enters_under_player: None,
         enters_attacking: false,
         enter_with_counters: Vec::new(),
+        conditional_enter_with_counters: vec![],
         duration: None,
         track_exiled_by_source: false,
         // Search-from-outside brings cards in face up.
         face_down_profile: None,
         library_placement: None,
+        // CR 614.12: search-from-outside carries no moved-object type gate.
+        enters_modified_if: None,
+        enter_attached_to: None,
     };
     Ok(change_zone::process_one_zone_move(
         state, &ctx, object_id, events,
@@ -330,7 +336,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             source_id,

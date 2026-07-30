@@ -1,64 +1,32 @@
-import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import type { GameState, WaitingFor } from "../../../adapter/types";
 import { isWaitingForHandled } from "../../../game/waitingForRegistry.ts";
 import { useGameStore } from "../../../stores/gameStore";
+import {
+  buildAssistPaymentWaitingFor,
+  buildGameState,
+  buildManaPaymentWaitingFor,
+} from "../../../test/factories/gameStateFactory.ts";
+import { setGameStoreForTest } from "../../../test/helpers/gameStoreHelpers.ts";
 import { AssistPaymentUI } from "../AssistPaymentUI.tsx";
 
 function createGameState(overrides: Partial<GameState> = {}): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
-    priority_player: 0,
-    objects: {},
+  return buildGameState({
     next_object_id: 100,
-    battlefield: [],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
-    waiting_for: { type: "ManaPayment", data: { player: 0 } },
+    waiting_for: buildManaPaymentWaitingFor(),
     has_pending_cast: true,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
-    seat_order: [0, 1],
-    format_config: {
-      format: "Standard",
-      starting_life: 20,
-      min_players: 2,
-      max_players: 2,
-      deck_size: 60,
-      singleton: false,
-      command_zone: false,
-      commander_damage_threshold: null,
-      range_of_influence: null,
-      team_based: false,
-      uses_commander: false,
-      allow_debug_actions: false,
-    },
-    eliminated_players: [],
     ...overrides,
-  };
+  });
 }
 
 // caster = 0, chosen = 0 so the local PLAYER_ID (0) is the acting helper and
 // `useCanActForWaitingState` returns true (CR 702.132a routes to `chosen`).
 function assistPaymentWaitingFor(max: number): WaitingFor {
-  return {
-    type: "AssistPayment",
+  return buildAssistPaymentWaitingFor({
     data: { caster: 1, chosen: 0, max_generic: max },
-  };
+  });
 }
 
 describe("AssistPaymentUI", () => {
@@ -75,12 +43,8 @@ describe("AssistPaymentUI", () => {
   });
 
   it("renders nothing when not in AssistPayment state", () => {
-    act(() => {
-      useGameStore.setState({
-        gameState: createGameState(),
-        waitingFor: { type: "Priority", data: { player: 0 } },
-        dispatch: vi.fn().mockResolvedValue([]),
-      });
+    setGameStoreForTest({
+      gameState: createGameState(),
     });
 
     const { container } = render(<AssistPaymentUI />);
@@ -89,12 +53,9 @@ describe("AssistPaymentUI", () => {
 
   it("clamps the slider to [0, max] and defaults to 0", () => {
     const waitingFor = assistPaymentWaitingFor(4);
-    act(() => {
-      useGameStore.setState({
-        gameState: createGameState({ waiting_for: waitingFor }),
-        waitingFor,
-        dispatch: vi.fn().mockResolvedValue([]),
-      });
+    setGameStoreForTest({
+      gameState: createGameState({ waiting_for: waitingFor }),
+      waitingFor,
     });
 
     render(<AssistPaymentUI />);
@@ -108,12 +69,10 @@ describe("AssistPaymentUI", () => {
   it("dispatches CommitAssistPayment with the selected value", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const waitingFor = assistPaymentWaitingFor(4);
-    act(() => {
-      useGameStore.setState({
-        gameState: createGameState({ waiting_for: waitingFor }),
-        waitingFor,
-        dispatch,
-      });
+    setGameStoreForTest({
+      gameState: createGameState({ waiting_for: waitingFor }),
+      waitingFor,
+      dispatch,
     });
 
     render(<AssistPaymentUI />);
@@ -130,12 +89,10 @@ describe("AssistPaymentUI", () => {
   it("commits generic:0 when paying nothing", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const waitingFor = assistPaymentWaitingFor(4);
-    act(() => {
-      useGameStore.setState({
-        gameState: createGameState({ waiting_for: waitingFor }),
-        waitingFor,
-        dispatch,
-      });
+    setGameStoreForTest({
+      gameState: createGameState({ waiting_for: waitingFor }),
+      waitingFor,
+      dispatch,
     });
 
     render(<AssistPaymentUI />);

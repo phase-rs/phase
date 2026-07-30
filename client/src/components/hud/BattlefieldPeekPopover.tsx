@@ -54,6 +54,10 @@ export function BattlefieldPeekPopover({
   const { t } = useTranslation("game");
   const battlefield = useGameStore((s) => s.gameState?.battlefield);
   const objects = useGameStore((s) => s.gameState?.objects);
+  // CR 732.2a: engine-authored ∞-pile membership (accepted object-growth loop).
+  // Threaded into groupByName so the peek renders `∞` (not `×N`) exactly like the
+  // main board (see buildPlayerBattlefieldView in gameStateView.ts).
+  const unboundedPile = useGameStore((s) => s.gameState?.derived?.unbounded_pile);
   if (!battlefield || !objects) return null;
 
   const owned = battlefield
@@ -77,7 +81,8 @@ export function BattlefieldPeekPopover({
   const candidateObjects = candidates
     .map((id) => objects[id])
     .filter((obj): obj is NonNullable<typeof obj> => obj != null);
-  const groups = groupByName(candidateObjects);
+  const unboundedPileIds = new Set(unboundedPile ?? []);
+  const groups = groupByName(candidateObjects, undefined, unboundedPileIds);
   // Sort legal targets to the front during targeting so the cap can never
   // hide a card the player needs to see. In idle mode the order from
   // `partitionByType` (creatures → planeswalkers → support) is preserved
@@ -165,9 +170,12 @@ export function BattlefieldPeekPopover({
                   tokenImageRef={obj.token_image_ref}
                 />
               </div>
-              {group.count > 1 && (
+              {/* CR 732.2a: the ∞ badge is count-independent — a single-member
+                  pile still reads `∞` (matches the main-board "singleton trap"
+                  handling in GroupedPermanent.tsx). Non-pile groups keep `×N`. */}
+              {(group.isUnboundedPile || group.count > 1) && (
                 <div className="absolute -left-2 -top-2 z-10 flex h-7 min-w-7 items-center justify-center rounded-full bg-black px-1.5 text-xs font-extrabold text-white ring-2 ring-white/75 shadow-[0_2px_8px_rgba(0,0,0,0.65)]">
-                  ×{group.count}
+                  {group.isUnboundedPile ? "∞" : `×${group.count}`}
                 </div>
               )}
               {pt && (

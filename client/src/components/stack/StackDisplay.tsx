@@ -1,4 +1,4 @@
-import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
@@ -8,50 +8,14 @@ import { effectiveStackPressure } from "../../utils/stackThroughput.ts";
 import { StackTargetArcs } from "./StackTargetArcs.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
-import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, StackEntryDisplay, WaitingFor } from "../../adapter/types.ts";
+import { getSeatCount, isSplitBoardActive } from "../../viewmodel/gameStateView.ts";
+import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, StackEntryDisplay } from "../../adapter/types.ts";
 import { getStackCardSize } from "../board/boardSizing.ts";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
 
 const EMPTY_STACK: StackEntryType[] = [];
 const EMPTY_GROUPS: StackDisplayGroup[] = [];
 const EMPTY_DETAILS: Record<string, StackEntryDisplay> = {};
-
-// CR 601.2a + CR 601.2b-f: Post-announcement, the spell sits on the engine's
-// stack while modes/targets/costs are chosen. This helper identifies the
-// ObjectId of the cast currently in that pre-finalization window so the UI can
-// render the "Casting…" badge on it.
-//
-// Most mid-cast WaitingFor variants carry the PendingCast inline (including
-// ChooseXValue) — read the object_id directly. `ManaPayment` is the one
-// variant where the engine keeps the PendingCast on outer GameState; in that
-// case the topmost stack entry is always the current cast by engine invariant
-// (no other stack push/pop can interleave within a single cast).
-function getPendingCastObjectId(
-  waitingFor: WaitingFor | null | undefined,
-  topOfStackId: ObjectId | null,
-): ObjectId | null {
-  if (!waitingFor) return null;
-  switch (waitingFor.type) {
-    case "TargetSelection":
-    case "ModeChoice":
-    case "OptionalCostChoice":
-    case "DefilerPayment":
-    case "BlightChoice":
-    case "HarmonizeTapChoice":
-    case "ChooseXValue":
-      return waitingFor.data.pending_cast.object_id;
-    // CR 601.2b: PayCost carries its pending cast inside `resume` (only the
-    // spell-cast resume; mana-ability cost payment has no pending cast).
-    case "PayCost":
-      return waitingFor.data.resume.type === "Spell"
-        ? waitingFor.data.resume.Spell.object_id
-        : null;
-    case "ManaPayment":
-      return topOfStackId;
-    default:
-      return null;
-  }
-}
 
 const STAGGER_Y = 24;
 const STAGGER_X = 10;
@@ -73,8 +37,8 @@ function getViewportSize() {
 
 export function StackDisplay() {
   const { t } = useTranslation("game");
-  const stack = useGameStore((s) => s.gameState?.stack ?? EMPTY_STACK);
-  const waitingFor = useGameStore((s) => s.waitingFor);
+  const gameState = useGameStore((s) => s.gameState);
+  const stack = gameState?.stack ?? EMPTY_STACK;
   // Engine-authored stack grouping rides on the same state snapshot that
   // carries `state.stack` (see `engine::game::derived_views`). Reading
   // directly from the selector makes the grouped view atomically
@@ -95,6 +59,7 @@ export function StackDisplay() {
   // choice on every resolution.
   const stackDockSide = usePreferencesStore((s) => s.stackDockSide);
   const setStackDockSide = usePreferencesStore((s) => s.setStackDockSide);
+  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const dockedLeft = stackDockSide === "left";
   // User size multiplier over the viewport-derived auto-scale (absent ⇒ 1).
   // Cards derive width AND height from one scale, so this stays aspect-correct.
@@ -108,15 +73,6 @@ export function StackDisplay() {
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
-
-  // CR 601.2a: The engine places the spell on the stack at announcement, so
-  // no ghost synthesis is needed here. Identify the in-progress cast so the
-  // "Casting…" badge can be applied to that entry.
-  const topOfStackId = stack.length > 0 ? stack[stack.length - 1].id : null;
-  const pendingCastId = useMemo(
-    () => getPendingCastObjectId(waitingFor, topOfStackId),
-    [waitingFor, topOfStackId],
-  );
 
   const activeStackEntryId = hoveredStackEntryId ?? stack[stack.length - 1]?.id ?? null;
 
@@ -171,8 +127,10 @@ export function StackDisplay() {
   // clamped to a pixel top below so the panel header — the only controls (swap,
   // collapse, count) — can never be pushed off the top edge when the pile is
   // taller than the viewport.
-  const topFraction =
-    viewport.width < 640 ? 0.38 :
+  const splitBoardActive = isSplitBoardActive(multiplayerBoardLayout, getSeatCount(gameState));
+  const topFraction = splitBoardActive
+    ? viewport.width < 640 ? 0.52 : viewport.width < 1024 ? 0.58 : 0.66
+    : viewport.width < 640 ? 0.38 :
       viewport.width < 1024 ? 0.43 : 0.5;
   const collapsedPeekPx = viewport.width < 768 ? 24 : COLLAPSED_PEEK_PX;
 
@@ -248,7 +206,7 @@ export function StackDisplay() {
             <button
               type="button"
               onClick={() => setIsCollapsed(false)}
-              className={`pointer-events-auto absolute top-1/2 z-20 flex h-20 w-7 -translate-y-1/2 items-center justify-center border border-white/10 bg-gray-950/95 text-gray-300 shadow-[0_18px_36px_rgba(0,0,0,0.45)] transition-colors hover:bg-gray-900 hover:text-white ${dockedLeft ? "right-0 translate-x-1/2 rounded-l-md rounded-r-xl" : "left-0 -translate-x-1/2 rounded-l-xl rounded-r-md"}`}
+              className={`pointer-events-auto absolute top-1/2 z-20 flex h-16 w-7 -translate-y-1/2 items-center justify-center rounded-[6px] border border-white/12 bg-gray-950 text-gray-300 shadow-[0_8px_18px_rgba(0,0,0,0.36)] transition-colors hover:bg-gray-900 hover:text-white ${dockedLeft ? "right-0 translate-x-1/2" : "left-0 -translate-x-1/2"}`}
               aria-label={t("stack.expandPanel")}
             >
               {/* Chevron points back toward the board (the direction the panel
@@ -263,7 +221,7 @@ export function StackDisplay() {
             </button>
           )}
 
-          <div className="pointer-events-auto relative h-full overflow-hidden rounded-2xl border border-white/10 bg-gray-950/88 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-md">
+          <div className="pointer-events-auto relative h-full overflow-hidden rounded-[10px] border border-white/10 bg-gray-950/96 shadow-[0_16px_36px_rgba(0,0,0,0.45)]">
             <div className="flex h-9 items-center justify-between border-b border-white/10 px-3">
               <div className="flex items-center gap-2">
                 <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-gray-400">
@@ -327,7 +285,7 @@ export function StackDisplay() {
                       entry={entry}
                       index={index}
                       isTop={index === displayStack.length - 1}
-                      isPending={pendingCastId != null && entry.id === pendingCastId}
+                      isPending={stackEntryDetails[String(entry.id)]?.is_pending}
                       cardSize={cardSize}
                       onHoverChange={(hovered) => handleStackEntryHover(entry.id, hovered)}
                       style={entryStyles[index]}

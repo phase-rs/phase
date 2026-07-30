@@ -54,6 +54,9 @@ Review the plan as an architectural gate. Reject the plan if any required dimens
    - Reject helper-only tests for changes whose production path goes through `apply()`, `WaitingFor`/`GameAction`, casting/stack, combat declaration, replacement handling, or the scenario runner.
    - Parser shape tests do not satisfy runtime semantics or coverage-support claims. Parser-only shape tests are acceptable only when unsupported semantics remain honest via `Effect::unimplemented`, an equivalent strict-failure marker, or unchanged red coverage.
    - Reject parser plans that accept full Oracle text while dropping semantics unless the plan explicitly preserves an `Unimplemented`/coverage gap.
+   - Reject negative-only test plans without a paired positive reach-guard: a planned assertion like `!detector(...)` or "X is NOT applied" must also prove the input got past upstream short-circuits (parse succeeded, zero `Effect::Unimplemented`), or an early-return makes it pass vacuously.
+   - Cast-pipeline runtime tests must be planned via the `/card-test` recipe with the card's verbatim Oracle text, not a paraphrase.
+   - If the plan adds a field to an existing enum variant or struct, require an enumeration of every construction/consumption site of that variant and how each threads the new field (resume/continuation paths, single-vs-multi-pick branches, and adapter payload constructors are the recurring drop points).
 
 10. **Identity / provenance contract**
    - For any "this way", "that source", "chosen", "cast using", "from among them", selected target/mode, duration-bound effect, replacement predicate, or controller/owner-relative text, require the plan to name the source phrase/rules concept, selected authority type and id/value, binding time/event, live vs snapshotted/latched semantics, storage location, consumption point, invalidation/expiration behavior, and a multi-authority hostile fixture.

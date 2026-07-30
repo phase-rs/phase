@@ -59,6 +59,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Seek,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -93,7 +94,7 @@ pub fn resolve(
     // CR 616.1: a `Moved` redirect (or, for a battlefield entry, an as-enters
     // choice) can surface a player choice mid-batch. `move_objects_simultaneously`
     // parks `state.waiting_for` and stashes the undelivered tail in
-    // `state.pending_batch_deliveries`; bail before emitting `EffectResolved` so
+    // the active `BatchDelivery` frame; bail before emitting `EffectResolved` so
     // the surfaced prompt is not clobbered and no later pick overwrites the
     // parked replacement. The resume path
     // (`zone_pipeline::drain_pending_batch_deliveries`) finishes the batch.
@@ -107,6 +108,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Seek,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -117,7 +119,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ChoiceValue, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+        CardPredicateChoice, ChoiceValue, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -374,10 +377,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let land = add_library_land(&mut state, 1, PlayerId(0), "Forest");
         let creature = add_library_creature(&mut state, 2, PlayerId(0), "Bear");
-        state.last_named_choice = Some(ChoiceValue::Label("Land".to_string()));
+        state.last_named_choice = Some(ChoiceValue::CardPredicate(CardPredicateChoice::Land));
 
         let filter = TargetFilter::Typed(
-            TypedFilter::default().properties(vec![FilterProp::IsChosenLandOrNonlandKind]),
+            TypedFilter::default().properties(vec![FilterProp::MatchesLastChosenCardPredicate]),
         );
         let ability = make_seek_ability(filter, 1);
         let mut events = Vec::new();
@@ -393,10 +396,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let land = add_library_land(&mut state, 1, PlayerId(0), "Forest");
         let creature = add_library_creature(&mut state, 2, PlayerId(0), "Bear");
-        state.last_named_choice = Some(ChoiceValue::Label("Nonland".to_string()));
+        state.last_named_choice = Some(ChoiceValue::CardPredicate(CardPredicateChoice::Nonland));
 
         let filter = TargetFilter::Typed(
-            TypedFilter::default().properties(vec![FilterProp::IsChosenLandOrNonlandKind]),
+            TypedFilter::default().properties(vec![FilterProp::MatchesLastChosenCardPredicate]),
         );
         let ability = make_seek_ability(filter, 1);
         let mut events = Vec::new();
@@ -450,7 +453,9 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 ))
                 .description(desc.to_string());
@@ -490,8 +495,7 @@ mod tests {
             "per-card ordering prompt must be parked"
         );
         let stash = state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .expect("the undelivered tail must be stashed for the resume path");
         // Fix-4: the re-stash must carry the batch-uniform request context so
         // the drain rebuilds equivalent requests — seek attributes every move to

@@ -52,7 +52,9 @@ fn graveyard_exile_replacement(description: &str) -> ReplacementDefinition {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         ))
         .description(description.to_string())
@@ -208,7 +210,7 @@ fn surveil_rest_pile_under_two_redirects_runs_keep_on_top_cleanup_once() {
         "no unkept card may reach the graveyard under the redirects"
     );
     assert!(
-        state.pending_batch_deliveries.is_none(),
+        state.active_batch_delivery().is_none(),
         "the parked rest-pile tail must be fully drained"
     );
     // The discriminating C6 assertion: the post-loop kept-on-top reorder ran

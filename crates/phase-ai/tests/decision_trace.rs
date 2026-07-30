@@ -114,7 +114,9 @@ fn make_fetch_ability() -> AbilityDefinition {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )));
     ability
@@ -172,10 +174,7 @@ fn fetchland_candidate(fetch: ObjectId) -> CandidateAction {
             source_id: fetch,
             ability_index: 0,
         },
-        metadata: ActionMetadata {
-            actor: Some(AI),
-            tactical_class: TacticalClass::Ability,
-        },
+        metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
     }
 }
 

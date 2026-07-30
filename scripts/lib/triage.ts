@@ -17,6 +17,8 @@ export interface TriageItem {
   thread_name: string;
   message_id: string;
   cards: string[];
+  /** Trusted `[[Card]]` / Scryfall-link subset of `cards` (see ./types.ts). */
+  explicitCards?: string[];
   summary: string;
   extraction_confidence: number;
   source_url: string;
@@ -136,7 +138,10 @@ function isCorrection(summary: string, actual: string): boolean {
   return CORRECTION_PHRASES.some((phrase) => lower.startsWith(phrase) || lower.includes(phrase));
 }
 
-function isChatter(summary: string, actual: string): boolean {
+function isChatter(summary: string, actual: string, hasEvidence: boolean): boolean {
+  // A screenshot or game-state save IS the report. Terse wording around one
+  // ("stuck, see save") is a complete report, not chatter.
+  if (hasEvidence) return false;
   const combined = (summary + " " + actual).trim();
   if (combined.length < 20) return true;
   // Pure emoji / reaction messages
@@ -188,6 +193,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           thread_name: r.thread_name,
           message_id: r.message_id,
           cards: r.cards,
+          explicitCards: r.explicitCards,
           summary,
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
@@ -208,6 +214,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           thread_name: r.thread_name,
           message_id: r.message_id,
           cards: r.cards,
+          explicitCards: r.explicitCards,
           summary,
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
@@ -228,6 +235,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           thread_name: r.thread_name,
           message_id: r.message_id,
           cards: r.cards,
+          explicitCards: r.explicitCards,
           summary,
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
@@ -239,7 +247,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
       }
 
       // --- Chatter ---
-      if (isChatter(summary, actual)) {
+      if (isChatter(summary, actual, r.evidence.attachments.length > 0)) {
         result.push({
           report_id: r.report_id,
           classification: "chatter",
@@ -248,6 +256,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           thread_name: r.thread_name,
           message_id: r.message_id,
           cards: r.cards,
+          explicitCards: r.explicitCards,
           summary,
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
@@ -280,6 +289,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           thread_name: r.thread_name,
           message_id: r.message_id,
           cards: r.cards,
+          explicitCards: r.explicitCards,
           summary,
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
@@ -300,6 +310,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           thread_name: r.thread_name,
           message_id: r.message_id,
           cards: r.cards,
+          explicitCards: r.explicitCards,
           summary,
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
@@ -338,7 +349,10 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
         thread_name: r.thread_name,
         message_id: r.message_id,
         cards: r.cards,
+        explicitCards: r.explicitCards,
         summary,
+        body: r.actual,
+        attachments: r.evidence.attachments,
         extraction_confidence: r.extraction_confidence,
         source_url: sourceUrl,
         parser_status: parserStatus,

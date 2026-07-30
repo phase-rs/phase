@@ -1,8 +1,12 @@
+import type { CSSProperties } from "react";
+
 import type { PTColor, PTDisplay } from "../../viewmodel/cardProps";
 import { formatPTDelta, type PTContribution } from "../../viewmodel/attribution";
 
 interface PTBoxProps {
   ptDisplay: PTDisplay;
+  /** Keeps a creature-planeswalker's P/T clear of its bottom-right loyalty badge. */
+  position?: "left" | "right";
   /**
    * Per-source +N/+M contributions from CR 613 layer 7c (ModifyPT).
    * When present and non-empty, attaches a hover tooltip listing each
@@ -20,6 +24,12 @@ const COLOR_CLASSES: Record<PTColor, string> = {
   red: "text-red-400",
   white: "text-white",
 };
+
+const ptBoxStyle = {
+  fontSize: "clamp(8px, calc(var(--card-h, 88px) * 0.095), 12px)",
+  paddingInline: "clamp(3px, calc(var(--card-w, 63px) * 0.055), 6px)",
+  paddingBlock: "clamp(1px, calc(var(--card-h, 88px) * 0.012), 2px)",
+} as CSSProperties;
 
 function formatTooltip(
   ptDisplay: PTDisplay,
@@ -40,6 +50,7 @@ function formatTooltip(
 
 export function PTBox({
   ptDisplay,
+  position = "right",
   ptSources,
   basePower,
   baseToughness,
@@ -50,8 +61,9 @@ export function PTBox({
       : undefined;
   return (
     <div
-      className="absolute bottom-0 right-0 z-20 flex items-center gap-px rounded-tl bg-black/80 px-1.5 py-0.5 text-xs font-bold"
+      className={`absolute bottom-0 z-20 flex items-center gap-px bg-black/80 font-bold leading-none ${position === "left" ? "left-0 rounded-tr" : "right-0 rounded-tl"}`}
       title={title}
+      style={ptBoxStyle}
     >
       <span className={COLOR_CLASSES[ptDisplay.powerColor]}>
         {ptDisplay.power}

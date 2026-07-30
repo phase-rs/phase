@@ -61,6 +61,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Adapt,
         source_id,
+        subject: None,
     });
 
     Ok(())

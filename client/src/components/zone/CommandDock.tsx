@@ -8,8 +8,8 @@ import { useResolvedCommandZoneDisplay } from "../../hooks/useResolvedCommandZon
 import { useGameStore } from "../../stores/gameStore.ts";
 import {
   type CommanderDamageEntry,
+  commandZoneLeaders,
   commanderDamageEntriesFor,
-  commandersInZone,
 } from "../../viewmodel/commanderColumn.ts";
 import { CommanderDamage } from "../board/CommanderDamage.tsx";
 import { CommanderCardZone } from "./CommanderCardZone.tsx";
@@ -20,6 +20,7 @@ interface CommandDockProps {
   /** The focused-opponent area renders mirrored (anchored to the top of the
    *  screen), so the compact popover must open downward instead of upward. */
   isMirrored: boolean;
+  splitOverview?: boolean;
 }
 
 /** Card-size CSS vars the dock's children read (`CommanderCardZone` → --card-*,
@@ -46,13 +47,13 @@ const POPOVER_SCALE = 0.82;
  *  - **compact**: a collapsed pile (commander thumbnail + emblem/damage badges)
  *    that expands to a popover on hover/click.
  */
-export function CommandDock({ playerId, isMirrored }: CommandDockProps) {
+export function CommandDock({ playerId, isMirrored, splitOverview = false }: CommandDockProps) {
   const { t } = useTranslation("game");
   const mode = useResolvedCommandZoneDisplay();
   const gameState = useGameStore((s) => s.gameState);
 
-  const commanders = useMemo(
-    () => (gameState ? commandersInZone(gameState, playerId) : []),
+  const commandZoneLeadersForPlayer = useMemo(
+    () => (gameState ? commandZoneLeaders(gameState, playerId) : []),
     [gameState, playerId],
   );
   const damageEntries = useMemo(
@@ -72,16 +73,18 @@ export function CommandDock({ playerId, isMirrored }: CommandDockProps) {
 
   // Same content gate PlayerArea used for `hasSupportExtras` — render nothing
   // when the command zone is empty so it reserves no corner space.
-  const hasContent = commanders.length > 0 || emblemCount > 0 || damageEntries.length > 0;
+  const hasContent = commandZoneLeadersForPlayer.length > 0 || emblemCount > 0 || damageEntries.length > 0;
   if (!hasContent) return null;
 
   // The full cluster — rendered in exactly one place (inline body OR popover),
-  // never both, so the interactive commander card is never duplicated.
-  const fullContent = (
-    <div className="flex flex-col items-end gap-1">
-      <CommanderCardZone playerId={playerId} />
+  // never both, so the interactive commander card is never duplicated. The
+  // popover always renders at full fidelity (it's the expanded, readable view),
+  // so only the inline body inherits the split-pane compaction.
+  const fullContent = (split: boolean) => (
+    <div className={split ? "flex flex-col items-end gap-0.5" : "flex flex-col items-end gap-1"}>
+      <CommanderCardZone playerId={playerId} splitOverview={split} />
       <CommandZone playerId={playerId} />
-      <CommanderDamage playerId={playerId} />
+      <CommanderDamage playerId={playerId} compact={split} />
     </div>
   );
 
@@ -91,8 +94,9 @@ export function CommandDock({ playerId, isMirrored }: CommandDockProps) {
         className="flex max-w-none flex-col items-end gap-1 overflow-visible"
         style={dockStyle(INLINE_SCALE)}
         data-debug-label="Command"
+        data-command-dock={isMirrored ? "opponent" : "player"}
       >
-        {fullContent}
+        {fullContent(splitOverview)}
       </div>
     );
   }
@@ -100,18 +104,20 @@ export function CommandDock({ playerId, isMirrored }: CommandDockProps) {
   return (
     <CompactCommandDock
       isMirrored={isMirrored}
-      commanders={commanders}
+      commanders={commandZoneLeadersForPlayer}
       emblemCount={emblemCount}
       damageEntries={damageEntries}
       label={t("zone.commandZone")}
+      dockRole={isMirrored ? "opponent" : "player"}
     >
-      {fullContent}
+      {fullContent(false)}
     </CompactCommandDock>
   );
 }
 
 interface CompactCommandDockProps {
   isMirrored: boolean;
+  dockRole: "player" | "opponent";
   commanders: GameObject[];
   emblemCount: number;
   damageEntries: CommanderDamageEntry[];
@@ -121,6 +127,7 @@ interface CompactCommandDockProps {
 
 function CompactCommandDock({
   isMirrored,
+  dockRole,
   commanders,
   emblemCount,
   damageEntries,
@@ -211,6 +218,7 @@ function CompactCommandDock({
       onMouseEnter={openDock}
       onMouseLeave={scheduleCloseDock}
       data-debug-label="Command"
+      data-command-dock={dockRole}
     >
       <button
         type="button"

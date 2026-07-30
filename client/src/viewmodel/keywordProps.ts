@@ -100,6 +100,120 @@ export function getKeywordReminderText(kw: Keyword): string | null {
   return KEYWORD_REMINDER_TEXT[getKeywordName(kw)] ?? null;
 }
 
+/**
+ * Keyword display name (as returned by `getKeywordName`) → mana-font
+ * `ms-ability-*` glyph class. Every value here is verified to exist as a
+ * selector in `mana-font/css/mana.css` by the guardrail test; keywords with no
+ * shipped glyph are simply absent and fall back to their text chip. Keys are
+ * the human display names so both bare-string keywords ("Flying") and
+ * parameterized ones ({ Ward: … } → "Ward") resolve through one lookup.
+ */
+export const KEYWORD_ICON_CLASS: Record<string, string> = {
+  // Evergreen / combat
+  "Flying": "ms-ability-flying",
+  "Reach": "ms-ability-reach",
+  "First Strike": "ms-ability-first-strike",
+  "Double Strike": "ms-ability-double-strike",
+  "Deathtouch": "ms-ability-deathtouch",
+  "Trample": "ms-ability-trample",
+  "Lifelink": "ms-ability-lifelink",
+  "Vigilance": "ms-ability-vigilance",
+  "Haste": "ms-ability-haste",
+  "Menace": "ms-ability-menace",
+  "Defender": "ms-ability-defender",
+  "Hexproof": "ms-ability-hexproof",
+  "Shroud": "ms-ability-shroud",
+  "Indestructible": "ms-ability-indestructible",
+  "Ward": "ms-ability-ward",
+  "Protection": "ms-ability-protection",
+  "Flash": "ms-ability-flash",
+  "Prowess": "ms-ability-prowess",
+  "Skulk": "ms-ability-skulk",
+  "Fear": "ms-ability-fear",
+  "Infect": "ms-ability-infect",
+  "Intimidate": "ms-ability-intimidate",
+  "Changeling": "ms-ability-changeling",
+  "Totem Armor": "ms-ability-totem-armor",
+  "Enchant": "ms-ability-enchant",
+  // Set / supplemental mechanics
+  "Adapt": "ms-ability-adapt",
+  "Afflict": "ms-ability-afflict",
+  "Afterlife": "ms-ability-afterlife",
+  "Amass": "ms-ability-amass",
+  "Annihilator": "ms-ability-annihilator",
+  "Ascend": "ms-ability-ascend",
+  "Backup": "ms-ability-backup",
+  "Bargain": "ms-ability-bargain",
+  "Battle Cry": "ms-ability-battle-cry",
+  "Blitz": "ms-ability-blitz",
+  "Boast": "ms-ability-boast",
+  "Casualty": "ms-ability-casualty",
+  "Channel": "ms-ability-channel",
+  "Cleave": "ms-ability-cleave",
+  "Cloak": "ms-ability-cloak",
+  "Companion": "ms-ability-companion",
+  "Convoke": "ms-ability-convoke",
+  "Craft": "ms-ability-craft",
+  "Crew": "ms-ability-crew",
+  "Cycling": "ms-ability-cycling",
+  "Delve": "ms-ability-delve",
+  "Discover": "ms-ability-discover",
+  "Disguise": "ms-ability-disguise",
+  "Disturb": "ms-ability-disturb",
+  "Embalm": "ms-ability-embalm",
+  "Enlist": "ms-ability-enlist",
+  "Enrage": "ms-ability-enrage",
+  "Escape": "ms-ability-escape",
+  "Eternalize": "ms-ability-eternalize",
+  "Evolve": "ms-ability-evolve",
+  "Exalted": "ms-ability-exalted",
+  "Exploit": "ms-ability-exploit",
+  "Fabricate": "ms-ability-fabricate",
+  "Fading": "ms-ability-fading",
+  "Forage": "ms-ability-forage",
+  "Foretell": "ms-ability-foretell",
+  "Goad": "ms-ability-goad",
+  "Haunt": "ms-ability-haunt",
+  "Hideaway": "ms-ability-hideaway",
+  "Impending": "ms-ability-impending",
+  "Improvise": "ms-ability-improvise",
+  "Ingest": "ms-ability-ingest",
+  "Jumpstart": "ms-ability-jumpstart",
+  "Kicker": "ms-ability-kicker",
+  "Learn": "ms-ability-learn",
+  "Mentor": "ms-ability-mentor",
+  "Morph": "ms-ability-morph",
+  "Mutate": "ms-ability-mutate",
+  "Ninjutsu": "ms-ability-ninjutsu",
+  "Offspring": "ms-ability-offspring",
+  "Outlast": "ms-ability-outlast",
+  "Plot": "ms-ability-plot",
+  "Prototype": "ms-ability-prototype",
+  "Read Ahead": "ms-ability-read-ahead",
+  "Reconfigure": "ms-ability-reconfigure",
+  "Regenerate": "ms-ability-regenerate",
+  "Riot": "ms-ability-riot",
+  "Saddle": "ms-ability-saddle",
+  "Soulshift": "ms-ability-soulshift",
+  "Spectacle": "ms-ability-spectacle",
+  "Spree": "ms-ability-spree",
+  "Survival": "ms-ability-survival",
+  "Suspect": "ms-ability-suspect",
+  "Toxic": "ms-ability-toxic",
+  "Training": "ms-ability-training",
+  "Undying": "ms-ability-undying",
+  "Unearth": "ms-ability-unearth",
+};
+
+/**
+ * Resolve a keyword to its mana-font `ms-ability-*` glyph class, or null when
+ * no glyph is shipped for it. Keyed off `getKeywordName` so parameterized
+ * keywords (Ward {2}, Protection from red) resolve by their base name.
+ */
+export function getKeywordIconClass(kw: Keyword): string | null {
+  return KEYWORD_ICON_CLASS[getKeywordName(kw)] ?? null;
+}
+
 /** Combat-relevant keywords displayed first, in this order. */
 const KEYWORD_DISPLAY_ORDER: string[] = [
   "Flying", "First Strike", "Double Strike", "Deathtouch", "Trample",

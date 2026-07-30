@@ -19,8 +19,10 @@
 //! - Controller scoping: `TypedFilter.controller: Option<ControllerRef>` at
 //!   `ability.rs:815-818`.
 //!
-//! `StaticMode::ModifyCost` is deliberately out of scope — cost reducers are a
-//! follow-up feature.
+//! `StaticMode::ModifyCost` is deliberately out of scope here — this axis
+//! measures mana *added* to the pool. Cost reducers (cost *removed* from spells,
+//! CR 601.2f) are the disjoint `features::cost_reduction` axis; a card is never
+//! counted by both.
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
@@ -378,7 +380,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         ability
@@ -409,6 +413,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         ability.cost = Some(AbilityCost::Tap);
@@ -566,7 +571,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         let mut face = card_face_with_types("Gift Spell", vec![CoreType::Sorcery]);
@@ -613,7 +620,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         let mut face = card_face_with_types("Fetchland", vec![CoreType::Land]);

@@ -118,6 +118,48 @@ describe("getDominantManaColor", () => {
     expect(result).toBe("White");
   });
 
+  it("counts shards serialized as engine variant names (e.g. 'White')", () => {
+    // The engine emits mana_cost.shards as Rust variant names, never Scryfall
+    // symbols like "W", so a colored spell's pips must still be counted.
+    const objects: Record<string, GameObject> = {
+      "1": makeGameObject({
+        id: 1,
+        name: "Serra Angel",
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Angel"] },
+        mana_cost: { type: "Cost", shards: ["White", "White"], generic: 3 },
+      }),
+      "2": makeGameObject({
+        id: 2,
+        name: "Lightning Bolt",
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
+        mana_cost: { type: "Cost", shards: ["Red"], generic: 0 },
+      }),
+    };
+
+    expect(getDominantManaColor([1, 2], objects, 0)).toBe("White");
+  });
+
+  it("counts both halves of a hybrid shard variant name (e.g. 'WhiteBlue')", () => {
+    // "WhiteBlue" bridges to "W/U"; both White and Blue should be tallied.
+    const objects: Record<string, GameObject> = {
+      "1": makeGameObject({
+        id: 1,
+        name: "Hybrid Spell",
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
+        mana_cost: { type: "Cost", shards: ["WhiteBlue"], generic: 0 },
+      }),
+      "2": makeGameObject({
+        id: 2,
+        name: "Blue Spell",
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
+        mana_cost: { type: "Cost", shards: ["Blue"], generic: 0 },
+      }),
+    };
+
+    // Blue appears in both objects (hybrid half + mono), White only once → Blue wins.
+    expect(getDominantManaColor([1, 2], objects, 0)).toBe("Blue");
+  });
+
   it("combines land subtypes and spell mana costs", () => {
     const objects: Record<string, GameObject> = {
       "1": makeGameObject({ id: 1, card_types: { supertypes: ["Basic"], core_types: ["Land"], subtypes: ["Island"] } }),

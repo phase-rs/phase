@@ -1,0 +1,235 @@
+import { type CSSProperties, useCallback, useEffect, useMemo } from "react";
+import { createPortal } from "react-dom";
+import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
+
+import type { ObjectId } from "../../adapter/types.ts";
+import { dispatchInteraction } from "../../game/dispatch.ts";
+import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { useAppNotificationStore } from "../../stores/appToastStore.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
+import { CardImage } from "../card/CardImage.tsx";
+import { fanGeometry, spreadFactor } from "../card/fanGeometry.ts";
+
+// Card sizing for the centered fan. Cards render at near card-preview size so
+// oracle text / P-T are readable at rest (no separate preview needed), and scale
+// down ONLY IF NEEDED to fit the viewport. The width is:
+//
+//   min( clamp(11rem, 26vh, 24rem) ,  ${WIDTH_BUDGET_VW}vw / spreadFactor(n) )
+//        └────── desired size ──────┘  └──────── width-fit cap ────────────┘
+//
+//   • Desired size is height-driven (`26vh`; `* 1.4` is the standard card aspect)
+//     so it's generous on a tall screen — but FLOORED at `11rem` so a SHORT screen
+//     (landscape phone, where `26vh` collapses to ~100px) still gets a big card.
+//     Ceiling keeps a 2-card fan from ballooning on an ultrawide monitor.
+//   • Width-fit cap is an OUTER `min`, so it can pull the card BELOW the 11rem
+//     floor when the whole overlapped fan (`cardW * spreadFactor`) would otherwise
+//     overflow — i.e. a narrow PORTRAIT phone with several attachments. It never
+//     binds on a roomy screen, so those sizes are unchanged. Budget is generous
+//     (96vw) so the common 1–2 card case is never shrunk.
+//
+// The floor lives INSIDE the desired term (not as an outer clamp) precisely so it
+// rescues short screens without re-inflating a correctly width-shrunk card.
+const WIDTH_BUDGET_VW = 96;
+function fanCardSizingStyle(cardCount: number): CSSProperties {
+  const widthCapVw = (WIDTH_BUDGET_VW / spreadFactor(cardCount)).toFixed(1);
+  const cardW = `min(clamp(11rem, 26vh, 24rem), ${widthCapVw}vw)`;
+  return {
+    "--fan-card-w": cardW,
+    "--fan-card-h": `calc(${cardW} * 1.4)`,
+  } as CSSProperties;
+}
+
+/**
+ * Centered spread of a host permanent plus every permanent attached to it
+ * (Aura / Equipment / Fortification), fanned out at HAND size using the shared
+ * compact `fanGeometry` profile — so it reads as a familiar held hand of large,
+ * legible cards rather than a bespoke overlay. Solves the reachability
+ * problem where an attached Equipment/Aura renders only as a narrow peek behind
+ * its host: during a target or board-choice prompt the overlapping objects are
+ * all legal picks (CR 301.5 / 303.4: an attached permanent is its own
+ * independent object), and the fan lets the player choose which one without
+ * hunting the peek.
+ *
+ * The fan NEVER invents a choice — each card lights up (cyan) and dispatches
+ * only what the engine's live prompt actually offers for that object. Terminal
+ * One-step picks close the fan. Multi-step decisions stay in their dedicated
+ * engine-authored interaction surfaces instead of asking this display to build
+ * a response payload.
+ * Direct clicking on the battlefield still works — this fan is an opt-in
+ * convenience opened from the "⧉" badge, not a forced modal.
+ */
+export function AttachmentFan() {
+  const { t } = useTranslation("game");
+  const hostId = useUiStore((s) => s.attachmentFanHostId);
+  const setAttachmentFanHost = useUiStore((s) => s.setAttachmentFanHost);
+  const dismissPreview = useUiStore((s) => s.dismissPreview);
+  const showNotification = useAppNotificationStore((s) => s.showNotification);
+
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const viewerInteraction = useGameStore((s) => s.viewerInteraction);
+  const host = hostId != null ? objects?.[hostId] : undefined;
+  const interactionFan = useMemo(
+    () =>
+      hostId == null
+        ? null
+        : (viewerInteraction?.attachmentFans[hostId] ?? null),
+    [hostId, viewerInteraction],
+  );
+
+  // During an interaction, the engine projection is the sole authority for
+  // which direct attachments belong in the fan. The fallback preserves the
+  // existing read-only badge outside an interaction, where no choice is being
+  // exposed and therefore no interaction capability exists to consume.
+  const cardIds = host
+    ? [
+        host.id,
+        ...(interactionFan
+          ? interactionFan.children.map((child) => child.objectId)
+          : host.attachments),
+      ]
+    : [];
+
+  const close = useCallback(() => {
+    setAttachmentFanHost(null);
+    // The fan is opened from a hovered card, so a card preview may still be up
+    // (CardPreview `z-[100]`); tear it down so it doesn't linger over the board.
+    dismissPreview();
+  }, [setAttachmentFanHost, dismissPreview]);
+
+  // Esc closes, mirroring every other dismissible overlay.
+  useEffect(() => {
+    if (hostId == null) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [hostId, close]);
+
+  const handlePick = useCallback(
+    (id: ObjectId) => {
+      const child = interactionFan?.children.find((candidate) => candidate.objectId === id);
+      if (!child || !viewerInteraction?.canSubmit) return;
+      void dispatchInteraction(child.submission).then(close).catch((error: unknown) => {
+        showNotification({
+          title: t("actionError.title", { action: t("permanent.fanPick") }),
+          description: error instanceof Error ? error.message : t("actionError.unknownEngineError"),
+        });
+      });
+    },
+    [close, interactionFan, showNotification, t, viewerInteraction?.canSubmit],
+  );
+
+  if (hostId == null || !host || cardIds.length === 0) return null;
+
+  // Shared compact whole-row fan — sized by the total card count so the host +
+  // its attachments stay within the overlay's viewport budget.
+  // The overlap basis is `--fan-card-w` (the fan's larger card width) so the
+  // spread stays proportional to the bigger cards.
+  const fan = fanGeometry(cardIds.length, "--fan-card-w");
+
+  return createPortal(
+    // Portaled above the card preview (`z-[100]`) so the fan and its cyan
+    // affordances are never veiled. Backdrop click / Esc dismiss.
+    <div
+      className="fixed inset-0 z-[120] flex flex-col items-center justify-center bg-black/60 backdrop-blur-[2px]"
+      onClick={close}
+      data-attachment-fan
+    >
+      {/* `items-end` + `perspective` mirror the hand container so the cards fan
+          up from a shared baseline with the same held-hand feel. The sizing style
+          defines `--fan-card-w/h` — big by default, scaling down only if the fan
+          would overflow a narrow screen (portrait mobile with several cards). */}
+      <div
+        className="flex items-end justify-center"
+        style={{ perspective: "800px", ...fanCardSizingStyle(cardIds.length) }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {cardIds.map((id, i) => (
+          <FanCard
+            key={id}
+            objectId={id}
+            marginLeft={i === 0 ? 0 : fan.overlap}
+            rotation={fan.rotation(i)}
+            arcOffset={fan.arc(i)}
+            zIndex={i}
+            selectable={interactionFan !== null && id !== host.id}
+            onPick={handlePick}
+          />
+        ))}
+      </div>
+
+    </div>,
+    document.body,
+  );
+}
+
+function FanCard({
+  objectId,
+  marginLeft,
+  rotation,
+  arcOffset,
+  zIndex,
+  selectable,
+  onPick,
+}: {
+  objectId: ObjectId;
+  marginLeft: string | number;
+  rotation: number;
+  arcOffset: number;
+  zIndex: number;
+  selectable: boolean;
+  onPick: (id: ObjectId) => void;
+}) {
+  const { t } = useTranslation("game");
+  const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  if (!obj) return null;
+
+  const lookup = cardImageLookup(obj);
+  const isToken = obj.display_source === "Token";
+  // The whole fan speaks one "pick me" color — cyan — so a spread of a host and
+  // its attachments reads as one direct engine-authorized chooser.
+  const ring = selectable ? "ring-2 ring-cyan-400 shadow-[0_0_16px_5px_rgba(34,211,238,0.55)]" : "";
+
+  // Mirror the hand card's resting animation (arc + tilt) and hover lift so the
+  // attachment fan feels identical to picking a card out of hand.
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 40 }}
+      animate={{ opacity: 1, y: 30 + arcOffset, rotate: rotation }}
+      whileHover={{ y: arcOffset - 12, scale: 1.12, zIndex: 999 }}
+      transition={{ duration: 0.2 }}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (selectable) onPick(objectId);
+      }}
+      aria-label={obj.name}
+      className={`relative leading-[0] select-none ${selectable ? "cursor-pointer" : "cursor-default"}`}
+      style={{ marginLeft, zIndex }}
+    >
+      <div className={`relative overflow-hidden rounded-lg ${ring} ${selectable ? "" : "opacity-60"}`}>
+        <CardImage
+          cardName={lookup.name}
+          faceIndex={lookup.faceIndex}
+          oracleId={lookup.oracleId}
+          faceName={lookup.faceName}
+          size="large"
+          isToken={isToken}
+          tokenFilters={isToken ? tokenFiltersForObject(obj) : undefined}
+          tokenImageRef={isToken ? obj.token_image_ref : undefined}
+          oracleText={isToken ? obj.token_rules_text : undefined}
+          faceDown={obj.face_down}
+          className="!w-[var(--fan-card-w)] !h-[var(--fan-card-h)]"
+        />
+      </div>
+      {selectable && (
+        <span className="pointer-events-none absolute left-1 top-1 z-10 rounded bg-cyan-400 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-cyan-950 ring-1 ring-cyan-950/50 shadow">
+          {t("permanent.fanPick")}
+        </span>
+      )}
+    </motion.div>
+  );
+}

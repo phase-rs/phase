@@ -1,0 +1,26 @@
+{
+  "viewer": {
+    "title": "Wiederholungs-Viewer",
+    "eyebrow": "Eine aufgezeichnete Partie ansehen",
+    "chooseFile": "Wiederholungsdatei wählen",
+    "loading": "Wiederholung wird geladen…",
+    "errorGeneric": "Diese Wiederholungsdatei konnte nicht geladen werden.",
+    "backToMenu": "Zurück zum Menü"
+  },
+  "controls": {
+    "play": "Abspielen",
+    "pause": "Pause",
+    "stepBack": "Schritt zurück",
+    "stepForward": "Schritt vor",
+    "actionOf": "Aktion {{current}} / {{total}}",
+    "speed": "Geschwindigkeit",
+    "speedValue": "{{value}}x",
+    "seekError": "Dieser Punkt der Wiederholung konnte nicht rekonstruiert werden: {{message}}"
+  },
+  "export": {
+    "button": "Wiederholung exportieren",
+    "success": "Wiederholung gespeichert als {{filename}}",
+    "noRecording": "Für diese Partie ist keine Wiederholungsaufzeichnung verfügbar.",
+    "error": "Die Wiederholung konnte nicht exportiert werden."
+  }
+}

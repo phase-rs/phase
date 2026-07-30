@@ -5,7 +5,7 @@
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::{AbilityKind, BounceSelection, Effect};
+use engine::types::ability::{AbilityKind, Effect};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -81,20 +81,20 @@ fn macabre_waltz_returns_creature_from_graveyard_to_hand() {
 }
 
 #[test]
-fn macabre_waltz_parses_bounce_then_discard_chain() {
+fn macabre_waltz_parses_return_then_discard_chain() {
     let def = parse_effect_chain(MACABRE_WALTZ_ORACLE, AbilityKind::Spell);
     assert!(
-        matches!(&*def.effect, Effect::Bounce { .. }),
-        "expected graveyard bounce head, got {:?}",
+        matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                ..
+            }
+        ),
+        "expected graveyard-to-hand ChangeZone head, got {:?}",
         def.effect
     );
-    if let Effect::Bounce { selection, .. } = def.effect.as_ref() {
-        assert_eq!(
-            *selection,
-            BounceSelection::Targeted,
-            "graveyard return must be targeted bounce"
-        );
-    }
     let spec = def
         .multi_target
         .as_ref()

@@ -22,7 +22,7 @@ export function TabBar({ onWhatsNew, hasUnread }: TabBarProps) {
 
   return (
     <nav
-      className="fixed inset-x-0 bottom-0 z-50 flex items-stretch justify-around gap-0.5 border-t border-hairline-strong bg-[rgba(6,10,22,0.92)] px-1.5 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur-xl min-[820px]:hidden"
+      className="fixed inset-x-0 bottom-0 z-50 flex items-stretch justify-around gap-0.5 border-t border-hairline-strong bg-[rgba(6,10,22,0.96)] px-1.5 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] min-[820px]:hidden"
       aria-label={t("nav.label")}
     >
       {/* Version/update chip, anchored just above the bar's real top edge
@@ -37,8 +37,8 @@ export function TabBar({ onWhatsNew, hasUnread }: TabBarProps) {
             key={key}
             to={path}
             aria-current={on ? "page" : undefined}
-            className={`flex flex-1 flex-col items-center gap-1 rounded-xl px-0.5 py-1.5 text-[10.5px] font-semibold transition-colors ${
-              on ? "text-white" : "text-fg-meta"
+            className={`flex flex-1 flex-col items-center gap-1 rounded-[8px] border px-0.5 py-1.5 text-[10.5px] font-semibold transition-colors ${
+              on ? "border-white/12 bg-slate-900 text-white" : "border-transparent text-fg-meta"
             }`}
           >
             <Icon
@@ -51,7 +51,7 @@ export function TabBar({ onWhatsNew, hasUnread }: TabBarProps) {
 
       <button
         onClick={onWhatsNew}
-        className="flex flex-1 flex-col items-center gap-1 rounded-xl px-0.5 py-1.5 text-[10.5px] font-semibold text-fg-meta transition-colors"
+        className="flex flex-1 flex-col items-center gap-1 rounded-[8px] border border-transparent px-0.5 py-1.5 text-[10.5px] font-semibold text-fg-meta transition-colors"
       >
         <span className="relative">
           <SparkleIcon className="h-7 w-7 opacity-50" />

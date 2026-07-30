@@ -1,12 +1,12 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
 use crate::types::ability::{
-    CategoryChooserScope, Effect, EffectError, EffectKind, PlayerFilter, ResolvedAbility,
-    TargetFilter,
+    CategoryChooserScope, Effect, EffectError, EffectKind, KeeperConstraint, PlayerFilter,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, PendingPlayerScopeSacrificeCompletion, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
@@ -19,17 +19,28 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (categories, chooser_scope, choose_filter, sacrifice_filter) = match &ability.effect {
+    let (
+        categories,
+        chooser_scope,
+        choose_filter,
+        sacrifice_filter,
+        total_power_cap,
+        keeper_constraint,
+    ) = match &ability.effect {
         Effect::ChooseAndSacrificeRest {
             categories,
             chooser_scope,
             choose_filter,
             sacrifice_filter,
+            total_power_cap,
+            keeper_constraint,
         } => (
             categories.clone(),
             *chooser_scope,
             choose_filter.clone(),
             sacrifice_filter.clone(),
+            total_power_cap.clone(),
+            keeper_constraint.clone(),
         ),
         _ => {
             return Err(EffectError::MissingParam(
@@ -59,8 +70,58 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseAndSacrificeRest,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
+    }
+
+    // CR 107.1c + CR 701.21a (Slaughter the Strong): total-power-capped keep mode —
+    // each player keeps a chosen subset whose combined power is at most the cap,
+    // instead of one permanent per category.
+    if let Some(cap_expr) = total_power_cap {
+        let cap = crate::game::quantity::resolve_quantity(
+            state,
+            &cap_expr,
+            ability.controller,
+            ability.source_id,
+        );
+        return step_total_power(
+            state,
+            ability.source_id,
+            ability.controller,
+            chooser_scope,
+            &player_order,
+            Vec::new(),
+            &choose_filter,
+            &sacrifice_filter,
+            cap,
+            &player_order,
+            events,
+        );
+    }
+
+    // CR 101.4 + CR 701.21a: exact-cardinality keeper mode. This is a
+    // separate constraint from the legacy category and total-power modes: a
+    // player protects exactly N eligible permanents, then the reusable
+    // player-scope sacrifice queue moves every unprotected permanent after all
+    // APNAP choices are known.
+    if let Some(KeeperConstraint::ExactCount { count }) = keeper_constraint {
+        let keep_count =
+            crate::game::quantity::resolve_quantity_with_targets(state, &count, ability).max(0)
+                as usize;
+        return step_exact_count(
+            state,
+            ability.source_id,
+            ability.controller,
+            chooser_scope,
+            &player_order,
+            Vec::new(),
+            &choose_filter,
+            &sacrifice_filter,
+            keep_count,
+            &player_order,
+            events,
+        );
     }
 
     // Start with the first player in APNAP order.
@@ -84,10 +145,6 @@ pub fn resolve(
 
     // If all categories are empty for all players, skip directly to sacrifice.
     if eligible.iter().all(|e| e.is_empty()) && remaining_players.is_empty() {
-        // CR 603.10a: the permanents this sweep sacrifices left the battlefield
-        // together — stamp the sub-slice so a co-departing leaves-the-battlefield
-        // observer among them observes the rest.
-        let before = events.len();
         sacrifice_unchosen(
             state,
             &[],
@@ -96,12 +153,7 @@ pub fn resolve(
             ability.source_id,
             ability.controller,
             events,
-        );
-        crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[before..]);
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::ChooseAndSacrificeRest,
-            source_id: ability.source_id,
-        });
+        )?;
         return Ok(());
     }
 
@@ -126,9 +178,6 @@ pub fn resolve(
     if let Some(auto_choices) = try_auto_resolve(&eligible) {
         let kept: Vec<ObjectId> = auto_choices.iter().filter_map(|&opt| opt).collect();
         if remaining_players.is_empty() {
-            // CR 603.10a: co-departing observer among the sacrificed group
-            // observes the rest — stamp the sweep's sub-slice.
-            let before = events.len();
             sacrifice_unchosen(
                 state,
                 &kept,
@@ -137,12 +186,7 @@ pub fn resolve(
                 ability.source_id,
                 ability.controller,
                 events,
-            );
-            crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[before..]);
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::ChooseAndSacrificeRest,
-                source_id: ability.source_id,
-            });
+            )?;
             return Ok(());
         }
         return advance_to_next_player(
@@ -178,6 +222,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseAndSacrificeRest,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -209,6 +254,204 @@ pub(crate) fn compute_eligible_per_category(
                 .collect()
         })
         .collect()
+}
+
+/// CR 701.21a: Eligible creatures for the total-power keep mode — `choose_filter`
+/// permanents controlled by `player`.
+pub(crate) fn compute_eligible_creatures(
+    state: &GameState,
+    player: PlayerId,
+    choose_filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+) -> Vec<ObjectId> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.controller == player
+                    && !obj.is_emblem
+                    && matches_target_filter(state, *id, choose_filter, filter_ctx)
+            })
+        })
+        .collect()
+}
+
+/// CR 208.3: Combined power of the given objects (treating absent/empty power as 0).
+pub(crate) fn total_power(state: &GameState, ids: &[ObjectId]) -> i32 {
+    ids.iter()
+        .filter_map(|id| state.objects.get(id))
+        .map(|obj| obj.power.unwrap_or(0))
+        .sum()
+}
+
+/// CR 107.1c + CR 701.21a: Process the next player in the total-power keep flow.
+/// Auto-keeps all eligible creatures when their combined power already fits the
+/// cap (or none are eligible); otherwise pauses for an interactive subset choice.
+/// When no players remain, sacrifices every non-kept `sacrifice_filter` permanent.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_total_power(
+    state: &mut GameState,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+    chooser_scope: CategoryChooserScope,
+    players_remaining: &[PlayerId],
+    all_kept: Vec<ObjectId>,
+    choose_filter: &TargetFilter,
+    sacrifice_filter: &TargetFilter,
+    cap: i32,
+    scoped_players: &[PlayerId],
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let Some((&current_player, rest)) = players_remaining.split_first() else {
+        sacrifice_unchosen(
+            state,
+            &all_kept,
+            scoped_players,
+            sacrifice_filter,
+            source_id,
+            source_controller,
+            events,
+        )?;
+        return Ok(());
+    };
+
+    // CR 109.5: preserve the source-controller provenance (mirroring
+    // `advance_to_next_player`) so a controller-relative `choose_filter`
+    // evaluates eligibility against the spell's controller even on a
+    // resumed/serialized choice or when the source object is gone.
+    let filter_ctx = FilterContext::from_source_with_controller(source_id, source_controller);
+    let eligible = compute_eligible_creatures(state, current_player, choose_filter, &filter_ctx);
+
+    // CR 107.1c: "any number" includes zero — even when keeping every eligible
+    // creature already fits the cap, the player may choose to keep fewer (e.g. to
+    // sacrifice their own creatures). So only auto-resolve a truly empty eligible
+    // set; otherwise prompt (the UI/AI is free to default to keeping all).
+    if eligible.is_empty() {
+        let mut all_kept = all_kept;
+        all_kept.extend(eligible);
+        return step_total_power(
+            state,
+            source_id,
+            source_controller,
+            chooser_scope,
+            rest,
+            all_kept,
+            choose_filter,
+            sacrifice_filter,
+            cap,
+            scoped_players,
+            events,
+        );
+    }
+
+    // CR 101.4: the chooser is the affected player (EachPlayerSelf) or the source
+    // controller (ControllerForAll).
+    let chooser = match chooser_scope {
+        CategoryChooserScope::EachPlayerSelf => current_player,
+        CategoryChooserScope::ControllerForAll => source_controller,
+    };
+    state.waiting_for = WaitingFor::KeepWithinTotalPowerChoice {
+        player: chooser,
+        target_player: current_player,
+        eligible,
+        cap,
+        choose_filter: choose_filter.clone(),
+        sacrifice_filter: sacrifice_filter.clone(),
+        chooser_scope,
+        source_id,
+        source_controller,
+        remaining_players: rest.to_vec(),
+        all_kept,
+        scoped_players: scoped_players.to_vec(),
+    };
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::ChooseAndSacrificeRest,
+        source_id,
+        subject: None,
+    });
+    Ok(())
+}
+
+/// CR 101.4 + CR 701.21a: Process the next exact-keeper choice. Every player
+/// chooses before any unchosen permanent is sacrificed; the terminal action is
+/// delegated to the reusable replacement-safe scope-sacrifice executor.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_exact_count(
+    state: &mut GameState,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+    chooser_scope: CategoryChooserScope,
+    players_remaining: &[PlayerId],
+    all_kept: Vec<ObjectId>,
+    choose_filter: &TargetFilter,
+    sacrifice_filter: &TargetFilter,
+    count: usize,
+    scoped_players: &[PlayerId],
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let Some((&target_player, rest)) = players_remaining.split_first() else {
+        sacrifice_unchosen(
+            state,
+            &all_kept,
+            scoped_players,
+            sacrifice_filter,
+            source_id,
+            source_controller,
+            events,
+        )?;
+        return Ok(());
+    };
+
+    let filter_ctx = FilterContext::from_source_with_controller(source_id, source_controller);
+    let eligible = compute_eligible_creatures(state, target_player, choose_filter, &filter_ctx);
+    if eligible.len() <= count {
+        let mut all_kept = all_kept;
+        all_kept.extend(eligible);
+        return step_exact_count(
+            state,
+            source_id,
+            source_controller,
+            chooser_scope,
+            rest,
+            all_kept,
+            choose_filter,
+            sacrifice_filter,
+            count,
+            scoped_players,
+            events,
+        );
+    }
+
+    let player = match chooser_scope {
+        CategoryChooserScope::EachPlayerSelf => target_player,
+        CategoryChooserScope::ControllerForAll => source_controller,
+    };
+    // CR 609.3: If fewer than the required count are eligible, this instruction
+    // does as much as possible by keeping every eligible permanent. Publish the
+    // resulting exact requirement so the caller has no legality arithmetic left.
+    let required_count = count.min(eligible.len());
+    state.waiting_for = WaitingFor::KeepExactPermanentsChoice {
+        player,
+        target_player,
+        eligible,
+        required_count,
+        choose_filter: choose_filter.clone(),
+        sacrifice_filter: sacrifice_filter.clone(),
+        chooser_scope,
+        source_id,
+        source_controller,
+        remaining_players: rest.to_vec(),
+        all_kept,
+        scoped_players: scoped_players.to_vec(),
+    };
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::ChooseAndSacrificeRest,
+        source_id,
+        subject: None,
+    });
+    Ok(())
 }
 
 /// Try to auto-resolve when every category has at most one eligible permanent.
@@ -243,9 +486,6 @@ pub(crate) fn advance_to_next_player(
 ) -> Result<(), EffectError> {
     dedupe_object_ids(&mut all_kept);
     if remaining.is_empty() {
-        // CR 603.10a: terminal APNAP sweep — the sacrificed group left the
-        // battlefield together, so stamp this sub-slice for co-departing observers.
-        let before = events.len();
         sacrifice_unchosen(
             state,
             &all_kept,
@@ -254,12 +494,7 @@ pub(crate) fn advance_to_next_player(
             source_id,
             controller,
             events,
-        );
-        crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[before..]);
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::ChooseAndSacrificeRest,
-            source_id,
-        });
+        )?;
         return Ok(());
     }
 
@@ -340,7 +575,7 @@ pub(crate) fn sacrifice_unchosen_from_handler(
     source_id: ObjectId,
     source_controller: PlayerId,
     events: &mut Vec<GameEvent>,
-) {
+) -> Result<(), EffectError> {
     sacrifice_unchosen(
         state,
         kept,
@@ -349,7 +584,7 @@ pub(crate) fn sacrifice_unchosen_from_handler(
         source_id,
         source_controller,
         events,
-    );
+    )
 }
 
 /// CR 701.21a: Sacrifice all permanents on the battlefield that were not chosen.
@@ -361,7 +596,7 @@ fn sacrifice_unchosen(
     source_id: ObjectId,
     source_controller: PlayerId,
     events: &mut Vec<GameEvent>,
-) {
+) -> Result<(), EffectError> {
     // CR 701.21a: Sacrifice each permanent NOT chosen, restricted to the
     // permanents controlled by the players within `player_scope`. A player
     // outside the effect's scope (e.g. Liliana's controller, scope = Opponent)
@@ -378,43 +613,81 @@ fn sacrifice_unchosen(
     } else {
         scoped_players.to_vec()
     };
-    // Collect all battlefield permanents not in the kept set, controlled by a
-    // player within scope.
-    let filter_ctx = FilterContext::from_source_with_controller(source_id, source_controller);
-    let to_sacrifice: Vec<ObjectId> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| {
-            !kept.contains(id)
-                && state
-                    .objects
-                    .get(id)
-                    .is_some_and(|obj| !obj.is_emblem && effective_scope.contains(&obj.controller))
-                && matches_target_filter(state, *id, sacrifice_filter, &filter_ctx)
-        })
-        .collect();
+    let selections = unchosen_sacrifice_selections_for_scope(
+        state,
+        kept,
+        &effective_scope,
+        sacrifice_filter,
+        source_id,
+        source_controller,
+    );
+    let completion = PendingPlayerScopeSacrificeCompletion {
+        effect_kind: Some(EffectKind::ChooseAndSacrificeRest),
+        ..Default::default()
+    };
+    let _ = super::perform_collected_player_scope_sacrifices_with_completion(
+        state,
+        source_id,
+        source_controller,
+        selections,
+        completion,
+        events,
+    )?;
+    Ok(())
+}
 
-    for obj_id in to_sacrifice {
-        let controller = state
-            .objects
-            .get(&obj_id)
-            .map(|obj| obj.controller)
-            .unwrap_or(state.active_player);
-        // Use the sacrifice primitive directly — single authority for sacrifice.
-        match crate::game::sacrifice::sacrifice_permanent(state, obj_id, controller, events) {
-            Ok(crate::game::sacrifice::SacrificeOutcome::Complete) => {}
-            Ok(crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(player)) => {
-                state.waiting_for =
-                    crate::game::replacement::replacement_choice_waiting_for(player, state);
-                // Replacement choice will resume; remaining sacrifices happen after.
-                return;
+fn unchosen_sacrifice_selections_for_scope(
+    state: &GameState,
+    kept: &[ObjectId],
+    scope: &[PlayerId],
+    sacrifice_filter: &TargetFilter,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+) -> Vec<(PlayerId, Vec<ObjectId>)> {
+    let mut selections: Vec<(PlayerId, Vec<ObjectId>)> = Vec::new();
+    for player in scope {
+        // CR 608.2c: When the sacrifice filter carries a `ParentTarget`-relative
+        // predicate (Winnowing's "that don't share a creature type with the
+        // chosen creature they control"), the reference must resolve to THIS
+        // player's kept creature — not to a single global keeper. Bind
+        // `recipient_id` to the first kept object this player controls so the
+        // `SharesQuality { reference: ParentTarget }` prop is scoped per player.
+        // `kept` is a flat list across all players (see `resolve`).
+        // ponytail: first kept object per player — if a future effect lets one
+        // player keep multiple creatures here, only the first is used as the
+        // shared-quality reference.
+        let recipient = kept.iter().copied().find(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.controller == *player)
+        });
+        let filter_ctx = match recipient {
+            Some(recipient_id) => {
+                FilterContext::from_source_with_recipient(state, source_id, recipient_id)
             }
-            Err(_) => {
-                // Object may have left the battlefield; skip silently.
-            }
+            // Inert for filters with no reference/recipient-reading prop
+            // (Cataclysm, Tragic Arrogance, Slaughter the Strong, Natural Balance).
+            None => FilterContext::from_source_with_controller(source_id, source_controller),
+        };
+        let cards: Vec<ObjectId> = state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| {
+                !kept.contains(id)
+                    && state.objects.get(id).is_some_and(|obj| {
+                        obj.controller == *player
+                            && !obj.is_emblem
+                            && matches_target_filter(state, *id, sacrifice_filter, &filter_ctx)
+                    })
+            })
+            .collect();
+        if !cards.is_empty() {
+            selections.push((*player, cards));
         }
     }
+    selections
 }
 
 fn dedupe_object_ids(ids: &mut Vec<ObjectId>) {
@@ -464,6 +737,8 @@ mod tests {
                 chooser_scope,
                 choose_filter: permanent_filter(),
                 sacrifice_filter: permanent_filter(),
+                total_power_cap: None,
+                keeper_constraint: None,
             },
             vec![],
             ObjectId(100),
@@ -483,6 +758,8 @@ mod tests {
                 chooser_scope,
                 choose_filter: permanent_filter(),
                 sacrifice_filter: permanent_filter(),
+                total_power_cap: None,
+                keeper_constraint: None,
             },
             vec![],
             ObjectId(100),
@@ -680,6 +957,8 @@ mod tests {
                 chooser_scope: CategoryChooserScope::EachPlayerSelf,
                 choose_filter: nonland_permanent_filter(),
                 sacrifice_filter: nonland_permanent_filter(),
+                total_power_cap: None,
+                keeper_constraint: None,
             },
             vec![],
             ObjectId(100),
@@ -828,6 +1107,8 @@ mod tests {
                 chooser_scope: CategoryChooserScope::EachPlayerSelf,
                 choose_filter: permanent_filter(),
                 sacrifice_filter: permanent_filter(),
+                total_power_cap: None,
+                keeper_constraint: None,
             },
             vec![],
             ObjectId(100),

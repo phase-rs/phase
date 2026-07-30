@@ -1,19 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { BatchResolveResult, GameState } from "../../adapter/types";
+import type { BatchResolveResult, EngineSnapshot, GameState } from "../../adapter/types";
+import { nextSnapshotSeq } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import { buildGameState, buildPriorityWaitingFor, buildStackEntry } from "../../test/factories/gameStateFactory";
 import { dispatchResolveAll } from "../dispatch";
 
 // A Priority-on-the-storming-player WaitingFor (active player holds priority).
-const priorityWf = { type: "Priority", data: { player: 0 } } as unknown as BatchResolveResult["waitingFor"];
+const priorityWf: BatchResolveResult["waitingFor"] = buildPriorityWaitingFor();
 
 function stateWithStack(len: number): GameState {
-  return { waiting_for: priorityWf, stack: new Array(len).fill(0), turn: { active_player: 0 } } as unknown as GameState;
+  return buildGameState({
+    waiting_for: priorityWf,
+    stack: Array.from({ length: len }, (_, index) => buildStackEntry({ id: index + 1 })),
+  });
 }
 
 function chunk(itemsResolved: number, total: number): BatchResolveResult {
   return { events: [], waitingFor: priorityWf, logEntries: [], itemsResolved, total };
+}
+
+/**
+ * A `getSnapshot` stub that reads through the test's own `getState` script and
+ * pairs it with empty legal actions. The drain now reads ONE atomic pair per
+ * chunk (not getState + getLegalActions), so this keeps each test's per-chunk
+ * `getState` sequencing intact while matching the real adapter contract.
+ */
+function snapshotVia(getState: () => Promise<GameState>) {
+  return vi.fn(async (): Promise<EngineSnapshot> => ({
+    state: await getState(),
+    legalResult: { actions: [], autoPassRecommended: false },
+    seq: nextSnapshotSeq(),
+  }));
 }
 
 describe("dispatchResolveAll progress", () => {
@@ -68,10 +87,13 @@ describe("dispatchResolveAll progress", () => {
         resolveAll,
         getState,
         getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
       } as never,
     });
 
-    await dispatchResolveAll(0, []);
+    // Non-empty AI seat list = the "ai"-mode shape; an empty list would route
+    // to the SetAutoPass fallback instead of the batch drain under test.
+    await dispatchResolveAll(0, [{ playerId: 1, difficulty: "Medium" }]);
 
     // Three progress updates: total latched at 200 throughout; resolved
     // accumulates 80 -> 160 -> clamped 200.
@@ -99,17 +121,82 @@ describe("dispatchResolveAll progress", () => {
       return chunk(0, 19192);
     });
 
+    const getState = vi.fn().mockResolvedValue(stateWithStack(0));
     useGameStore.setState({
       adapter: {
         resolveAll,
-        getState: vi.fn().mockResolvedValue(stateWithStack(0)),
+        getState,
         getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
+      } as never,
+    });
+
+    await dispatchResolveAll(0, [{ playerId: 1, difficulty: "Medium" }]);
+
+    expect(resolveAll).toHaveBeenCalledTimes(1);
+    expect(useGameStore.getState().isResolvingAll).toBe(false);
+  });
+
+  it("falls back to the auto-yield when there are no AI seats to drive the drain, even with a batch-capable adapter (local hotseat, #4978)", async () => {
+    const resolveAll = vi.fn<EngineResolveAll>();
+    const submitAction = vi
+      .fn<(action: unknown, actor: number) => Promise<{ events: never[] }>>()
+      .mockResolvedValue({ events: [] });
+
+    const getState = vi.fn().mockResolvedValue(stateWithStack(2));
+    useGameStore.setState({
+      gameState: stateWithStack(3),
+      adapter: {
+        resolveAll,
+        submitAction,
+        getState,
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
       } as never,
     });
 
     await dispatchResolveAll(0, []);
 
-    expect(resolveAll).toHaveBeenCalledTimes(1);
+    // The batch drain needs an AI decider for every non-requester seat; with
+    // none, those seats are humans (local hotseat) and CR 117.4 entitles each
+    // to their own priority window — never engage the worker drain.
+    expect(resolveAll).not.toHaveBeenCalled();
+    expect(submitAction).toHaveBeenCalledWith(
+      { type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } },
+      0,
+    );
+  });
+
+  it("falls back to an engine-side UntilStackEmpty auto-pass when the adapter has no batch resolveAll (multiplayer)", async () => {
+    const submitAction = vi
+      .fn<(action: unknown, actor: number) => Promise<{ events: never[] }>>()
+      .mockResolvedValue({ events: [] });
+
+    const getState = vi.fn().mockResolvedValue(stateWithStack(2));
+    useGameStore.setState({
+      gameState: stateWithStack(3),
+      adapter: {
+        submitAction,
+        getState,
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
+      } as never,
+    });
+
+    // A NON-empty seat list pins the `!adapter.resolveAll` half of the
+    // fallback gate on its own: even when a caller claims AI seats exist
+    // (draft-match vs a human would, if its pairing were misread), a
+    // transport with no batch drain must still take the auto-yield path.
+    await dispatchResolveAll(0, [{ playerId: 1, difficulty: "Medium" }]);
+
+    // Arena semantics: yield THIS seat's priority windows via the engine's
+    // auto-pass session — never a host-driven batch drain over human seats.
+    expect(submitAction).toHaveBeenCalledTimes(1);
+    expect(submitAction).toHaveBeenCalledWith(
+      { type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } },
+      0,
+    );
+    // The batch busy-state must stay untouched — there is no local drain loop.
     expect(useGameStore.getState().isResolvingAll).toBe(false);
   });
 });

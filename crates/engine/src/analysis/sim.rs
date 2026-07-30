@@ -320,6 +320,7 @@ mod tests {
             GameEvent::EffectResolved {
                 kind: EffectKind::ExtraTurn,
                 source_id: ObjectId(9),
+                subject: None,
             },
             // ETB of a land == landfall + etb.
             zone_change(Some(Zone::Hand), Zone::Battlefield, vec![CoreType::Land]),
@@ -336,6 +337,8 @@ mod tests {
             GameEvent::PlayerPerformedAction {
                 player_id: PlayerId(0),
                 action: PlayerActionKind::Proliferate,
+                look_count: None,
+                scry_bottom_count: None,
             },
         ];
 
@@ -405,6 +408,8 @@ mod tests {
             &[GameEvent::PlayerPerformedAction {
                 player_id: PlayerId(0),
                 action: PlayerActionKind::Scry,
+                look_count: None,
+                scry_bottom_count: None,
             }],
         );
         assert!(acc.generic_triggers.is_empty());
@@ -565,12 +570,9 @@ mod tests {
         probe.runner.state_mut().players[1].poison_counters = 4;
         let delta = probe.iteration_delta();
 
-        use crate::analysis::resource::{CounterClass, ObjectClass};
+        // CR 704.5c: poison is per-victim in `delta.poison`, read from the state snapshot.
         assert_eq!(
-            delta
-                .counters
-                .get(&(CounterClass::Poison, ObjectClass::Player))
-                .copied(),
+            delta.poison.get(&PlayerId(1)).copied(),
             Some(4),
             "poison is read from the state snapshot, not the event feed"
         );
@@ -688,6 +690,7 @@ mod tests {
             &[GameEvent::EffectResolved {
                 kind: EffectKind::ExtraTurn,
                 source_id: ObjectId(7),
+                subject: None,
             }],
         );
         assert_eq!(
@@ -702,6 +705,7 @@ mod tests {
             &[GameEvent::EffectResolved {
                 kind: EffectKind::DealDamage,
                 source_id: ObjectId(7),
+                subject: None,
             }],
         );
         assert_eq!(
@@ -725,6 +729,8 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let v = ResourceVector::snapshot(&state);
@@ -748,6 +754,8 @@ mod tests {
             state.extra_phases.push(ExtraPhase {
                 anchor: Phase::EndCombat,
                 phase: Phase::BeginCombat,
+                attacker_restriction: None,
+                attacker_restriction_source: None,
             });
         }
 
@@ -793,6 +801,8 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::Upkeep,
             phase: Phase::Upkeep,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let v = ResourceVector::snapshot(&state);

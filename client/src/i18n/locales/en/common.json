@@ -15,6 +15,24 @@
     "enter": "Enter fullscreen",
     "exit": "Exit fullscreen"
   },
+  "nativeEngineProgress": {
+    "title": "Updating native engine",
+    "resolving": "Finding the correct local server…",
+    "downloadingBinary": "Downloading updated server…",
+    "verifying": "Verifying server…",
+    "downloadingData": "Downloading game data…",
+    "spawning": "Starting local server…",
+    "ready": "Native engine ready",
+    "failed": "Unable to prepare native engine"
+  },
+  "engineBadge": {
+    "native": "Native engine",
+    "nativeTooltip": "This game is running on the desktop app's native engine.",
+    "inBrowser": "In-browser engine",
+    "inBrowserTooltip": "Native engine unavailable — this game is running in-browser.",
+    "versionMismatchTooltip": "Native engine version mismatch — this game is running in-browser.",
+    "notAttemptedTooltip": "This game is running in-browser — the native engine wasn't used for it."
+  },
   "buildBadge": {
     "downloading": "downloading… {{progress}}%",
     "checking": "checking…",
@@ -22,18 +40,40 @@
     "updatePending": "update pending after game",
     "cards": "cards {{age}} ({{commit}})",
     "cardDataTitle": "Card data generated {{date}} from {{commit}}",
+    "desktopAppVersion": "Desktop app v{{version}}",
     "checkForUpdates": "Check for updates",
     "updaterDebugInfo": "Updater debug info",
     "updaterIssue": "Updater issue: {{error}}",
     "updateIssue": "update issue",
     "updated": "updated"
   },
+  "comboDetector": {
+    "label": "Combo Detector",
+    "title": "Detect infinite loops: end mandatory loops automatically and show ∞ resources (off by default)",
+    "on": "On",
+    "off": "Off",
+    "interactive": "Interactive"
+  },
   "gameMenu": {
+    "sections": {
+      "view": "View",
+      "tools": "Tools",
+      "game": "Game"
+    },
+    "reportCard": "Report a card",
     "menu": "Game menu",
     "sandboxTools": "Sandbox Tools",
     "sandboxToolsTitle": "Sandbox Tools — set up any board state (`)",
+    "openSandboxTools": "Open Sandbox Tools",
+    "clickModeButton": "Click Mode Button",
+    "shown": "Shown",
+    "hidden": "Hidden",
     "resume": "Resume",
     "settings": "Settings",
+    "boardLayoutSplit": "Split",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Switch to split table view",
+    "switchToLegacyView": "Switch to legacy focused view",
     "helpShortcuts": "Help & Shortcuts",
     "showAiHand": "Show AI Hand",
     "hideAiHand": "Hide AI Hand",
@@ -95,6 +135,7 @@
     "recoveryDescription": "If a card misbehaves, export state first. The advanced debug panel is available when you need to inspect or adjust the game.",
     "copyState": "Copy State",
     "exportState": "Export State",
+    "exportReplay": "Export Replay",
     "openAdvancedDebug": "Open Advanced Debug",
     "sections": {
       "Flow": "Flow",
@@ -105,7 +146,10 @@
       "copied": "Copied game state to clipboard.",
       "copyFailed": "Could not copy game state.",
       "exported": "Exported {{filename}}.",
-      "exportFailed": "Could not export game state."
+      "exportFailed": "Could not export game state.",
+      "replayExported": "Replay saved as {{filename}}.",
+      "replayExportUnavailable": "No replay recording is available for this game.",
+      "replayExportFailed": "Could not export the replay."
     },
     "prompt": {
       "starting": "The game is starting or restoring state.",
@@ -196,6 +240,12 @@
       "message": "Set up any board state with <tools>Sandbox Tools</tools> — add cards and tokens, change life and counters, copy permanents, or jump phases. Open it anytime with the <key>`</key> key.",
       "dismiss": "Dismiss",
       "open": "Open Sandbox Tools"
+    },
+    "reportCardNudge": {
+      "message": "See a card render or play wrong? Tap the <flag>report flag</flag> in the top-left to flag it so we can fix it.",
+      "dismiss": "Dismiss",
+      "open": "Report a Card",
+      "debugPrompt": "See a card render or play wrong? Flag it so we can fix it."
     }
   },
   "splash": {
@@ -215,12 +265,29 @@
     "youPlayFirst": "You play first",
     "playerPlaysFirst": "{{name}} plays first",
     "heads": "Heads",
-    "tails": "Tails"
+    "tails": "Tails",
+    "coinFlip": "Coin flip",
+    "wonCoinFlip": "{{name}} won the flip",
+    "lostCoinFlip": "{{name}} lost the flip",
+    "turnOrder": "Turn order",
+    "turnOrderItem": "Turn {{turn}}: {{name}}",
+    "youTakeTurn": "You take turn {{turn}}"
   },
   "chrome": {
     "back": "Back",
     "settings": "Settings",
     "languageSettings": "Language ({{lang}}) — open settings",
     "languageTitle": "Language: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Something went wrong",
+    "body": "The app hit an unexpected error and can't continue on this screen. Reloading usually fixes it.",
+    "reload": "Reload"
+  },
+  "actionError": {
+    "title": "{{action}} failed",
+    "skipTarget": "Skip target",
+    "genericAction": "Action",
+    "unknownEngineError": "Unknown engine error"
   }
 }

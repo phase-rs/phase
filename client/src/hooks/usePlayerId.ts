@@ -1,4 +1,4 @@
-import type { PlayerId } from "../adapter/types";
+import type { PlayerId, WaitingFor } from "../adapter/types";
 import { PLAYER_ID, SPECTATOR_PLAYER_ID } from "../constants/game";
 import { useGameStore } from "../stores/gameStore";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
@@ -32,7 +32,14 @@ export function getPlayerId(): PlayerId {
   return currentLocalPlayerId();
 }
 
-function waitingPlayer(waitingFor: ReturnType<typeof useGameStore.getState>["waitingFor"]): PlayerId | null {
+/**
+ * The seat that must act next for `waitingFor` — the *semantic* actor, which
+ * differs from the engine's `priority_player` (the re-derived authorized
+ * submitter). Resolves Vote delegation and Assist's chosen helper; otherwise
+ * the variant's `player`. Exported so display surfaces (e.g. `useTurnStatus`)
+ * read this single authority instead of cloning the logic.
+ */
+export function waitingPlayer(waitingFor: WaitingFor | null): PlayerId | null {
   if (!waitingFor || waitingFor.type === "GameOver") return null;
   // `VoteChoice.actor` names who submits the next `ChooseOption`. Classic
   // Council's-dilemma votes carry `{ type: "SubjectActs" }` so the current
@@ -51,6 +58,16 @@ function waitingPlayer(waitingFor: ReturnType<typeof useGameStore.getState>["wai
   // caster and falls through to the default below.)
   if (waitingFor.type === "AssistPayment") {
     return waitingFor.data.chosen;
+  }
+  // CR 732.2a: LoopShortcut routes authorization to the proposer, whose data
+  // field is `proposer` (not `player`); mirror engine `acting_player()`
+  // (game_state.rs). Without this the declare modal's actor gate returns false
+  // and it never renders. `RespondToShortcut` carries `player` → default below.
+  if (
+    waitingFor.type === "LoopShortcut"
+    || waitingFor.type === "PrecastCopyShortcutOffer"
+  ) {
+    return waitingFor.data.proposer;
   }
   return "player" in waitingFor.data ? waitingFor.data.player : null;
 }

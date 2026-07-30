@@ -37,6 +37,68 @@ export function computeGapPx(cardWidthPx: number, edgeOverlapPx: number): number
   return VISIBLE_GAP_FRACTION * cardWidthPx + edgeOverlapPx;
 }
 
+/**
+ * Pure computation of the post-reorder hand order for a drag-and-drop within the
+ * hand, or `null` when the reorder must be suppressed or is a no-op.
+ *
+ * The caller derives a `ReorderHand` order by mapping a *displayed* slot index
+ * onto `hand` (the engine's `player.hand` order). That mapping is only 1:1 when
+ * the displayed order equals `hand`, so the caller passes `suppressed = true`
+ * whenever the display diverges from `hand`: a cast is in flight (the pending
+ * card is filtered out of the DOM, leaving N-1 slots) or the hand is sorted /
+ * filtered (the display permutes or hides entries). Dispatching a reorder in
+ * those states would scramble the real hand — this returns `null` instead.
+ * Returns `null` too for a no-op move (unknown slot, card not in `hand`, or the
+ * card already at `targetSlot`). Generic over the id type so it is exercisable
+ * with plain numbers in tests and `ObjectId`s in production.
+ */
+export function computeReorderedHand<Id>(
+  hand: readonly Id[],
+  objectId: Id,
+  targetSlot: number | null,
+  suppressed: boolean,
+): Id[] | null {
+  if (suppressed || targetSlot == null) return null;
+  const order = hand.slice();
+  const fromIdx = order.indexOf(objectId);
+  if (fromIdx === -1 || fromIdx === targetSlot) return null;
+  const [moved] = order.splice(fromIdx, 1);
+  order.splice(targetSlot, 0, moved);
+  return order;
+}
+
+/**
+ * True when `order` names exactly the cards in `hand` — same length and same
+ * multiset of ids (element order is free; that is the whole point of a reorder).
+ *
+ * The engine accepts `ReorderHand` only when the submitted order is a
+ * permutation of the CURRENT hand, and otherwise rejects the action
+ * ("ReorderHand: expected N ids, got M"). A drag computes its order against the
+ * hand as it looked when the gesture was set up, so a card drawn, discarded, or
+ * cast mid-drag leaves that order stale — dispatching it surfaces the engine's
+ * rejection as a spurious user-facing error (issue #5913).
+ *
+ * Callers validate against the freshest hand they can read and drop a stale
+ * reorder rather than recomputing it: the drop slot was chosen against the old
+ * layout, so replaying it onto a changed hand could place the card somewhere the
+ * player never pointed at. Hand order is purely cosmetic (CR 402.3), so
+ * discarding the gesture is strictly safer than guessing.
+ *
+ * Generic over the id type so it is exercisable with plain numbers in tests and
+ * `ObjectId`s in production.
+ */
+export function isHandPermutation<Id>(order: readonly Id[], hand: readonly Id[]): boolean {
+  if (order.length !== hand.length) return false;
+  const remaining = new Map<Id, number>();
+  for (const id of hand) remaining.set(id, (remaining.get(id) ?? 0) + 1);
+  for (const id of order) {
+    const count = remaining.get(id);
+    if (count === undefined || count === 0) return false;
+    remaining.set(id, count - 1);
+  }
+  return true;
+}
+
 export function computeHandInsertionSlot(
   cards: HandSlotRect[],
   clientX: number,

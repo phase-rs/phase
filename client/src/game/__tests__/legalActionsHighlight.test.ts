@@ -3,6 +3,9 @@ import { act } from "react";
 
 import type { GameAction, GameState } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
+import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
+import { buildGameObject, buildObjectMap } from "../../test/factories/gameObjectFactory";
+import { buildGameState, buildPlayer } from "../../test/factories/gameStateFactory";
 
 /**
  * Integration test: verifies that legal actions from the engine
@@ -13,176 +16,71 @@ import { useGameStore } from "../../stores/gameStore";
  */
 
 function createMockState(overrides: Partial<GameState> = {}): GameState {
-  return {
-    turn_number: 2,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [
-      {
-        id: 0,
-        life: 20,
-        mana_pool: { mana: [], total: () => 0 },
-        library: [],
-        hand: [100, 101, 102],
-        graveyard: [],
-        exile: [],
-      },
-      {
-        id: 1,
-        life: 20,
-        mana_pool: { mana: [], total: () => 0 },
-        library: [],
-        hand: [],
-        graveyard: [],
-        exile: [],
-      },
-    ],
-    priority_player: 0,
-    objects: {
-      100: {
-        id: 100,
-        card_id: 10,
-        owner: 0,
-        controller: 0,
-        zone: "Hand",
-        tapped: false,
-        face_down: false,
-        flipped: false,
-        transformed: false,
-        damage_marked: 0,
-        dealt_deathtouch_damage: false,
-        attached_to: null,
-        attachments: [],
-        counters: {},
-        name: "Forest",
-        power: null,
-        toughness: null,
-        loyalty: null,
-        card_types: {
-          core_types: ["Land"],
-          subtypes: ["Forest"],
-          supertypes: [],
-        },
-        mana_cost: { type: "NoCost" },
-        keywords: [],
-        abilities: [],
-        trigger_definitions: [],
-        replacement_definitions: [],
-        static_definitions: [],
-        color: [],
-        base_power: null,
-        base_toughness: null,
-        base_keywords: [],
-        base_color: [],
-        timestamp: 1,
-        entered_battlefield_turn: null,
-      },
-      101: {
-        id: 101,
-        card_id: 11,
-        owner: 0,
-        controller: 0,
-        zone: "Hand",
-        tapped: false,
-        face_down: false,
-        flipped: false,
-        transformed: false,
-        damage_marked: 0,
-        dealt_deathtouch_damage: false,
-        attached_to: null,
-        attachments: [],
-        counters: {},
-        name: "Lightning Bolt",
-        power: null,
-        toughness: null,
-        loyalty: null,
-        card_types: {
-          core_types: ["Instant"],
-          subtypes: [],
-          supertypes: [],
-        },
-        mana_cost: { type: "Cost", shards: ["Red"], generic: 0 },
-        keywords: [],
-        abilities: [],
-        trigger_definitions: [],
-        replacement_definitions: [],
-        static_definitions: [],
-        color: ["Red"],
-        base_power: null,
-        base_toughness: null,
-        base_keywords: [],
-        base_color: ["Red"],
-        timestamp: 2,
-        entered_battlefield_turn: null,
-      },
-      102: {
-        id: 102,
-        card_id: 12,
-        owner: 0,
-        controller: 0,
-        zone: "Hand",
-        tapped: false,
-        face_down: false,
-        flipped: false,
-        transformed: false,
-        damage_marked: 0,
-        dealt_deathtouch_damage: false,
-        attached_to: null,
-        attachments: [],
-        counters: {},
-        name: "Suntail Hawk",
-        power: 1,
-        toughness: 1,
-        loyalty: null,
-        card_types: {
-          core_types: ["Creature"],
-          subtypes: ["Bird"],
-          supertypes: [],
-        },
-        mana_cost: { type: "Cost", shards: ["White"], generic: 0 },
-        keywords: [],
-        abilities: [],
-        trigger_definitions: [],
-        replacement_definitions: [],
-        static_definitions: [],
-        color: ["White"],
-        base_power: 1,
-        base_toughness: 1,
-        base_keywords: [],
-        base_color: ["White"],
-        timestamp: 3,
-        entered_battlefield_turn: null,
-      },
+  const forest = buildGameObject({
+    id: 100,
+    card_id: 10,
+    zone: "Hand",
+    name: "Forest",
+    card_types: {
+      core_types: ["Land"],
+      subtypes: ["Forest"],
+      supertypes: [],
     },
-    battlefield: [],
-    stack: [],
-    exile: [],
+    mana_cost: { type: "NoCost" },
+    timestamp: 1,
+  });
+  const lightningBolt = buildGameObject({
+    id: 101,
+    card_id: 11,
+    zone: "Hand",
+    name: "Lightning Bolt",
+    card_types: {
+      core_types: ["Instant"],
+      subtypes: [],
+      supertypes: [],
+    },
+    mana_cost: { type: "Cost", shards: ["Red"], generic: 0 },
+    color: ["Red"],
+    base_color: ["Red"],
+    timestamp: 2,
+  });
+  const suntailHawk = buildGameObject({
+    id: 102,
+    card_id: 12,
+    zone: "Hand",
+    name: "Suntail Hawk",
+    power: 1,
+    toughness: 1,
+    card_types: {
+      core_types: ["Creature"],
+      subtypes: ["Bird"],
+      supertypes: [],
+    },
+    mana_cost: { type: "Cost", shards: ["White"], generic: 0 },
+    color: ["White"],
+    base_power: 1,
+    base_toughness: 1,
+    base_color: ["White"],
+    timestamp: 3,
+  });
+
+  return buildGameState({
+    turn_number: 2,
+    players: [
+      buildPlayer({ id: 0, hand: [100, 101, 102] }),
+      buildPlayer({ id: 1 }),
+    ],
+    objects: buildObjectMap(forest, lightningBolt, suntailHawk),
     rng_seed: 42,
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
     next_timestamp: 4,
     ...overrides,
-  } as unknown as GameState;
+  });
 }
 
 function createMockAdapter(state: GameState, legalActions: GameAction[]) {
-  return {
-    initialize: vi.fn().mockResolvedValue(undefined),
-    initializeGame: vi.fn().mockResolvedValue({ events: [] }),
-    submitAction: vi.fn().mockResolvedValue({ events: [] }),
-    getState: vi.fn().mockResolvedValue(state),
+  return buildEngineAdapterMock(state, {
     getLegalActions: vi.fn().mockResolvedValue({ actions: legalActions, autoPassRecommended: false }),
-    restoreState: vi.fn(),
-    getAiAction: vi.fn().mockReturnValue(null),
-    dispose: vi.fn(),
-    estimateBracket: vi.fn().mockResolvedValue(null),
-  };
+  });
 }
 
 /** Mimics how serde_wasm_bindgen returns legal actions with u64 fields as BigInt */

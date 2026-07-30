@@ -134,7 +134,10 @@ pub(crate) fn apnap_choice_groups_from(
             .unwrap_or(0);
         return (0..len)
             .filter_map(|offset| {
-                let candidate = seat_order[(start_idx + offset) % len];
+                // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
+                let idx =
+                    super::players::turn_order_index(start_idx, offset, len, state.turn_direction);
+                let candidate = seat_order[idx];
                 super::players::is_alive(state, candidate).then_some(vec![candidate])
             })
             .collect();
@@ -147,7 +150,9 @@ pub(crate) fn apnap_choice_groups_from(
     let mut seen = std::collections::BTreeSet::new();
     let mut groups = Vec::new();
     for offset in 0..len {
-        let candidate = seat_order[(start_idx + offset) % len];
+        // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
+        let idx = super::players::turn_order_index(start_idx, offset, len, state.turn_direction);
+        let candidate = seat_order[idx];
         if !super::players::is_alive(state, candidate) {
             continue;
         }
@@ -200,7 +205,8 @@ pub(crate) fn priority_pass_representative(state: &GameState, player: PlayerId) 
 /// each player.
 pub(crate) fn next_turn_representative(state: &GameState, current: PlayerId) -> PlayerId {
     if !state.format_config.topology().has_shared_team_turns() {
-        return super::players::next_player(state, current);
+        // CR 103.1: the next turn proceeds in the current turn-order direction.
+        return super::players::next_player_in_turn_order(state, current);
     }
 
     let seat_order = &state.seat_order;
@@ -213,7 +219,8 @@ pub(crate) fn next_turn_representative(state: &GameState, current: PlayerId) -> 
     let current_idx = seat_order.iter().position(|&id| id == current).unwrap_or(0);
 
     for offset in 1..=len {
-        let idx = (current_idx + offset) % len;
+        // CR 103.1: walk seats in the current turn-order direction.
+        let idx = super::players::turn_order_index(current_idx, offset, len, state.turn_direction);
         let candidate = seat_order[idx];
         if super::players::is_alive(state, candidate) && team_id(state, candidate) != current_team {
             return normalize_shared_turn_recipient(state, candidate);
@@ -244,6 +251,17 @@ pub(crate) fn priority_pass_participants(state: &GameState) -> Vec<PlayerId> {
 mod tests {
     use super::*;
     use crate::types::format::FormatConfig;
+
+    #[test]
+    fn next_turn_representative_reverses_with_turn_direction() {
+        use crate::types::phase::TurnDirection;
+        let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        // CR 103.1: normal turn order walks forward (P0 → P1).
+        assert_eq!(next_turn_representative(&state, PlayerId(0)), PlayerId(1));
+        state.turn_direction = TurnDirection::Reversed;
+        // Reversed: the next turn walks backward (P0 → P3).
+        assert_eq!(next_turn_representative(&state, PlayerId(0)), PlayerId(3));
+    }
 
     #[test]
     fn two_hg_priority_pass_participants_are_team_representatives() {

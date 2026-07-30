@@ -110,9 +110,10 @@ fn phyrexian_dreadnought_parsed_etb_carries_power_threshold_unless_cost() {
     let etb = runner.state().objects[&dreadnought]
         .trigger_definitions
         .iter_unchecked()
-        .find(|t| t.unless_pay.is_some())
+        .find(|t| t.definition.unless_pay.is_some())
         .expect("Phyrexian Dreadnought must have an ETB unless-pay trigger");
     let unless_pay = etb
+        .definition
         .unless_pay
         .as_ref()
         .expect("ETB must carry unless_pay (#864)");

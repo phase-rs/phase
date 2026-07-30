@@ -267,6 +267,10 @@ pub fn execute_untap_step_phasing(state: &mut GameState, events: &mut Vec<GameEv
                     }
                 ) && obj.controller == active
             })
+            // CR 702.26a + CR 101.2: a permanent held by an active "can't phase
+            // in" restriction (The Pandorica) is excluded from this turn-based
+            // action — it stays phased out until the restriction lapses.
+            && !crate::game::static_abilities::object_has_active_cant_phase_in(state, *id)
         })
         .collect();
 
@@ -423,6 +427,100 @@ mod tests {
                 indirect: false,
             } if *object_id == id
         )));
+    }
+
+    /// CR 702.26a + CR 101.2 + CR 611.2b + CR 110.5d: `object_has_active_cant_phase_in`
+    /// reports a `SpecificObject`-pinned `CantPhaseIn` transient grant as active
+    /// only while its `ForAsLongAs { SourceIsTapped }` condition holds — true
+    /// while the source is tapped on the battlefield, false the instant it untaps.
+    #[test]
+    fn cant_phase_in_lock_tracks_source_tap_state() {
+        use crate::game::static_abilities::object_has_active_cant_phase_in;
+        use crate::types::ability::{
+            ContinuousModification, Duration, StaticCondition, TargetFilter,
+        };
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let source = setup_creature(&mut state, "The Pandorica", PlayerId(0));
+        let target = setup_creature(&mut state, "Locked", PlayerId(0));
+        state.objects.get_mut(&source).unwrap().tapped = true;
+
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::ForAsLongAs {
+                condition: StaticCondition::SourceIsTapped,
+            },
+            TargetFilter::SpecificObject { id: target },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantPhaseIn,
+            }],
+            None,
+        );
+
+        assert!(
+            object_has_active_cant_phase_in(&state, target),
+            "lock must be active while the source is tapped"
+        );
+
+        // CR 611.2b + CR 110.5d: untapping the source ends the duration.
+        state.objects.get_mut(&source).unwrap().tapped = false;
+        assert!(
+            !object_has_active_cant_phase_in(&state, target),
+            "lock must lapse once the source untaps"
+        );
+    }
+
+    /// CR 702.26a + CR 101.2: the untap-step phase-in turn-based action skips a
+    /// permanent held by an active `CantPhaseIn` lock, but phases it in once the
+    /// lock lapses (positive control — the source untaps).
+    #[test]
+    fn execute_untap_step_phasing_respects_cant_phase_in_lock() {
+        use crate::types::ability::{
+            ContinuousModification, Duration, StaticCondition, TargetFilter,
+        };
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        let source = setup_creature(&mut state, "The Pandorica", PlayerId(0));
+        let target = setup_creature(&mut state, "Held", PlayerId(0));
+        state.objects.get_mut(&source).unwrap().tapped = true;
+
+        let mut events = Vec::new();
+        phase_out_object(&mut state, target, PhaseOutCause::Directly, &mut events);
+        assert!(state.objects[&target].is_phased_out());
+
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::ForAsLongAs {
+                condition: StaticCondition::SourceIsTapped,
+            },
+            TargetFilter::SpecificObject { id: target },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantPhaseIn,
+            }],
+            None,
+        );
+
+        // Lock active: the TBA must NOT phase the target in.
+        events.clear();
+        execute_untap_step_phasing(&mut state, &mut events);
+        assert!(
+            state.objects[&target].is_phased_out(),
+            "held permanent must stay phased out while the lock is active"
+        );
+
+        // Lock lapses (source untaps): the TBA phases the target in.
+        state.objects.get_mut(&source).unwrap().tapped = false;
+        events.clear();
+        execute_untap_step_phasing(&mut state, &mut events);
+        assert!(
+            state.objects[&target].is_phased_in(),
+            "permanent must phase in once the lock lapses"
+        );
     }
 
     #[test]

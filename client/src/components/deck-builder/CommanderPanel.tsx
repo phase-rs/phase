@@ -25,6 +25,16 @@ interface CommanderPanelProps {
   isCommanderEligible: (name: string) => boolean;
   onSetCommander: (cardName: string) => void;
   onRemoveCommander: (cardName: string) => void;
+  signatureSpell?: string;
+  /** `null` means this format has no signature-spell slot. */
+  signatureSpellCandidates?: string[] | null;
+  onSetSignatureSpell?: (cardName: string) => void;
+  onRemoveSignatureSpell?: () => void;
+  companion?: string;
+  /** `null` means candidates have not loaded yet. */
+  companionCandidates?: string[] | null;
+  onSetCompanion?: (cardName: string) => void;
+  onRemoveCompanion?: () => void;
   onCardHover?: (cardName: string | null) => void;
   /** Engine evaluateDeckCompatibility reasons for the active format. */
   formatValidationReasons?: string[];
@@ -39,12 +49,22 @@ export function CommanderPanel({
   isCommanderEligible,
   onSetCommander,
   onRemoveCommander,
+  signatureSpell,
+  signatureSpellCandidates = null,
+  onSetSignatureSpell = () => {},
+  onRemoveSignatureSpell = () => {},
+  companion,
+  companionCandidates = null,
+  onSetCompanion = () => {},
+  onRemoveCompanion = () => {},
   onCardHover,
   formatValidationReasons = [],
 }: CommanderPanelProps) {
   const { t } = useTranslation("deck-builder");
   const identity = getCombinedColorIdentity(commanders, cardDataCache);
-  const totalCards = deck.reduce((sum, e) => sum + e.count, 0) + commanders.length;
+  const totalCards = deck.reduce((sum, e) => sum + e.count, 0)
+    + commanders.length
+    + (signatureSpell ? 1 : 0);
 
   // Cards in deck that could become a commander. The handler decides whether
   // clicking adds (free slot or partner pair) or swaps (replaces existing).
@@ -118,6 +138,76 @@ export function CommanderPanel({
               onClick={() => onSetCommander(name)}
               {...mouseHoverPreview(onCardHover, name)}
               className="block w-full truncate rounded bg-purple-800/40 px-2 py-1 text-left text-xs text-purple-300 hover:bg-purple-700/40"
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {signatureSpellCandidates !== null && (
+        <div className="space-y-2 border-t border-white/10 pt-3">
+          <h5 className="text-xs font-semibold uppercase text-gray-500">
+            {t("commanderPanel.signatureSpell.heading")}
+          </h5>
+          {signatureSpell ? (
+            <div
+              {...mouseHoverPreview(onCardHover, signatureSpell)}
+              className="flex items-center justify-between rounded bg-purple-900/30 px-2 py-1.5"
+            >
+              <span className="text-sm font-medium text-purple-300">{signatureSpell}</span>
+              <button
+                onClick={onRemoveSignatureSpell}
+                className="min-h-11 px-2 text-xs text-red-400 hover:text-red-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-purple-300"
+              >
+                {t("commanderPanel.signatureSpell.remove")}
+              </button>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-500">
+              {t("commanderPanel.signatureSpell.noSignatureSpell")}
+            </p>
+          )}
+          {!signatureSpell && signatureSpellCandidates.map((name) => (
+            <button
+              key={name}
+              onClick={() => onSetSignatureSpell(name)}
+              {...mouseHoverPreview(onCardHover, name)}
+              className="block min-h-11 w-full truncate rounded bg-purple-800/40 px-2 py-1 text-left text-xs text-purple-300 hover:bg-purple-700/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-purple-300"
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {companionCandidates !== null && (
+        <div className="space-y-2 border-t border-white/10 pt-3">
+          <h5 className="text-xs font-semibold uppercase text-gray-500">
+            {t("commanderPanel.companion.heading")}
+          </h5>
+          {companion ? (
+            <div
+              {...mouseHoverPreview(onCardHover, companion)}
+              className="flex items-center justify-between rounded bg-blue-900/30 px-2 py-1.5"
+            >
+              <span className="text-sm font-medium text-blue-300">{companion}</span>
+              <button
+                onClick={onRemoveCompanion}
+                className="min-h-11 px-2 text-xs text-red-400 hover:text-red-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300"
+              >
+                {t("commanderPanel.companion.remove")}
+              </button>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-500">{t("commanderPanel.companion.noCompanion")}</p>
+          )}
+          {!companion && companionCandidates.map((name) => (
+            <button
+              key={name}
+              onClick={() => onSetCompanion(name)}
+              {...mouseHoverPreview(onCardHover, name)}
+              className="block min-h-11 w-full truncate rounded bg-blue-800/40 px-2 py-1 text-left text-xs text-blue-300 hover:bg-blue-700/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300"
             >
               {name}
             </button>

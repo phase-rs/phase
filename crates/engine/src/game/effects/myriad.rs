@@ -28,6 +28,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: crate::types::ability::EffectKind::Myriad,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -69,11 +70,11 @@ pub fn resolve(
     }
 
     if !created.is_empty() {
-        state.delayed_triggers.push(DelayedTrigger {
+        let exile_tokens = DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase {
                 phase: Phase::EndCombat,
             },
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Exile,
@@ -85,7 +86,9 @@ pub fn resolve(
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 created
                     .iter()
@@ -94,16 +97,18 @@ pub fn resolve(
                     .collect(),
                 ability.source_id,
                 ability.controller,
-            ),
+            )),
             controller: ability.controller,
             source_id: ability.source_id,
             one_shot: true,
-        });
+        };
+        crate::game::triggers::install_delayed_trigger(state, exile_tokens);
     }
 
     events.push(GameEvent::EffectResolved {
         kind: crate::types::ability::EffectKind::Myriad,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }

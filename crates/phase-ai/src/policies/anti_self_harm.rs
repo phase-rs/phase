@@ -28,7 +28,9 @@ use engine::game::players;
 
 use super::activation::turn_only;
 use super::context::PolicyContext;
-use super::copy_value::{copy_target_penalties, score_legend_rule_keep};
+use super::copy_value::{
+    copy_effect_strips_legendary, copy_target_penalties, score_legend_rule_keep,
+};
 use super::effect_classify::{
     aggregate_player_impact, aura_polarity, effect_polarity, effect_targets_object,
     extract_target_filter, is_spell_beneficial, lethal_to_creature, targeted_object_impact,
@@ -281,7 +283,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
                             && o.name == source.name
                     }) && !engine::game::sba::legend_rule_exempt(ctx.state, id)
                 })
-                .then_some(-8.0)
+                .then_some(ctx.penalties().wasted_cast_penalty)
         })
         .unwrap_or(0.0);
 
@@ -320,7 +322,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
             && !facts.requires_targets_in_spell_text
             && !etb_trigger_has_valid_targets(ctx, &facts)
         {
-            -8.0
+            ctx.penalties().wasted_cast_penalty
         } else {
             0.0
         }
@@ -360,17 +362,17 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
 
     // Beneficial creature-targeting spell but no own creatures to buff.
     if has_beneficial_creature_target && !has_own_creature {
-        penalty -= 8.0;
+        penalty += ctx.penalties().wasted_cast_penalty;
     }
 
     // Harmful creature-only spell (e.g. Murder) but no targetable opponent creatures.
     if has_harmful_creature_only_target && !has_targetable_opponent_creature {
-        penalty -= 8.0;
+        penalty += ctx.penalties().wasted_cast_penalty;
     }
 
     // Harmful bounce with no opposing legal targets will force a self-bounce line.
     if has_harmful_bounce && !has_opponent_bounce_target(ctx, &effects) {
-        penalty -= 8.0;
+        penalty += ctx.penalties().wasted_cast_penalty;
     }
 
     penalty += etb_whiff_penalty;
@@ -545,7 +547,7 @@ fn is_useful_removal_target(ctx: &PolicyContext<'_>, id: ObjectId, effects: &[&E
     if let Some(object) = ctx.state.objects.get(&id) {
         for keyword in &object.keywords {
             if let Keyword::Ward(ward) = keyword {
-                if !can_pay_ward_cost(ctx, ward) {
+                if !can_pay_ward_cost(ctx, ward, object) {
                     return false;
                 }
                 break;
@@ -696,22 +698,24 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
     {
         if object.tapped {
             score += if object.controller == ctx.ai_player {
-                8.0
+                ctx.penalties().untap_own_tapped_bonus
             } else {
-                -20.0
+                ctx.penalties().untap_opponent_tapped_penalty
             };
         } else {
-            score -= 6.0;
+            score += ctx.penalties().untap_untapped_penalty;
         }
     }
 
-    if ctx
+    if let Some(copy_effect) = ctx
         .effects()
         .iter()
-        .any(|effect| matches!(effect, Effect::CopyTokenOf { .. }))
+        .find(|effect| matches!(effect, Effect::CopyTokenOf { .. }))
     {
         if let Some(source) = ctx.source_object() {
-            score -= copy_target_penalties(ctx.state, ctx.ai_player, Some(source.id), object);
+            let strips = copy_effect_strips_legendary(copy_effect);
+            score -=
+                copy_target_penalties(ctx.state, ctx.ai_player, Some(source.id), object, strips);
         }
     }
 
@@ -774,12 +778,15 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
             // layer never double-scores that case.
             for keyword in &object.keywords {
                 if let Keyword::Ward(ward_cost) = keyword {
-                    if !can_pay_ward_cost(ctx, ward_cost) {
+                    if !can_pay_ward_cost(ctx, ward_cost, object) {
                         break;
                     }
                     let severity = match ward_cost {
                         WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                         WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                        WardCost::PayLifeEqualToPower => {
+                            (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
+                        }
                         WardCost::DiscardCard => 1.5,
                         WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                         WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
@@ -789,6 +796,9 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                             .map(|c| match c {
                                 WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                                 WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                                WardCost::PayLifeEqualToPower => {
+                                    (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
+                                }
                                 WardCost::DiscardCard => 1.5,
                                 WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                                 WardCost::Waterbend(cost) => {
@@ -828,7 +838,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                     .is_some_and(|(dmg, t)| dmg >= t - object.damage_marked as i32);
                 let is_destroy = effects.iter().any(|e| matches!(e, Effect::Destroy { .. }));
                 if !is_lethal_burn && !is_destroy {
-                    score -= 5.0;
+                    score += ctx.penalties().tapped_removal_no_urgency_penalty;
                 }
             }
         }
@@ -944,6 +954,10 @@ fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
     // Non-land, non-creature tier-1 sources (mana rocks) that auto_tap would use
     // before creatures. Exclude sacrifice-for-mana sources (Treasures) — those are
     // tier 4 in auto_tap and would NOT be tapped before creature dorks.
+    // CR 701.21: the exclusion is `mana_abilities::is_renewable_mana_ability`, the
+    // single engine authority. The local copy this replaced matched only a
+    // `Composite` cost, so a Gold token (bare `Sacrifice`) defeated the stated
+    // intent and was counted as a renewable tier-1 rock.
     let non_creature_tier1_count = ctx
         .state
         .battlefield
@@ -954,9 +968,10 @@ fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
                     && !obj.tapped
                     && !obj.card_types.core_types.contains(&CoreType::Land)
                     && !obj.card_types.core_types.contains(&CoreType::Creature)
-                    && obj.abilities.iter().any(|a| {
-                        mana_abilities::is_mana_ability(a) && !ability_cost_requires_sacrifice(a)
-                    })
+                    && obj
+                        .abilities
+                        .iter()
+                        .any(mana_abilities::is_renewable_mana_ability)
             })
         })
         .count();
@@ -969,21 +984,6 @@ fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
 
     // Each creature tapped loses its blocking value during this combat.
     -(5.0 * creatures_tapped as f64)
-}
-
-/// Check if an ability's cost includes self-sacrifice (Treasure-style `{T}, Sacrifice`).
-/// Mirrors `mana_sources::cost_requires_sacrifice` which is private to the engine module.
-fn ability_cost_requires_sacrifice(ability: &engine::types::ability::AbilityDefinition) -> bool {
-    match &ability.cost {
-        Some(AbilityCost::Composite { costs }) => costs.iter().any(|c| {
-            matches!(
-                c,
-                AbilityCost::Sacrifice(cost)
-                    if matches!(cost.target, TargetFilter::SelfRef)
-            )
-        }),
-        _ => false,
-    }
 }
 
 /// Extract the fixed damage amount from the pending spell's DealDamage effect.
@@ -1041,12 +1041,12 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardSelectionMode,
-        ContinuousModification, ControllerRef, DiscardSelfScope, FilterProp, PtValue, QuantityRef,
-        ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticDefinition, TargetFilter,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        ContinuousModification, ControllerRef, DiscardSelfScope, EffectKind, FilterProp, PtValue,
+        QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticDefinition,
+        TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use engine::types::game_state::{
-        CastingVariant, GameState, PendingCast, TargetSelectionSlot, WaitingFor,
+        CastingVariant, GameState, PendingCast, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
@@ -1113,6 +1113,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets,
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -1123,10 +1126,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: candidate_target,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         (decision, candidate)
     }
@@ -1184,7 +1184,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         state
@@ -1214,10 +1216,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         (decision, candidate)
     }
@@ -1237,6 +1236,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -1276,6 +1276,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -1314,6 +1315,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1332,6 +1334,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1343,6 +1346,160 @@ mod tests {
         assert!(
             score_opp < 0.0,
             "Opponent creature score should be negative"
+        );
+    }
+
+    #[test]
+    fn undying_malice_prefers_own_creature() {
+        // Undying Malice grants target creature "when this dies, return it to the
+        // battlefield" — GenericEffect{ Continuous{ GrantTrigger{ dies →
+        // ChangeZone→Battlefield } } }. Pre-fix `modification_polarity(GrantTrigger)`
+        // fell to `Contextual`, so `player_impact`/`is_spell_beneficial` read the
+        // spell as non-beneficial and `score_target_object` aimed it at an opponent
+        // creature. The fix classifies the grant Beneficial (via the executed
+        // ChangeZone→Battlefield), flipping the preference to the AI's own creature.
+        // Reverting the named `GrantTrigger` arm makes `score_own < score_opp`.
+        let mut state = make_state();
+        let own_id = add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let opp_id = add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let config = AiConfig::default();
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )));
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![ContinuousModification::GrantTrigger {
+                    trigger: Box::new(trigger),
+                }])],
+            target: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+            duration: None,
+            end_cost: None,
+        };
+
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect.clone(),
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(own_id)),
+        );
+        let ctx_own = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let score_own = AntiSelfHarmPolicy.score(&ctx_own);
+
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect,
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(opp_id)),
+        );
+        let ctx_opp = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
+
+        assert!(
+            score_own > score_opp,
+            "Undying grant should prefer own creature: own={score_own}, opp={score_opp}"
+        );
+        assert!(score_own > 0.0, "Own creature score should be positive");
+        assert!(
+            score_opp < 0.0,
+            "Opponent creature score should be negative"
+        );
+    }
+
+    #[test]
+    fn strength_of_tajuru_prefers_own_creature() {
+        // VERIFY-ONLY (expected to PASS on unmodified code): Strength of the Tajuru's
+        // payoff leaf is `PutCounterAll{ +1/+1 }`, which `counter_sign_polarity`
+        // already classifies Beneficial, so `is_spell_beneficial` is true and
+        // `score_target_object` prefers the AI's own creature. No code change backs
+        // this — it documents the reported "targets opponent" behavior as already
+        // correct for the counter payoff (the empty `Typed` target mirrors the real
+        // leaf AST). If this ever fails, it is a stop-and-return item, not a fix.
+        let mut state = make_state();
+        let own_id = add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let opp_id = add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let config = AiConfig::default();
+
+        let effect = Effect::PutCounterAll {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Typed(TypedFilter::default()),
+        };
+
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect.clone(),
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(own_id)),
+        );
+        let ctx_own = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let score_own = AntiSelfHarmPolicy.score(&ctx_own);
+
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect,
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(opp_id)),
+        );
+        let ctx_opp = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
+
+        assert!(
+            score_own > score_opp,
+            "PutCounterAll{{+1/+1}} should prefer own creature: own={score_own}, opp={score_opp}"
         );
     }
 
@@ -1367,6 +1524,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1383,6 +1541,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1419,6 +1578,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1436,6 +1596,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1471,6 +1632,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1488,6 +1650,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1525,6 +1688,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_self = AntiSelfHarmPolicy.score(&ctx_self);
 
@@ -1545,6 +1709,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1593,6 +1758,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: legal_targets.clone(),
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -1603,10 +1771,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(0))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let self_ctx = PolicyContext {
             state: &state,
@@ -1616,15 +1781,13 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let opp_candidate = CandidateAction {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(1))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let opp_ctx = PolicyContext {
             state: &state,
@@ -1634,6 +1797,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let self_score = AntiSelfHarmPolicy.score(&self_ctx);
@@ -1682,6 +1846,9 @@ mod tests {
                         TargetRef::Player(PlayerId(1)),
                     ],
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -1692,10 +1859,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(0))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let self_ctx = PolicyContext {
             state: &state,
@@ -1705,15 +1869,13 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let opp_candidate = CandidateAction {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(1))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let opp_ctx = PolicyContext {
             state: &state,
@@ -1723,6 +1885,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let self_score = AntiSelfHarmPolicy.score(&self_ctx);
@@ -1835,6 +1998,7 @@ mod tests {
             static_abilities: Vec::new(),
             target: None,
             duration: None,
+            end_cost: None,
         };
         assert_eq!(effect_polarity(&effect), EffectPolarity::Contextual);
     }
@@ -1895,10 +2059,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -1908,6 +2069,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -1957,10 +2119,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -1970,6 +2129,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2055,10 +2215,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2068,6 +2225,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2118,10 +2276,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2131,6 +2286,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2180,10 +2336,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2193,6 +2346,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2242,10 +2396,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2255,6 +2406,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2306,10 +2458,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2319,6 +2468,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2369,10 +2519,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2382,6 +2529,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2413,6 +2561,7 @@ mod tests {
                 amount: engine::types::ability::QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )]);
 
@@ -2431,10 +2580,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2444,6 +2590,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2571,6 +2718,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![TargetRef::Object(target_id)],
                     optional: true,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -2581,10 +2731,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(target_id)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state,
@@ -2594,6 +2741,7 @@ mod tests {
             config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.score(&ctx)
     }
@@ -2620,6 +2768,7 @@ mod tests {
             config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.score(&ctx)
     }
@@ -2647,10 +2796,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2660,6 +2806,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2777,10 +2924,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2790,6 +2934,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2829,6 +2974,7 @@ mod tests {
                 static_abilities: Vec::new(),
                 target: None,
                 duration: None,
+                end_cost: None,
             },
             Vec::new(),
             aura_id,
@@ -2843,6 +2989,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets,
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -2853,10 +3002,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: candidate_target,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         (decision, candidate)
     }
@@ -2935,10 +3081,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2948,12 +3091,165 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
         assert!(
             score < -4.0,
             "Should penalize pump spell that must tap creature blocker, got {score}"
+        );
+    }
+
+    /// Row 15 — the F-1 migration, driven through the production policy seam.
+    ///
+    /// CR 701.21: a **Gold** token's mana ability sacrifices its own source, so it
+    /// is NOT a renewable tier-1 rock and cannot spare a creature dork from being
+    /// tapped. The local `ability_cost_requires_sacrifice` this replaced matched
+    /// only a `Composite` cost, while Gold's cost is a **bare** `Sacrifice` — so
+    /// Gold fell to the `_ => false` arm and was counted as tier-1, defeating the
+    /// filter's own stated intent.
+    ///
+    /// Discrimination: with one dork, no lands, and a 1-mana pump, `shortfall`
+    /// is `1`. Counting Gold gives `creatures_at_risk = 1 - 1 = 0` and the
+    /// penalty never fires; excluding it gives `1 - 0 = 1` and the penalty does
+    /// fire. The `score < -4.0` assertion therefore flips exactly on this
+    /// migration.
+    ///
+    /// The paired positive (a Signet-shaped rock, bare `{T}`) proves the
+    /// discriminator is the self-sacrifice clause and not merely the presence of
+    /// a nonland artifact.
+    #[test]
+    fn gold_token_is_not_a_tier1_rock_but_a_signet_is() {
+        use engine::game::effects::token::predefined_token_abilities;
+        use engine::types::ability::{AbilityCost, AbilityKind, ManaContribution, ManaProduction};
+        use engine::types::mana::ManaColor;
+
+        /// Builds the shared fixture: opponent's combat, one non-sick creature
+        /// mana dork, no lands, a `{G}` pump in hand, plus `extra_abilities` on a
+        /// single untapped nonland artifact.
+        fn score_with_artifact(
+            extra_abilities: Vec<engine::types::ability::AbilityDefinition>,
+        ) -> f64 {
+            let mut state = make_state();
+            state.active_player = PlayerId(1);
+            state.phase = Phase::DeclareAttackers;
+
+            let dork_id = add_creature(&mut state, PlayerId(0), "Llanowar Elves", 1, 1);
+            let dork_obj = state.objects.get_mut(&dork_id).unwrap();
+            dork_obj.entered_battlefield_turn = Some(0);
+            let mut mana_ability = engine::types::ability::AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            );
+            mana_ability.cost = Some(AbilityCost::Tap);
+            Arc::make_mut(&mut dork_obj.abilities).push(mana_ability);
+
+            let artifact_id = create_object(
+                &mut state,
+                CardId(600),
+                PlayerId(0),
+                "Artifact".to_string(),
+                Zone::Battlefield,
+            );
+            let artifact = state.objects.get_mut(&artifact_id).unwrap();
+            artifact.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut artifact.abilities).extend(extra_abilities);
+
+            add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+
+            let spell_id = create_object(
+                &mut state,
+                CardId(500),
+                PlayerId(0),
+                "Giant Growth".to_string(),
+                Zone::Hand,
+            );
+            let spell_obj = state.objects.get_mut(&spell_id).unwrap();
+            spell_obj.card_types.core_types.push(CoreType::Instant);
+            spell_obj.mana_cost = ManaCost::Cost {
+                shards: vec![engine::types::mana::ManaCostShard::Green],
+                generic: 0,
+            };
+            spell_obj.abilities = Arc::new(vec![engine::types::ability::AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Pump {
+                    power: PtValue::Fixed(3),
+                    toughness: PtValue::Fixed(3),
+                    target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                },
+            )]);
+
+            let config = AiConfig::default();
+            let decision = AiDecisionContext {
+                waiting_for: WaitingFor::Priority {
+                    player: PlayerId(0),
+                },
+                candidates: Vec::new(),
+            };
+            let candidate = CandidateAction {
+                action: GameAction::CastSpell {
+                    object_id: spell_id,
+                    card_id: CardId(500),
+                    targets: Vec::new(),
+                    payment_mode: CastPaymentMode::Auto,
+                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+            };
+            let ctx = PolicyContext {
+                state: &state,
+                decision: &decision,
+                candidate: &candidate,
+                ai_player: PlayerId(0),
+                config: &config,
+                context: &crate::context::AiContext::empty(&config.weights),
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            };
+            AntiSelfHarmPolicy.score(&ctx)
+        }
+
+        // Verbatim production Gold ability — a BARE `Sacrifice(SelfRef)`.
+        let gold = predefined_token_abilities("Gold");
+        assert_eq!(gold.len(), 1);
+        assert!(
+            matches!(gold[0].cost, Some(AbilityCost::Sacrifice(_))),
+            "reach-guard: Gold's cost must be a BARE Sacrifice, not a Composite — \
+             if this ever changes, this row stops discriminating"
+        );
+
+        // A Signet-shaped renewable rock: bare `{T}`, no sacrifice.
+        let mut signet = engine::types::ability::AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+        signet.cost = Some(AbilityCost::Tap);
+
+        assert!(
+            score_with_artifact(gold) < -4.0,
+            "Gold self-sacrifices, so it cannot spare the dork — the penalty must fire"
+        );
+        assert!(
+            score_with_artifact(vec![signet]) > -4.0,
+            "a renewable Signet-shaped rock IS tier-1 and does spare the dork"
         );
     }
 
@@ -3038,10 +3334,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -3051,6 +3344,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -3103,6 +3397,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -3142,11 +3437,11 @@ mod tests {
         token_obj.is_token = true;
 
         // Set up pending trigger with exile effect (like Seam Rip)
-        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+        state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
             source_id: ObjectId(200),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: None,
                     destination: Zone::Exile,
@@ -3158,12 +3453,14 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 Vec::new(),
                 ObjectId(200),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -3174,7 +3471,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
 
         let config = AiConfig::default();
         let legal_targets = vec![TargetRef::Object(creature), TargetRef::Object(token)];
@@ -3187,6 +3484,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: legal_targets.clone(),
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 target_constraints: Vec::new(),
@@ -3202,10 +3502,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(creature)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let creature_ctx = PolicyContext {
             state: &state,
@@ -3215,6 +3512,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let creature_score = AntiSelfHarmPolicy.score(&creature_ctx);
 
@@ -3223,10 +3521,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(token)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let token_ctx = PolicyContext {
             state: &state,
@@ -3236,6 +3531,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let token_score = AntiSelfHarmPolicy.score(&token_ctx);
 
@@ -3254,11 +3550,11 @@ mod tests {
     #[test]
     fn trigger_target_effects_are_extracted() {
         let mut state = make_state();
-        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+        state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
             source_id: ObjectId(200),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: None,
                     destination: Zone::Exile,
@@ -3270,12 +3566,14 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 Vec::new(),
                 ObjectId(200),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -3286,7 +3584,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
 
         let config = AiConfig::default();
         let decision = AiDecisionContext {
@@ -3306,10 +3604,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::ChooseTarget { target: None },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -3319,6 +3614,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let effects = ctx.effects();
@@ -3352,6 +3648,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
         let ability = ResolvedAbility::new(effect, Vec::new(), fanatic_id, PlayerId(0));
         let mut pending_cast = PendingCast::new(fanatic_id, CardId(100), ability, ManaCost::zero());
@@ -3374,6 +3671,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets,
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -3386,10 +3686,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(fanatic_id)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx_self = PolicyContext {
             state: &state,
@@ -3399,6 +3696,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict_self = AntiSelfHarmPolicy.verdict(&ctx_self);
 
@@ -3407,10 +3705,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(opp_creature)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx_opp = PolicyContext {
             state: &state,
@@ -3420,6 +3715,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -3428,10 +3724,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(1))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx_player = PolicyContext {
             state: &state,
@@ -3441,6 +3734,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_player = AntiSelfHarmPolicy.score(&ctx_player);
 
@@ -3474,6 +3768,7 @@ mod tests {
                 .affected(TargetFilter::Typed(TypedFilter::creature()))],
             duration: Some(engine::types::ability::Duration::UntilEndOfTurn),
             target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            end_cost: None,
         };
 
         // Score targeting own creature
@@ -3491,6 +3786,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -3509,6 +3805,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -3544,6 +3841,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
 
         let (decision, candidate) = make_target_selection_ctx(
@@ -3560,6 +3858,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_creature = AntiSelfHarmPolicy.score(&ctx_creature);
 
@@ -3578,6 +3877,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_face = AntiSelfHarmPolicy.score(&ctx_face);
 
@@ -3608,6 +3908,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
 
         let (decision, candidate) = make_target_selection_ctx(
@@ -3624,6 +3925,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score = AntiSelfHarmPolicy.score(&ctx);
 
@@ -3654,6 +3956,7 @@ mod tests {
                         ],
                     },
                     damage_source: None,
+                    excess: None,
                 },
             ));
         state
@@ -3667,6 +3970,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
         let (decision, candidate) = make_target_selection_ctx(
             &state,
@@ -3683,6 +3987,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score = AntiSelfHarmPolicy.score(&ctx);
         assert!(
@@ -3706,6 +4011,7 @@ mod tests {
             },
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         };
         let config = AiConfig::default();
 
@@ -3726,6 +4032,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let lowest_score = AntiSelfHarmPolicy.score(&ctx_lowest);
 
@@ -3746,6 +4053,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let other_score = AntiSelfHarmPolicy.score(&ctx_other);
 
@@ -3794,6 +4102,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.score(&ctx)
     }
@@ -3810,6 +4119,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.verdict(&ctx)
     }
@@ -3820,6 +4130,7 @@ mod tests {
             self_loss.then_some(DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::End,
                 player: PlayerId(0),
+                gate: engine::types::ability::TurnGate::None,
             }),
         )
     }
@@ -3881,7 +4192,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         let mut land_filter = TypedFilter::new(TypeFilter::Land);
@@ -3980,6 +4293,7 @@ mod tests {
             Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::Upkeep,
                 player: PlayerId(0),
+                gate: engine::types::ability::TurnGate::None,
             }),
         );
 
@@ -4130,10 +4444,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::DecideOptionalEffect { accept: true },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Replacement,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Replacement),
         };
         let context = crate::context::AiContext::empty(&config.weights);
         let ctx = PolicyContext {
@@ -4144,6 +4455,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.verdict(&ctx)
     }
@@ -4174,10 +4486,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::DecideOptionalEffect { accept: true },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Replacement,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Replacement),
         };
         let context = crate::context::AiContext::empty(&config.weights);
         let ctx = PolicyContext {
@@ -4188,6 +4497,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdicts = crate::policies::registry::PolicyRegistry::shared().verdicts(&ctx);

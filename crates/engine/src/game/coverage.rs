@@ -1,7 +1,13 @@
 use crate::database::legality::LegalityFormat;
 use crate::database::CardDatabase;
+use crate::game::effects::token::{
+    materialize_token_ability_payload, TokenAbilityMaterialization, TokenAbilitySource,
+};
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, static_registry, StaticAbilityHandler};
+use crate::game::token_presets::{
+    known_token_presets, PresetFidelity, TokenPreset, TokenPtProvenance,
+};
 use crate::game::triggers::{build_trigger_registry, trigger_registry};
 use crate::parser::oracle::{
     is_commander_permission_sentence, is_deck_construction_copy_limit_sentence,
@@ -12,14 +18,15 @@ use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
-    Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
-    CounteredSpellDestination, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
-    Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction, LibraryPosition,
-    ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
-    SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    CoinFlipResult, Comparator, ContinuousModification, ControllerRef, CountScope,
+    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
+    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
+    ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
+    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -30,7 +37,7 @@ use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::triggers::TriggerMode;
-use crate::types::zones::Zone;
+use crate::types::zones::{EtbTapState, Zone};
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::space1;
@@ -39,9 +46,14 @@ use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+const TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL: &str =
+    "TokenFidelity:PartialMissingAbilities";
+const TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL: &str =
+    "TokenBody:DynamicOrSourceDefinedPowerToughness";
+
 /// Data-carrying static mode variants that are supported but can't be registered
 /// by exact key in the static registry (because the key includes runtime data).
-fn is_data_carrying_static(mode: &StaticMode) -> bool {
+pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
     matches!(
         mode,
         // CR 514.2: nullary marker static — runtime enforcement is the cleanup
@@ -56,6 +68,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // permanents. Not registry-keyed (mirrors the marker cluster).
             | StaticMode::CantBecomeSuspected
             | StaticMode::ReduceAbilityCost { .. }
+            // CR 116.2 + CR 118.7a: ReduceActionCost carries `action`
+            // (SpecialAction), `mode`, and `amount`. Runtime enforcement is the
+            // special-action cost-reduction resolver
+            // (casting.rs::apply_special_action_cost_reduction), consulted at the
+            // plot activation and Room-door unlock payment sites. Not
+            // registry-keyed (SpecialAction is open value space).
+            | StaticMode::ReduceActionCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::ModifyCost { .. }
@@ -72,6 +91,20 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
+            // CR 702.170a grant + CR 702.170f permission: the two nullary
+            // plot-from-library markers (Fblthp's L3 "has plot" grant and L4
+            // "you may plot nonland cards" permission). The nonland scope is the
+            // permission's printed L4 filter (NOT a CR 702.170f clause) on
+            // `affected`; the plot cost is the top card's mana cost, computed
+            // live at synthesis. Runtime enforcement is end-to-end:
+            // casting.rs::top_of_library_plot_source requires both roles,
+            // runtime_granted_top_of_library_plot_abilities synthesizes the
+            // plot special action on the top card, candidates.rs offers it as
+            // ActivateAbility, and the existing Plotted later-cast lifecycle
+            // (CR 702.170d) is reused. Not registry-keyed (mirrors the
+            // cast-permission cluster).
+            | StaticMode::TopOfLibraryHasPlot
+            | StaticMode::TopOfLibraryPlotPermission
             | StaticMode::CastFromHandFree { .. }
             // CR 601.2a + CR 113.6b: ExileCastPermission carries frequency,
             // play_mode, and the `without_paying_mana_cost` flag. Runtime
@@ -100,6 +133,20 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::CantBeBlockedBy { .. }
+            // CR 509.1c: MustBeBlocked carries an optional blocker `TargetFilter`
+            // (None = any blocker; Some = "must be blocked by a <quality>"). The
+            // None shape is no longer registry-keyed (the variant is now
+            // parameterized with a non-Hash TargetFilter); runtime enforcement is
+            // direct-match in combat.rs declare-blockers validation (mirrors
+            // CantBeBlockedBy).
+            | StaticMode::MustBeBlocked { .. }
+            // CR 509.1c: MustBeBlockedByAll carries an optional blocker
+            // `TargetFilter` (None = all creatures (Lure); Some = only matching
+            // creatures compelled, Talruum Piper flying / Marble Priest Walls).
+            // The variant is now parameterized with a non-Hash TargetFilter, so
+            // it is no longer registry-keyed; runtime enforcement is direct-match
+            // in combat.rs declare-blockers validation (mirrors MustBeBlocked).
+            | StaticMode::MustBeBlockedByAll { .. }
             // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
             | StaticMode::CantBeBlockedExceptBy { .. }
             // CR 702.39a + CR 509.1c: MustBlockAttacker carries the `ObjectId` of
@@ -126,6 +173,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantActivateDuring { .. }
             // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
             | StaticMode::CantSearchLibrary { .. }
+            // CR 701.23f + CR 614.1a: RestrictLibrarySearchToTop carries `who` +
+            // `count`. Runtime enforcement is in
+            // game/effects/search_library.rs::library_search_top_limit.
+            | StaticMode::RestrictLibrarySearchToTop { .. }
+            // CR 723.1a + CR 723.5: search-scoped player control carries the
+            // affected-player scope and is consumed at search preparation.
+            | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
             // CR 603.2 + CR 609.3: CantCauseSacrificeOrExile carries `cause`.
             | StaticMode::CantCauseSacrificeOrExile { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
@@ -149,6 +203,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 121.6: CantDraw carries `who` (controller vs all_players) —
             // runtime enforcement is in game/effects/draw.rs::allowed_draw_count.
             | StaticMode::CantDraw { .. }
+            // CR 121.1 / CR 613.11: DrawFromBottom carries `who` — top-vs-bottom
+            // selection is enforced in
+            // game/effects/draw.rs::select_cards_to_draw.
+            | StaticMode::DrawFromBottom { .. }
             // CR 614.1b + CR 614.10: SkipStep carries the `Phase` discriminant
             // (Draw, Untap, Upkeep, etc.). Runtime enforcement is in
             // turns.rs::should_skip_step_static(). Coverage support is via
@@ -203,6 +261,11 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // Watchdog). Runtime enforcement is in morph::turn_face_up. Not
             // registry-keyed.
             | StaticMode::CantBeTurnedFaceUp
+            // CR 122.1d + CR 101.2: CountersCantBeRemoved carries the
+            // `CounterType` axis (Fear of Sleep Paralysis = Stun). Runtime
+            // enforcement is in turns.rs::counter_removal_blocked. Not
+            // registry-keyed.
+            | StaticMode::CountersCantBeRemoved { .. }
     )
 }
 
@@ -374,6 +437,8 @@ pub struct CoverageSummary {
     pub coverage_pct: f64,
     pub keyword_count: usize,
     #[serde(default)]
+    pub token_coverage: TokenCoverageSummary,
+    #[serde(default)]
     pub coverage_by_format: BTreeMap<String, FormatCoverageSummary>,
     /// Per-set coverage rollup. Each card counts toward every set it was
     /// printed in (via `CardCoverageResult::printings`). Consumers that
@@ -392,6 +457,52 @@ pub struct CoverageSummary {
     /// Per-category diagnostic counts for regression ratcheting (D-08).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub diagnostics: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TokenCoverageSummary {
+    pub total_tokens: usize,
+    pub supported_tokens: usize,
+    pub coverage_pct: f64,
+    pub full_fidelity_tokens: usize,
+    pub partial_fidelity_tokens: usize,
+    pub rules_text_tokens: usize,
+    pub parsed_rules_text_tokens: usize,
+    pub unparsed_rules_text_tokens: usize,
+    pub source_card_refs: usize,
+    #[serde(default)]
+    pub by_category: BTreeMap<String, TokenCoverageBucket>,
+    #[serde(default)]
+    pub by_payload_source: BTreeMap<String, TokenCoverageBucket>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_gaps: Vec<TokenGapFrequency>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_gap_token_makeup: Vec<TokenGapTokenMakeup>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TokenCoverageBucket {
+    pub total_tokens: usize,
+    pub supported_tokens: usize,
+    pub coverage_pct: f64,
+    pub source_card_refs: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TokenGapFrequency {
+    pub handler: String,
+    pub total_count: usize,
+    pub source_card_refs: usize,
+    pub example_tokens: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TokenGapTokenMakeup {
+    pub handler: String,
+    pub token_name: String,
+    pub total_count: usize,
+    pub source_card_refs: usize,
+    pub example_source_cards: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -438,9 +549,14 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::Player => "player".into(),
         TargetFilter::AllPlayers => "any player".into(),
         TargetFilter::Controller => "controller".into(),
+        TargetFilter::Opponent => "opponent".into(),
         TargetFilter::OriginalController => "original controller".into(),
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
+        // CR 201.5a: a granted body's by-name reference to its granting object.
+        TargetFilter::GrantingObject => "granting object".into(),
+        // CR 608.2c: the ability's pre-rebind source (reanimator-Aura keyword swap).
+        TargetFilter::OriginalSource => "original source".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
         TargetFilter::ExiledCardByIndex { index } => format!("exiled card {index}"),
         TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
@@ -486,7 +602,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
         TargetFilter::LastRevealed => "last revealed".into(),
+        TargetFilter::LastZoneChanged => "last zone changed".into(),
         TargetFilter::CostPaidObject => "cost-paid object".into(),
+        TargetFilter::ChosenCard => "last chosen card".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
@@ -502,9 +620,18 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::PostReplacementSourceController => {
             "prevented event source's controller".into()
         }
+        TargetFilter::PostReplacementDamageSource => "prevented event's damage source".into(),
         TargetFilter::PostReplacementDamageTarget => "prevented damage target".into(),
+        TargetFilter::PostReplacementDamageTargetOwner => "prevented damage target's owner".into(),
+        TargetFilter::ControllerAndControlledPermanents { permanent_type } => {
+            match permanent_type {
+                Some(ct) => format!("you and {ct:?}s you control"),
+                None => "you and permanents you control".into(),
+            }
+        }
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
+        TargetFilter::PlayerWhoChoseLabel { label } => format!("player who last chose {label}"),
         TargetFilter::Neighbor { direction } => match direction {
             SeatDirection::Left => "player to your left".into(),
             SeatDirection::Right => "player to your right".into(),
@@ -515,7 +642,10 @@ fn fmt_target(filter: &TargetFilter) -> String {
         }
         TargetFilter::ExiledBySource => "cards exiled by source".into(),
         TargetFilter::HasChosenName => "card with the chosen name".into(),
-        TargetFilter::ChosenDamageSource => "chosen damage source".into(),
+        TargetFilter::ChosenDamageSource { filter: Some(f) } => {
+            format!("chosen damage source matching {}", fmt_target(f))
+        }
+        TargetFilter::ChosenDamageSource { filter: None } => "chosen damage source".into(),
         TargetFilter::Named { name } => format!("card named {name}"),
         TargetFilter::Not { filter } => format!("not {}", fmt_target(filter)),
         TargetFilter::Or { filters } => filters
@@ -539,6 +669,13 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
         match prop {
             FilterProp::Token => parts.push("token".into()),
             FilterProp::NonToken => parts.push("nontoken".into()),
+            FilterProp::RepresentedByCard => parts.push("represented by a card".into()),
+            FilterProp::ControllerChoseLabel { label } => {
+                parts.push(format!("controlled by a player who last chose {label}"))
+            }
+            FilterProp::ControllerMatches { player } => {
+                parts.push(format!("controlled by {}", fmt_player_filter(player)))
+            }
             FilterProp::WasPlayed => parts.push("was played".into()),
             FilterProp::Attacking { defender } => match defender {
                 None => parts.push("attacking".into()),
@@ -555,6 +692,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::IsSaddled => parts.push("saddled".into()),
             FilterProp::SaddledSource => parts.push("saddled the source".into()),
+            FilterProp::ConvokedSource => parts.push("convoked the source".into()),
             FilterProp::ProtectorMatches { .. } => parts.push("protector matches".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
             FilterProp::HasHasteOrControlledSinceTurnBegan => {
@@ -711,6 +849,25 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 };
                 parts.push(label);
             }
+            FilterProp::ManaSymbolCount {
+                color,
+                comparator,
+                value,
+            } => {
+                let symbol = match color {
+                    Some(c) => format!("{c:?} mana symbol").to_lowercase(),
+                    None => "colored mana symbol".into(),
+                };
+                let label = match comparator {
+                    Comparator::GE => format!("≥{value} {symbol}"),
+                    Comparator::LE => format!("≤{value} {symbol}"),
+                    Comparator::GT => format!(">{value} {symbol}"),
+                    Comparator::LT => format!("<{value} {symbol}"),
+                    Comparator::EQ => format!("{value} {symbol}"),
+                    Comparator::NE => format!("≠{value} {symbol}"),
+                };
+                parts.push(label);
+            }
             FilterProp::HasSupertype { value } => {
                 parts.push(format!("{value}").to_lowercase());
             }
@@ -721,6 +878,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::Opponent => "opponent's",
                     ControllerRef::ScopedPlayer => "that player's",
                     ControllerRef::TargetPlayer => "target player's",
+                    ControllerRef::TargetOpponent => "target opponent's",
                     ControllerRef::ParentTargetController => "parent target's",
                     ControllerRef::ParentTargetOwner => "parent target owner's",
                     ControllerRef::DefendingPlayer => "defending player's",
@@ -729,6 +887,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::TriggeringPlayer => "triggering player's",
                     // CR 303.4b: Display label for enchanted-player controller scope.
                     ControllerRef::EnchantedPlayer => "enchanted player's",
+                    // CR 102.1: Display label for active-player controller scope.
+                    ControllerRef::ActivePlayer => "the active player's",
                 };
                 let zone_str = format!("{zone:?}").to_lowercase();
                 parts.push(format!(
@@ -736,7 +896,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ));
             }
             FilterProp::IsChosenCardType => parts.push("chosen card type".into()),
-            FilterProp::IsChosenLandOrNonlandKind => parts.push("chosen land/nonland kind".into()),
+            FilterProp::MatchesLastChosenCardPredicate => {
+                parts.push("chosen card predicate".into())
+            }
             FilterProp::NotColor { color } => {
                 parts.push(format!("non-{}", format!("{color:?}").to_lowercase()));
             }
@@ -745,6 +907,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             }
             FilterProp::Suspected => parts.push("suspected".into()),
             FilterProp::Renowned => parts.push("renowned".into()),
+            // CR 701.15b/c
+            FilterProp::Goaded => parts.push("goaded".into()),
             // CR 700.9
             FilterProp::Modified => parts.push("modified".into()),
             // CR 700.6
@@ -752,9 +916,14 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::NotHistoric => parts.push("nonhistoric".into()),
             // CR 903.3d
             FilterProp::IsCommander => parts.push("commander".into()),
+            // CR 205.3m + CR 903.3: Path of Ancestry's relational predicate.
+            FilterProp::SharesCreatureTypeWithCommander => {
+                parts.push("that shares a creature type with your commander".into())
+            }
             FilterProp::ToughnessGTPower => parts.push("toughness > power".into()),
             FilterProp::PowerExceedsBase => parts.push("power > base power".into()),
             FilterProp::DifferentNameFrom { .. } => parts.push("different name".into()),
+            FilterProp::DistinctFrom { .. } => parts.push("other than target".into()),
             FilterProp::Other { value } => parts.push(value.clone()),
             FilterProp::InAnyZone { zones } => {
                 let zone_strs: Vec<_> = zones.iter().map(fmt_zone).collect();
@@ -774,6 +943,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     SharedQuality::CreatureType => "creature type",
                     SharedQuality::Color => "color",
                     SharedQuality::CardType => "card type",
+                    SharedQuality::PermanentType => "permanent type",
                     SharedQuality::LandType => "land type",
                 };
                 let prefix = match relation {
@@ -787,14 +957,30 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 };
                 parts.push(format!("{prefix} {name}{suffix}"));
             }
-            FilterProp::WasDealtDamageThisTurn => parts.push("dealt damage this turn".into()),
+            // Both damage-role filters share this human coverage label (the AST
+            // variant carries the source-vs-recipient distinction); keeping the
+            // passive label unchanged avoids a cosmetic coverage-diff on every
+            // existing "was dealt damage this turn" card.
+            FilterProp::WasDealtDamageThisTurn | FilterProp::DealtDamageThisTurn => {
+                parts.push("dealt damage this turn".into())
+            }
             FilterProp::EnteredThisTurn => parts.push("entered this turn".into()),
+            FilterProp::ControlledContinuouslySinceTurnBegan => {
+                parts.push("controlled continuously since turn began".into())
+            }
             FilterProp::ZoneChangedThisTurn { from, to } => parts.push(format!(
                 "zone changed this turn from {} to {}",
                 from.map_or("any".into(), |zone| format!("{zone:?}")),
                 to.map_or("any".into(), |zone| format!("{zone:?}"))
             )),
-            FilterProp::AttackedThisTurn => parts.push("attacked this turn".into()),
+            FilterProp::AttackedThisTurn { defender } => match defender {
+                None => parts.push("attacked this turn".into()),
+                Some(ControllerRef::You) => parts.push("attacked you this turn".into()),
+                Some(ControllerRef::Opponent) => {
+                    parts.push("attacked your opponents this turn".into())
+                }
+                Some(_) => parts.push("attacked scoped player this turn".into()),
+            },
             FilterProp::BlockedThisTurn => parts.push("blocked this turn".into()),
             FilterProp::AttackedOrBlockedThisTurn => {
                 parts.push("attacked or blocked this turn".into());
@@ -822,7 +1008,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ));
             }
             FilterProp::HasSingleTarget => parts.push("single target".into()),
+            FilterProp::Modal => parts.push("modal spell".into()),
             FilterProp::FaceDown => parts.push("face-down".into()),
+            FilterProp::Transformed => parts.push("transformed".into()),
             FilterProp::TargetsOnly { filter } => {
                 parts.push(format!("targets only {}", fmt_target(filter)));
             }
@@ -841,11 +1029,17 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 let inner_tf = TypedFilter::default().properties(vec![(**prop).clone()]);
                 parts.push(format!("not {}", fmt_typed_filter(&inner_tf)));
             }
+            // CR 608.2c: "chosen this way" / a member of the resolution-chain set.
+            FilterProp::InTrackedSet { .. } => parts.push("chosen this way".into()),
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
+            FilterProp::HasAdventure => parts.push("with an Adventure".into()),
             FilterProp::WasKicked => parts.push("kicked".into()),
             FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
             FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
             FilterProp::HasNoAbilities => parts.push("with no abilities".into()),
+            FilterProp::CouldBeTargetedByTriggeringSpell => {
+                parts.push("that the spell could target".into())
+            }
         }
     }
     if let Some(ctrl) = &tf.controller {
@@ -856,6 +1050,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::Opponent => "opponent",
                 ControllerRef::ScopedPlayer => "scoped player",
                 ControllerRef::TargetPlayer => "target player",
+                ControllerRef::TargetOpponent => "target opponent",
                 ControllerRef::ParentTargetController => "parent target's controller",
                 ControllerRef::ParentTargetOwner => "parent target's owner",
                 ControllerRef::DefendingPlayer => "defending player",
@@ -864,6 +1059,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::TriggeringPlayer => "triggering player",
                 // CR 303.4b: Display label for enchanted-player controller scope.
                 ControllerRef::EnchantedPlayer => "enchanted player",
+                // CR 102.1: Display label for active-player controller scope.
+                ControllerRef::ActivePlayer => "the active player",
             };
             parts.push(label.into());
         } else {
@@ -928,6 +1125,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::Opponent => "opponent controls",
         ControllerRef::ScopedPlayer => "scoped player controls",
         ControllerRef::TargetPlayer => "target player controls",
+        ControllerRef::TargetOpponent => "target opponent controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
         ControllerRef::ParentTargetOwner => "parent target's owner controls",
         ControllerRef::DefendingPlayer => "defending player controls",
@@ -936,6 +1134,8 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::TriggeringPlayer => "triggering player controls",
         // CR 303.4b: Display label for enchanted-player controller scope.
         ControllerRef::EnchantedPlayer => "enchanted player controls",
+        // CR 102.1: Display label for active-player controller scope.
+        ControllerRef::ActivePlayer => "the active player controls",
     }
     .into()
 }
@@ -1006,6 +1206,7 @@ fn fmt_duration(d: &Duration) -> String {
             format!("until end of next turn ({})", fmt_player_scope(player))
         }
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
+        Duration::UntilSourceExilesAnotherCard => "until source exiles another card".to_string(),
         Duration::UntilNextStepOf { step, player } => {
             format!(
                 "until next {} ({})",
@@ -1064,6 +1265,7 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::DefendingPlayer => "defending player".to_string(),
         PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
+        PlayerScope::AnyTurn => "any turn".to_string(),
         PlayerScope::ParentObjectTargetController => "parent target's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
             format!("{} of opponents", fmt_aggregate_function(*aggregate))
@@ -1097,6 +1299,13 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::LifeAboveStarting => "life above starting".into(),
         QuantityRef::StartingLifeTotal => "starting life total".into(),
+        QuantityRef::TriggeringDiscoverValue => "the triggering discover's value".into(),
+        QuantityRef::TriggeringScryLookCount => {
+            "the number of cards looked at while scrying this way".into()
+        }
+        QuantityRef::TriggeringScryBottomCount => {
+            "the number of cards put on the bottom while scrying this way".into()
+        }
         QuantityRef::Speed { player } => {
             format!("speed ({})", fmt_player_scope(player))
         }
@@ -1130,6 +1339,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             )
         }
         QuantityRef::PlayerCount { filter } => format!("# of {}", fmt_player_filter(filter)),
+        QuantityRef::EventContextPlayerCount { filter } => {
+            format!("# of trigger-event {}", fmt_player_filter(filter))
+        }
         QuantityRef::CountersOn {
             scope,
             counter_type,
@@ -1141,6 +1353,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::EventSource => "event source",
                 ObjectScope::EventTarget => "event target",
                 ObjectScope::CostPaidObject => "cost-paid object",
+                ObjectScope::OtherRevealedCard => "other revealed card",
+                ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card",
+                ObjectScope::AmassedArmy => "amassed Army",
             };
             match counter_type {
                 Some(ct) => format!("{} counters on {scope_str}", ct.as_str()),
@@ -1165,6 +1380,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventSource => "event source's power".into(),
             ObjectScope::EventTarget => "event target's power".into(),
             ObjectScope::CostPaidObject => "referenced object's power".into(),
+            ObjectScope::OtherRevealedCard => "other revealed card's power".into(),
+            ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's power".into(),
+            ObjectScope::AmassedArmy => "amassed Army's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1175,6 +1393,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventSource => "event source's toughness".into(),
             ObjectScope::EventTarget => "event target's toughness".into(),
             ObjectScope::CostPaidObject => "referenced object's toughness".into(),
+            ObjectScope::OtherRevealedCard => "other revealed card's toughness".into(),
+            ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's toughness".into(),
+            ObjectScope::AmassedArmy => "amassed Army's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1185,6 +1406,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventSource => "event source's mana value".into(),
             ObjectScope::EventTarget => "event target's mana value".into(),
             ObjectScope::CostPaidObject => "referenced object's mana value".into(),
+            ObjectScope::OtherRevealedCard => "other revealed card's mana value".into(),
+            ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's mana value".into(),
+            ObjectScope::AmassedArmy => "amassed Army's mana value".into(),
         },
         QuantityRef::TargetObjectManaValue { .. } => "target object's mana value".into(),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -1196,6 +1420,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventSource => "event source's colors".into(),
             ObjectScope::EventTarget => "event target's colors".into(),
             ObjectScope::CostPaidObject => "cost-paid object's colors".into(),
+            ObjectScope::OtherRevealedCard => "other revealed card's colors".into(),
+            ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's colors".into(),
+            ObjectScope::AmassedArmy => "amassed Army's colors".into(),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1206,6 +1433,11 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventSource => "typeline components on event source".into(),
             ObjectScope::EventTarget => "typeline components on event target".into(),
             ObjectScope::CostPaidObject => "typeline components on cost-paid object".into(),
+            ObjectScope::OtherRevealedCard => "typeline components on other revealed card".into(),
+            ObjectScope::OwnedLinkedExileCard => {
+                "typeline components on owned linked-exiled card".into()
+            }
+            ObjectScope::AmassedArmy => "typeline components on amassed Army".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1216,6 +1448,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventSource => "words in event source's name".into(),
             ObjectScope::EventTarget => "words in event target's name".into(),
             ObjectScope::CostPaidObject => "words in cost-paid object's name".into(),
+            ObjectScope::OtherRevealedCard => "words in other revealed card's name".into(),
+            ObjectScope::OwnedLinkedExileCard => "words in owned linked-exiled card's name".into(),
+            ObjectScope::AmassedArmy => "words in amassed Army's name".into(),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
@@ -1225,8 +1460,14 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::EventSource => "event source",
                 ObjectScope::EventTarget => "event target",
                 ObjectScope::CostPaidObject => "cost-paid object",
+                ObjectScope::OtherRevealedCard => "other revealed card",
+                ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card",
+                ObjectScope::AmassedArmy => "amassed Army",
             };
-            format!("{color:?} mana symbols in {scope_str}'s mana cost")
+            match color {
+                Some(c) => format!("{c:?} mana symbols in {scope_str}'s mana cost"),
+                None => format!("colored mana symbols in {scope_str}'s mana cost"),
+            }
         }
         QuantityRef::SelfManaValue => "self mana value".into(),
         QuantityRef::Aggregate {
@@ -1283,6 +1524,23 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 None => "card types among tracked cards".into(),
             },
         },
+        QuantityRef::DistinctSubtypes { source, exclude } => {
+            let suffix = match exclude {
+                crate::types::ability::SubtypeExclusion::CreatureTypes => {
+                    " other than creature types"
+                }
+                crate::types::ability::SubtypeExclusion::None => "",
+            };
+            let scope_desc = match source {
+                CardTypeSetSource::Zone { zone, scope } => {
+                    format!("cards in {} {}", fmt_count_scope(scope), fmt_zone_ref(zone))
+                }
+                CardTypeSetSource::ExiledBySource => "cards exiled with source".into(),
+                CardTypeSetSource::Objects { filter } => fmt_target(filter),
+                CardTypeSetSource::TrackedSet { .. } => "tracked cards".into(),
+            };
+            format!("subtypes{suffix} among {scope_desc}")
+        }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
         QuantityRef::ExiledCardPower { index } => format!("power of exiled card {index}"),
         QuantityRef::ZoneCardCount {
@@ -1324,12 +1582,16 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("# of counter kinds among {}", fmt_target(filter))
         }
         QuantityRef::VoteCount { choice_index } => format!("# of votes for choice {choice_index}"),
-        QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
+        QuantityRef::PreviousEffectAmount { .. } => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::FilteredTrackedSetSize { filter, .. } => {
             format!("filtered tracked set ({})", fmt_target(filter))
         }
-        QuantityRef::TrackedSetAggregate { function, property } => {
+        QuantityRef::TrackedSetAggregate {
+            function,
+            property,
+            source: _,
+        } => {
             let func = match function {
                 AggregateFunction::Max => "max",
                 AggregateFunction::Min => "min",
@@ -1367,6 +1629,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             )
         }
         QuantityRef::CrimesCommittedThisTurn => "crimes committed this turn".into(),
+        QuantityRef::BendTypesThisTurn => "distinct bend types this turn".into(),
         QuantityRef::LifeGainedThisTurn { player } => {
             format!("life gained this turn ({})", fmt_player_scope(player))
         }
@@ -1412,7 +1675,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             aggregate,
             group_by,
             damage_kind,
-            excess_only,
+            channel,
         } => {
             let group = match group_by {
                 None => "ungrouped".to_string(),
@@ -1423,7 +1686,10 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 crate::types::ability::DamageKindFilter::CombatOnly => " combat",
                 crate::types::ability::DamageKindFilter::NoncombatOnly => " noncombat",
             };
-            let excess_tag = if *excess_only { " excess" } else { "" };
+            let excess_tag = match channel {
+                crate::types::ability::DamageChannel::Excess => " excess",
+                crate::types::ability::DamageChannel::Total => "",
+            };
             format!(
                 "{}{}{} damage dealt this turn ({} -> {}) [{group}]",
                 fmt_aggregate_function(*aggregate),
@@ -1491,6 +1757,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("mana spent to cast ({scope:?}, {metric:?})")
         }
         QuantityRef::EventContextSourceCostX => "X of triggering spell".into(),
+        QuantityRef::EventContextSourceModesChosen => {
+            "modes chosen for the triggering spell".into()
+        }
         QuantityRef::ColorsInCommandersColorIdentity => {
             "# of colors in commander's color identity".into()
         }
@@ -1518,6 +1787,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             };
             format!("# of {kind} counters {scope_s}")
         }
+        QuantityRef::TargetControllerCounter { kind } => {
+            format!("# of {kind} counters its controller has")
+        }
         QuantityRef::PartySize { player } => {
             format!("party size ({})", fmt_player_scope(player))
         }
@@ -1536,7 +1808,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
 }
 
 fn fmt_player_filter(pf: &PlayerFilter) -> String {
-    use crate::types::ability::PlayerRelation;
+    use crate::types::ability::{DamageKindFilter, PlayerRelation};
     match pf {
         PlayerFilter::Controller => "you",
         PlayerFilter::Opponent => "each opponent",
@@ -1544,9 +1816,14 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OpponentLostLife => "each opponent who lost life this turn",
         PlayerFilter::OpponentGainedLife => "each opponent who gained life this turn",
         PlayerFilter::HasLostTheGame => "each player who has lost the game",
-        PlayerFilter::OpponentDealtCombatDamage { .. } => {
-            "each opponent who was dealt combat damage this turn"
-        }
+        // CR 120.2a/120.2b: human string reflects the damage-kind selector.
+        PlayerFilter::OpponentDealtDamage { kind, .. } => match kind {
+            DamageKindFilter::CombatOnly => "each opponent who was dealt combat damage this turn",
+            DamageKindFilter::NoncombatOnly => {
+                "each opponent who was dealt noncombat damage this turn"
+            }
+            DamageKindFilter::Any => "each opponent who was dealt damage this turn",
+        },
         PlayerFilter::OpponentAttacked { subject, scope } => match (subject, scope) {
             (AttackSubject::You, AttackScope::ThisTurn) => "each opponent you attacked this turn",
             (AttackSubject::Source, AttackScope::ThisTurn) => {
@@ -1559,13 +1836,18 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
                 "each opponent this source attacked this combat"
             }
         },
+        PlayerFilter::OpponentAttackingEnchantedPlayer => {
+            "each opponent attacking the enchanted player"
+        }
         PlayerFilter::All => "each player",
+        PlayerFilter::AllExcept { .. } => "each player other than the excluded player",
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
         PlayerFilter::PerformedActionThisWay { .. } => "players who performed an action this way",
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
+        PlayerFilter::OpponentOfTriggeringPlayer => "each of that player's opponents",
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
             "opponents of the attacking player who aren't being attacked"
         }
@@ -1711,13 +1993,20 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
                 fmt_quantity(count)
             )
         }
+        ManaProduction::AnyCombinationOfObjectColors { count, scope } => {
+            let subject = match scope {
+                ObjectScope::Target => "target's",
+                _ => "object's",
+            };
+            format!("{} any combo of {subject} colors", fmt_quantity(count))
+        }
         ManaProduction::TriggerEventManaType => "1 of the triggering mana's type".to_string(),
     }
 }
 
 fn fmt_choice_type(ct: &ChoiceType) -> String {
     match ct {
-        ChoiceType::CreatureType => "creature type",
+        ChoiceType::CreatureType { .. } => "creature type",
         ChoiceType::Color { excluded } => {
             if excluded.is_empty() {
                 "color"
@@ -1735,16 +2024,18 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
             }
         }
         ChoiceType::CardName => "card name",
-        ChoiceType::NumberRange { min, max } => return format!("number ({min}-{max})"),
+        ChoiceType::NumberRange { min, max, .. } => return format!("number ({min}-{max})"),
         ChoiceType::Labeled { options } => return format!("one of: {}", options.join(", ")),
         ChoiceType::LandType => "land type",
+        ChoiceType::CardPredicate { .. } => "card predicate",
+        ChoiceType::CardPredicateGuess { .. } => "card predicate guess",
         ChoiceType::Opponent { .. } => "opponent",
-        ChoiceType::Player => "player",
+        ChoiceType::Player { .. } => "player",
         ChoiceType::TwoColors => "two colors",
         ChoiceType::Word => "word",
         ChoiceType::Artist => "artist",
         // CR 608.2d: "choose an ability" — Urborg / Walking Sponge prompt.
-        ChoiceType::Keyword { options } => {
+        ChoiceType::Keyword { options, .. } => {
             return format!(
                 "ability from: {}",
                 options
@@ -1754,6 +2045,9 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
                     .join(", ")
             );
         }
+        // CR 608.2d + CR 122.1: "choose a counter on it" — the option list is
+        // enumerated at resolution, so the coverage label stays generic.
+        ChoiceType::CounterKind { .. } => return "counter kind".to_string(),
     }
     .into()
 }
@@ -1776,6 +2070,10 @@ fn fmt_delayed_condition(cond: &DelayedTriggerCondition) -> String {
         }
         DelayedTriggerCondition::WhenDiesOrExiled { .. } => "when dies or exiled".into(),
         DelayedTriggerCondition::WheneverEvent { .. } => "whenever event this turn".into(),
+        DelayedTriggerCondition::WhenNextEvent {
+            lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
+            ..
+        } => "when next event (persistent)".into(),
         DelayedTriggerCondition::WhenNextEvent { .. } => "when next event this turn".into(),
     }
 }
@@ -1943,9 +2241,31 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::ApplyPostReplacementDamage { .. } => {}
-        Effect::EachDealsDamageEqualToPower { sources, recipient } => {
+        Effect::EachDealsDamageEqualToPower {
+            sources,
+            recipient,
+            extra_source,
+        } => {
             d.push(("sources".into(), fmt_target(sources)));
             d.push(("recipient".into(), fmt_target(recipient)));
+            if let Some(extra) = extra_source {
+                d.push(("extra_source".into(), fmt_target(extra)));
+            }
+        }
+        Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } => {
+            d.push(("sources".into(), fmt_target(sources)));
+            d.push(("amount".into(), fmt_quantity(amount)));
+            d.push((
+                "recipient".into(),
+                match recipient {
+                    EachDamageRecipient::Shared(filter) => fmt_target(filter),
+                    EachDamageRecipient::EachController => "its controller".into(),
+                },
+            ));
         }
         Effect::SearchOutsideGame {
             filter,
@@ -1979,13 +2299,26 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExileTop {
             player,
             count,
+            position,
             face_down,
         } => {
             d.push(("player".into(), fmt_target(player)));
             d.push(("count".into(), fmt_quantity(count)));
+            if !matches!(position, crate::types::ability::LibraryPosition::Top) {
+                d.push(("position".into(), format!("{position:?}")));
+            }
             if *face_down {
                 d.push(("face_down".into(), "true".into()));
             }
+        }
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => {
+            d.push(("object".into(), fmt_target(object)));
+            d.push(("player".into(), fmt_target(player)));
+            d.push(("count".into(), fmt_quantity(count)));
         }
         Effect::Pump {
             power,
@@ -2020,6 +2353,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         } => {
             d.push(("target".into(), fmt_target(target)));
         }
+        // CR 707.2c (Metamorphic Alteration): report the copy-source choice pool.
+        Effect::ChoosePermanent { filter } => {
+            d.push(("choose".into(), fmt_target(filter)));
+        }
         Effect::Destroy { target, .. }
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
@@ -2036,20 +2373,41 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
         | Effect::ForceAttack { target, .. }
-        | Effect::Transform { target }
+        // CR 701.27a: single-scope Transform reports its `target` like other
+        // single-target effects; mass Transform (scope:All) reports a `filter` below.
+        | Effect::Transform {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
+        // CR 710.4: the flipping permanent is the effect's single reported target.
+        | Effect::FlipPermanent { target }
         | Effect::Shuffle { target }
         | Effect::Reveal { target }
         | Effect::Regenerate { target }
         | Effect::RemoveAllDamage { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
+        Effect::ForceBlock {
+            target,
+            attacker,
+            duration,
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+            if let Some(attacker) = attacker {
+                d.push(("attacker".into(), format!("{attacker:?}")));
+            }
+            if *duration != Duration::UntilEndOfTurn {
+                d.push(("duration".into(), format!("{duration:?}")));
+            }
+        }
         // CR 702.50a: EpicCopy's parameters live in its snapshotted ability.
         Effect::EpicCopy { .. } => {}
         Effect::Intensify { .. } => {}
         Effect::ApplyPerpetual { .. } => {}
         Effect::TurnFaceUp { .. } => {}
+        Effect::TurnFaceDown { .. } => {}
         Effect::DestroyAll { target, .. }
         // CR 613.1b: mass gain-control reports its population `filter` like the
         // other mass effects (Hellkite Tyrant — "all artifacts that player controls").
@@ -2057,6 +2415,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         // CR 701.26a/b: mass tap/untap (legacy `TapAll`/`UntapAll`) reports a
         // population `filter`, like the other mass effects.
         | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
+        // CR 701.27a + CR 115.10a: mass Transform ("Transform all Humans") reports its
+        // non-targeting population `filter`, like the other mass effects.
+        | Effect::Transform {
             scope: EffectScope::All,
             target,
             ..
@@ -2115,20 +2480,32 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             // CR 701.6a + CR 614.1a: countered-spell destination redirect.
             match countered_spell_zone {
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Top,
                 }) => d.push(("redirect".into(), "library top".into())),
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Bottom,
                 }) => d.push(("redirect".into(), "library bottom".into())),
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::NthFromTop { n },
                 }) => d.push(("redirect".into(), format!("library #{n} from top"))),
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::BeneathTop { .. },
                 }) => d.push(("redirect".into(), "library beneath top X".into())),
-                Some(CounteredSpellDestination::Hand) => {
+                // Digital-only Alchemy placement (no CR entry): counter-redirect
+                // never emits `RandomWithinTop` (conjure-only), but the arm keeps
+                // the match exhaustive.
+                Some(SpellStackToGraveyardReplacement::Library {
+                    position: LibraryPosition::RandomWithinTop { .. },
+                }) => d.push(("redirect".into(), "library random within top X".into())),
+                Some(SpellStackToGraveyardReplacement::Hand) => {
                     d.push(("redirect".into(), "hand".into()))
+                }
+                // CR 614.1a: `Exile` is shared with the cast-this-way rider; the
+                // counter parser never emits it (exile-on-counter is a separate
+                // sub-ability rider), but the arm keeps the match exhaustive.
+                Some(SpellStackToGraveyardReplacement::Exile) => {
+                    d.push(("redirect".into(), "exile".into()))
                 }
                 None => {}
             }
@@ -2299,13 +2676,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             origin,
             destination,
             target,
-            ..
-        }
-        | Effect::ChangeZoneAll {
-            origin,
-            destination,
-            target,
-            ..
+            owner_library,
+            enter_transformed,
+            enters_under,
+            enter_tapped,
+            enters_attacking,
+            up_to,
+            enter_with_counters,
+            conditional_enter_with_counters,
+            face_down_profile,
+            enters_modified_if,
         } => {
             if let Some(o) = origin {
                 d.push(("from".into(), fmt_zone(o)));
@@ -2313,6 +2693,88 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("to".into(), fmt_zone(destination)));
             if !matches!(target, TargetFilter::None) {
                 d.push(("target".into(), fmt_target(target)));
+            }
+            // #5495 (follow-up to #5492): battlefield-entry qualifiers a parser
+            // change can flip, previously swallowed by `..` and thus invisible to
+            // the coverage-parse-diff sticky (e.g. `enters_attacking` for
+            // "put it onto the battlefield attacking", CR 508.4 — Senu). Emitted
+            // only when active, so a plain ChangeZone's signature is unchanged.
+            if *owner_library {
+                d.push(("owner_library".into(), "true".into()));
+            }
+            if *enter_transformed {
+                d.push(("enter_transformed".into(), "true".into()));
+            }
+            if let Some(u) = enters_under {
+                d.push(("enters_under".into(), format!("{u:?}")));
+            }
+            if !matches!(enter_tapped, EtbTapState::Unspecified) {
+                d.push(("enter_tapped".into(), format!("{enter_tapped:?}")));
+            }
+            if *enters_attacking {
+                d.push(("enters_attacking".into(), "true".into()));
+            }
+            if *up_to {
+                d.push(("up_to".into(), "true".into()));
+            }
+            if !enter_with_counters.is_empty() {
+                d.push((
+                    "enter_with_counters".into(),
+                    format!("{enter_with_counters:?}"),
+                ));
+            }
+            if !conditional_enter_with_counters.is_empty() {
+                d.push((
+                    "conditional_enter_with_counters".into(),
+                    format!("{conditional_enter_with_counters:?}"),
+                ));
+            }
+            if let Some(fd) = face_down_profile {
+                d.push(("face_down_profile".into(), format!("{fd:?}")));
+            }
+            if let Some(f) = enters_modified_if {
+                d.push(("enters_modified_if".into(), fmt_target(f)));
+            }
+        }
+        Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            enters_under,
+            enter_tapped,
+            enter_with_counters,
+            face_down_profile,
+            library_position,
+            random_order,
+        } => {
+            if let Some(o) = origin {
+                d.push(("from".into(), fmt_zone(o)));
+            }
+            d.push(("to".into(), fmt_zone(destination)));
+            if !matches!(target, TargetFilter::None) {
+                d.push(("target".into(), fmt_target(target)));
+            }
+            // #5495: same entry-qualifier audit for the `All` variant.
+            if let Some(u) = enters_under {
+                d.push(("enters_under".into(), format!("{u:?}")));
+            }
+            if !matches!(enter_tapped, EtbTapState::Unspecified) {
+                d.push(("enter_tapped".into(), format!("{enter_tapped:?}")));
+            }
+            if !enter_with_counters.is_empty() {
+                d.push((
+                    "enter_with_counters".into(),
+                    format!("{enter_with_counters:?}"),
+                ));
+            }
+            if let Some(fd) = face_down_profile {
+                d.push(("face_down_profile".into(), format!("{fd:?}")));
+            }
+            if let Some(lp) = library_position {
+                d.push(("library_position".into(), format!("{lp:?}")));
+            }
+            if *random_order {
+                d.push(("random_order".into(), "true".into()));
             }
         }
         Effect::Dig {
@@ -2404,11 +2866,55 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("persist".into(), "yes".into()));
             }
         }
+        Effect::OpponentGuess { guesser, subject } => {
+            d.push(("guesser".into(), format!("{guesser:?}")));
+            d.push((
+                "subject".into(),
+                match subject.as_ref() {
+                    crate::types::ability::GuessSubject::CommittedChoice { choice_type } => {
+                        format!("committed {}", fmt_choice_type(choice_type))
+                    }
+                    crate::types::ability::GuessSubject::Proposition { .. } => {
+                        "proposition".into()
+                    }
+                },
+            ));
+        }
+        Effect::SwapChosenLabels { first, second } => {
+            d.push(("swap".into(), format!("{first} <-> {second}")));
+        }
         Effect::ChooseDamageSource { source_filter } => {
             d.push(("source".into(), fmt_target(source_filter)));
         }
-        Effect::Mana { produced, .. } => {
+        Effect::Mana {
+            produced,
+            restrictions,
+            grants,
+            expiry,
+            target,
+        } => {
+            // #5507 (third instance after #5492/#5495): the mana effect rendered
+            // only `produced`, swallowing `restrictions`/`grants`/`expiry`/`target`
+            // with `..`. So a parser change that attaches a `ManaSpellGrant` to the
+            // produced mana (e.g. Hall of the Bandit Lord's creature-spell haste
+            // rider, #5502) never showed a compensating addition in the sticky —
+            // removals-with-no-addition, the signature of a regression, when it was
+            // really a half-rendered effect. Fully destructure (no `..`) so a new
+            // Mana field is a compile error, not another silent omission, and emit
+            // each field only when set so unqualified signatures stay byte-identical.
             d.push(("mana".into(), fmt_mana_production(produced)));
+            if !restrictions.is_empty() {
+                d.push(("restrictions".into(), format!("{restrictions:?}")));
+            }
+            if !grants.is_empty() {
+                d.push(("grants".into(), format!("{grants:?}")));
+            }
+            if let Some(e) = expiry {
+                d.push(("expiry".into(), format!("{e:?}")));
+            }
+            if let Some(t) = target {
+                d.push(("target".into(), fmt_target(t)));
+            }
         }
         Effect::RevealHand {
             target,
@@ -2530,6 +3036,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             static_abilities,
             duration,
             target,
+            // CR 116.2c: the pay-to-end permission is a runtime special action,
+            // not a characteristic-shaping detail of the continuous effect, so it
+            // is deliberately absent from this display-only detail map.
+            end_cost: _,
         } => {
             if let Some(dur) = duration {
                 d.push(("duration".into(), fmt_duration(dur)));
@@ -2669,17 +3179,28 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             amount,
             target,
             scope,
+            damage_source_filter,
             ..
         } => {
             d.push(("amount".into(), format!("{amount:?}")));
             d.push(("target".into(), fmt_target(target)));
             d.push(("scope".into(), format!("{scope:?}")));
+            // CR 615 + CR 614.1a: the source-restriction qualifier (#5492). Omitting
+            // it made a change from unqualified `ChosenDamageSource` to
+            // `ChosenDamageSource { filter: Some(..) }` (the Circle/Rune of
+            // Protection cycles) invisible to the parse-diff sticky — a real parser
+            // change reading as "No card-parse changes".
+            if let Some(f) = damage_source_filter {
+                d.push(("damage_source_filter".into(), fmt_target(f)));
+            }
         }
         Effect::CreateDamageReplacement {
             modification,
             redirect_to,
             redirect_amount,
             combat_scope,
+            source_filter,
+            target_filter,
             redirect_object_filter,
             recipient_object_filter,
             ..
@@ -2696,6 +3217,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(cs) = combat_scope {
                 d.push(("combat_scope".into(), format!("{cs:?}")));
             }
+            // #5492: `source_filter` shares `PreventDamage`'s
+            // `parse_oneshot_source_filter` binding and had the same blind spot;
+            // `target_filter` is likewise parser-alterable. Emit both so any change
+            // to which sources/targets a replacement covers is diff-visible.
+            if let Some(f) = source_filter {
+                d.push(("source_filter".into(), fmt_target(f)));
+            }
+            if let Some(f) = target_filter {
+                d.push(("target_filter".into(), format!("{f:?}")));
+            }
             if let Some(f) = redirect_object_filter {
                 d.push(("redirect_object_filter".into(), fmt_target(f)));
             }
@@ -2703,11 +3234,26 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("recipient_object_filter".into(), fmt_target(f)));
             }
         }
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            d.push((
+                "replacement_effect".into(),
+                crate::types::ability::effect_variant_name(replacement_effect).to_string(),
+            ));
+        }
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            d.push((
+                "replacement_effect".into(),
+                crate::types::ability::effect_variant_name(replacement_effect).to_string(),
+            ));
+        }
         Effect::ChooseFromZone { count, zone, .. } => {
             d.push(("count".into(), count.to_string()));
             d.push(("zone".into(), fmt_zone(zone)));
         }
-        Effect::ForEachCategoryExile { category, zone, .. } => {
+        Effect::RememberCard { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::ForEachCategory { category, action, .. } => {
             d.push((
                 "category".into(),
                 match category {
@@ -2715,7 +3261,19 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                     crate::types::ability::IterationCategory::CardType => "card type".to_string(),
                 },
             ));
-            d.push(("zone".into(), fmt_zone(zone)));
+            match action {
+                ForEachCategoryAction::ExileFromPool { zone, .. } => {
+                    d.push(("zone".into(), fmt_zone(zone)));
+                }
+                ForEachCategoryAction::PutCounter {
+                    target,
+                    counter_type,
+                    ..
+                } => {
+                    d.push(("target".into(), fmt_target(target)));
+                    d.push(("counter_type".into(), counter_type.as_str().to_string()));
+                }
+            }
         }
         Effect::ChooseObjectsIntoTrackedSet {
             chooser,
@@ -2730,6 +3288,27 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 "max".into(),
                 max.map_or_else(|| "any".to_string(), |m| m.to_string()),
             ));
+        }
+        Effect::ChooseCounterKind { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+            d.push(("count".into(), fmt_quantity(count)));
+            if let Some(condition) = target_condition {
+                d.push((
+                    "target_condition".into(),
+                    format!(
+                        "chosen counter count {:?} {}",
+                        condition.comparator,
+                        fmt_quantity(&condition.rhs)
+                    ),
+                ));
+            }
         }
         Effect::GainEnergy { amount } => {
             d.push(("amount".into(), fmt_quantity(amount)));
@@ -2811,8 +3390,22 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Cascade => {}
         Effect::Ripple { .. } => {}
         // CR 614.1a: the "exile it instead of putting it into a graveyard as it
-        // resolves" rider acts on the triggering spell; no displayable parameter.
-        Effect::ExileResolvingSpellInsteadOfGraveyard => {}
+        // resolves" rider acts on the triggering spell; the only displayable
+        // parameter is the optional "If you do, ..." consequence rider.
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile } => match on_exile {
+            Some(crate::types::ability::ExiledSpellRider::ReturnTo {
+                destination,
+                timing,
+            }) => {
+                d.push(("return to".into(), format!("{destination:?}")));
+                d.push(("return at".into(), format!("{timing:?}")));
+            }
+            // CR 702.170c: Lilah's exiled spell becomes plotted.
+            Some(crate::types::ability::ExiledSpellRider::BecomePlotted) => {
+                d.push(("then".into(), "becomes plotted".into()));
+            }
+            None => {}
+        },
         // CR 702.94a: MiracleCast is an internal engine effect, not parsed from Oracle text.
         Effect::MiracleCast { .. } => {}
         // CR 702.35a: MadnessCast is synthesized from Keyword::Madness.
@@ -2900,10 +3493,17 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ControlNextTurn {
             target,
             grant_extra_turn_after,
+            window,
         } => {
             d.push(("player".into(), fmt_target(target)));
             if *grant_extra_turn_after {
                 d.push(("extra turn after".into(), "yes".into()));
+            }
+            if matches!(
+                window,
+                crate::types::ability::ControlWindow::NextCombatPhase
+            ) {
+                d.push(("window".into(), "next combat phase".into()));
             }
         }
         Effect::AdditionalPhase {
@@ -2912,6 +3512,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             after,
             followed_by,
             count,
+            attacker_restriction,
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("phase".into(), format!("{phase:?}")));
@@ -2921,6 +3522,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
                 d.push(("count".into(), format!("{count:?}")));
+            }
+            if let Some(restriction) = attacker_restriction {
+                d.push((
+                    "only these can attack".into(),
+                    fmt_target(restriction),
+                ));
             }
         }
         Effect::Double {
@@ -2991,6 +3598,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExploreAll { filter } => {
             d.push(("filter".into(), fmt_target(filter)));
         }
+        // CR 701.4a: behold's only parameter is the beheld quality (subtype filter).
+        Effect::Behold { filter } => {
+            d.push(("filter".into(), fmt_target(filter)));
+        }
         Effect::GiftDelivery { kind } => {
             d.push(("gift".into(), format!("{kind:?}")));
         }
@@ -3003,6 +3614,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::BecomePrepared { target }
         | Effect::BecomeUnprepared { target }
         | Effect::BecomeSaddled { target }
+        | Effect::BecomeBlocked { target }
         | Effect::PairWith { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
@@ -3047,7 +3659,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::ChaosEnsues
+        | Effect::RedistributeLifeTotals
+        | Effect::ReverseTurnOrder
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters
@@ -3061,8 +3677,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ApplySticker { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::ChooseCounterAdjustment { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::Specialize => {}
     }
@@ -3077,6 +3696,34 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
     }
     if let Some(dur) = &def.duration {
         d.push(("duration".into(), fmt_duration(dur)));
+    }
+    // CR 608.2c: a lifted "[once] for each ⟨set⟩" repeat multiplier is an
+    // `AbilityDefinition` field. Surface it in the per-card parse-diff signature ONLY
+    // for the shapes THIS PR's lift produces — a fieldless `Effect::Investigate` whose
+    // `repeat_for` is a member-count `QuantityRef` (`PlayerCount`/`ObjectCount`), i.e.
+    // exactly the eligibility set of `for_each_repeatable_repeat_for`
+    // (parser/oracle_effect/mod.rs). Projecting the *whole* repeat_for surface
+    // (CopySpell/Token/Proliferate/… and pre-existing `Fixed`/`Variable`/tracked-set
+    // Investigate forms) would migrate ~250 unrelated, parse-identical cards' coverage
+    // signatures in one shot — a deliberate global coverage-schema migration, deferred
+    // out of this focused feature. `None`, or any out-of-scope shape, pushes nothing,
+    // so those cards keep a byte-identical signature.
+    // COUPLING: if the lift's eligible quantity set ever widens (e.g. the Gap B
+    // leading-adjective fix), this scope MUST widen in lockstep, or the new lift class
+    // becomes false-green in the parse-diff.
+    if let Some(rf) = &def.repeat_for {
+        let is_lift_shape = matches!(&*def.effect, Effect::Investigate)
+            && matches!(
+                rf,
+                QuantityExpr::Ref { qty }
+                    if matches!(
+                        qty,
+                        QuantityRef::PlayerCount { .. } | QuantityRef::ObjectCount { .. }
+                    )
+            );
+        if is_lift_shape {
+            d.push(("repeat_for".into(), fmt_quantity(rf)));
+        }
     }
     if def.optional_targeting {
         d.push(("targeting".into(), "optional (up to)".into()));
@@ -3174,8 +3821,15 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         AbilityCondition::AlternativeManaCostPaid => "alternative mana cost was paid".into(),
         AbilityCondition::EffectOutcome { .. } => "previous effect outcome".into(),
         AbilityCondition::EventOutcomeWon => "you won the event".into(),
+        AbilityCondition::CoinFlipOutcome { result } => match result {
+            CoinFlipResult::Won => "you won the flip".into(),
+            CoinFlipResult::Lost => "you lost the flip".into(),
+        },
         AbilityCondition::WhenYouDo => "when you do".into(),
-        AbilityCondition::CastFromZone { zone } => format!("cast from {}", fmt_zone(zone)),
+        AbilityCondition::WasCast { zone } => match zone {
+            Some(z) => format!("cast from {}", fmt_zone(z)),
+            None => "was cast".into(),
+        },
         AbilityCondition::CastDuringPhase { phases } => {
             let parts: Vec<&str> = phases.iter().map(fmt_phase).collect();
             format!("cast during {}", parts.join(" or "))
@@ -3205,19 +3859,32 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
             fmt_comparator(comparator),
             fmt_quantity(rhs)
         ),
-        AbilityCondition::PreviousEffectAmount { comparator, rhs } => format!(
-            "previous amount {} {}",
+        AbilityCondition::PreviousEffectAmount {
+            comparator,
+            rhs,
+            channel,
+        } => format!(
+            "previous {}amount {} {}",
+            match channel {
+                crate::types::ability::DamageChannel::Excess => "excess ",
+                crate::types::ability::DamageChannel::Total => "",
+            },
             fmt_comparator(comparator),
             fmt_quantity(rhs)
         ),
         AbilityCondition::HasMaxSpeed => "has max speed".into(),
         AbilityCondition::IsMonarch => "is monarch".into(),
+        AbilityCondition::CompletedDungeon { specific } => match specific {
+            None => "you've completed a dungeon".into(),
+            Some(dungeon) => format!("you've completed {dungeon}"),
+        },
         AbilityCondition::IsInitiative => "has the initiative".into(),
         AbilityCondition::HasCityBlessing => "has the city's blessing".into(),
         AbilityCondition::IsRingBearer => "is the ring-bearer".into(),
         AbilityCondition::TargetHasKeywordInstead { keyword } => {
             format!("target has {} (instead)", keyword_label(keyword))
         }
+        AbilityCondition::HasObjectTarget => "has an object target".into(),
         AbilityCondition::TargetMatchesFilter { filter, .. } => {
             format!("target is {}", fmt_target(filter))
         }
@@ -3226,6 +3893,9 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         }
         AbilityCondition::SourceMatchesFilter { filter } => {
             format!("source is {}", fmt_target(filter))
+        }
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter } => {
+            format!("prevented event's damage source is {}", fmt_target(filter))
         }
         AbilityCondition::ZoneChangeObjectMatchesFilter {
             destination,
@@ -3249,6 +3919,7 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         }
         AbilityCondition::FirstCombatPhaseOfTurn => "first combat phase of the turn".into(),
         AbilityCondition::FirstEndStepOfTurn => "first end step of the turn".into(),
+        AbilityCondition::CurrentPhaseIs { .. } => "current phase matches".into(),
         AbilityCondition::ZoneChangedThisWay { filter } => {
             format!("{} changed zones this way", fmt_target(filter))
         }
@@ -3320,6 +3991,9 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
             format!("dealt damage this turn by {}", fmt_target(source))
         }
         TC::FirstTimeObjectTappedThisTurn => "first time tapped this turn".into(),
+        TC::FirstTimeObjectCountersAddedThisTurn => {
+            "first time counters put on it this turn".into()
+        }
         TC::WasType { card_type } => format!("was a {}", fmt_core_type(card_type)),
         TC::LifeTotalGE { minimum } => format!("life ≥ {minimum}"),
         TC::ControlCount { minimum, filter } => {
@@ -3327,6 +4001,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         }
         TC::ControlsNone { filter } => format!("you control no {}", fmt_target(filter)),
         TC::AttackedThisTurn => "attacked this turn".into(),
+        TC::SourceAttackedThisCombat => "source attacked this combat".into(),
         TC::FirstCombatPhaseOfTurn => "first combat phase of the turn".into(),
         TC::CastSpellThisTurn { filter } => match filter {
             Some(f) => format!("cast a {} spell this turn", fmt_target(f)),
@@ -3395,6 +4070,9 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         TC::EventDamageSourceMatchesFilter { filter } => {
             format!("damage source is {}", fmt_target(filter))
         }
+        TC::EventObjectMatchesFilter { filter } => {
+            format!("event object is {}", fmt_target(filter))
+        }
         TC::DamagedPlayerIsEventSourceOwner => "damaged player is the source's owner".into(),
         TC::ChosenLabelIs { label } => format!("chosen label is {label}"),
         TC::AttackersDeclaredCount {
@@ -3404,6 +4082,9 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         TC::PlacedByAbilitySource => "placed by this ability".into(),
         TC::TriggeringSpellTargetsFilter { filter } => {
             format!("triggering spell targets {}", fmt_target(filter))
+        }
+        TC::TriggeringSpellMatchesFilter { filter } => {
+            format!("triggering spell is {}", fmt_target(filter))
         }
         TC::And { conditions } => {
             let parts: Vec<String> = conditions.iter().map(fmt_trigger_condition).collect();
@@ -3510,6 +4191,9 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::UnlessPay { .. } => "unless a cost is paid".into(),
         SC::Unrecognized { .. } => "unrecognized".into(),
         SC::DuringYourTurn => "during your turn".into(),
+        SC::SharesColorWithMostCommonColorAmongPermanents => {
+            "shares a color with the most common color among all permanents".into()
+        }
         SC::SourceEnteredThisTurn => "source entered this turn".into(),
         SC::SourceHasDealtDamage => "source has dealt damage".into(),
         SC::WasCast { zone } => match zone {
@@ -3529,6 +4213,9 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceIsHarnessed => "source is harnessed".into(),
         SC::SourceAttachedToCreature => "source is attached to a creature".into(),
         SC::SourceMatchesFilter { filter } => format!("source is {}", fmt_target(filter)),
+        SC::TopOfLibraryMatches { filter } => {
+            format!("top card of library is {}", fmt_target(filter))
+        }
         SC::RecipientMatchesFilter { filter } => format!("recipient is {}", fmt_target(filter)),
         SC::RecipientAttackingOwnerTarget { .. } => {
             "recipient is attacking its owner's target".into()
@@ -3536,6 +4223,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceIsPaired => "source is paired".into(),
         SC::SourceInZone { zone } => format!("source is in {}", fmt_zone(zone)),
         SC::EnchantedIsFaceDown => "enchanted creature is face-down".into(),
+        SC::SourceIsFaceUp => "source plane is face up".into(),
         SC::AdditionalCostPaid => "additional cost was paid".into(),
         SC::CastingAsVariant { variant } => format!("casting as {variant:?}"),
         SC::None => "none".into(),
@@ -3547,7 +4235,11 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
     use crate::types::ability::ContinuousModification;
     match m {
         ContinuousModification::CopyValues { .. } => "copy values".into(),
+        // CR 707.2c (Metamorphic Alteration): parse-time marker for the enchanted
+        // host's copy — the runtime copy is the latched `CopyValues` TCE.
+        ContinuousModification::CopyChosen => "copy chosen".into(),
         ContinuousModification::SetName { name } => format!("set name {name}"),
+        ContinuousModification::SetTextName { name } => format!("set text name {name}"),
         ContinuousModification::AddPower { value } => format!("power {:+}", value),
         ContinuousModification::AddToughness { value } => format!("toughness {:+}", value),
         ContinuousModification::SetPower { value } => format!("base power {value}"),
@@ -3559,10 +4251,23 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("remove {}", keyword_label(keyword))
         }
         ContinuousModification::GrantAbility { .. } => "grant ability".into(),
-        ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {
-            "grant all activated abilities of".into()
+        ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap } => {
+            // Blind spot (same class as #5492/#5495/#5501/#5507): this rendered
+            // only the bare label, swallowing `source`/`cap` with `..`, so a parser
+            // change to which permanents' abilities are granted showed as a removal
+            // with no compensating addition in the sticky. Expose the source filter
+            // (and cap only when set, so unqualified signatures stay byte-identical).
+            let mut s = format!("grant all activated abilities of {}", fmt_target(source));
+            if let Some(cap) = cap {
+                s.push_str(&format!(" (cap {cap:?})"));
+            }
+            s
+        }
+        ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
+            format!("grant all triggered abilities of {}", fmt_target(source))
         }
         ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
+        ContinuousModification::GrantReplacement { .. } => "grant replacement".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
         ContinuousModification::AddType { core_type } => {
             format!("add type {}", fmt_core_type(core_type))
@@ -3590,11 +4295,17 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::AddDynamicKeyword { kind, .. } => {
             format!("dynamic keyword {kind:?}")
         }
+        ContinuousModification::AddKeywordWithDerivedCost { kind, .. } => {
+            format!("derived-cost keyword {kind:?}")
+        }
         ContinuousModification::AddAllCreatureTypes => "all creature types".into(),
         ContinuousModification::AddAllBasicLandTypes => "all basic land types".into(),
         ContinuousModification::AddAllLandTypes => "all land types".into(),
         ContinuousModification::AddChosenSubtype { .. } => "add chosen subtype".into(),
-        ContinuousModification::AddChosenColor => "add chosen color".into(),
+        ContinuousModification::AddChosenColor { mode } => match mode {
+            crate::types::ability::ColorChangeMode::Set => "set chosen color".into(),
+            crate::types::ability::ColorChangeMode::Add => "add chosen color".into(),
+        },
         // CR 608.2d + CR 613.1f: Urborg / Walking Sponge — strip the
         // keyword chosen at resolution time.
         ContinuousModification::RemoveChosenKeyword => "remove chosen keyword".into(),
@@ -3623,6 +4334,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("set land type {}", land_type.as_subtype_str())
         }
         ContinuousModification::SetChosenBasicLandType => "set chosen land type".into(),
+        ContinuousModification::SetChosenName => "set chosen name".into(),
         ContinuousModification::AssignNoCombatDamage => "assign no combat damage".into(),
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
@@ -3630,6 +4342,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::RetainPrintedAbilityFromSource {
             source_ability_index,
         } => format!("retain printed ability {source_ability_index}"),
+        ContinuousModification::RetainAllOtherAbilitiesFromSource => {
+            "retain source's other abilities".into()
+        }
         ContinuousModification::AddSupertype { supertype } => {
             format!("add supertype {supertype}")
         }
@@ -3699,6 +4414,7 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
                 m,
                 ContinuousModification::GrantTrigger { .. }
                     | ContinuousModification::GrantAbility { .. }
+                    | ContinuousModification::GrantReplacement { .. }
             )
         })
         .map(fmt_modification)
@@ -3714,6 +4430,102 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
     }
     if let Some(zone) = &stat.affected_zone {
         d.push(("zone".into(), fmt_zone(zone)));
+    }
+    d
+}
+
+/// Extract detail pairs from a `ReplacementDefinition` (non-effect fields).
+///
+/// Mirrors `trigger_details`/`static_details`: the replacement's scoping and
+/// modification fields must be projected into the parse signature so two
+/// replacements that differ only in *whom* or *what* they apply to produce
+/// distinct `ParsedItem`s. Without this, a scope-only fix (e.g. a self-scoped
+/// damage shield flipping `valid_card` from `None` to `Some(SelfRef)`) shows a
+/// false "no card-parse changes detected" diff.
+///
+/// Covers every parse-time semantic axis on the struct: recipient/player
+/// scope, mode, shield kind, damage source/target/combat/modification,
+/// quantity modification, destination zone, condition, redirect target, draw
+/// scope, token owner scope/redirect, mana modification/scope, additional and
+/// ensure-all token specs, counter match, and controller overrides
+/// (`enters_under`) and expiry. Deliberately excludes runtime-only state
+/// (`execute`, `runtime_execute`, `consume_on_apply`, `is_consumed`,
+/// `source_controller`) which carries no parse-time signal of its own.
+fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
+    let mut d = Vec::new();
+    // Recipient scope — the field a shield-scoping fix changes.
+    if let Some(vc) = &repl.valid_card {
+        d.push(("scope".into(), fmt_target(vc)));
+    }
+    if let Some(vp) = &repl.valid_player {
+        d.push(("player scope".into(), format!("{vp:?}")));
+    }
+    // Mode discriminant (Mandatory / Optional / MayCost).
+    match &repl.mode {
+        ReplacementMode::Mandatory => {}
+        ReplacementMode::Optional { .. } => d.push(("mode".into(), "optional".into())),
+        ReplacementMode::MayCost { .. } => d.push(("mode".into(), "may pay cost".into())),
+    }
+    // Shield kind, including the prevented amount (ShieldKind::Prevention).
+    if !repl.shield_kind.is_none() {
+        d.push(("shield".into(), format!("{:?}", repl.shield_kind)));
+    }
+    if let Some(src) = &repl.damage_source_filter {
+        d.push(("damage from".into(), fmt_target(src)));
+    }
+    if let Some(tgt) = &repl.damage_target_filter {
+        d.push(("damage to".into(), format!("{tgt:?}")));
+    }
+    if let Some(scope) = &repl.combat_scope {
+        d.push(("combat".into(), format!("{scope:?}")));
+    }
+    if let Some(dm) = &repl.damage_modification {
+        d.push(("damage mod".into(), format!("{dm:?}")));
+    }
+    if let Some(qm) = &repl.quantity_modification {
+        d.push(("quantity mod".into(), format!("{qm:?}")));
+    }
+    if let Some(zone) = &repl.destination_zone {
+        d.push(("to zone".into(), fmt_zone(zone)));
+    }
+    if let Some(cond) = &repl.condition {
+        d.push(("condition".into(), format!("{cond:?}")));
+    }
+    if let Some(redirect) = &repl.redirect_target {
+        d.push(("redirect to".into(), fmt_target(redirect)));
+    }
+    if let Some(scope) = &repl.draw_scope {
+        d.push(("draw scope".into(), format!("{scope:?}")));
+    }
+    if let Some(scope) = &repl.token_owner_scope {
+        d.push(("token owner scope".into(), format!("{scope:?}")));
+    }
+    if let Some(redirect) = &repl.token_owner_redirect {
+        d.push(("token owner redirect".into(), format!("{redirect:?}")));
+    }
+    if let Some(mm) = &repl.mana_modification {
+        d.push(("mana mod".into(), format!("{mm:?}")));
+    }
+    if !repl.mana_replacement_scope.is_any() {
+        d.push((
+            "mana scope".into(),
+            format!("{:?}", repl.mana_replacement_scope),
+        ));
+    }
+    if let Some(spec) = &repl.additional_token_spec {
+        d.push(("additional token".into(), format!("{spec:?}")));
+    }
+    if let Some(specs) = &repl.ensure_token_specs {
+        d.push(("ensure tokens".into(), format!("{specs:?}")));
+    }
+    if let Some(cm) = &repl.counter_match {
+        d.push(("counter match".into(), format!("{cm:?}")));
+    }
+    if let Some(cref) = &repl.enters_under {
+        d.push(("enters under".into(), format!("{cref:?}")));
+    }
+    if let Some(expiry) = &repl.expiry {
+        d.push(("expiry".into(), format!("{expiry:?}")));
     }
     d
 }
@@ -3792,6 +4604,11 @@ pub fn build_parse_details(
                 ContinuousModification::GrantAbility { definition } => {
                     children.push(build_ability_item(definition));
                 }
+                ContinuousModification::GrantReplacement { replacement } => {
+                    if let Some(execute) = &replacement.execute {
+                        children.push(build_ability_item(execute));
+                    }
+                }
                 _ => {}
             }
         }
@@ -3829,7 +4646,7 @@ pub fn build_parse_details(
             label: format!("{}", repl.event),
             source_text: repl.description.clone(),
             supported: execute_supported,
-            details: vec![],
+            details: replacement_details(repl),
             children,
         });
     }
@@ -3931,6 +4748,38 @@ fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
     // Modal abilities
     for mode_ability in &def.mode_abilities {
         children.push(build_ability_item(mode_ability));
+    }
+
+    // CR 705.2 (#5601): coin-flip branch effects are embedded `AbilityDefinition`s
+    // (not `sub_ability` links), so — like the sub-ability / else / modal chains
+    // above — recurse into them here. Without this the win/lose branch parse
+    // signatures are swallowed by the bare `("win"/"lose", "yes")` presence
+    // markers in `effect_details`, making a real parser change inside a branch
+    // (e.g. Desperate Gambit's lose-branch `damage_source_filter` flipping
+    // `SelfRef` → `ChosenDamageSource`) invisible to the coverage parse-diff.
+    // Same swallowed-structure class as #5492/#5495/#5501.
+    match &*def.effect {
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(win) = win_effect {
+                children.push(build_ability_item(win));
+            }
+            if let Some(lose) = lose_effect {
+                children.push(build_ability_item(lose));
+            }
+        }
+        Effect::FlipCoinUntilLose { win_effect } => {
+            children.push(build_ability_item(win_effect));
+        }
+        _ => {}
     }
 
     ParsedItem {
@@ -4373,7 +5222,8 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     let trigger_registry = trigger_registry();
     // Classification scan: iterate every printed trigger/static regardless
     // of functioning state — we're computing coverage, not game behavior.
-    for trig in obj.trigger_definitions.iter_all() {
+    for entry in obj.trigger_definitions.iter_all() {
+        let trig = entry.definition();
         if matches!(&trig.mode, TriggerMode::Unknown(_))
             || (!trigger_registry.contains_key(&trig.mode)
                 && !matches!(&trig.mode, TriggerMode::StateCondition))
@@ -4392,6 +5242,279 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     }
 
     missing
+}
+
+fn unsupported_partial_token_gap_label(
+    preset: &TokenPreset,
+    materialized: &TokenAbilityMaterialization,
+) -> &'static str {
+    if matches!(
+        preset.pt_provenance,
+        TokenPtProvenance::SourceDefinedOrDynamic { .. }
+    ) && materialized.source == TokenAbilitySource::None
+        && materialized.rules_text.is_none()
+        && !materialized.has_functional_payload()
+        && materialized.unparsed_rules_text_lines.is_empty()
+    {
+        TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
+    } else {
+        TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
+    }
+}
+
+fn token_pt_provenance_represents_line(preset: &TokenPreset, line: &str) -> bool {
+    if !matches!(
+        preset.pt_provenance,
+        TokenPtProvenance::SourceDefinedOrDynamic { .. }
+    ) {
+        return false;
+    }
+
+    let lower = line.to_ascii_lowercase();
+    lower.contains("power") || lower.contains("toughness")
+}
+
+fn token_rules_text_unparsed_gap(
+    preset: &TokenPreset,
+    materialized: &TokenAbilityMaterialization,
+) -> bool {
+    materialized
+        .unparsed_rules_text_lines
+        .iter()
+        .any(|line| !token_pt_provenance_represents_line(preset, line))
+}
+
+fn token_pt_provenance_has_no_materialization_gap(
+    preset: &TokenPreset,
+    materialized: &TokenAbilityMaterialization,
+) -> bool {
+    matches!(
+        preset.pt_provenance,
+        TokenPtProvenance::SourceDefinedOrDynamic { .. }
+    ) && !token_rules_text_unparsed_gap(preset, materialized)
+}
+
+fn analyze_token_coverage() -> TokenCoverageSummary {
+    let mut summary = TokenCoverageSummary::default();
+    let mut gap_accumulators: BTreeMap<String, (usize, usize, Vec<String>)> = BTreeMap::new();
+    let mut gap_token_accumulators: BTreeMap<(String, String), (usize, usize, Vec<String>)> =
+        BTreeMap::new();
+
+    for preset in known_token_presets() {
+        let materialized = materialize_token_ability_payload(
+            &preset.body.display_name,
+            &preset.body.subtypes,
+            Some(preset),
+        );
+        let source_refs = preset.source_card_refs.len();
+        let has_rules_text = preset
+            .rules_text
+            .as_deref()
+            .is_some_and(|text| !text.is_empty());
+        let has_unparsed_gap = token_rules_text_unparsed_gap(preset, &materialized);
+        let supported = !has_unparsed_gap
+            && (matches!(preset.fidelity, PresetFidelity::Full)
+                || (has_rules_text && materialized.has_functional_payload())
+                || token_pt_provenance_has_no_materialization_gap(preset, &materialized));
+
+        summary.total_tokens += 1;
+        summary.source_card_refs += source_refs;
+        if supported {
+            summary.supported_tokens += 1;
+        }
+        match preset.fidelity {
+            PresetFidelity::Full => summary.full_fidelity_tokens += 1,
+            PresetFidelity::PartialMissingAbilities if !supported => {
+                summary.partial_fidelity_tokens += 1;
+                let handler = unsupported_partial_token_gap_label(preset, &materialized);
+                push_token_gap(
+                    &mut gap_accumulators,
+                    handler,
+                    &preset.body.display_name,
+                    source_refs,
+                );
+                push_token_gap_makeup(
+                    &mut gap_token_accumulators,
+                    handler,
+                    &preset.body.display_name,
+                    source_refs,
+                    &preset.source_card_refs,
+                    &preset.source_card_names,
+                );
+            }
+            PresetFidelity::PartialMissingAbilities => summary.partial_fidelity_tokens += 1,
+        }
+        if has_rules_text {
+            summary.rules_text_tokens += 1;
+            if !has_unparsed_gap {
+                summary.parsed_rules_text_tokens += 1;
+            } else {
+                summary.unparsed_rules_text_tokens += 1;
+                for line in &materialized.unparsed_rules_text_lines {
+                    if token_pt_provenance_represents_line(preset, line) {
+                        continue;
+                    }
+                    let handler = format!("TokenRulesText:{}", normalize_oracle_pattern(line));
+                    push_token_gap(
+                        &mut gap_accumulators,
+                        &handler,
+                        &preset.body.display_name,
+                        source_refs,
+                    );
+                }
+            }
+        }
+
+        let category = token_category_label(&preset.category);
+        push_token_bucket(
+            summary.by_category.entry(category).or_default(),
+            supported,
+            source_refs,
+        );
+        let payload_source = match materialized.source {
+            TokenAbilitySource::Predefined => "predefined",
+            TokenAbilitySource::CatalogRulesText => "catalog_rules_text",
+            TokenAbilitySource::None => "none",
+        };
+        push_token_bucket(
+            summary
+                .by_payload_source
+                .entry(payload_source.to_string())
+                .or_default(),
+            supported,
+            source_refs,
+        );
+    }
+
+    summary.coverage_pct = percent(summary.supported_tokens, summary.total_tokens);
+    for bucket in summary.by_category.values_mut() {
+        bucket.coverage_pct = percent(bucket.supported_tokens, bucket.total_tokens);
+    }
+    for bucket in summary.by_payload_source.values_mut() {
+        bucket.coverage_pct = percent(bucket.supported_tokens, bucket.total_tokens);
+    }
+
+    let mut top_gaps: Vec<_> = gap_accumulators
+        .into_iter()
+        .map(
+            |(handler, (total_count, source_card_refs, example_tokens))| TokenGapFrequency {
+                handler,
+                total_count,
+                source_card_refs,
+                example_tokens,
+            },
+        )
+        .collect();
+    top_gaps.sort_by(|left, right| {
+        right
+            .source_card_refs
+            .cmp(&left.source_card_refs)
+            .then_with(|| right.total_count.cmp(&left.total_count))
+            .then_with(|| left.handler.cmp(&right.handler))
+    });
+    top_gaps.truncate(50);
+    summary.top_gaps = top_gaps;
+
+    let mut top_gap_token_makeup: Vec<_> = gap_token_accumulators
+        .into_iter()
+        .map(
+            |((handler, token_name), (total_count, source_card_refs, example_source_cards))| {
+                TokenGapTokenMakeup {
+                    handler,
+                    token_name,
+                    total_count,
+                    source_card_refs,
+                    example_source_cards,
+                }
+            },
+        )
+        .collect();
+    top_gap_token_makeup.sort_by(|left, right| {
+        right
+            .source_card_refs
+            .cmp(&left.source_card_refs)
+            .then_with(|| right.total_count.cmp(&left.total_count))
+            .then_with(|| left.handler.cmp(&right.handler))
+            .then_with(|| left.token_name.cmp(&right.token_name))
+    });
+    top_gap_token_makeup.truncate(50);
+    summary.top_gap_token_makeup = top_gap_token_makeup;
+
+    summary
+}
+
+fn push_token_bucket(bucket: &mut TokenCoverageBucket, supported: bool, source_refs: usize) {
+    bucket.total_tokens += 1;
+    bucket.source_card_refs += source_refs;
+    if supported {
+        bucket.supported_tokens += 1;
+    }
+}
+
+fn push_token_gap(
+    gaps: &mut BTreeMap<String, (usize, usize, Vec<String>)>,
+    handler: &str,
+    token_name: &str,
+    source_refs: usize,
+) {
+    let entry = gaps.entry(handler.to_string()).or_default();
+    entry.0 += 1;
+    entry.1 += source_refs;
+    if entry.2.len() < 3 && !entry.2.iter().any(|name| name == token_name) {
+        entry.2.push(token_name.to_string());
+    }
+}
+
+fn push_token_gap_makeup(
+    gaps: &mut BTreeMap<(String, String), (usize, usize, Vec<String>)>,
+    handler: &str,
+    token_name: &str,
+    source_refs: usize,
+    source_card_refs: &[crate::game::token_presets::TokenSourceRef],
+    source_card_names: &[String],
+) {
+    let entry = gaps
+        .entry((handler.to_string(), token_name.to_string()))
+        .or_default();
+    entry.0 += 1;
+    entry.1 += source_refs;
+    for name in source_card_refs
+        .iter()
+        .map(|source_ref| source_ref.card_name.as_str())
+        .chain(source_card_names.iter().map(String::as_str))
+    {
+        if entry.2.len() >= 5 {
+            break;
+        }
+        if !entry.2.iter().any(|existing| existing == name) {
+            entry.2.push(name.to_string());
+        }
+    }
+}
+
+fn token_category_label(category: &crate::game::token_presets::TokenCategory) -> String {
+    use crate::game::token_presets::TokenCategory;
+
+    match category {
+        TokenCategory::PredefinedArtifact { kind } => {
+            format!("predefined_artifact:{}", kind.subtype_str())
+        }
+        TokenCategory::Creature => "creature".to_string(),
+        TokenCategory::Aura => "aura".to_string(),
+        TokenCategory::Equipment => "equipment".to_string(),
+        TokenCategory::Vehicle => "vehicle".to_string(),
+        TokenCategory::Enchantment => "enchantment".to_string(),
+        TokenCategory::Land => "land".to_string(),
+        TokenCategory::Artifact => "artifact".to_string(),
+    }
+}
+
+fn percent(supported: usize, total: usize) -> f64 {
+    if total > 0 {
+        (supported as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    }
 }
 
 /// Analyze card coverage by checking which cards have all their abilities,
@@ -4819,6 +5942,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         supported_cards,
         coverage_pct,
         keyword_count,
+        token_coverage: analyze_token_coverage(),
         coverage_by_format,
         coverage_by_set,
         cards,
@@ -4858,6 +5982,10 @@ fn static_has_unimplemented_parts(def: &StaticDefinition) -> bool {
                 ContinuousModification::GrantTrigger { trigger } => {
                     trigger_has_unimplemented_parts(trigger)
                 }
+                ContinuousModification::GrantReplacement { replacement } => replacement
+                    .execute
+                    .as_deref()
+                    .is_some_and(ability_definition_has_unimplemented_parts),
                 _ => false,
             })
 }
@@ -4951,6 +6079,11 @@ fn check_statics(
                 }
                 ContinuousModification::GrantTrigger { trigger } => {
                     check_trigger(trigger, trigger_registry, missing);
+                }
+                ContinuousModification::GrantReplacement { replacement } => {
+                    if let Some(execute) = &replacement.execute {
+                        collect_ability_missing_parts(execute, missing);
+                    }
                 }
                 _ => {}
             }
@@ -5871,6 +7004,10 @@ fn is_static_supported(
                 ContinuousModification::GrantTrigger { trigger } => {
                     is_trigger_supported(trigger, trigger_registry)
                 }
+                ContinuousModification::GrantReplacement { replacement } => replacement
+                    .execute
+                    .as_deref()
+                    .is_none_or(is_ability_supported),
                 _ => true,
             })
 }
@@ -6215,10 +7352,15 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
             EffectOutcomeSignal::CurrentScopeSucceeded => {
                 ("EffectOutcomeCurrentScopeSucceeded", Handled)
             }
+            EffectOutcomeSignal::Guessed { .. } => ("EffectOutcomeGuessed", Handled),
         },
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
+        AbilityCondition::CoinFlipOutcome { .. } => ("CoinFlipOutcome", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
-        AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
+        // ponytail: coverage tag key intentionally stays "CastFromZone" (decoupled
+        // from the renamed variant) to keep coverage-data byte-stable across the
+        // BB-FU4 WasCast rename — the string is a report key, not the variant name.
+        AbilityCondition::WasCast { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
         AbilityCondition::ObjectsShareQuality { .. } => ("ObjectsShareQuality", Handled),
         AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. } => {
@@ -6234,6 +7376,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ManaColorSpent { .. } => ("ManaColorSpent", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
+        // CR 309.7: evaluated at resolution via `dungeon::has_completed_dungeon`.
+        AbilityCondition::CompletedDungeon { .. } => ("CompletedDungeon", Handled),
         AbilityCondition::IsInitiative => ("IsInitiative", Handled),
         AbilityCondition::HasCityBlessing => ("HasCityBlessing", Handled),
         AbilityCondition::IsRingBearer => ("IsRingBearer", Handled),
@@ -6251,6 +7395,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // `evaluate_condition` (effects/mod.rs).
         AbilityCondition::FirstCombatPhaseOfTurn => ("FirstCombatPhaseOfTurn", Handled),
         AbilityCondition::FirstEndStepOfTurn => ("FirstEndStepOfTurn", Handled),
+        // CR 505.1 + CR 500.1 + CR 608.2c: live current-phase check; handled by
+        // `evaluate_condition` (effects/mod.rs).
+        AbilityCondition::CurrentPhaseIs { .. } => ("CurrentPhaseIs", Handled),
         // CR 614.1a: `ConditionInstead` wraps a general condition with swap-on-true semantics.
         AbilityCondition::ConditionInstead { .. } => ("ConditionInstead", Handled),
         // CR 608.2c + CR 614.1d: "you control a/no [filter]" — handled by
@@ -6268,6 +7415,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // CR 400.7 + CR 608.2c: Target filter conditions — resolved by
         // `evaluate_condition` (effects/mod.rs) with current-state and optional
         // LKI paths.
+        // CR 601.2c + CR 115.1: object-target presence guard — resolved by
+        // `evaluate_condition` (effects/mod.rs) against the ability's declared targets.
+        AbilityCondition::HasObjectTarget => ("HasObjectTarget", Handled),
         AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Handled),
         AbilityCondition::TriggeringSpellTargetsFilter { .. } => {
             ("TriggeringSpellTargetsFilter", Handled)
@@ -6275,6 +7425,11 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // CR 608.2c: Source filter conditions — resolved by `evaluate_condition`
         // against the ability source object.
         AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
+        // CR 615.5: Prevented-event damage-source filter — resolved by
+        // `evaluate_condition` against `post_replacement_event_source`.
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. } => {
+            ("PostReplacementDamageSourceMatchesFilter", Handled)
+        }
         // CR 608.2c: Zone-change-this-way — resolved by `evaluate_condition`
         // against `state.last_zone_changed_ids`.
         AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Handled),
@@ -6319,11 +7474,15 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::GraveyardSize { .. } => ("GraveyardSize", Handled),
         QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
+        QuantityRef::TriggeringDiscoverValue => ("TriggeringDiscoverValue", Handled),
+        QuantityRef::TriggeringScryLookCount => ("TriggeringScryLookCount", Handled),
+        QuantityRef::TriggeringScryBottomCount => ("TriggeringScryBottomCount", Handled),
         QuantityRef::Speed { .. } => ("Speed", Handled),
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
         QuantityRef::ObjectCountDistinct { .. } => ("ObjectCountDistinct", Handled),
         QuantityRef::ObjectCountBySharedQuality { .. } => ("ObjectCountBySharedQuality", Handled),
         QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
+        QuantityRef::EventContextPlayerCount { .. } => ("EventContextPlayerCount", Handled),
         QuantityRef::CountersOn { .. } => ("CountersOn", Handled),
         QuantityRef::Intensity { .. } => ("Intensity", Handled),
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),
@@ -6337,6 +7496,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourcePower", Handled),
             ObjectScope::EventTarget => ("EventTargetPower", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectPower", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardPower", Handled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardPower", Handled),
+            ObjectScope::AmassedArmy => ("AmassedArmyPower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6347,6 +7509,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceToughness", Handled),
             ObjectScope::EventTarget => ("EventTargetToughness", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectToughness", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardToughness", Handled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardToughness", Handled),
+            ObjectScope::AmassedArmy => ("AmassedArmyToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6357,6 +7522,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceManaValue", Handled),
             ObjectScope::EventTarget => ("EventTargetManaValue", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectManaValue", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardManaValue", Handled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardManaValue", Handled),
+            ObjectScope::AmassedArmy => ("AmassedArmyManaValue", Handled),
         },
         QuantityRef::TargetObjectManaValue { .. } => ("TargetObjectManaValue", Handled),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -6368,6 +7536,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceObjectColorCount", Handled),
             ObjectScope::EventTarget => ("EventTargetObjectColorCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectColorCount", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardColorCount", Handled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardColorCount", Handled),
+            ObjectScope::AmassedArmy => ("AmassedArmyObjectColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6378,6 +7549,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceObjectNameWordCount", Handled),
             ObjectScope::EventTarget => ("EventTargetObjectNameWordCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectNameWordCount", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardNameWordCount", Handled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardNameWordCount", Handled),
+            ObjectScope::AmassedArmy => ("AmassedArmyObjectNameWordCount", Handled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6388,6 +7562,11 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceObjectTypelineComponentCount", Handled),
             ObjectScope::EventTarget => ("EventTargetObjectTypelineComponentCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectTypelineComponentCount", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardTypelineComponentCount", Handled),
+            ObjectScope::OwnedLinkedExileCard => {
+                ("OwnedLinkedExileCardTypelineComponentCount", Handled)
+            }
+            ObjectScope::AmassedArmy => ("AmassedArmyObjectTypelineComponentCount", Handled),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6398,11 +7577,17 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceManaSymbolsInManaCost", Handled),
             ObjectScope::EventTarget => ("EventTargetManaSymbolsInManaCost", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectManaSymbolsInManaCost", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardManaSymbolsInManaCost", Handled),
+            ObjectScope::OwnedLinkedExileCard => {
+                ("OwnedLinkedExileCardManaSymbolsInManaCost", Handled)
+            }
+            ObjectScope::AmassedArmy => ("AmassedArmyManaSymbolsInManaCost", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
         QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
+        QuantityRef::DistinctSubtypes { .. } => ("DistinctSubtypes", Handled),
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
@@ -6412,7 +7597,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         }
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
-        QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
+        QuantityRef::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
         QuantityRef::TrackedSetAggregate { .. } => ("TrackedSetAggregate", Handled),
@@ -6423,14 +7608,38 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::SacrificedThisTurn { .. } => ("SacrificedThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
+        QuantityRef::BendTypesThisTurn => ("BendTypesThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
-        QuantityRef::BattlefieldEntriesThisTurn { .. } => ("BattlefieldEntriesThisTurn", Handled),
+        // CR 608.2h: `Handled` only when the entry-record matcher can actually evaluate the
+        // filter. `battlefield_entry_matches_filter` fails closed on props the entry snapshot
+        // never captured (game/restrictions.rs:517), so such a card would resolve a silent
+        // constant 0 while claiming support.
+        //
+        // REACHABILITY (measured, MTGJSON sweep): this arm is reached from
+        // `StaticDefinition.condition` (`:7050-7053`), ability conditions, `repeat_for`, and
+        // effect positions — 21 cards, 15 of them purely static-condition (e.g. Armory Mice,
+        // Saddled Rimestag, Mechan Shieldmate). It is NOT reached from a trigger
+        // intervening-if: `:7040-7042` emits only the structural tag and never descends, so
+        // Tunnel Tipster's `FilterProp::FaceDown` ledger read stays invisible here (see the
+        // §10.11 ledger item). No corpus card currently trips this arm (`unhandled=0`); it is a
+        // guard against the next printing, not a live reclassification.
+        QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => (
+            "BattlefieldEntriesThisTurn",
+            if crate::game::restrictions::ledger_filter_is_evaluable(filter) {
+                Handled
+            } else {
+                Unhandled
+            },
+        ),
         QuantityRef::LandsPlayedThisTurn { .. } => ("LandsPlayedThisTurn", Handled),
         QuantityRef::ZoneChangeCountThisTurn { .. } => ("ZoneChangeCountThisTurn", Handled),
         QuantityRef::ZoneChangeAggregateThisTurn { .. } => ("ZoneChangeAggregateThisTurn", Handled),
         QuantityRef::DamageDealtThisTurn { .. } => ("DamageDealtThisTurn", Handled),
-        QuantityRef::TurnsTaken => ("TurnsTaken", Unhandled),
+        // CR 500: per-player turn count. Resolver (game/quantity.rs, player.turns_taken)
+        // has always worked; Control Win Condition's CDA now consumes it live. Not a
+        // strict-failure marker anywhere, so it is genuinely handled.
+        QuantityRef::TurnsTaken => ("TurnsTaken", Handled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
         QuantityRef::AttackedThisTurn { .. } => ("AttackedThisTurn", Handled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
@@ -6455,6 +7664,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TimesCostPaidThisResolution => ("TimesCostPaidThisResolution", Handled),
         QuantityRef::ManaSpentToCast { .. } => ("ManaSpentToCast", Handled),
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),
+        QuantityRef::EventContextSourceModesChosen => ("EventContextSourceModesChosen", Handled),
         QuantityRef::ColorsInCommandersColorIdentity => {
             ("ColorsInCommandersColorIdentity", Handled)
         }
@@ -6464,6 +7674,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CommanderManaValue { .. } => ("CommanderManaValue", Handled),
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
+        QuantityRef::TargetControllerCounter { .. } => ("TargetControllerCounter", Handled),
         QuantityRef::PartySize { .. } => ("PartySize", Handled),
         QuantityRef::ControlledByEachPlayer { .. } => ("ControlledByEachPlayer", Handled),
     }
@@ -6475,13 +7686,17 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
     use FeatureSupport::*;
     match scope {
         PlayerFilter::All => ("All", Handled),
+        PlayerFilter::AllExcept { .. } => ("AllExcept", Handled),
         PlayerFilter::Opponent => ("Opponent", Handled),
         PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
         PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
         PlayerFilter::HasLostTheGame => ("HasLostTheGame", Handled),
-        PlayerFilter::OpponentDealtCombatDamage { .. } => ("OpponentDealtCombatDamage", Handled),
+        PlayerFilter::OpponentDealtDamage { .. } => ("OpponentDealtDamage", Handled),
         PlayerFilter::OpponentAttacked { .. } => ("OpponentAttacked", Handled),
+        PlayerFilter::OpponentAttackingEnchantedPlayer => {
+            ("OpponentAttackingEnchantedPlayer", Handled)
+        }
         PlayerFilter::HighestSpeed => ("HighestSpeed", Handled),
         // Previously emitted via Debug formatting; never appeared in the handled set.
         PlayerFilter::Controller => ("Controller", Unhandled),
@@ -6490,6 +7705,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OwnersOfCardsExiledBySource => ("OwnersOfCardsExiledBySource", Handled),
         PlayerFilter::TriggeringPlayer => ("TriggeringPlayer", Handled),
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
+        PlayerFilter::OpponentOfTriggeringPlayer => ("OpponentOfTriggeringPlayer", Handled),
         // CR 506.2 + CR 508.6: count-only filter resolved by `resolve_player_count`
         // (Suppressor Skyguard's intervening-if). Handled like the other count filters.
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
@@ -6529,6 +7745,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
         StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => {
+            ("SharesColorWithMostCommonColorAmongPermanents", Handled)
+        }
         StaticCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         StaticCondition::SourceHasDealtDamage => ("SourceHasDealtDamage", Handled),
         StaticCondition::WasCast { .. } => ("WasCast", Handled),
@@ -6583,11 +7802,17 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
         // SourceMatchesFilter resolved by layers::evaluate_condition (layers.rs:1104)
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
+        // CR 401.1 + CR 401.5: top-of-library gate, resolved by
+        // layers::evaluate_condition_with_context against the controller's library top.
+        StaticCondition::TopOfLibraryMatches { .. } => ("TopOfLibraryMatches", Handled),
         StaticCondition::SourceIsPaired => ("SourceIsPaired", Handled),
         // CR 113.6b: evaluated by `layers::evaluate_condition` — checks source
         // object's zone against the specified zone. Runtime-handled.
         StaticCondition::SourceInZone { .. } => ("SourceInZone", Handled),
         StaticCondition::EnchantedIsFaceDown => ("EnchantedIsFaceDown", Handled),
+        // CR 311.2 / CR 901.7: evaluated by `layers::evaluate_condition` against
+        // the command-zone active plane. Runtime-handled.
+        StaticCondition::SourceIsFaceUp => ("SourceIsFaceUp", Handled),
         StaticCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
         StaticCondition::CastingAsVariant { .. } => ("CastingAsVariant", Handled),
     }
@@ -6732,6 +7957,7 @@ fn oracle_line_mentions_counter_type(lower: &str, counter_type: &CounterType) ->
         | CounterType::Fade
         | CounterType::Age
         | CounterType::Shield
+        | CounterType::Finality
         | CounterType::Generic(_) => {
             let needle = format!("{} counter", counter_type.as_str()).to_lowercase();
             lower.contains(&needle)
@@ -6858,10 +8084,37 @@ pub fn audit_semantic(card_db: &CardDatabase) -> SemanticAuditSummary {
 /// Check if an ability definition has a pump effect matching the given P/T values.
 /// Checks `Effect::Pump`, `Effect::PumpAll`, and `Effect::GenericEffect` with
 /// `AddPower`/`AddToughness` continuous modifications.
+/// Whether the current Oracle line permits a *perpetual* power/toughness
+/// modification to satisfy its "+N/+M" text. "[object] perpetually gets +N/+M"
+/// lowers to `Effect::ApplyPerpetual { ModifyPowerToughness }`; a temporary
+/// "gets +N/+M until end of turn" must NOT be satisfied by a perpetual
+/// (permanent) modification — admitting it would silence the semantic audit for
+/// a real duration-mislowering bug (an until-end-of-turn line that wrongly
+/// lowered to a permanent effect). Derived once from the line at the call site.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PerpetualPump {
+    /// The line says "perpetual(ly)" — an `ApplyPerpetual` P/T delta is expected.
+    Allowed,
+    /// No "perpetual" in the line — only `Pump` / static modifications satisfy it.
+    Disallowed,
+}
+
+impl PerpetualPump {
+    /// Classify an already-lowercased Oracle line.
+    fn from_lower_line(lower_line: &str) -> Self {
+        if lower_line.contains("perpetual") {
+            Self::Allowed
+        } else {
+            Self::Disallowed
+        }
+    }
+}
+
 fn pump_matches_oracle(
     def: &AbilityDefinition,
     expected_power: i32,
     expected_toughness: i32,
+    perpetual: PerpetualPump,
 ) -> bool {
     fn pt_matches(power: &PtValue, toughness: &PtValue, ep: i32, et: i32) -> bool {
         let p_match = match power {
@@ -6887,6 +8140,28 @@ fn pump_matches_oracle(
         Effect::GenericEffect {
             static_abilities, ..
         } if static_has_pump_modification(static_abilities, expected_power, expected_toughness) => {
+            return true;
+        }
+        // Digital-only Alchemy "[object] perpetually gets +N/+M" (no CR entry for
+        // "perpetually"; the delta applies as a CR 613.4c layer-7c power/toughness
+        // modification) lowers to `Effect::ApplyPerpetual` carrying a
+        // `ModifyPowerToughness` delta rather than a top-level `Effect::Pump`.
+        // Without this arm every perpetual-pump card (Heir to Dragonfire, Perennial
+        // Gravewarden, Tomakul Phoenix, …) is a spurious `WrongParameter: no matching
+        // pump effect` finding. Gated on `PerpetualPump::Allowed` so a *temporary*
+        // "+N/+M until end of turn" line that mis-lowered to a permanent
+        // `ApplyPerpetual` is still flagged rather than silently accepted.
+        Effect::ApplyPerpetual {
+            modification:
+                PerpetualModification::ModifyPowerToughness {
+                    power_delta,
+                    toughness_delta,
+                },
+            ..
+        } if perpetual == PerpetualPump::Allowed
+            && *power_delta == expected_power
+            && *toughness_delta == expected_toughness =>
+        {
             return true;
         }
         _ => {}
@@ -7239,19 +8514,19 @@ impl<'a> ParsedElement<'a> {
     }
 
     /// Check if this element has a pump effect matching the given P/T.
-    fn has_pump(&self, power: i32, toughness: i32) -> bool {
+    fn has_pump(&self, power: i32, toughness: i32, perpetual: PerpetualPump) -> bool {
         match self {
             ParsedElement::Ability(a) => {
-                ability_tree_any(a, &|d| pump_matches_oracle(d, power, toughness))
+                ability_tree_any(a, &|d| pump_matches_oracle(d, power, toughness, perpetual))
             }
             ParsedElement::Trigger(t) => t.execute.as_ref().is_some_and(|e| {
-                ability_tree_any(e, &|d| pump_matches_oracle(d, power, toughness))
+                ability_tree_any(e, &|d| pump_matches_oracle(d, power, toughness, perpetual))
             }),
             ParsedElement::Static(s) => {
                 static_has_pump_modification(std::slice::from_ref(s), power, toughness)
             }
             ParsedElement::Replacement(r) => r.execute.as_ref().is_some_and(|e| {
-                ability_tree_any(e, &|d| pump_matches_oracle(d, power, toughness))
+                ability_tree_any(e, &|d| pump_matches_oracle(d, power, toughness, perpetual))
             }),
         }
     }
@@ -7669,7 +8944,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             && (lower.starts_with("cast this spell only ")
                 || lower.starts_with("you can't cast ")
                 || lower.starts_with("you cannot cast ")
-                || lower.starts_with("you can\u{2019}t cast "));
+                || lower.starts_with("you can\u{2019}t cast ")
+                // Hogaak, Arisen Necropolis (issue #1095): "You can't spend mana
+                // to cast this spell" is parsed to CastingRestriction::CantSpendMana.
+                || lower.starts_with("you can't spend mana to cast ")
+                || lower.starts_with("you can\u{2019}t spend mana to cast "));
         // Casting option lines ("You may pay X rather than pay...", "If you control a
         // commander, you may cast this spell without paying its mana cost", etc.)
         let covered_by_casting_option = !face.casting_options.is_empty()
@@ -7677,8 +8956,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 || effective_lower.contains("without paying")
                 || effective_lower.contains("as though it had flash")
                 || effective_lower.contains("you may cast this spell for")
-                || effective_lower.contains("you may pay")
-                || effective_lower.contains("you can't spend mana to cast"));
+                || effective_lower.contains("you may pay"));
         let covered_by_additional_cost = face.additional_cost.is_some()
             && (lower.starts_with("as an additional cost ")
                 || effective_lower.starts_with("as an additional cost ")
@@ -7713,6 +8991,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             // that the static description will contain.
             StaticMode::TopOfLibraryCastPermission { .. } => {
                 effective_lower.contains("you may cast") || effective_lower.contains("you may play")
+            }
+            // CR 702.170a grant + CR 702.170f permission: plot-from-library
+            // (Fblthp). Both descriptions ("the top card of your library has
+            // plot" / "you may plot nonland cards from the top of your library")
+            // carry "plot" + "library". The role/discriminator is already
+            // enforced by the parser; coverage just needs a phrase the
+            // description will contain.
+            StaticMode::TopOfLibraryHasPlot | StaticMode::TopOfLibraryPlotPermission => {
+                effective_lower.contains("plot") && effective_lower.contains("library")
             }
             // CR 601.2a + CR 113.6b: Maralen-class exile-cast permission. The
             // discriminator phrase ("from among cards exiled with") is
@@ -7804,9 +9091,16 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantUntap => {
                 effective_lower.contains("doesn't untap") || effective_lower.contains("don't untap")
             }
+            // CR 702.26a + CR 101.2: The Pandorica's "It can't phase in for as
+            // long as ~ remains tapped".
+            StaticMode::CantPhaseIn => effective_lower.contains("can't phase in"),
             StaticMode::CantAttack => effective_lower.contains("can't attack"),
             StaticMode::CantBlock => effective_lower.contains("can't block"),
             StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),
+            // CR 508.1c: Pramikon/Mystic Barrier/Teyo directional restriction.
+            StaticMode::AttackOnlyNeighbor => {
+                effective_lower.contains("attack only the nearest opponent")
+            }
             // CR 701.60a + CR 701.60d: Airtight Alibi's "can't become suspected".
             StaticMode::CantBecomeSuspected => effective_lower.contains("can't become suspected"),
             StaticMode::CantCrew => {
@@ -7821,6 +9115,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             }
             StaticMode::MayChooseNotToUntap => effective_lower.contains("may choose not to untap"),
             StaticMode::CantDraw { .. } => effective_lower.contains("can't draw"),
+            StaticMode::DrawFromBottom { .. } => effective_lower.contains("from the bottom of"),
             StaticMode::PerTurnDrawLimit { .. } => effective_lower.contains("can't draw more than"),
             StaticMode::DoubleTriggers { .. } => {
                 effective_lower.contains("triggers an additional time")
@@ -7845,6 +9140,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't be blocked")
             }
             StaticMode::CantBeBlockedBy { .. } => effective_lower.contains("can't be blocked"),
+            // CR 509.1b: CantBeBlockedUnlessAllBlock — "can't be blocked" anchor
+            // (Tromokratis). The "unless all creatures" clause is validated by
+            // parser tests.
+            StaticMode::CantBeBlockedUnlessAllBlock => effective_lower.contains("can't be blocked"),
             // CR 502.3: Smoke / Damping Field / Winter Orb max-untap cap. Anchor
             // on the verb phrase; the type filter half is the reused TargetFilter
             // and is validated by parser tests.
@@ -7865,6 +9164,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                         && effective_lower.contains("becomes")
                 }
             },
+            StaticMode::UnspentManaLossCausesLifeLoss => {
+                effective_lower.contains("losing unspent mana")
+                    && effective_lower.contains("causes that player to lose that much life")
+            }
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
             }
@@ -7909,7 +9212,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 static_abilities.iter().any(|s| match &s.mode {
                     // CR 509.1c: "All creatures able to block ~ do so" lowers to the
                     // lure-strength MustBeBlockedByAll (not the one-blocker MustBeBlocked).
-                    StaticMode::MustBeBlockedByAll => {
+                    StaticMode::MustBeBlockedByAll { .. } => {
                         effective_lower.contains("able to block")
                             && effective_lower.contains("do so")
                     }
@@ -7947,13 +9250,26 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             Vec<&AbilityDefinition>,
         ) = {
             let line_matches_effect_type = |d: &AbilityDefinition| match &*d.effect {
-                Effect::AddRestriction { restriction, .. } => {
-                    matches!(
-                        restriction,
-                        GameRestriction::DamagePreventionDisabled { .. }
-                    ) && effective_lower.contains("can't be prevented")
-                        && effective_lower.contains("damage")
-                }
+                Effect::AddRestriction { restriction, .. } => match restriction {
+                    GameRestriction::DamagePreventionDisabled { .. } => {
+                        effective_lower.contains("can't be prevented")
+                            && effective_lower.contains("damage")
+                    }
+                    // CR 611.2a + CR 614.1d: "cards can't enter [the battlefield]
+                    // from <zone>" (Bad Wolf Bay). AddRestriction carries no
+                    // description string, so match the source prose here to keep
+                    // the semantic-audit from flagging a false positive.
+                    GameRestriction::CantEnterBattlefieldFrom { .. } => {
+                        effective_lower.contains("can't enter")
+                            && (effective_lower.contains("from exile")
+                                || effective_lower.contains("from a graveyard")
+                                || effective_lower.contains("from your graveyard")
+                                || effective_lower.contains("from a library")
+                                || effective_lower.contains("from your library")
+                                || effective_lower.contains("from your hand"))
+                    }
+                    GameRestriction::ProhibitActivity { .. } => false,
+                },
                 Effect::CastFromZone { .. } => {
                     effective_lower.contains("you may cast")
                         || effective_lower.contains("you may play")
@@ -8335,15 +9651,23 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     }
                 }
             } else {
+                // Admit a perpetual P/T modification only when this line actually
+                // says "perpetually" — a temporary "+N/+M until end of turn" that
+                // mis-lowered to a permanent `ApplyPerpetual` must still be flagged.
+                let perpetual = PerpetualPump::from_lower_line(&lower_for_pt);
                 let any_has_pump = if matched_via_split {
-                    matched.iter().all(|e| e.has_pump(power, toughness))
+                    matched
+                        .iter()
+                        .all(|e| e.has_pump(power, toughness, perpetual))
                 } else {
-                    matched.iter().any(|e| e.has_pump(power, toughness))
+                    matched
+                        .iter()
+                        .any(|e| e.has_pump(power, toughness, perpetual))
                         || modal_any(&|d: &AbilityDefinition| {
-                            pump_matches_oracle(d, power, toughness)
+                            pump_matches_oracle(d, power, toughness, perpetual)
                         })
                         || covered_ability_effect_type_any(&|d: &AbilityDefinition| {
-                            pump_matches_oracle(d, power, toughness)
+                            pump_matches_oracle(d, power, toughness, perpetual)
                         })
                 };
                 if !any_has_pump {
@@ -8635,8 +9959,12 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // "if it doesn't have" / "if it had no" — state check on result object
             || lower.contains("if it doesn't have")
             || lower.contains("if it had no")
-            // "if it's on the battlefield" — zone check at resolution
-            || lower.contains("if it's on the battlefield")
+            // NOTE (phase#4767): "if it's on the battlefield" was previously listed
+            // here as an unparsed gap. It is now parsed as a source-scoped
+            // `TriggerCondition::SourceInZone { Battlefield }` (see
+            // `oracle_trigger.rs::extract_if_condition_with_card_name`), so it must
+            // NOT be flagged as an unsupported gap any longer (Animate Dead /
+            // Dance of the Dead reanimator-Aura ETB trigger).
             // "this way" — resolve-time checks on what happened during resolution
             // "if you reveal a creature card this way" / "if a card is put into a graveyard this way"
             || lower.contains("this way")
@@ -8855,8 +10183,6 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("had no cards in hand")
             // "if no permanents left the battlefield" — turn-event check
             || lower.contains("no permanents left")
-            // "if [this card is] the only creature card in your graveyard" — zone state check
-            || lower.contains("only creature card in your graveyard")
             // "if you discarded a card this turn" — turn-event action check
             || lower.contains("if you discarded")
             // "if 4 or more damage was dealt" — turn-event damage check
@@ -8889,9 +10215,6 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // "unless [it/they] attacked or blocked" — combat state check
             || lower.contains("unless it attacked")
             || lower.contains("unless it blocked")
-            // "unless target opponent pays" — payment alternative
-            || lower.contains("unless target opponent pays")
-            || lower.contains("unless target opponent sacrifices")
             // "if you have a card in hand" — resolve-time hand check
             || lower.contains("if you have a card in hand")
             // "if you pay {N} more to cast" — additional cost condition (casting option)
@@ -9508,7 +10831,385 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{BlockExceptionKind, ProhibitionScope};
-    use crate::types::zones::Zone;
+    use crate::types::zones::{EtbTapState, Zone};
+
+    #[test]
+    fn change_zone_signature_exposes_enters_attacking() {
+        // #5495: a parser change flipping `enters_attacking` (e.g. teaching
+        // `parse_battlefield_entry_qualifiers` to recognize "... onto the
+        // battlefield attacking", CR 508.4 — Senu) must be visible in the
+        // parse-diff signature; a plain ChangeZone has no such row.
+        let signature_keys = |attacking: bool| -> Vec<String> {
+            effect_details(&Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::None,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: attacking,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            })
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+        };
+        assert!(
+            signature_keys(true).iter().any(|k| k == "enters_attacking"),
+            "enters_attacking=true must appear in the parse-diff signature",
+        );
+        assert!(
+            !signature_keys(false)
+                .iter()
+                .any(|k| k == "enters_attacking"),
+            "a plain (non-attacking) ChangeZone must not add the row",
+        );
+    }
+
+    #[test]
+    fn investigate_signature_exposes_repeat_for() {
+        // ASK 2 + #6110 3rd review: a lifted "[once] for each ⟨set⟩" multiplier
+        // (`def.repeat_for = Some(PlayerCount/ObjectCount)`) must be visible in the
+        // per-card parse-diff signature — but ONLY for the shapes this PR's lift
+        // produces (fieldless `Effect::Investigate` + a member-count `QuantityRef`).
+        // The projection must NOT fire for the whole pre-existing repeat_for surface
+        // (CopySpell/Token/Proliferate, or pre-existing `Fixed`/`Variable` Investigate
+        // forms), which would migrate ~250 parse-identical cards' signatures at once.
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, PlayerFilter, QuantityExpr, QuantityRef, TargetFilter,
+            TypedFilter,
+        };
+        let projects = |effect: Effect, repeat: Option<QuantityExpr>| -> bool {
+            let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
+            def.repeat_for = repeat;
+            ability_details(&def)
+                .into_iter()
+                .any(|(k, _)| k == "repeat_for")
+        };
+        let object_count = || QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        };
+        let player_count = || QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentLostLife,
+            },
+        };
+
+        // Positive — both member-count lift shapes surface (Serene = ObjectCount,
+        // Teysa/Wojek = PlayerCount). Revert-probe: reverting the `ability_details`
+        // projection drops the row and flips both.
+        assert!(
+            projects(Effect::Investigate, Some(object_count())),
+            "Investigate + ObjectCount lift must appear in the signature",
+        );
+        assert!(
+            projects(Effect::Investigate, Some(player_count())),
+            "Investigate + PlayerCount lift must appear in the signature",
+        );
+
+        // Negative — no repeat_for → byte-identical signature (unchanged cards).
+        assert!(
+            !projects(Effect::Investigate, None),
+            "an Investigate with no repeat_for must not add the row",
+        );
+        // Negative — a `Fixed` multiplier ("investigate twice", Confirm Suspicions et
+        // al.) is not a member-count lift. Revert-probe: dropping the
+        // `QuantityExpr::Ref` guard flips this.
+        assert!(
+            !projects(Effect::Investigate, Some(QuantityExpr::Fixed { value: 2 })),
+            "a Fixed repeat_for must not project (not a member-count lift)",
+        );
+        // Negative — a non-member-count `Ref` (pre-existing `Variable`/tracked-set
+        // Investigate forms: Disorder in the Court, Declaration in Stone) must not
+        // project. Revert-probe: dropping the inner `PlayerCount|ObjectCount` guard
+        // flips this.
+        assert!(
+            !projects(
+                Effect::Investigate,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name: "x".into() },
+                }),
+            ),
+            "a non-member-count Ref repeat_for must not project",
+        );
+        // Negative (team-lead required) — the SAME member-count lift on a
+        // NON-Investigate effect (stand-in for the CopySpell/Token/Proliferate
+        // repeat_for surface) must not project. Revert-probe: dropping the
+        // `Effect::Investigate` guard widens the scope to the whole surface and flips
+        // this — this case is what locks a1.
+        assert!(
+            !projects(Effect::Populate, Some(object_count())),
+            "a non-Investigate repeat_for must not project (scope is the Investigate lift class)",
+        );
+    }
+
+    #[test]
+    fn prevent_damage_signature_exposes_damage_source_filter() {
+        // #5492: a change to `damage_source_filter` (e.g. unqualified
+        // `ChosenDamageSource` → `ChosenDamageSource { filter: Some(..) }`, the
+        // Circle/Rune of Protection cycles) must be visible to the
+        // coverage-parse-diff signature. When set, the field appears; when None
+        // it is omitted so unqualified prevention's signature is unchanged.
+        let signature_keys = |dsf: Option<TargetFilter>| -> Vec<String> {
+            effect_details(&Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: dsf,
+                prevention_duration: None,
+            })
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+        };
+        assert!(
+            signature_keys(Some(TargetFilter::Any))
+                .iter()
+                .any(|k| k == "damage_source_filter"),
+            "a set damage_source_filter must appear in the parse-diff signature",
+        );
+        assert!(
+            !signature_keys(None)
+                .iter()
+                .any(|k| k == "damage_source_filter"),
+            "an absent damage_source_filter must not appear",
+        );
+    }
+
+    #[test]
+    fn replacement_signature_exposes_valid_card_scope() {
+        // #5673: the replacement projection hardcoded `details: vec![]` and never
+        // projected `valid_card`, so a fix that changes *whom* a shield applies to
+        // (e.g. a self-scoped damage shield flipping `valid_card` from `None` to
+        // `Some(SelfRef)`, Swans of Bryn Argoll / #5652) produced a byte-identical
+        // parse signature — a false "No card-parse changes detected" sticky.
+        let details = |vc: Option<TargetFilter>| -> Vec<(String, String)> {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::DealtDamage);
+            if let Some(vc) = vc {
+                repl = repl.valid_card(vc);
+            }
+            let mut face = make_face();
+            face.replacements = vec![repl];
+            let items = build_parse_details_for_face(&face);
+            let repl_item = items
+                .iter()
+                .find(|i| i.category == ParseCategory::Replacement)
+                .expect("replacement item must be projected");
+            repl_item.details.clone()
+        };
+
+        let unscoped = details(None);
+        let self_scoped = details(Some(TargetFilter::SelfRef));
+
+        // The scoping fix must change the projected signature, not be swallowed.
+        assert_ne!(
+            unscoped, self_scoped,
+            "a valid_card scope change must produce a different replacement signature",
+        );
+        assert!(
+            self_scoped.iter().any(|(k, _)| k == "scope"),
+            "a set valid_card must appear as a `scope` detail row; got {self_scoped:?}",
+        );
+        assert!(
+            !unscoped.iter().any(|(k, _)| k == "scope"),
+            "an absent valid_card must not appear, so unqualified signatures stay stable",
+        );
+    }
+
+    #[test]
+    fn replacement_signature_exposes_enters_under_and_token_owner_scope() {
+        // Review follow-up on #5673/#5800: the first projection pass covered
+        // `valid_card` but still left other parse-time semantic axes
+        // (`enters_under`, `token_owner_scope`, `mana_modification`, etc.)
+        // unprojected, so a fix that only changes one of those still produced
+        // a byte-identical signature. Guard the two axes matthewevans called
+        // out by name so this class of omission cannot silently recur.
+        let details = |enters_under: Option<ControllerRef>| -> Vec<(String, String)> {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield);
+            if let Some(cref) = enters_under {
+                repl = repl.enters_under(cref);
+            }
+            let mut face = make_face();
+            face.replacements = vec![repl];
+            let items = build_parse_details_for_face(&face);
+            let repl_item = items
+                .iter()
+                .find(|i| i.category == ParseCategory::Replacement)
+                .expect("replacement item must be projected");
+            repl_item.details.clone()
+        };
+
+        let owner_controlled = details(None);
+        let opponent_redirected = details(Some(ControllerRef::Opponent));
+
+        assert_ne!(
+            owner_controlled, opponent_redirected,
+            "an enters_under controller override must produce a different replacement signature",
+        );
+        assert!(
+            opponent_redirected.iter().any(|(k, _)| k == "enters under"),
+            "a set enters_under must appear as an `enters under` detail row; got {opponent_redirected:?}",
+        );
+        assert!(
+            !owner_controlled.iter().any(|(k, _)| k == "enters under"),
+            "an absent enters_under must not appear, so unqualified signatures stay stable",
+        );
+
+        let mut token_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .token_owner_scope(ControllerRef::Opponent);
+        let mut token_face = make_face();
+        token_face.replacements = vec![token_repl.clone()];
+        let scoped = build_parse_details_for_face(&token_face)
+            .into_iter()
+            .find(|i| i.category == ParseCategory::Replacement)
+            .expect("replacement item must be projected")
+            .details;
+        token_repl.token_owner_scope = None;
+        token_face.replacements = vec![token_repl];
+        let unscoped_token = build_parse_details_for_face(&token_face)
+            .into_iter()
+            .find(|i| i.category == ParseCategory::Replacement)
+            .expect("replacement item must be projected")
+            .details;
+
+        assert!(
+            scoped.iter().any(|(k, _)| k == "token owner scope"),
+            "a set token_owner_scope must appear as a `token owner scope` detail row; got {scoped:?}",
+        );
+        assert!(
+            !unscoped_token.iter().any(|(k, _)| k == "token owner scope"),
+            "an absent token_owner_scope must not appear",
+        );
+    }
+
+    /// #5601 (same swallowed-structure class as #5492/#5495/#5501): a parser
+    /// change INSIDE a coin-flip branch — e.g. Desperate Gambit's lose-branch
+    /// `damage_source_filter` flipping `SelfRef` → `ChosenDamageSource` — must be
+    /// visible to the coverage parse-diff. The FlipCoin branch effects are
+    /// embedded `AbilityDefinition`s (not `sub_ability` links), so
+    /// `build_ability_item` must recurse into `win_effect`/`lose_effect` rather
+    /// than emit only the bare `("lose", "yes")` presence marker — otherwise the
+    /// change is swallowed and the sticky reports a false "No card-parse changes".
+    #[test]
+    fn flip_coin_branch_effects_are_exposed_in_parse_details() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind};
+
+        let lose = Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                prevention_duration: None,
+            },
+        ));
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: Some(lose),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let item = build_ability_item(&def);
+        assert!(
+            item.children
+                .iter()
+                .any(|c| c.details.iter().any(|(k, _)| k == "damage_source_filter")),
+            "FlipCoin lose-branch damage_source_filter must be exposed as a child \
+             parse detail; got children {:#?}",
+            item.children
+        );
+    }
+
+    #[test]
+    fn grant_all_abilities_signature_exposes_source() {
+        // Same class as #5492/#5495/#5501/#5507: GrantAllActivatedAbilitiesOf /
+        // GrantAllTriggeredAbilitiesOf rendered only the bare label, swallowing their
+        // `source` filter with `..`, so a parser change to which permanents' abilities
+        // are granted showed as a removal with no compensating addition in the sticky.
+        use crate::types::ability::{ContinuousModification, TargetFilter};
+
+        let act = |source: TargetFilter| {
+            fmt_modification(&ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source,
+                cap: None,
+            })
+        };
+        let trg = |source: TargetFilter| {
+            fmt_modification(&ContinuousModification::GrantAllTriggeredAbilitiesOf { source })
+        };
+
+        // The source filter must appear in each signature ...
+        assert!(
+            act(TargetFilter::Controller).contains(&fmt_target(&TargetFilter::Controller)),
+            "activated-grant signature must expose its source filter",
+        );
+        assert!(
+            trg(TargetFilter::SelfRef).contains(&fmt_target(&TargetFilter::SelfRef)),
+            "triggered-grant signature must expose its source filter",
+        );
+        // ... so different source filters produce distinct signatures, not one bare label.
+        assert_ne!(
+            act(TargetFilter::Controller),
+            act(TargetFilter::SelfRef),
+            "different source filters must produce different activated-grant signatures",
+        );
+    }
+
+    #[test]
+    fn mana_signature_exposes_grants() {
+        use crate::types::ability::ManaContribution;
+        use crate::types::mana::ManaSpellGrant;
+
+        // #5507: a `ManaSpellGrant` attached to produced mana (e.g. Hall of the
+        // Bandit Lord's creature-spell haste rider, #5502) is parser-alterable but
+        // was swallowed by `..`. It must appear in the mana signature when set and
+        // be absent when the grants list is empty, so unqualified mana signatures
+        // stay byte-identical. (Mirrors #5493/#5501.)
+        let signature_keys = |grants: Vec<ManaSpellGrant>| -> Vec<String> {
+            effect_details(&Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::White, ManaColor::Blue],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants,
+                expiry: None,
+                target: None,
+            })
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+        };
+        assert!(
+            signature_keys(vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                keyword: Keyword::Haste,
+                restriction: None,
+                duration: Box::new(Duration::UntilEndOfTurn),
+            }])
+            .iter()
+            .any(|k| k == "grants"),
+            "a set ManaSpellGrant must appear in the mana parse-diff signature",
+        );
+        assert!(
+            !signature_keys(vec![]).iter().any(|k| k == "grants"),
+            "an empty grants list must not appear (unqualified mana signature unchanged)",
+        );
+    }
 
     fn make_obj() -> GameObject {
         GameObject::new(
@@ -9520,14 +11221,265 @@ mod tests {
         )
     }
 
+    fn token_preset_with_body(
+        core_types: Vec<CoreType>,
+        power: Option<i32>,
+        toughness: Option<i32>,
+        pt_provenance: TokenPtProvenance,
+    ) -> TokenPreset {
+        let category = if core_types.contains(&CoreType::Creature) {
+            crate::game::token_presets::TokenCategory::Creature
+        } else {
+            crate::game::token_presets::TokenCategory::Artifact
+        };
+
+        TokenPreset {
+            id: "test-token".to_string(),
+            category,
+            fidelity: PresetFidelity::PartialMissingAbilities,
+            pt_provenance,
+            body: crate::types::proposed_event::TokenCharacteristics {
+                display_name: "Test Token".to_string(),
+                power,
+                toughness,
+                core_types,
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            source_card_names: Vec::new(),
+            source_card_refs: Vec::new(),
+            token_image_ref: None,
+            set_code: String::new(),
+            set_name: String::new(),
+            collector_number: None,
+            released_at: None,
+            type_line: String::new(),
+            rules_text: None,
+        }
+    }
+
+    fn token_materialization_none() -> TokenAbilityMaterialization {
+        TokenAbilityMaterialization {
+            source: TokenAbilitySource::None,
+            abilities: Vec::new(),
+            trigger_definitions: Vec::new(),
+            static_definitions: Vec::new(),
+            keywords: Vec::new(),
+            modifications: Vec::new(),
+            back_face: None,
+            rules_text: None,
+            unparsed_rules_text_lines: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unsupported_partial_token_gap_label_marks_source_defined_pt_without_payload() {
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            None,
+            Some(1),
+            TokenPtProvenance::SourceDefinedOrDynamic {
+                power: Some("*".to_string()),
+                toughness: Some("1".to_string()),
+            },
+        );
+        let materialized = token_materialization_none();
+
+        assert_eq!(
+            unsupported_partial_token_gap_label(&preset, &materialized),
+            TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
+        );
+    }
+
+    #[test]
+    fn unsupported_partial_token_gap_label_keeps_fixed_pt_creature_as_partial_fidelity() {
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            Some(1),
+            Some(1),
+            TokenPtProvenance::FixedOrAbsent,
+        );
+        let materialized = token_materialization_none();
+
+        assert_eq!(
+            unsupported_partial_token_gap_label(&preset, &materialized),
+            TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
+        );
+    }
+
+    #[test]
+    fn unsupported_partial_token_gap_label_keeps_missing_pt_without_provenance_as_partial_fidelity()
+    {
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            None,
+            None,
+            TokenPtProvenance::FixedOrAbsent,
+        );
+        let materialized = token_materialization_none();
+
+        assert_eq!(
+            unsupported_partial_token_gap_label(&preset, &materialized),
+            TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
+        );
+    }
+
+    #[test]
+    fn unsupported_partial_token_gap_label_keeps_functional_payload_as_partial_fidelity() {
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            None,
+            Some(1),
+            TokenPtProvenance::SourceDefinedOrDynamic {
+                power: Some("*".to_string()),
+                toughness: Some("1".to_string()),
+            },
+        );
+        let mut materialized = token_materialization_none();
+        materialized.keywords.push(Keyword::Flying);
+
+        assert_eq!(
+            unsupported_partial_token_gap_label(&preset, &materialized),
+            TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
+        );
+    }
+
+    #[test]
+    fn unsupported_partial_token_gap_label_keeps_unrelated_rules_text_as_partial_fidelity() {
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            None,
+            Some(1),
+            TokenPtProvenance::SourceDefinedOrDynamic {
+                power: Some("*".to_string()),
+                toughness: Some("1".to_string()),
+            },
+        );
+        let mut materialized = token_materialization_none();
+        materialized.rules_text = Some("Flying".to_string());
+
+        assert_eq!(
+            unsupported_partial_token_gap_label(&preset, &materialized),
+            TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
+        );
+
+        let mut materialized = token_materialization_none();
+        materialized
+            .unparsed_rules_text_lines
+            .push("This creature has ward {2}.".to_string());
+
+        assert_eq!(
+            unsupported_partial_token_gap_label(&preset, &materialized),
+            TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
+        );
+    }
+
+    #[test]
+    fn source_defined_pt_rules_text_does_not_count_as_unparsed_token_rules_gap() {
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            None,
+            None,
+            TokenPtProvenance::SourceDefinedOrDynamic {
+                power: Some("*".to_string()),
+                toughness: Some("*".to_string()),
+            },
+        );
+        let mut materialized = token_materialization_none();
+        materialized.unparsed_rules_text_lines.push(
+            "This creature's power and toughness are each equal to the number of lands you control."
+                .to_string(),
+        );
+
+        assert!(!token_rules_text_unparsed_gap(&preset, &materialized));
+        assert!(token_pt_provenance_has_no_materialization_gap(
+            &preset,
+            &materialized
+        ));
+    }
+
+    #[test]
+    fn unrelated_unparsed_token_rules_still_count_as_gap_with_source_defined_pt() {
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            None,
+            None,
+            TokenPtProvenance::SourceDefinedOrDynamic {
+                power: Some("*".to_string()),
+                toughness: Some("*".to_string()),
+            },
+        );
+        let mut materialized = token_materialization_none();
+        materialized
+            .unparsed_rules_text_lines
+            .push("This creature has ward {2}.".to_string());
+
+        assert!(token_rules_text_unparsed_gap(&preset, &materialized));
+        assert!(!token_pt_provenance_has_no_materialization_gap(
+            &preset,
+            &materialized
+        ));
+    }
+
+    #[test]
+    fn analyze_token_coverage_treats_source_defined_pt_as_represented() {
+        let summary = analyze_token_coverage();
+
+        // The weekly MTGJSON vintage refresh (#6237) makes absolute token counts
+        // data-dependent. Provenance — that this catalog is what the reproducible
+        // pipeline produces for its vintage — is established UPSTREAM, not here: the
+        // `refresh-card-data.yml` workflow regenerates from a clean checkout and
+        // refuses to open a catalog PR unless `fetch-token-sets.sh` reports every
+        // token-bearing set downloaded (`failed 0`). That fetch-completeness gate,
+        // not these asserts, is what catches a partial regen at its source.
+        //
+        // So these floors are CATASTROPHIC-LOSS BACKSTOPS with deliberate headroom,
+        // not exact ratchets. The invariants below (full parse coverage) are the
+        // strong guards; the floors only fail if the catalog is grossly gutted
+        // (a truncated/empty `known-tokens.toml`), which no headroom should tolerate.
+        //
+        // Basis: a clean, complete pipeline run for vintage 2026-07-21 yields
+        // total_tokens=2858, rules_text_tokens>=1490, source_card_refs=8644. The
+        // count reflects the reproducible fetch scope (`SetList.json` token-bearing
+        // sets). An earlier hand-committed catalog carried source_card_refs=9821 from
+        // a developer's local `data/mtgjson/sets/` dir that had accumulated extra
+        // reprint set files beyond that scope — inflated printings a clean CI fetch
+        // does not reproduce. Do NOT re-pin a floor to a hand-regen count; the
+        // reproducible pipeline output is the reference. Reproduce with:
+        //
+        //     ./scripts/fetch-token-sets.sh   # populates the gitignored input
+        //     cargo run --bin tokens-gen -- --input data/mtgjson/sets --output /tmp/kt.toml
+        //     cmp /tmp/kt.toml crates/engine/data/known-tokens.toml
+        assert_eq!(summary.supported_tokens, summary.total_tokens);
+        assert_eq!(summary.parsed_rules_text_tokens, summary.rules_text_tokens);
+        assert!(
+            summary.total_tokens >= 2700,
+            "token catalog gutted: {} presets < 2700",
+            summary.total_tokens
+        );
+        assert!(
+            summary.rules_text_tokens >= 1400,
+            "token catalog gutted: {} rules-text presets < 1400",
+            summary.rules_text_tokens
+        );
+        assert!(
+            summary.source_card_refs >= 8000,
+            "token catalog gutted: {} source_card_refs < 8000",
+            summary.source_card_refs
+        );
+        assert!(!summary.top_gaps.iter().any(|gap| {
+            gap.handler == TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
+        }));
+    }
+
     #[test]
     fn apnap_swallowed_clause_warning_counts_as_coverage_gap() {
-        let warnings = vec![OracleDiagnostic::SwallowedClause {
-            detector: "APNAP".to_string(),
-            description: "Repeat the following process for each opponent in turn order."
-                .to_string(),
-            line_index: 0,
-        }];
+        let warnings = vec![OracleDiagnostic::swallowed_clause(
+            "APNAP",
+            "Repeat the following process for each opponent in turn order.",
+        )];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
         assert_eq!(missing, vec!["Swallow:APNAP"]);
@@ -9536,11 +11488,10 @@ mod tests {
     #[test]
     fn swallowed_clause_warning_counts_as_coverage_gap() {
         let warnings = vec![
-            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
-                detector: "Condition_If".to_string(),
-                description: "If foo, draw a card.".to_string(),
-                line_index: 0,
-            },
+            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::swallowed_clause(
+                "Condition_If",
+                "If foo, draw a card.",
+            ),
         ];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
@@ -9603,6 +11554,7 @@ mod tests {
                 ])],
                 duration: None,
                 target: None,
+                end_cost: None,
             },
         ));
 
@@ -9642,11 +11594,10 @@ mod tests {
     /// exactly `"Swallow:{detector}"`, so this locks it.
     #[test]
     fn check_parse_warnings_flags_swallowed_clause() {
-        let warnings = vec![OracleDiagnostic::SwallowedClause {
-            detector: "Condition_If".into(),
-            description: "if you control a creature, …".into(),
-            line_index: 0,
-        }];
+        let warnings = vec![OracleDiagnostic::swallowed_clause(
+            "Condition_If",
+            "if you control a creature, …",
+        )];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
         assert_eq!(missing, vec!["Swallow:Condition_If".to_string()]);
@@ -9657,16 +11608,11 @@ mod tests {
     #[test]
     fn check_parse_warnings_dedupes_same_detector() {
         let warnings = vec![
-            OracleDiagnostic::SwallowedClause {
-                detector: "DynamicQty".into(),
-                description: "equal to the number of charge counters".into(),
-                line_index: 0,
-            },
-            OracleDiagnostic::SwallowedClause {
-                detector: "DynamicQty".into(),
-                description: "equal to that card's mana value".into(),
-                line_index: 1,
-            },
+            OracleDiagnostic::swallowed_clause(
+                "DynamicQty",
+                "equal to the number of charge counters",
+            ),
+            OracleDiagnostic::swallowed_clause("DynamicQty", "equal to that card's mana value"),
         ];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
@@ -9679,11 +11625,10 @@ mod tests {
     /// sub-effects must not be counted as supported.
     #[test]
     fn check_parse_warnings_flags_optional_you_may() {
-        let warnings = vec![OracleDiagnostic::SwallowedClause {
-            detector: "Optional_YouMay".into(),
-            description: "you may reveal that card and put it into your hand".into(),
-            line_index: 0,
-        }];
+        let warnings = vec![OracleDiagnostic::swallowed_clause(
+            "Optional_YouMay",
+            "you may reveal that card and put it into your hand",
+        )];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
         assert_eq!(missing, vec!["Swallow:Optional_YouMay".to_string()]);
@@ -9728,6 +11673,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
         assert!(unimplemented_mechanics(&obj).is_empty());
@@ -9840,9 +11786,10 @@ mod tests {
     #[test]
     fn card_face_with_replacement_decline_unimplemented_is_detected() {
         let mut face = make_face();
-        face.replacements
-            .push(ReplacementDefinition::new(ReplacementEvent::Draw).mode(
-                ReplacementMode::Optional {
+        face.replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+                .mode(ReplacementMode::Optional {
                     decline: Some(Box::new(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::Unimplemented {
@@ -9850,8 +11797,8 @@ mod tests {
                             description: None,
                         },
                     ))),
-                },
-            ));
+                }),
+        );
 
         assert!(card_face_has_unimplemented_parts(&face));
     }
@@ -10315,10 +12262,10 @@ mod tests {
             AbilityKind::Spell,
             Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition {
-                    mode: StaticMode::MustBeBlocked,
+                    mode: StaticMode::MustBeBlocked { by: None },
                     affected: None,
                     modifications: vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::MustBeBlocked,
+                        mode: StaticMode::MustBeBlocked { by: None },
                     }],
                     condition: None,
                     per_player_condition: None,
@@ -10328,9 +12275,14 @@ mod tests {
                     characteristic_defining: false,
                     description: None,
                     attack_defended: None,
+                    source_controller: None,
+                    source_object: None,
+                    bypass_beneficiary: None,
+                    protection_does_not_remove: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
 
@@ -10372,9 +12324,14 @@ mod tests {
                     characteristic_defining: false,
                     description: None,
                     attack_defended: None,
+                    source_controller: None,
+                    source_object: None,
+                    bypass_beneficiary: None,
+                    protection_does_not_remove: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
 
@@ -10430,6 +12387,69 @@ mod tests {
             support,
             FeatureSupport::Handled,
             "TargetZoneCardCount is resolved by game::quantity and should not block coverage",
+        );
+    }
+
+    /// T22 (Step 7c). `battlefield_entry_matches_filter` fails closed on the
+    /// `FilterProp`s the entry snapshot never captured, so a ledger read over one
+    /// of them resolves a silent constant 0. The classifier must stop calling that
+    /// `Handled`. Case (a) is Tunnel Tipster's real live *filter shape* (its
+    /// intervening-if carries `FilterProp::FaceDown`, so its trigger can never fire);
+    /// note the classifier never reaches Tunnel Tipster's trigger intervening-if
+    /// (see `:7519`), so this test drives `quantity_ref_feature` directly.
+    ///
+    /// REVERT-PROBE: restore the unconditional `Handled` arm → (a) and (d) FAIL;
+    /// (b)/(c) pass in both builds and are the vacuity controls.
+    #[test]
+    fn ledger_ref_feature_is_unhandled_when_filter_is_unevaluable() {
+        let ledger = |properties: Vec<FilterProp>| QuantityRef::BattlefieldEntriesThisTurn {
+            player: PlayerScope::Controller,
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties,
+            }),
+        };
+
+        // (a) Tunnel Tipster's shape — unanswerable from the entry record.
+        assert_eq!(
+            quantity_ref_feature(&ledger(vec![FilterProp::FaceDown])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
+            "(a) FaceDown is not answerable from a BattlefieldEntryRecord"
+        );
+        // (b)/(c) vacuity controls — the feature stays Handled for evaluable filters.
+        assert_eq!(
+            quantity_ref_feature(&ledger(vec![])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Handled),
+            "(b) a bare filter is trivially evaluable"
+        );
+        assert_eq!(
+            quantity_ref_feature(&ledger(vec![FilterProp::HasColor {
+                color: ManaColor::Green
+            }])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Handled),
+            "(c) HasColor is one of the four props the matcher answers"
+        );
+        // (d) composite recursion — one unanswerable leaf poisons the whole read.
+        let QuantityRef::BattlefieldEntriesThisTurn { filter: bare, .. } = ledger(vec![]) else {
+            unreachable!()
+        };
+        let QuantityRef::BattlefieldEntriesThisTurn {
+            filter: face_down, ..
+        } = ledger(vec![FilterProp::FaceDown])
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            quantity_ref_feature(&QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Or {
+                    filters: vec![bare, face_down]
+                },
+            }),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
+            "(d) CR 608.2i: an Or disjunct the matcher drops is a silent partial count of a \
+             look-back read"
         );
     }
 
@@ -10783,6 +12803,90 @@ mod tests {
                 |f| matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "counter")
             ),
             "ChooseOneOf counter branches should satisfy counter parameter audit: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_pump_parameter_perpetual_gated_by_oracle_line() {
+        use crate::types::ability::PerpetualModification;
+
+        // "[object] perpetually gets +N/+M" lowers to
+        // `Effect::ApplyPerpetual{ModifyPowerToughness}`, not a top-level
+        // `Effect::Pump`. The pump-parameter audit must accept that delta — but
+        // ONLY when the line says "perpetually". A temporary "+N/+M until end of
+        // turn" that mis-lowered to a permanent `ApplyPerpetual` (a real duration
+        // bug) must still be flagged, so the audit stays discriminating.
+        let perpetual_pump = |power_delta: i32, toughness_delta: i32| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ApplyPerpetual {
+                    target: TargetFilter::Any,
+                    modification: PerpetualModification::ModifyPowerToughness {
+                        power_delta,
+                        toughness_delta,
+                    },
+                },
+            )
+        };
+        let pump_findings = |findings: &[SemanticFinding]| {
+            findings
+                .iter()
+                .filter(|f| {
+                    matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "pump")
+                })
+                .count()
+        };
+
+        // Discrimination, at the gating authority itself: the same
+        // `ApplyPerpetual{+1/+1}` satisfies a "+1/+1" line ONLY when the line is
+        // perpetual. This is the arm the review asked to be gated — proving the
+        // Disallowed branch rejects it is the whole point of the fix.
+        assert!(
+            pump_matches_oracle(&perpetual_pump(1, 1), 1, 1, PerpetualPump::Allowed),
+            "a perpetual line must accept ApplyPerpetual{{ModifyPowerToughness}}"
+        );
+        assert!(
+            !pump_matches_oracle(&perpetual_pump(1, 1), 1, 1, PerpetualPump::Disallowed),
+            "a temporary (non-perpetual) line must NOT be satisfied by a permanent ApplyPerpetual"
+        );
+
+        // End-to-end accept: a perpetual line whose only effect is the perpetual
+        // pump produces no spurious pump WrongParameter.
+        let perpetual_line = "This creature perpetually gets +1/+1.";
+        let mut perpetual_face = make_face();
+        perpetual_face.oracle_text = Some(perpetual_line.to_string());
+        perpetual_face.abilities.push(perpetual_pump(1, 1));
+        assert_eq!(
+            pump_findings(&audit_card_lines(perpetual_line, &perpetual_face)),
+            0,
+            "perpetual line + ApplyPerpetual must satisfy the pump audit"
+        );
+
+        // Delta discrimination (at the gating authority): even on a perpetual
+        // line, an ApplyPerpetual whose delta does not match the "+N/+M" text is
+        // rejected — the arm compares the deltas, it does not blanket-accept
+        // ApplyPerpetual. Together with the accept above this proves the +1/+1
+        // acceptance passes for the right reason, not vacuously.
+        assert!(
+            !pump_matches_oracle(&perpetual_pump(2, 2), 1, 1, PerpetualPump::Allowed),
+            "a perpetual ApplyPerpetual delta that does not match the +N/+M text must be rejected"
+        );
+
+        // End-to-end discrimination: a temporary "+N/+M until end of turn" line
+        // whose effect mis-lowered to a PERMANENT ApplyPerpetual is still flagged.
+        // The permanent effect no longer matches the temporary pump line, so it
+        // surfaces as a SilentDrop rather than being silently accepted as a valid
+        // pump — exactly the mislowering the review wanted the audit to keep
+        // catching, and proof that audit_card_lines does emit findings here (so
+        // the perpetual accept above is meaningful).
+        let temporary_line = "Target creature gets +1/+1 until end of turn.";
+        let mut temporary_face = make_face();
+        temporary_face.oracle_text = Some(temporary_line.to_string());
+        temporary_face.abilities.push(perpetual_pump(1, 1));
+        let temporary_findings = audit_card_lines(temporary_line, &temporary_face);
+        assert!(
+            !temporary_findings.is_empty(),
+            "a temporary +N/+M line mislowered to a permanent ApplyPerpetual must still be flagged: {temporary_findings:?}"
         );
     }
 
@@ -11180,6 +13284,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
 
@@ -11356,6 +13461,10 @@ mod tests {
                 "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost less to cast.".to_string(),
             ),
             attack_defended: None,
+            source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -11387,6 +13496,10 @@ mod tests {
                 "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost less to cast.".to_string(),
             ),
             attack_defended: None,
+            source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -11416,6 +13529,10 @@ mod tests {
             characteristic_defining: false,
             description: None,
             attack_defended: None,
+            source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -11450,6 +13567,7 @@ mod tests {
                 AbilityCondition::TargetMatchesFilter {
                     filter: TargetFilter::Any,
                     use_lki: false,
+                    subject_slot: None,
                 },
                 "TargetMatchesFilter",
             ),
@@ -11562,6 +13680,10 @@ mod tests {
             characteristic_defining: false,
             description: Some("Skip your draw step.".to_string()),
             attack_defended: None,
+            source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(
@@ -11591,6 +13713,10 @@ mod tests {
             characteristic_defining: false,
             description: Some("Players skip their upkeep steps.".to_string()),
             attack_defended: None,
+            source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(
@@ -11630,6 +13756,10 @@ mod tests {
             characteristic_defining: false,
             description: Some("Players can't draw cards.".to_string()),
             attack_defended: None,
+            source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -11660,6 +13790,10 @@ mod tests {
             characteristic_defining: false,
             description: Some("You can't draw cards.".to_string()),
             attack_defended: None,
+            source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -11692,6 +13826,10 @@ mod tests {
             characteristic_defining: false,
             description: Some(oracle.to_string()),
             attack_defended: None,
+            source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -11730,6 +13868,10 @@ mod tests {
                 characteristic_defining: false,
                 description: Some(description.to_string()),
                 attack_defended: None,
+                source_controller: None,
+                source_object: None,
+                bypass_beneficiary: None,
+                protection_does_not_remove: None,
             });
         }
 
@@ -11748,7 +13890,7 @@ mod tests {
         let mut face = make_face();
         face.static_abilities.push(
             StaticDefinition::new(StaticMode::MustBlockAttacker {
-                attacker: ObjectId(42),
+                attacker: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(42), 0),
             })
             .description("Target creature blocks this creature this turn if able.".to_string()),
         );
@@ -11764,6 +13906,31 @@ mod tests {
         assert!(
             gaps.is_empty(),
             "Data-carrying combat statics should be fully supported, but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 509.1b: CantBeBlockedUnlessAllBlock is a nullary registry-keyed
+    /// static enforced by combat.rs declare-blockers validation (Tromokratis).
+    #[test]
+    fn cant_be_blocked_unless_all_block_has_no_coverage_gap() {
+        let mut face = make_face();
+        face.oracle_text = Some(
+            "Tromokratis can't be blocked unless all creatures defending player controls block it."
+                .to_string(),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::CantBeBlockedUnlessAllBlock)
+                .affected(TargetFilter::SelfRef)
+                .description(
+                    "Tromokratis can't be blocked unless all creatures defending player controls block it.".to_string(),
+                ),
+        );
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "CantBeBlockedUnlessAllBlock should be fully supported, but got gaps: {:?}",
             gaps
         );
     }
@@ -11870,6 +14037,10 @@ mod tests {
             characteristic_defining: false,
             description: Some(oracle.to_string()),
             attack_defended: None,
+            source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(

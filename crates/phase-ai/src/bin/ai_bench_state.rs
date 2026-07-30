@@ -1,6 +1,6 @@
 //! Load a saved GameState JSON and time AI decisions.
 //!
-//! Usage: `cargo run --release --bin ai-bench-state -- <path> [--difficulty medium] [--iters N]`
+//! Usage: `cargo run --release --bin ai-bench-state -- <path> [--difficulty medium] [--iters N] [--assert-under-ms N]`
 
 use std::fs;
 use std::time::Instant;
@@ -20,6 +20,7 @@ fn main() {
 
     let mut difficulty = AiDifficulty::Medium;
     let mut iters = 3usize;
+    let mut assert_under_ms: Option<u128> = None;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -36,6 +37,10 @@ fn main() {
             }
             "--iters" => {
                 iters = args[i + 1].parse().unwrap_or(3);
+                i += 2;
+            }
+            "--assert-under-ms" => {
+                assert_under_ms = args[i + 1].parse().ok();
                 i += 2;
             }
             _ => i += 1,
@@ -111,5 +116,19 @@ fn main() {
             None => println!("iter {}: {:?}  action=None", i, dt),
         }
     }
-    println!("mean:             {:?}", total / iters as u32);
+    let mean = total / iters as u32;
+    println!("mean:             {:?}", mean);
+
+    // V3 mechanical gate: exit non-zero if the mean choose_action latency exceeds
+    // the asserted ceiling (budget + T_apply_max + margin). Skips cleanly when the
+    // flag is absent, so the saved-state check stays reproducible without pinning
+    // the 23 MB state into the repo.
+    if let Some(ceiling_ms) = assert_under_ms {
+        let mean_ms = mean.as_millis();
+        if mean_ms > ceiling_ms {
+            eprintln!("FAIL: mean {mean_ms} ms exceeds --assert-under-ms {ceiling_ms} ms");
+            std::process::exit(1);
+        }
+        println!("PASS: mean {mean_ms} ms <= --assert-under-ms {ceiling_ms} ms");
+    }
 }

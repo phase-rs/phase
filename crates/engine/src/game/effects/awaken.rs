@@ -196,6 +196,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )
         .sub_ability(inner);

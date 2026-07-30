@@ -47,7 +47,14 @@ export function ExilePile({ playerId, onClick, size }: ExilePileProps) {
           }}
         />
         <div className="absolute inset-0 flex items-center justify-center">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300/80">{t("zone.exile")}</span>
+          {/* Scale the label with the pile so split-pane minis don't wear a
+              full-size wordmark; capped at the original 10px for big piles. */}
+          <span
+            className="font-bold uppercase tracking-wider text-indigo-300/80"
+            style={{ fontSize: `min(10px, calc(${w} * 0.24))` }}
+          >
+            {t("zone.exile")}
+          </span>
         </div>
       </div>
       <div className="absolute -bottom-1 -right-1 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-indigo-950 text-[9px] font-bold text-indigo-200 ring-1 ring-indigo-500/60">

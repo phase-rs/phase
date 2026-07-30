@@ -44,6 +44,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ForceAttack,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -119,7 +120,7 @@ mod tests {
             GameEvent::EffectResolved {
                 kind: EffectKind::ForceAttack,
                 source_id,
-            } if *source_id == source
+            ..} if *source_id == source
         )));
     }
 

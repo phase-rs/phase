@@ -5,7 +5,7 @@ use crate::game::{casting, casting_costs};
 use crate::types::ability::{AbilityCost, Effect, QuantityExpr, QuantityRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PayableResource, WaitingFor};
-use crate::types::mana::{ManaCost, ManaCostShard};
+use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 
 use super::{EffectError, ResolvedAbility};
@@ -36,6 +36,19 @@ pub fn resolve(
         Effect::PayCost { cost, scale, payer } => (cost, scale, payer),
         _ => return Err(EffectError::MissingParam("PayCost".to_string())),
     };
+    // CR 118.12 + CR 608.2c: make the failure signal resolution-local to THIS
+    // `PayCost` instance. `cost_payment_failed_flag` is only ever SET on
+    // failure; without clearing it here, a stale `true` left by an earlier,
+    // unrelated resolution's unpayable cost would survive into this payment,
+    // suppress the `optional_effect_performed` seed for a payment that
+    // SUCCEEDED (`effects/mod.rs`'s mandatory-rider seed guards on
+    // `!cost_payment_failed_flag`), and make a `Not { OptionalEffectPerformed }`
+    // "If you can't" rider fire despite the cost having been paid (Greenbelt
+    // Rampager bouncing after a successful {E}{E} payment, issue #4955 review).
+    // Mirrors the established per-iteration clear in the repeated-payment
+    // driver ("clear the resolution failure flag before THIS payment so a
+    // prior iteration's failure can't be misread as this payment's outcome").
+    state.cost_payment_failed_flag = false;
     let Some(payer) = resolve_effect_player_ref(state, ability, payer_filter) else {
         state.cost_payment_failed_flag = true;
         return Ok(());
@@ -76,18 +89,34 @@ pub fn resolve(
         AbilityCost::Mana { cost: mana_cost }
             if payment_ability.chosen_x.is_none() && casting_costs::cost_has_x(mana_cost) =>
         {
-            let per_x = mana_x_shard_count(mana_cost);
-            let max = max_resolution_mana_x_value(state, payer, ability.source_id, mana_cost);
-            let max = trigger_event_amount(state).map_or(max, |amount| max.min(amount));
-            state.waiting_for = WaitingFor::PayAmountChoice {
-                player: payer,
-                resource: PayableResource::ManaGeneric { per_x },
-                min: 0,
-                max,
-                accumulated: 0,
-                source_id: ability.source_id,
-                pending_mana_ability: None,
-            };
+            match resolution_mana_x_max(state, payer, ability.source_id, mana_cost) {
+                Some(max) => {
+                    let max = trigger_event_amount_for_x_payment(state)
+                        .map_or(max, |amount| max.min(amount));
+                    state.waiting_for = WaitingFor::PayAmountChoice {
+                        player: payer,
+                        resource: PayableResource::ManaGeneric {
+                            base_cost: mana_cost.clone(),
+                        },
+                        min: 0,
+                        max,
+                        accumulated: 0,
+                        source_id: ability.source_id,
+                        pending_mana_ability: None,
+                    };
+                }
+                // CR 608.2d + CR 118.12: not even X=0 is payable — the
+                // cost's fixed portion (colored/generic pips alongside X,
+                // e.g. `{X}{W}` with no white available) can't be paid
+                // regardless of what X is chosen, so there is no legal
+                // amount to offer. Presenting a `[0, 0]` prompt here would
+                // let the player "choose" an impossible option; fail the
+                // payment outright instead, exactly like any other
+                // unaffordable resolution-time cost.
+                None => {
+                    state.cost_payment_failed_flag = true;
+                }
+            }
         }
         // CR 107.1c + CR 107.14: "Pay any amount of {E}" — suspend the chain and
         // surface a `PayAmountChoice` prompt. The sub-ability continuation
@@ -181,9 +210,12 @@ pub fn resolve(
 /// `times` times and the generic component scaled. `times == 0` yields `{0}`
 /// (`Cost { shards: [], generic: 0 }`), which the existing mana-payment path
 /// treats as trivially paid.
-fn scale_mana_cost(base: &ManaCost, times: u32) -> ManaCost {
+pub(crate) fn scale_mana_cost(base: &ManaCost, times: u32) -> ManaCost {
     match base {
-        ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => ManaCost::zero(),
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => ManaCost::zero(),
         ManaCost::Cost { shards, generic } => {
             let mut scaled_shards = Vec::with_capacity(shards.len() * times as usize);
             for _ in 0..times {
@@ -227,7 +259,10 @@ fn resolve_ability_cost_payment(
             payer,
             ability.source_id,
             cost,
-            &costs::PaymentScope::Resolution { ability },
+            &costs::PaymentScope::Resolution {
+                ability,
+                cost_move_root: costs::ResolutionCostMoveRoot::EffectPayCost,
+            },
         )
     {
         state.cost_payment_failed_flag = true;
@@ -243,13 +278,19 @@ fn resolve_ability_cost_payment(
         // `DiscardChoice` — interrupted payment. `state.waiting_for` is already
         // set by the authority; the resolution chain resumes from there.
         Ok(PaymentOutcome::Paused { remaining_cost }) => {
-            if let Some(remaining_cost) = remaining_cost.clone() {
-                super::prepend_remaining_pay_cost_continuation(
-                    state,
-                    ability,
-                    payer,
-                    remaining_cost,
-                );
+            // CR 118.12 + CR 605.3b + CR 616.1: A paused mana-source payment
+            // owns its complete unpaid suffix in `ManaAbilityResume`, never in
+            // the effect continuation queue.  The queue remains only for
+            // ordinary non-mana cost choices such as discard selection.
+            if !crate::game::casting::mana_ability_cost_payment_is_paused(state) {
+                if let Some(remaining_cost) = remaining_cost.clone() {
+                    super::prepend_remaining_pay_cost_continuation(
+                        state,
+                        ability,
+                        payer,
+                        remaining_cost,
+                    );
+                }
             }
             Ok(PaymentOutcome::Paused { remaining_cost })
         }
@@ -265,22 +306,27 @@ fn resolve_ability_cost_payment(
     }
 }
 
-fn mana_x_shard_count(cost: &ManaCost) -> u32 {
-    match cost {
-        ManaCost::Cost { shards, .. } => shards
-            .iter()
-            .filter(|shard| matches!(shard, ManaCostShard::X))
-            .count() as u32,
-        ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => 0,
-    }
-}
-
-fn max_resolution_mana_x_value(
+/// CR 608.2d: while resolving, a player can't be offered an illegal or
+/// impossible choice. Returns `Some(max)` for the greatest affordable X —
+/// `Some(0)` covers both "a pure `{X}` cost with nothing to spend" (paying
+/// `{0}` is a trivial no-op, always legal) and "a fixed portion the player
+/// can just barely afford at X=0". Returns `None` only when the cost's
+/// fixed portion (any colored/generic pips alongside X, e.g. `{X}{W}` with
+/// no white available) can't be paid at ANY value of X, including 0 — the
+/// caller must treat that as an ordinary payment failure, never open a
+/// `[0, 0]` prompt (there is no legal amount to submit).
+///
+/// Monotonic by construction: `concretize_x` only ever ADDS generic mana as
+/// X grows while the fixed shards stay constant, so if some X = V is
+/// payable, X = 0 is payable too. The downward search below therefore never
+/// needs to re-check 0 separately — reaching `max == 0` and failing there is
+/// exactly the "not even 0 works" case.
+fn resolution_mana_x_max(
     state: &GameState,
     payer: PlayerId,
     source_id: crate::types::identifiers::ObjectId,
     cost: &ManaCost,
-) -> u32 {
+) -> Option<u32> {
     // Resolution-time X costs are not spell casts — convoke/improvise/waterbend
     // tap-payments do not apply, so no spell object is passed.
     let mut max = casting_costs::max_x_value(state, payer, cost, None);
@@ -288,10 +334,10 @@ fn max_resolution_mana_x_value(
         let mut concrete = cost.clone();
         concrete.concretize_x(max);
         if casting::can_pay_effect_mana_cost_after_auto_tap(state, payer, source_id, &concrete) {
-            return max;
+            return Some(max);
         }
         if max == 0 {
-            return 0;
+            return None;
         }
         max -= 1;
     }
@@ -303,6 +349,18 @@ fn trigger_event_amount(state: &GameState) -> Option<u32> {
         .as_ref()
         .and_then(crate::game::targeting::extract_amount_from_event)
         .and_then(|amount| u32::try_from(amount.max(0)).ok())
+}
+
+/// CR 107.3i + CR 508.1m: Only event amounts that bound pay-{X} via an explicit
+/// comparator where-X clause (Well of Lost Dreams class) may cap X announcement.
+/// `AttackersDeclared` exposes attacker *count* for "that many" effects, not as
+/// a pay-{X} cap — using it capped Elenda and Azor at X=1 (#4226).
+fn trigger_event_amount_for_x_payment(state: &GameState) -> Option<u32> {
+    let event = state.current_trigger_event.as_ref()?;
+    match event {
+        GameEvent::AttackersDeclared { .. } => None,
+        _ => trigger_event_amount(state),
+    }
 }
 
 #[cfg(test)]
@@ -815,6 +873,111 @@ mod tests {
         assert_eq!(state.players[0].energy, 2);
     }
 
+    /// CR 107.4f + CR 118.12 + CR 119.4 + CR 616.1: A replacement pause
+    /// raised while paying a leading Phyrexian mana component must not let the
+    /// outer rider skip a later composite cost component.
+    #[test]
+    fn deferred_phyrexian_payment_resumes_composite_suffix_before_rider() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::{
+            PlayerFilter, QuantityModification, ReplacementDefinition, SubAbilityLink,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 2;
+        let source = create_object(
+            &mut state,
+            CardId(904),
+            PlayerId(0),
+            "Interactive Phyrexian Payment".to_string(),
+            Zone::Battlefield,
+        );
+        let replacement_choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )],
+            },
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::LoseLife)
+            .quantity_modification(QuantityModification::Plus { value: 0 })
+            .execute(replacement_choice)]
+        .into();
+
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![ManaCostShard::PhyrexianBlack],
+                                generic: 0,
+                            },
+                        },
+                        AbilityCost::PayEnergy {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut rider = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+        pay.sub_ability = Some(Box::new(rider));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].life, 18);
+        assert_eq!(
+            state.players[0].energy, 2,
+            "the later energy cost must remain unpaid during the replacement choice"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch { .. }
+        ));
+
+        crate::game::engine::apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .unwrap();
+
+        assert_eq!(
+            state.players[0].energy, 1,
+            "the suffix cost must be paid after the replacement settles"
+        );
+        assert_eq!(
+            state.players[0].life, 26,
+            "the replacement branch resolves before the parked +7-life rider"
+        );
+        assert!(state.pending_deferred_life_cost_resume.is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
     /// CR 118.3: Composite of `PayLife` + `PayEnergy` fails when the energy
     /// component is unaffordable, and the pre-flight check prevents the life
     /// portion from being committed (no partial payment).
@@ -886,6 +1049,42 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         assert_eq!(state.players[0].energy, 0);
         assert_eq!(state.last_effect_count, Some(5));
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a successful payment must REPLACE the stale failure signal, not keep it"
+        );
+    }
+
+    /// Maintainer review on PR #5869: the failure signal is resolution-local
+    /// to each `PayCost` instance. A stale `cost_payment_failed_flag` left by
+    /// an EARLIER, unrelated resolution must be cleared at this payment's
+    /// chain handoff, so a SUCCESSFUL mandatory payment reads as performed —
+    /// otherwise the mandatory-rider seed (guarded on
+    /// `!cost_payment_failed_flag`) skips `optional_effect_performed` and a
+    /// `Not { OptionalEffectPerformed }` "If you can't" rider fires despite
+    /// the cost having been paid (Greenbelt Rampager, issue #4955).
+    #[test]
+    fn resolution_pay_success_clears_stale_failed_flag() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 2;
+        state.cost_payment_failed_flag = true;
+        let ability = make_ability(Effect::PayCost {
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.players[0].energy, 0,
+            "the payment itself must succeed"
+        );
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a stale pre-set failure flag must not survive a successful PayCost"
+        );
     }
 
     #[test]
@@ -1184,6 +1383,7 @@ mod tests {
             outcome,
             ResolutionChoiceOutcome::WaitingFor(_)
                 | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_)
+                | ResolutionChoiceOutcome::WaitingForWithParkedObservers(_)
                 | ResolutionChoiceOutcome::ActionResult(_)
         ));
         assert_eq!(state.players[0].life, 23);
@@ -1292,6 +1492,7 @@ mod tests {
         let damage = ResolvedAbility::new(
             Effect::DealDamage {
                 damage_source: None,
+                excess: None,
                 target: TargetFilter::Any,
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextAmount,
@@ -1340,6 +1541,7 @@ mod tests {
         match outcome {
             ResolutionChoiceOutcome::WaitingFor(_) => {}
             ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_) => {}
+            ResolutionChoiceOutcome::WaitingForWithParkedObservers(_) => {}
             ResolutionChoiceOutcome::ActionResult(_) => {}
         }
 
@@ -1432,7 +1634,15 @@ mod tests {
         resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
         match &state.waiting_for {
             WaitingFor::PayAmountChoice { resource, max, .. } => {
-                assert_eq!(*resource, PayableResource::ManaGeneric { per_x: 1 });
+                assert_eq!(
+                    *resource,
+                    PayableResource::ManaGeneric {
+                        base_cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X],
+                            generic: 0,
+                        },
+                    }
+                );
                 assert_eq!(*max, 3);
             }
             other => panic!("expected PayAmountChoice, got {other:?}"),
@@ -1450,10 +1660,399 @@ mod tests {
             outcome,
             ResolutionChoiceOutcome::WaitingFor(_)
                 | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_)
+                | ResolutionChoiceOutcome::WaitingForWithParkedObservers(_)
                 | ResolutionChoiceOutcome::ActionResult(_)
         ));
         assert_eq!(state.players[0].hand.len(), 2);
         assert_eq!(state.players[0].mana_pool.mana.len(), 1);
+    }
+
+    /// CR 107.3f + CR 118.12: Elenda and Azor's attack trigger resolves
+    /// `Effect::PayCost` for `{X}{W}{U}{B}`, not a pure X cost — this is a
+    /// resolution-time cost on a triggered ability's effect text ("you may
+    /// pay ... If you do, ..."), not a spell/activated-ability cost
+    /// announced at cast/activation time (CR 601 doesn't apply here). #6410:
+    /// the player attacked, paid an amount, and drew that many cards
+    /// WITHOUT ever being charged {W}{U}{B}. The resolution-time X-payment
+    /// prompt must concretize X into the FULL original cost — colored pips
+    /// included — not substitute a synthetic all-generic cost that silently
+    /// drops them.
+    #[test]
+    fn pay_x_plus_colored_mana_requires_the_colored_pips() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_resolution_choices::{
+            handle_resolution_choice, ResolutionChoiceOutcome,
+        };
+        use crate::game::zones::create_object;
+        use crate::types::actions::GameAction;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Elenda and Azor".to_string(),
+            Zone::Battlefield,
+        );
+        for n in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        // Exactly {W}{U}{B} plus 4 colorless — enough to pay X=4 ({4}{W}{U}{B})
+        // and no more, so a fix that ever drops the colored requirement would
+        // still pass a naive "enough total mana" check but leave W/U/B
+        // untapped in the pool.
+        for color in [ManaType::White, ManaType::Blue, ManaType::Black] {
+            state.players[0].mana_pool.add(ManaUnit {
+                color,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        for _ in 0..4 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+
+        let draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![
+                            ManaCostShard::X,
+                            ManaCostShard::White,
+                            ManaCostShard::Blue,
+                            ManaCostShard::Black,
+                        ],
+                        generic: 0,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { resource, max, .. } => {
+                assert_eq!(
+                    *resource,
+                    PayableResource::ManaGeneric {
+                        base_cost: ManaCost::Cost {
+                            shards: vec![
+                                ManaCostShard::X,
+                                ManaCostShard::White,
+                                ManaCostShard::Blue,
+                                ManaCostShard::Black
+                            ],
+                            generic: 0,
+                        },
+                    },
+                    "base_cost must carry the colored pips alongside X, not just per_x"
+                );
+                // 4 colorless available for the X portion after W/U/B are spoken for.
+                assert_eq!(*max, 4);
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+
+        let waiting_for = state.waiting_for.clone();
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::SubmitPayAmount { amount: 4 },
+            &mut events,
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            ResolutionChoiceOutcome::WaitingFor(_)
+                | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_)
+                | ResolutionChoiceOutcome::WaitingForWithParkedObservers(_)
+                | ResolutionChoiceOutcome::ActionResult(_)
+        ));
+        // All 7 mana units (4 colorless for X + W + U + B) must be spent —
+        // the pre-fix code paid only 4 generic and left W/U/B untapped.
+        assert!(
+            state.players[0].mana_pool.mana.is_empty(),
+            "W/U/B must be paid alongside the X-derived generic, pool: {:?}",
+            state.players[0].mana_pool.mana
+        );
+        assert_eq!(state.players[0].hand.len(), 4, "drew X=4 cards");
+    }
+
+    /// CR 608.2d + CR 118.12: a cost of `{X}{W}` with NO white mana available
+    /// can't be paid at any value of X, including 0 — there is no legal
+    /// amount to offer. Pre-fix, `max_resolution_mana_x_value` collapsed
+    /// "genuinely payable at X=0" and "not payable at all" into the same
+    /// `max = 0`, so this shape opened a `[0, 0]` `PayAmountChoice` that let
+    /// the player "choose" an impossible option, then failed with an
+    /// internal `InvalidAction` on submit instead of the ordinary
+    /// payment-failure path. Accepting the optional cost must instead fail
+    /// immediately: no `PayAmountChoice` ever appears, `cost_payment_failed_flag`
+    /// is set, and the `IfYouDo` Draw rider (gated on
+    /// `!cost_payment_failed_flag`) does not fire. Sibling control case:
+    /// `pay_x_plus_colored_mana_with_payable_fixed_pip_offers_zero_max_choice`
+    /// below covers the genuinely-payable `X=0` shape, which must still
+    /// present the prompt.
+    #[test]
+    fn pay_x_plus_colored_mana_with_unpayable_fixed_pip_fails_without_impossible_choice() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityCondition, SubAbilityLink};
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Elenda and Azor".to_string(),
+            Zone::Battlefield,
+        );
+        for n in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        assert!(
+            state.players[0].mana_pool.mana.is_empty(),
+            "controller must have no mana at all, so not even {{W}} at X=0 is payable"
+        );
+
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        draw.condition = Some(AbilityCondition::effect_performed());
+        draw.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X, ManaCostShard::White],
+                        generic: 0,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.sub_ability = Some(Box::new(draw));
+        pay.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        let waiting = handle_optional_effect_choice(&mut state, true, &mut events).unwrap();
+        assert!(
+            !matches!(waiting, WaitingFor::PayAmountChoice { .. }),
+            "an unpayable fixed pip must never open a PayAmountChoice prompt \
+             (CR 608.2d forbids offering an impossible choice), got {waiting:?}"
+        );
+        assert!(
+            state.cost_payment_failed_flag,
+            "PayCost with an unpayable fixed {{W}} pip must set cost_payment_failed_flag, \
+             exactly like any other unaffordable resolution-time cost"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            0,
+            "the IfYouDo Draw rider must not fire when the cost payment failed"
+        );
+        assert!(state.players[0].mana_pool.mana.is_empty());
+    }
+
+    /// Control case for the above: `{X}{W}` where the player has EXACTLY one
+    /// white mana and nothing else. X=0 (paying just `{W}`) IS genuinely
+    /// payable, so — unlike the unpayable-fixed-pip case — accepting the
+    /// optional cost MUST still present a `PayAmountChoice { min: 0, max: 0 }`
+    /// prompt, and submitting 0 must pay the `{W}` (not silently no-op).
+    #[test]
+    fn pay_x_plus_colored_mana_with_payable_fixed_pip_offers_zero_max_choice() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityCondition, SubAbilityLink};
+        use crate::types::actions::GameAction;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Elenda and Azor".to_string(),
+            Zone::Battlefield,
+        );
+        for n in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        // Exactly {W} — enough for X=0 ({W}), nothing left over for X>0.
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::White,
+            source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
+            supertype: None,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+        });
+
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        draw.condition = Some(AbilityCondition::effect_performed());
+        draw.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X, ManaCostShard::White],
+                        generic: 0,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.sub_ability = Some(Box::new(draw));
+        pay.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        let waiting = handle_optional_effect_choice(&mut state, true, &mut events).unwrap();
+        match &waiting {
+            WaitingFor::PayAmountChoice {
+                resource, min, max, ..
+            } => {
+                assert_eq!(
+                    *resource,
+                    PayableResource::ManaGeneric {
+                        base_cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X, ManaCostShard::White],
+                            generic: 0,
+                        },
+                    }
+                );
+                assert_eq!(*min, 0);
+                assert_eq!(*max, 0, "no spare mana beyond the {{W}} pip for X>0");
+            }
+            other => {
+                panic!("a genuinely payable X=0 cost must still present the choice, got {other:?}")
+            }
+        }
+
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SubmitPayAmount { amount: 0 },
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            state.players[0].mana_pool.mana.is_empty(),
+            "the {{W}} pip must be paid even though X=0"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            0,
+            "X=0 draws zero cards, but the IfYouDo rider still fires (payment succeeded)"
+        );
+        assert!(!state.cost_payment_failed_flag);
     }
 
     /// CR 603.2 + CR 603.5 + CR 107.3a + CR 608.2c + CR 119.3 + CR 121.1:
@@ -1574,7 +2173,15 @@ mod tests {
         let waiting = handle_optional_effect_choice(&mut state, true, &mut events).unwrap();
         match &waiting {
             WaitingFor::PayAmountChoice { resource, max, .. } => {
-                assert_eq!(*resource, PayableResource::ManaGeneric { per_x: 1 });
+                assert_eq!(
+                    *resource,
+                    PayableResource::ManaGeneric {
+                        base_cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X],
+                            generic: 0,
+                        },
+                    }
+                );
                 assert_eq!(
                     *max, 3,
                     "PayAmountChoice max must be capped by life gained (3), got {max} \
@@ -1591,8 +2198,7 @@ mod tests {
         // optional_effect_performed=true. Link (c) regression: continuation None.
         // Link (d) regression: continuation present but performed flag false.
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("pending_continuation must be stashed (link c)");
         assert!(
             matches!(cont.chain.effect, Effect::Draw { .. }),
@@ -1735,6 +2341,381 @@ mod tests {
         );
     }
 
+    /// Shared Power-Leak-shaped fixture: an Aura controlled by P0 whose
+    /// beginning-of-upkeep trigger fires for the enchanted permanent's
+    /// controller P1 (the active player). The chain is
+    /// `optional PayCost { Mana {X}, payer: TriggeringPlayer }`
+    /// → SequentialSibling `DealDamage { target: TriggeringPlayer, 2 }`.
+    /// `ability.controller` is P0 and `TriggeringPlayer` is P1 — the asymmetry
+    /// that discriminates the CR 608.2 trigger-context-across-pause fix.
+    #[cfg(test)]
+    fn power_leak_fixture() -> (GameState, ResolvedAbility, ObjectId) {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{QuantityExpr, SubAbilityLink, TargetFilter};
+        use crate::types::events::GameEvent;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        // CR 500.2 + CR 603.7c: the upkeep belongs to the enchanted permanent's
+        // controller (P1) — the active player — so `TriggeringPlayer` on the
+        // PhaseChanged event resolves to P1, never the Aura controller P0.
+        state.active_player = PlayerId(1);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(600),
+            PlayerId(0),
+            "Power Leak".to_string(),
+            Zone::Battlefield,
+        );
+
+        // CR 107.3a: give the payer (P1) mana so the {X} pay-amount prompt has a
+        // positive max and `SubmitPayAmount { amount: 1 }` is legal.
+        for _ in 0..5 {
+            state.players[1].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+
+        // CR 603.7c: the triggering event — a beginning-of-upkeep phase change.
+        state.current_trigger_event = Some(GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        });
+
+        // CR 120.1: "Power Leak deals X damage to that player" — the damage
+        // recipient is `TriggeringPlayer` (P1). Fixed(2) is used in place of the
+        // production ClampMin(X) shape; the recipient, not the magnitude, is
+        // under test.
+        let mut damage = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::TriggeringPlayer,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        damage.sub_link = SubAbilityLink::SequentialSibling;
+
+        // CR 601.2c: "you may pay {X}" — optional cost paid by the triggering
+        // player (P1), NOT the Aura controller.
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::TriggeringPlayer,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.sub_ability = Some(Box::new(damage));
+        pay.optional = true;
+
+        (state, pay, source_id)
+    }
+
+    /// CR 608.2 + CR 603.7c: the primary regression discriminator. When the
+    /// resolution pauses on the victim's `PayAmountChoice` and the live trigger
+    /// context is cleared (as `stack::resolve_top` does once the trigger's stack
+    /// entry has left the stack), the drained `DealDamage { TriggeringPlayer }`
+    /// MUST still hit P1 — the player the trigger fired for — not fall back to
+    /// the Aura controller P0 via `resolve_player_for_context_ref`'s bare
+    /// `ability.controller` fallback. Reverting the `drain_pending_continuation`
+    /// push/restore wrap flips this to P0 losing life.
+    #[test]
+    fn power_leak_pattern_deals_damage_to_correct_player_across_pay_amount_pause() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        let (mut state, pay, _source_id) = power_leak_fixture();
+        let mut events = Vec::new();
+
+        // Step A: optional "may pay" prompt.
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "expected OptionalEffectChoice, got {:?}",
+            state.waiting_for
+        );
+
+        // Step B: Accept → PayAmountChoice, prompting the TRIGGERING player P1.
+        let waiting = handle_optional_effect_choice(&mut state, true, &mut events).unwrap();
+        match &waiting {
+            WaitingFor::PayAmountChoice { player, .. } => assert_eq!(
+                *player,
+                PlayerId(1),
+                "the {{X}} payer is the triggering player P1, not the Aura controller P0"
+            ),
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+
+        // Reach guard: the stashed continuation is a REAL DealDamage node (never
+        // Effect::Unimplemented), and it snapshotted the trigger context.
+        let cont = state
+            .active_ability_continuation()
+            .expect("DealDamage continuation must be stashed on the pause");
+        assert!(
+            matches!(cont.chain.effect, Effect::DealDamage { .. }),
+            "continuation must wrap the DealDamage node, got {:?}",
+            cont.chain.effect
+        );
+        assert!(
+            cont.trigger_context.is_some(),
+            "pending_continuation must snapshot the trigger context at stash time \
+             (CR 608.2 capture) — without it the drain cannot restore TriggeringPlayer"
+        );
+
+        // Simulate stack::resolve_top's CR 603.7c cleanup: the trigger's stack
+        // entry has left the stack while the resolution is paused, so the LIVE
+        // trigger context is cleared. From here only the snapshotted
+        // pending_continuation.trigger_context can restore TriggeringPlayer.
+        state.current_trigger_event = None;
+        state.current_trigger_events.clear();
+        state.current_trigger_match_count = None;
+        state.die_result_this_resolution = None;
+
+        let p0_before = state.players[0].life;
+        let p1_before = state.players[1].life;
+
+        // Step C: submit the pay amount → drains the DealDamage continuation.
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SubmitPayAmount { amount: 1 },
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.players[1].life,
+            p1_before - 2,
+            "TriggeringPlayer (P1) must take the 2 damage after the paused drain"
+        );
+        assert_eq!(
+            state.players[0].life, p0_before,
+            "the Aura controller (P0) must NOT take damage — reverting the drain \
+             push/restore wrap reproduces the bug by damaging P0 here"
+        );
+    }
+
+    /// CR 601.2c + CR 608.2: declining the optional payment still runs the
+    /// SequentialSibling `DealDamage` (a separate printed instruction), and it
+    /// damages the triggering player P1 — never the Aura controller P0. Sibling
+    /// coverage for the decline branch; the decline resolves synchronously
+    /// inside `handle_optional_effect_choice`, so its trigger context is kept
+    /// live by the optional-effect frame's trigger-context mechanism
+    /// rather than by the drain-time snapshot under test. It guards that the
+    /// `PendingContinuation::new` signature change did not regress the decline
+    /// path's damage recipient.
+    #[test]
+    fn power_leak_pattern_declining_payment_still_damages_correct_player() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+
+        let (mut state, pay, _source_id) = power_leak_fixture();
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "expected OptionalEffectChoice, got {:?}",
+            state.waiting_for
+        );
+
+        let p0_before = state.players[0].life;
+        let p1_before = state.players[1].life;
+
+        handle_optional_effect_choice(&mut state, false, &mut events).unwrap();
+
+        // Reach guard + positive assertion: the DealDamage DID run (P1 lost
+        // life), so the P0-unchanged assertion is not vacuous.
+        assert_eq!(
+            state.players[1].life,
+            p1_before - 2,
+            "declining the pay still deals the SequentialSibling damage to P1"
+        );
+        assert_eq!(
+            state.players[0].life, p0_before,
+            "the Aura controller (P0) must NOT take damage on the decline path"
+        );
+    }
+
+    /// CR 120.1: baseline control — a bare `DealDamage { TriggeringPlayer }`
+    /// with NO PayCost, so the chain never pauses and the live trigger context
+    /// is never cleared. P1 takes the damage in one shot. This must pass
+    /// identically before and after the fix, proving the no-pause path is
+    /// untouched.
+    #[test]
+    fn warp_artifact_pattern_baseline_unaffected_by_fix() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{QuantityExpr, TargetFilter};
+        use crate::types::events::GameEvent;
+        use crate::types::identifiers::CardId;
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
+        let source_id = create_object(
+            &mut state,
+            CardId(601),
+            PlayerId(0),
+            "Warp Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        });
+
+        let damage = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::TriggeringPlayer,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        let p0_before = state.players[0].life;
+        let p1_before = state.players[1].life;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &damage, &mut events, 0).unwrap();
+
+        // Reach guard: no residual pending continuation — the DealDamage fully
+        // resolved in one shot (positive P1 life-loss confirms it ran).
+        assert!(
+            state.active_ability_continuation().is_none(),
+            "the no-pause path must not stash a continuation"
+        );
+        assert_eq!(
+            state.players[1].life,
+            p1_before - 1,
+            "TriggeringPlayer (P1) takes 1 damage with no pause"
+        );
+        assert_eq!(
+            state.players[0].life, p0_before,
+            "the Aura controller (P0) is never the recipient"
+        );
+    }
+
+    /// CR 608.2: nested-pause carry-over discriminator for
+    /// `prepend_to_pending_continuation`'s "a continuation already exists"
+    /// branch. When a SECOND pause splices a new head onto a continuation that a
+    /// FIRST pause already stashed, the merged continuation must keep the FIRST
+    /// pause's snapshotted trigger context — an ability's resolution is anchored
+    /// to its earliest pause (CR 608.2), so it must NOT re-latch to whatever
+    /// trigger context happens to be live at splice time.
+    ///
+    /// This is a direct-call unit test on the helper rather than a full
+    /// production drive. No production seam flips `current_trigger_event` (or its
+    /// siblings) BETWEEN two nested stash points inside one `stack::resolve_top`:
+    /// the live trigger context is set once at resolution start and cleared once
+    /// at resolution end, never mid-resolution. So every currently-reachable
+    /// production nested-pause has IDENTICAL live context at both stash points,
+    /// and a production-path fixture therefore cannot make the two pauses' live
+    /// contexts DIFFER — without a difference the test cannot tell "carried over"
+    /// apart from "re-captured", which is exactly the behavior under test.
+    /// Driving the helper directly with a deliberately-mutated live context is
+    /// the only way to make the assertion discriminating; reverting the
+    /// carry-over line to `ResolvingTriggerContext::capture(state)` flips this
+    /// assertion red (it would then observe context B, the second-pause live
+    /// state, instead of context A).
+    #[test]
+    fn nested_pause_prepend_carries_first_pause_trigger_context() {
+        use crate::types::ability::QuantityExpr;
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{PendingContinuation, ResolvingTriggerContext};
+        use crate::types::phase::Phase;
+
+        let mut state = GameState::new_two_player(42);
+
+        // First pause happens under live trigger context A (beginning-of-upkeep
+        // phase change). Capturing here exercises the real `capture` path.
+        let event_a = GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        };
+        state.current_trigger_event = Some(event_a.clone());
+        let context_a = ResolvingTriggerContext::capture(&state)
+            .expect("context A must capture — current_trigger_event is Some");
+
+        // Stash the FIRST pause's continuation, snapshotting context A via the
+        // real constructor.
+        let first_chain = make_ability(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        });
+        state.park_ability_continuation(PendingContinuation::new(Box::new(first_chain), &state));
+        assert_eq!(
+            state
+                .active_ability_continuation()
+                .and_then(|c| c.trigger_context.clone()),
+            Some(context_a.clone()),
+            "sanity: the first pause stashed context A"
+        );
+
+        // Between the two pauses the live context is DELIBERATELY changed to a
+        // DISTINCT context B (a life change for a different player). In
+        // production these would be identical; forcing a difference is what makes
+        // the carry-over assertion below able to discriminate.
+        let event_b = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 3,
+        };
+        state.current_trigger_event = Some(event_b.clone());
+        let context_b = ResolvingTriggerContext::capture(&state)
+            .expect("context B must capture — current_trigger_event is Some");
+        assert_ne!(
+            context_a, context_b,
+            "the fixture is only discriminating if the two contexts differ"
+        );
+
+        // SECOND pause: splice a new head onto the already-stashed continuation.
+        // This reaches the "existing" branch of prepend_to_pending_continuation.
+        let second_head = make_ability(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        });
+        crate::game::effects::prepend_to_pending_continuation(&mut state, second_head);
+
+        // The merged continuation must retain context A (the earliest pause),
+        // NOT re-capture context B from the live state at splice time.
+        let merged = state
+            .active_ability_continuation()
+            .expect("merge must leave a continuation stashed");
+        assert_eq!(
+            merged.trigger_context,
+            Some(context_a),
+            "CR 608.2: the spliced continuation must carry the FIRST pause's \
+             trigger context (A), not re-latch to the live context (B) at splice \
+             time — reverting the carry-over line to capture(state) makes this A→B"
+        );
+    }
+
     /// CR 107.3a: Accepting the optional, then submitting amount=0, is a
     /// legal payment of zero mana (the controller chooses X for the {X} cost,
     /// and 0 is legal since the trigger sets no positive lower bound). The `IfYouDo` Draw fires — the effect WAS
@@ -1851,6 +2832,26 @@ mod tests {
     /// trigger-event-amount cap independently from the X-payable cap, so a
     /// regression that drops the event cap surfaces as max=10 here even when
     /// the basic mana check still passes.
+    #[test]
+    fn trigger_event_amount_for_x_payment_ignores_attackers_declared_count() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![ObjectId(99)],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        });
+        assert_eq!(
+            trigger_event_amount_for_x_payment(&state),
+            None,
+            "attack-batch attacker count must not cap pay-{{X}} (#4226)"
+        );
+        assert_eq!(
+            trigger_event_amount(&state),
+            Some(1),
+            "extract_amount_from_event still exposes attacker count for other readers"
+        );
+    }
+
     #[test]
     fn pay_x_optional_max_capped_by_event_amount_not_player_mana() {
         use crate::game::effects::resolve_ability_chain;
@@ -2721,6 +3722,114 @@ mod tests {
             "chain must fully resolve, got {:?}",
             state.waiting_for
         );
+    }
+
+    /// CR 118.3b + CR 119.4 + CR 616.1: Public GameAction regression for a
+    /// life payment whose replacement has an interactive post-effect. The
+    /// submitted payment commits, but the PayAmount outer chain must remain
+    /// parked until that replacement choice resolves.
+    #[test]
+    fn pay_amount_game_action_waits_for_interactive_life_replacement() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, PlayerFilter, QuantityModification,
+            ReplacementDefinition, SubAbilityLink, TargetFilter,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = create_object(
+            &mut state,
+            CardId(501),
+            PlayerId(0),
+            "Interactive Life-Loss Modifier".to_string(),
+            Zone::Battlefield,
+        );
+        let replacement_choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )],
+            },
+        );
+        state
+            .objects
+            .get_mut(&replacement_source)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::LoseLife)
+            .quantity_modification(QuantityModification::Plus { value: 0 })
+            .execute(replacement_choice)]
+        .into();
+
+        let mut pay = ResolvedAbility::new(
+            pay_any_life_ability(),
+            vec![],
+            replacement_source,
+            PlayerId(0),
+        );
+        let mut rider = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            replacement_source,
+            PlayerId(0),
+        );
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+        pay.sub_ability = Some(Box::new(rider));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice { .. }
+        ));
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SubmitPayAmount { amount: 3 },
+        )
+        .unwrap();
+
+        assert_eq!(state.players[0].life, 17, "only the payment has committed");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "replacement choice must remain visible, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            matches!(
+                state.pending_deferred_life_cost_resume,
+                Some(crate::types::game_state::DeferredLifeCostResume::PayAmount { total: 3, .. })
+            ),
+            "the outer pay-amount action must have a typed resume owner"
+        );
+        assert_ne!(
+            state.last_effect_count,
+            Some(3),
+            "the outer payment result must not publish before the replacement child"
+        );
+
+        crate::game::engine::apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .unwrap();
+
+        assert_eq!(
+            state.players[0].life, 25,
+            "replacement branch (+1) resolves before the parked outer rider (+7)"
+        );
+        assert_eq!(state.last_effect_count, Some(3));
+        assert!(state.pending_deferred_life_cost_resume.is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
     /// CR 119.8: Under CantLoseLife the prompt clamps max=0; submitting 0

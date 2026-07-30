@@ -26,6 +26,7 @@ use crate::auto_play::run_ai_actions;
 use crate::config::{create_config_for_players, AiConfig, AiDifficulty, Platform};
 
 use super::attribution::{aggregate_events, CaptureLayer, MatchupAttribution};
+use super::harvest::{self, HarvestSink};
 use super::{all_matchups, resolve_deck_ref, Expected, FeatureKind, MatchupSpec};
 
 /// Safety cap on total AI actions per game — matches the constant in
@@ -169,6 +170,10 @@ pub struct SuiteOptions {
     pub attribution: AttributionMode,
     pub git_sha: Option<String>,
     pub card_data_hash: Option<String>,
+    /// When set, harvest per-turn eval features to this JSONL path (Texel retrain
+    /// corpus). Like attribution, harvesting forces the sequential branch so a
+    /// single `HarvestSink` owns the file.
+    pub harvest_output: Option<PathBuf>,
 }
 
 impl SuiteOptions {
@@ -182,6 +187,7 @@ impl SuiteOptions {
             attribution: AttributionMode::Disabled,
             git_sha: None,
             card_data_hash: None,
+            harvest_output: None,
         }
     }
 }
@@ -194,24 +200,52 @@ pub fn run_suite(db: &CardDatabase, options: &SuiteOptions) -> Result<SuiteRepor
         AttributionMode::Disabled => None,
     };
 
+    // One sink per suite run: created ONCE here, before the matchup loop, writing
+    // the single file-scoped meta line at construction. `run_all_matchups` (which
+    // harvesting forces onto the sequential branch) appends every game's records
+    // through this same handle.
+    let mut harvest_sink = match &options.harvest_output {
+        Some(path) => {
+            let meta = harvest::HarvestMeta {
+                // schema 2 added the `mana_development_offset` control column as
+                // a SELF-ONLY absolute count; schema 3 keeps the column name and
+                // changes its semantics to a signed self-minus-opponent
+                // DIFFERENTIAL (Unit 5).
+                //
+                // The trainer accepts only schema 3+ shards, preventing it from
+                // pooling this signed differential with schema 2's absolute count.
+                schema: 3,
+                git_sha: options.git_sha.clone(),
+                card_data_hash: options.card_data_hash.clone(),
+                difficulty: format!("{:?}", options.difficulty),
+            };
+            Some(harvest::HarvestSink::create(path, &meta)?)
+        }
+        None => None,
+    };
+
     // Install the subscriber for the duration of this call. When attribution
     // is disabled, skip subscriber installation entirely — the
     // `event_enabled!` gate inside `emit_decision_trace` short-circuits and
     // `PolicyRegistry::verdicts()` is never invoked.
-    if let Some(layer) = capture.as_ref() {
+    let results = if let Some(layer) = capture.as_ref() {
         let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             tracing_subscriber::EnvFilter::new("phase_ai::decision_trace=debug")
         });
         let subscriber = tracing_subscriber::registry::Registry::default()
             .with(filter)
             .with(layer.clone());
-        let results = tracing::subscriber::with_default(subscriber, || {
-            run_all_matchups(db, options, capture.as_ref())
-        });
-        return finalize_report(options, results);
+        tracing::subscriber::with_default(subscriber, || {
+            run_all_matchups(db, options, capture.as_ref(), harvest_sink.as_mut())
+        })
+    } else {
+        run_all_matchups(db, options, None, harvest_sink.as_mut())
+    };
+
+    if let Some(sink) = harvest_sink.as_mut() {
+        sink.flush()?;
     }
 
-    let results = run_all_matchups(db, options, None);
     finalize_report(options, results)
 }
 
@@ -233,6 +267,7 @@ fn run_all_matchups(
     db: &CardDatabase,
     options: &SuiteOptions,
     capture: Option<&CaptureLayer>,
+    mut harvest_sink: Option<&mut HarvestSink>,
 ) -> Vec<MatchupResult> {
     let matchups = all_matchups();
     let total = matchups.len();
@@ -245,10 +280,12 @@ fn run_all_matchups(
         .filter(|(_, spec)| matchup_selected(spec.id, options.filter.as_deref()))
         .collect();
 
-    // Attribution drains a process-global tracing subscriber between matchups,
-    // so capture runs must stay sequential — concurrent matchups would interleave
-    // their decision-trace events into the one capture layer.
-    if capture.is_some() {
+    // Attribution drains a process-global tracing subscriber between matchups, so
+    // capture runs must stay sequential — concurrent matchups would interleave
+    // their decision-trace events into the one capture layer. Harvesting joins the
+    // same sequential branch: a single `HarvestSink` owns the output file and
+    // parallel writers would interleave records / corrupt the append stream.
+    if capture.is_some() || harvest_sink.is_some() {
         let mut results = Vec::with_capacity(selected.len());
         for (idx, spec) in &selected {
             eprintln!(
@@ -262,7 +299,8 @@ fn run_all_matchups(
                 let _ = layer.drain();
             }
             let matchup_seed = options.base_seed.wrapping_add(*idx as u64 * 1_000);
-            let mut result = run_single_matchup(db, spec, options, matchup_seed);
+            let mut result =
+                run_single_matchup(db, spec, options, matchup_seed, harvest_sink.as_deref_mut());
             if let Some(layer) = capture {
                 let events = layer.drain();
                 result.attribution = Some(aggregate_events(&events));
@@ -300,27 +338,38 @@ fn run_matchups_parallel(
     let mut collected: Vec<(usize, MatchupResult)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..n_workers)
             .map(|_| {
-                scope.spawn(|| {
-                    let mut local: Vec<(usize, MatchupResult)> = Vec::new();
-                    loop {
-                        let pos = cursor.fetch_add(1, Ordering::Relaxed);
-                        if pos >= run_total {
-                            break;
+                // The plan-mandated `cargo ai-gate --difficulty hard` runs in a
+                // debug + measurement build with no wall-clock bail, so the
+                // determinized Hard+ search recurses deep — bounded, but deeper
+                // than the default ~2MB scoped-thread stack, which overflows.
+                // Give each worker a roomy 32 MiB stack. Test-harness only; zero
+                // production impact.
+                std::thread::Builder::new()
+                    .stack_size(32 << 20)
+                    .spawn_scoped(scope, || {
+                        let mut local: Vec<(usize, MatchupResult)> = Vec::new();
+                        loop {
+                            let pos = cursor.fetch_add(1, Ordering::Relaxed);
+                            if pos >= run_total {
+                                break;
+                            }
+                            let (idx, spec) = selected[pos];
+                            let matchup_seed = options.base_seed.wrapping_add(idx as u64 * 1_000);
+                            // Parallel path never harvests (harvesting forces the
+                            // sequential branch in `run_all_matchups`).
+                            let result = run_single_matchup(db, spec, options, matchup_seed, None);
+                            let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
+                            eprintln!(
+                                "[{completed:>2}/{run_total}] {id}  done (games: {games})",
+                                id = spec.id,
+                                games = options.games_per_matchup,
+                            );
+                            print_matchup_row(&result);
+                            local.push((pos, result));
                         }
-                        let (idx, spec) = selected[pos];
-                        let matchup_seed = options.base_seed.wrapping_add(idx as u64 * 1_000);
-                        let result = run_single_matchup(db, spec, options, matchup_seed);
-                        let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-                        eprintln!(
-                            "[{completed:>2}/{run_total}] {id}  done (games: {games})",
-                            id = spec.id,
-                            games = options.games_per_matchup,
-                        );
-                        print_matchup_row(&result);
-                        local.push((pos, result));
-                    }
-                    local
-                })
+                        local
+                    })
+                    .expect("failed to spawn suite worker thread")
             })
             .collect();
         handles
@@ -364,6 +413,7 @@ fn run_single_matchup(
     spec: &MatchupSpec,
     options: &SuiteOptions,
     matchup_seed: u64,
+    mut harvest_sink: Option<&mut HarvestSink>,
 ) -> MatchupResult {
     let payload = match build_payload(db, spec) {
         Ok(p) => p,
@@ -380,13 +430,40 @@ fn run_single_matchup(
     for game_idx in 0..options.games_per_matchup {
         let seed = matchup_seed.wrapping_add(game_idx as u64);
         let start = Instant::now();
-        let (winner, turns) = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-            run_game(&payload, seed, options.difficulty)
-        })) {
-            Ok(result) => result,
-            Err(_) => {
-                eprintln!("       seed {seed} aborted: AI panic during suite game");
-                (None, 0)
+        let (winner, turns) = if harvest_sink.is_some() {
+            // Harvester declared OUTSIDE catch_unwind. The observe closure's `&mut`
+            // borrow ends when the closure returns; `finish(winner)` then runs
+            // unconditionally (panic → `catch_unwind` Err → winner None → empty
+            // records, partial buffer dropped with the harvester).
+            let mut harvester = harvest::GameHarvester::new(seed, spec.id.to_string(), game_idx);
+            let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                run_game_observed(&payload, seed, options.difficulty, &mut |state, session| {
+                    harvester.observe(state, session)
+                })
+            }));
+            let (winner, turns) = match outcome {
+                Ok(result) => result,
+                Err(_) => {
+                    eprintln!("       seed {seed} aborted: AI panic during suite game");
+                    (None, 0)
+                }
+            };
+            let records = harvester.finish(winner);
+            if let Some(sink) = harvest_sink.as_deref_mut() {
+                if let Err(e) = sink.write_records(&records) {
+                    eprintln!("       seed {seed}: harvest write failed: {e}");
+                }
+            }
+            (winner, turns)
+        } else {
+            match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                run_game(&payload, seed, options.difficulty)
+            })) {
+                Ok(result) => result,
+                Err(_) => {
+                    eprintln!("       seed {seed} aborted: AI panic during suite game");
+                    (None, 0)
+                }
             }
         };
         total_duration_ms += start.elapsed().as_millis();
@@ -529,6 +606,56 @@ fn wilson_interval(successes: usize, total: usize) -> (f32, f32) {
 }
 
 fn run_game(payload: &DeckPayload, seed: u64, difficulty: AiDifficulty) -> (Option<PlayerId>, u32) {
+    drive_game(payload, seed, difficulty, MAX_TOTAL_ACTIONS)
+}
+
+/// [`run_game`]'s observing sibling — same `MAX_TOTAL_ACTIONS` cap, so harvested
+/// and unharvested suite games are byte-identical in `(winner, turns)`. Keeping
+/// the action cap in lockstep with `run_game` is what guarantees no drift between
+/// the two paths.
+fn run_game_observed(
+    payload: &DeckPayload,
+    seed: u64,
+    difficulty: AiDifficulty,
+    observe: &mut dyn FnMut(&GameState, &std::sync::Arc<crate::session::AiSession>),
+) -> (Option<PlayerId>, u32) {
+    drive_game_observed(payload, seed, difficulty, MAX_TOTAL_ACTIONS, observe)
+}
+
+/// Deterministic core game driver shared by the win-rate suite and the perf
+/// gate. Builds the two-player state, installs measurement-mode AI configs, and
+/// loops `run_ai_actions` until the action stream is empty or `action_cap` total
+/// actions have been taken (checked at `run_ai_actions` batch boundaries, so the
+/// realized count may overshoot the cap within a batch — identical semantics to
+/// the historical `run_game` body, which capped at `MAX_TOTAL_ACTIONS`). The
+/// result `(winner, turn_number)` is a pure function of
+/// `(binary, payload, seed, difficulty, action_cap)`; no wall-clock or thread
+/// scheduling influences it.
+pub(crate) fn drive_game(
+    payload: &DeckPayload,
+    seed: u64,
+    difficulty: AiDifficulty,
+    action_cap: usize,
+) -> (Option<PlayerId>, u32) {
+    // Delegate with a no-op observer. The `&mut dyn FnMut` closure is called once
+    // per `run_ai_actions` *batch* (a batch spans many engine applies), so at
+    // measurement granularity this is perf-neutral vs the historical body — the
+    // unchanged `ai-perf-gate` baseline is the witness.
+    drive_game_observed(payload, seed, difficulty, action_cap, &mut |_, _| {})
+}
+
+/// [`drive_game`] with an observer seam: `observe(&state, &ai_session)` fires
+/// after every `run_ai_actions` batch. The observer receives an immutable
+/// `&GameState` (read-only by construction) and the per-game `AiSession` p0's
+/// planner consumes. With a no-op closure the results are byte-identical to the
+/// historical `drive_game` body.
+pub(crate) fn drive_game_observed(
+    payload: &DeckPayload,
+    seed: u64,
+    difficulty: AiDifficulty,
+    action_cap: usize,
+    observe: &mut dyn FnMut(&GameState, &std::sync::Arc<crate::session::AiSession>),
+) -> (Option<PlayerId>, u32) {
     let mut state = GameState::new_two_player(seed);
     load_deck_into_state(&mut state, payload);
     engine::game::engine::start_game(&mut state);
@@ -551,11 +678,12 @@ fn run_game(payload: &DeckPayload, seed: u64, difficulty: AiDifficulty) -> (Opti
             &mut ai_rng,
             &ai_session,
         );
+        observe(&state, &ai_session);
         if results.is_empty() {
             break;
         }
         total_actions += results.len();
-        if total_actions >= MAX_TOTAL_ACTIONS {
+        if total_actions >= action_cap {
             break;
         }
     }
@@ -765,5 +893,27 @@ mod tests {
 
         assert_eq!(status, SuiteStatus::Fail);
         assert!(reason.unwrap().contains("Wilson 95% CI"));
+    }
+
+    /// Observer seam is inert: for the same `(payload, seed)`, a no-op observer
+    /// yields an identical `(winner, turns)` to the un-observed driver. Uses an
+    /// empty `DeckPayload` (both libraries empty → deterministic draw-from-empty
+    /// loss), so the test needs no card database and runs in CI.
+    ///
+    /// Scope caveat: `drive_game` IS `drive_game_observed` with a no-op closure,
+    /// so both calls execute the same code — this catches nondeterminism in the
+    /// shared driver, not observer-induced drift (impossible by construction:
+    /// the observer receives only `&GameState`). The load-bearing inertness
+    /// evidence is the unchanged duel-suite win-rate baseline with harvest off.
+    #[test]
+    fn observer_seam_is_inert_for_noop_observer() {
+        let payload = DeckPayload::default();
+        let seed = 4242;
+        let baseline = drive_game(&payload, seed, AiDifficulty::Easy, 200);
+        let observed = drive_game_observed(&payload, seed, AiDifficulty::Easy, 200, &mut |_, _| {});
+        assert_eq!(
+            baseline, observed,
+            "no-op observer must not perturb (winner, turns)"
+        );
     }
 }

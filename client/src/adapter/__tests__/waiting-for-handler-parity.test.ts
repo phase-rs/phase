@@ -27,6 +27,11 @@ const INTERNAL_NEVER_PLAYER_FACING: ReadonlySet<WaitingFor["type"]> =
   new Set<WaitingFor["type"]>([]);
 
 describe("WaitingFor handler parity", () => {
+  it("registers both interactive meld waiting states", () => {
+    expect(HANDLED_WAITING_FOR_TYPES.has("MeldPairChoice")).toBe(true);
+    expect(HANDLED_WAITING_FOR_TYPES.has("MeldAttackTargetChoice")).toBe(true);
+  });
+
   it("every engine WaitingFor variant has a frontend UI handler", () => {
     const rustSource = readFileSync(
       resolve(repoRoot(), "crates/engine/src/types/game_state.rs"),

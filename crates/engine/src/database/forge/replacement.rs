@@ -1,4 +1,4 @@
-use crate::types::ability::ReplacementDefinition;
+use crate::types::ability::{DrawReplacementScope, ReplacementDefinition};
 use crate::types::replacements::ReplacementEvent;
 
 use super::filter::translate_filter;
@@ -25,6 +25,14 @@ pub(crate) fn translate_replacement(
     let event = translate_replacement_event(event_str)?;
 
     let mut def = ReplacementDefinition::new(event);
+    // CR 121.2 + CR 121.6b: a Forge `R:` line carries no grammatical antecedent to
+    // read the draw scope from — its `Event$ Draw` is always a per-draw
+    // substitution, never a CR 121.2a instruction-count modifier (Forge encodes
+    // those as a separate DrawnCards event). Declared explicitly rather than left
+    // to default, so `validate_draw_scope` cannot pass on an unset scope.
+    if matches!(def.event, ReplacementEvent::Draw) {
+        def.draw_scope = Some(DrawReplacementScope::IndividualDraw);
+    }
 
     // ReplaceWith$ → execute (resolve SVar)
     if let Some(replace_name) = params.get("ReplaceWith") {

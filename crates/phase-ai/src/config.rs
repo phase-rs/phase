@@ -11,6 +11,12 @@ use crate::strategy_profile::StrategyProfile;
 /// cost of search quality on slow hardware. The same deadline gates expensive
 /// tactical projections so optional lookahead cannot dominate a move.
 ///
+/// Search runs iterative deepening (rung `0 -> max_depth-1`): this budget now
+/// bounds the *rungs* — the deepest fully-completed rung's scores are returned
+/// on expiry (rather than a single fixed-depth pass collapsing to a
+/// tactical-only score). Measurement mode pins the iteration ceiling and never
+/// consults the wall clock, preserving byte-determinism.
+///
 /// Measurement test and duel-suite runs call [`AiConfig::into_measurement`]
 /// to disable this wall-clock cap and remain bounded solely by node/depth
 /// budgets.
@@ -68,6 +74,24 @@ impl AiDifficulty {
     }
 }
 
+/// Every label [`AiDifficulty::from_label`] maps to a real difficulty rather
+/// than falling back to its unknown-label default (`Medium`).
+///
+/// **Single source of truth** — transports that must *validate* a label before
+/// accepting it (rather than silently downgrading it) reference this constant
+/// instead of restating the list. Kept as an explicit list rather than derived
+/// from the enum so a hard-error message can name every accepted spelling.
+///
+/// Two tests keep this list and the enum from drifting apart in either
+/// direction: `accepted_difficulty_labels_round_trip_through_from_label` asserts
+/// every entry here round-trips through `from_label` (list → enum → list), and
+/// `every_difficulty_variant_appears_in_accepted_labels` walks a wildcard-free
+/// match over all `AiDifficulty` variants — which fails to compile if a variant
+/// is added — asserting each variant's name appears here and round-trips
+/// (enum → list → enum).
+pub const ACCEPTED_DIFFICULTY_LABELS: &[&str] =
+    &["VeryEasy", "Easy", "Medium", "Hard", "VeryHard", "CEDH"];
+
 /// Platform the AI runs on (affects budget constraints).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -121,6 +145,19 @@ pub struct SearchConfig {
     /// runs still allow projections because they have no wall-clock deadline.
     /// Set to 0 to always run projections.
     pub projection_min_budget_ms: u128,
+    /// Number of determinized opponent-hidden-zone samples to average the
+    /// `score_candidates` ensemble over. `0` disables determinization entirely
+    /// (perfect-information search, byte-identical to the pre-feature path) — the
+    /// disabled sentinel, matching the `max_nodes`/`rollout_samples` numeric-knob
+    /// convention rather than a bool flag. `K > 0` replaces the opponent's real
+    /// hidden hand/library with K resampled plausible worlds and means the
+    /// per-action scores across them (§7 of the determinization plan). Every
+    /// shipped preset sets `0` (perfect-information search) as of the 2026-07-18
+    /// product decision — determinized sampling costs the difficulty ladder its
+    /// monotonicity when shipped. `K > 0` remains an experiment/measurement knob:
+    /// set it directly on `SearchConfig` after construction (as the `search.rs`
+    /// ensemble tests do) to exercise the retained machinery.
+    pub determinization_samples: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +220,7 @@ impl Default for SearchConfig {
             time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
             threat_awareness: ThreatAwareness::None,
             projection_min_budget_ms: 2000,
+            determinization_samples: 0,
         }
     }
 }
@@ -368,6 +406,149 @@ pub struct PolicyPenalties {
     /// Consumed by `EnergyPayoffPolicy`.
     #[serde(default = "default_energy_cast_bonus")]
     pub energy_cast_bonus: f64,
+    /// Penalty for a "wasted cast" the AI should avoid — a spell that whiffs or
+    /// backfires: a legendary duplicate the legend rule will immediately kill, an
+    /// ETB whose only target is illegal, or a creature-targeting spell with no
+    /// legal creature target (beneficial with no own creature, harmful
+    /// creature-only with no opponent creature, or bounce with no opponent
+    /// permanent). Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_wasted_cast_penalty")]
+    pub wasted_cast_penalty: f64,
+    /// Bonus for untapping the AI's own tapped creature (frees a blocker /
+    /// re-enables a tapped attacker). Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_untap_own_tapped_bonus")]
+    pub untap_own_tapped_bonus: f64,
+    /// Penalty for an untap effect that would untap an opponent's tapped creature
+    /// (hands them back a blocker/attacker). Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_untap_opponent_tapped_penalty")]
+    pub untap_opponent_tapped_penalty: f64,
+    /// Penalty for targeting an already-untapped creature with an untap effect —
+    /// no state change, so the effect is wasted. Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_untap_untapped_penalty")]
+    pub untap_untapped_penalty: f64,
+    /// Penalty for non-lethal removal aimed at a tapped opponent creature during
+    /// the pre-combat main phase — a tapped creature can't block, so there is no
+    /// urgency advantage over waiting. Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_tapped_removal_no_urgency_penalty")]
+    pub tapped_removal_no_urgency_penalty: f64,
+    /// CR 119.4: Per-point cost of a self-inflicted pay-life activation cost,
+    /// before runtime life-pressure scaling. Mirrors the `player_impact`
+    /// GainLife/LoseLife weight (0.15). Consumed by `SelfCostValuePolicy`.
+    #[serde(default = "default_self_cost_pay_life_per_point")]
+    pub self_cost_pay_life_per_point: f64,
+    /// CR 701.9a: Per-card cost of a self-inflicted discard activation cost (one
+    /// card ≈ one unit of expected value). Consumed by `SelfCostValuePolicy`.
+    #[serde(default = "default_self_cost_discard_per_card")]
+    pub self_cost_discard_per_card: f64,
+    /// CR 701.13a: Per-card cost of exiling a card from the AI's own graveyard
+    /// as an activation cost — cheap unless the deck is graveyard-committed.
+    /// Consumed by `SelfCostValuePolicy`.
+    #[serde(default = "default_self_cost_exile_graveyard_per_card")]
+    pub self_cost_exile_graveyard_per_card: f64,
+    /// One card-equivalent of patience that cancels Cycling's generic activation
+    /// edge while leaving tactical payoffs free to justify cycling.
+    /// Consumed by `CyclingDisciplinePolicy`.
+    #[serde(default = "default_cycling_patience_penalty")]
+    pub cycling_patience_penalty: f64,
+    /// Stronger finite penalty for cycling away the sole land still needed by
+    /// the current deck plan. Consumed by `CyclingDisciplinePolicy`.
+    #[serde(default = "default_cycling_needed_land_penalty")]
+    pub cycling_needed_land_penalty: f64,
+    /// Penalty for a `PayCost` discard selection that spends every land in hand
+    /// while a land drop remains available. Consumed by `PaymentSelectionPolicy`.
+    #[serde(default = "default_payment_selection_needed_land_penalty")]
+    pub payment_selection_needed_land_penalty: f64,
+    /// Finite penalty per land in a *sacrifice* selection. Consumed by
+    /// `SacrificeValuePolicy`, the sibling of the two `*_needed_land_penalty`
+    /// knobs above at the battlefield give-up seam.
+    ///
+    /// **Why this exists rather than a tier.** `strategy_helpers::SacrificeTier`
+    /// gives sort-based consumers a lexicographic "lands last" order that no
+    /// scalar can encode. `SacrificeValuePolicy` is score-based, and its verdict
+    /// is clamped to `registry::CRITICAL_MAX`, so a dominating band is not
+    /// expressible there — see the policy's own docstring. This knob is the
+    /// bounded equivalent: it must strictly exceed
+    /// `strategy_helpers::NONCREATURE_SACRIFICE_CAP` in magnitude, which is
+    /// exactly enough to restore correct ordering against every *non-creature*
+    /// alternative even when `sacrifice_land_penalty` is trained to zero. It
+    /// deliberately does NOT dominate a large creature — giving up a 6/6 to save
+    /// a Swamp is bad play, and a tier would force it.
+    /// `sacrifice_needed_land_penalty_outranks_the_noncreature_cap` pins the
+    /// magnitude invariant.
+    ///
+    /// **The magnitude is load-bearing in a second, less obvious way, so read
+    /// this before re-tuning it.** The guard is an *additive* term in a score
+    /// that is summed over the whole selection and then banded, so raising it
+    /// pushes selections toward `registry::CRITICAL_MAX` — where the band
+    /// mapping, not this constant, decides whether the guard survives at all.
+    /// `SacrificeValuePolicy::verdict` rescales rather than clamps for exactly
+    /// that reason, and `policies::sacrifice_value::SACRIFICE_VALUE_RAW_CEILING`
+    /// is derived from *this* default. Change this and the ceiling must be
+    /// re-derived with it; `sacrifice_value_ceiling_pins_the_compression_it_costs`
+    /// reddens if it is not.
+    #[serde(default = "default_sacrifice_needed_land_penalty")]
+    pub sacrifice_needed_land_penalty: f64,
+    /// Strong finite penalty for crewing outside an immediate attack or block
+    /// window. Consumed by `CrewTimingPolicy`.
+    #[serde(default = "default_crew_no_immediate_use_penalty")]
+    pub crew_no_immediate_use_penalty: f64,
+    /// Strong finite penalty for activating a combat-withdrawal ability when no
+    /// exact legal target rescues one of the controller's creatures from combat.
+    /// Consumed by `CombatWithdrawalPolicy`.
+    #[serde(default = "default_combat_withdrawal_futile_penalty")]
+    pub combat_withdrawal_futile_penalty: f64,
+    /// Penalty when an exact self-counter replenishment ability has its
+    /// replacement-aware counter addition prevented. Consumed by
+    /// `SelfCostValuePolicy`.
+    #[serde(default = "default_self_cost_counter_replacement_prevented_penalty")]
+    pub self_cost_counter_replacement_prevented_penalty: f64,
+    /// CR 732.2a / CR 104.2a: bonus for proposing an `UntilLethal` loop shortcut whose latched
+    /// `predicted_winner` IS the proposer — the crown ends the game in their favor, and the only
+    /// other outcome (`until_lethal_fallback`) restores the board a decline would have produced.
+    /// Game-deciding ⇒ the default lands in the `critical` band (5.0, 15.0]. Consumed by
+    /// `LoopShortcutPolicy`; fed through `PolicyVerdict::score`, which auto-bands and clamps to
+    /// `CRITICAL_MAX`. (The losing / no-crown cases are `PolicyVerdict::reject`s and take no
+    /// scalar.)
+    #[serde(default = "default_loop_shortcut_winning_declare_bonus")]
+    pub loop_shortcut_winning_declare_bonus: f64,
+    /// CR 104.3d: card-equivalent weight for advancing the poison clock.
+    /// Critical band when the action reaches ten poison (a win), scaled by
+    /// clock progress below that.
+    #[serde(default = "default_poison_clock_pressure")]
+    pub poison_clock_pressure: f64,
+    /// CR 205.2a: card-equivalent weight for advancing graveyard card-type
+    /// diversity toward a delirium/descend threshold. Strong band when the
+    /// action supplies the last missing type.
+    #[serde(default = "default_graveyard_types_progress")]
+    pub graveyard_types_progress: f64,
+    /// CR 700.5: card-equivalent value of one primary-color pip a cast adds
+    /// toward the deck's devotion payoffs (preference band, per pip).
+    #[serde(default = "default_devotion_pip_progress")]
+    pub devotion_pip_progress: f64,
+    /// CR 700.5: extra value when a cast crosses a god's `DevotionGE`
+    /// threshold, turning a non-creature enchantment into a body.
+    #[serde(default = "default_devotion_god_activation")]
+    pub devotion_god_activation: f64,
+    /// CR 121.1: card-equivalent value of drawing into one active "whenever you
+    /// draw" engine (preference band, per engine).
+    #[serde(default = "default_draw_payoff_bonus")]
+    pub draw_payoff_bonus: f64,
+    /// CR 702.122a: card-equivalent value of casting a Vehicle the board can
+    /// already crew, scaled by surplus crew power.
+    #[serde(default = "default_vehicle_deployment_bonus")]
+    pub vehicle_deployment_bonus: f64,
+    /// CR 601.2f: card-equivalent value of ONE generic mana saved by deploying a
+    /// cost reducer, multiplied by the capped saved-mana total.
+    #[serde(default = "default_cost_reduction_deploy_bonus")]
+    pub cost_reduction_deploy_bonus: f64,
+    /// CR 601.2f: nudge-band penalty for casting past an unplayed, cheaper cost
+    /// reducer — the discount should be deployed first.
+    #[serde(default = "default_cost_reduction_defer_penalty")]
+    pub cost_reduction_defer_penalty: f64,
+    /// CR 701.9: card-equivalent value of discarding into one active "whenever
+    /// you discard" engine (preference band, per engine).
+    #[serde(default = "default_discard_payoff_bonus")]
+    pub discard_payoff_bonus: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -421,15 +602,171 @@ impl Default for PolicyPenalties {
             etb_payoff_cast_bonus: default_etb_payoff_cast_bonus(),
             mill_cast_bonus: default_mill_cast_bonus(),
             energy_cast_bonus: default_energy_cast_bonus(),
+            wasted_cast_penalty: default_wasted_cast_penalty(),
+            untap_own_tapped_bonus: default_untap_own_tapped_bonus(),
+            untap_opponent_tapped_penalty: default_untap_opponent_tapped_penalty(),
+            untap_untapped_penalty: default_untap_untapped_penalty(),
+            tapped_removal_no_urgency_penalty: default_tapped_removal_no_urgency_penalty(),
+            self_cost_pay_life_per_point: default_self_cost_pay_life_per_point(),
+            self_cost_discard_per_card: default_self_cost_discard_per_card(),
+            self_cost_exile_graveyard_per_card: default_self_cost_exile_graveyard_per_card(),
+            cycling_patience_penalty: default_cycling_patience_penalty(),
+            cycling_needed_land_penalty: default_cycling_needed_land_penalty(),
+            payment_selection_needed_land_penalty: default_payment_selection_needed_land_penalty(),
+            sacrifice_needed_land_penalty: default_sacrifice_needed_land_penalty(),
+            crew_no_immediate_use_penalty: default_crew_no_immediate_use_penalty(),
+            combat_withdrawal_futile_penalty: default_combat_withdrawal_futile_penalty(),
+            self_cost_counter_replacement_prevented_penalty:
+                default_self_cost_counter_replacement_prevented_penalty(),
+            loop_shortcut_winning_declare_bonus: default_loop_shortcut_winning_declare_bonus(),
+            poison_clock_pressure: default_poison_clock_pressure(),
+            graveyard_types_progress: default_graveyard_types_progress(),
+            devotion_pip_progress: default_devotion_pip_progress(),
+            devotion_god_activation: default_devotion_god_activation(),
+            draw_payoff_bonus: default_draw_payoff_bonus(),
+            vehicle_deployment_bonus: default_vehicle_deployment_bonus(),
+            cost_reduction_deploy_bonus: default_cost_reduction_deploy_bonus(),
+            cost_reduction_defer_penalty: default_cost_reduction_defer_penalty(),
+            discard_payoff_bonus: default_discard_payoff_bonus(),
         }
     }
+}
+
+/// CR 205.2a. Shared by `Default` and `#[serde(default)]` so a tuning artifact
+/// written before this field existed still deserializes (`ai_tune` reads the
+/// `policy_penalties` section directly into this struct).
+fn default_graveyard_types_progress() -> f64 {
+    2.5
+}
+
+fn default_wasted_cast_penalty() -> f64 {
+    -8.0
+}
+/// CR 104.3d. Shared by `Default` and `#[serde(default)]` so a tuning artifact
+/// written before this field existed still deserializes (`ai_tune` reads the
+/// `policy_penalties` section directly into this struct).
+fn default_poison_clock_pressure() -> f64 {
+    6.0
+}
+fn default_untap_own_tapped_bonus() -> f64 {
+    8.0
+}
+fn default_untap_opponent_tapped_penalty() -> f64 {
+    -20.0
+}
+fn default_untap_untapped_penalty() -> f64 {
+    -6.0
+}
+fn default_tapped_removal_no_urgency_penalty() -> f64 {
+    -5.0
+}
+fn default_self_cost_pay_life_per_point() -> f64 {
+    0.15
+}
+fn default_self_cost_discard_per_card() -> f64 {
+    1.0
+}
+fn default_self_cost_exile_graveyard_per_card() -> f64 {
+    0.15
+}
+
+fn default_cycling_patience_penalty() -> f64 {
+    -1.0
+}
+fn default_cycling_needed_land_penalty() -> f64 {
+    -2.0
+}
+fn default_payment_selection_needed_land_penalty() -> f64 {
+    -2.0
+}
+/// Magnitude 4.5 is strictly above `NONCREATURE_SACRIFICE_CAP` (4.0), the
+/// ceiling on every non-creature sacrifice scalar, so a land outranks the most
+/// expensive artifact even when `sacrifice_land_penalty` is trained to zero.
+/// Mirrors `sacrifice_land_penalty`'s own default for legibility.
+fn default_sacrifice_needed_land_penalty() -> f64 {
+    -4.5
+}
+fn default_crew_no_immediate_use_penalty() -> f64 {
+    5.0
+}
+fn default_combat_withdrawal_futile_penalty() -> f64 {
+    5.0
+}
+fn default_self_cost_counter_replacement_prevented_penalty() -> f64 {
+    3.0
+}
+
+/// 8.0 = mid-`critical` band. Sized for the HEURISTIC branch, which adds the tactical score RAW:
+/// it turns the measured 0.5-vs-0.4 coinflip on a GUARANTEED win into ~88% declare at VeryEasy
+/// (T = 4.0) and ~98% at Easy (T = 2.0). That is the branch where nothing else can differentiate
+/// the two candidates.
+///
+/// On the SEARCH branch (Medium and up) the score is multiplied by `tactical_weight`: 0.1 at a
+/// quiesced `LoopShortcut` node, or 0.35 if an opponent's object is on the stack (the offer is
+/// raised at a priority window, which does not imply an empty stack). So this becomes a
+/// +0.8..+2.8 move-ordering / tie-break nudge on top of the beam's own continuation value, which
+/// already sees the CR 104.2a crown. It is deliberately NOT sized to dominate that value, and
+/// deliberately NOT saturated to `CRITICAL_MAX`: a VeryEasy AI is allowed to miss a free win.
+///
+/// The symmetric losing case is a `Reject` (`-inf`), which is temperature- AND weight-IMMUNE
+/// (`-inf * 0.1 == -inf * 0.35 == -inf`; `exp(-inf / T) == 0` for every T > 0) — no difficulty
+/// ever throws the game away.
+fn default_loop_shortcut_winning_declare_bonus() -> f64 {
+    8.0
 }
 
 fn default_lethality_tapout_penalty() -> f64 {
     -2.5
 }
+/// CR 305.2 + CR 701.21a: a land is the costliest ordinary permanent to give
+/// up, because the land drop that replaces it is rate-limited to one per turn.
+///
+/// Strictly above `strategy_helpers::NONCREATURE_SACRIFICE_CAP` (4.0) — at the
+/// former value of 4.0 a land merely TIED any permanent of mana value 4 or
+/// more, and every consumer sorts stably, so the tie was broken by enumeration
+/// order and the land was sacrificed whenever it happened to be listed first.
+/// The land-vs-nonland ORDER is now carried by `strategy_helpers::SacrificeTier`
+/// rather than by this gap, which a CMA-ES run could close at any time; this
+/// number is a within-class weight.
+///
+/// **CR 305.4 — the rate-limit rationale above is FALSE on one of this
+/// penalty's call sites, and that is a known mispricing, not an oversight.**
+/// CR 305.4 (`docs/MagicCompRules.txt:1700`): "Effects may also allow players to
+/// 'put' lands onto the battlefield. This isn't the same as 'playing a land' and
+/// doesn't count as a land played during the current turn." A fetchland *puts*
+/// its replacement onto the battlefield, so sacrificing it consumes no land
+/// drop and the CR 305.2 rationale does not apply. `self_cost::sacrifice_leaf_cost`
+/// short-circuits on `TargetFilter::SelfRef` and charges this full penalty to a
+/// land that sacrifices itself, so the AI under-activates fetchland-shaped
+/// abilities. Discounting that path is an unmeasured behaviour change and is
+/// deferred, NOT blocked on missing infrastructure: `policies::fetch_land_patience`
+/// (which cites CR 305.4 for the same reason) already carries the predicates —
+/// see the note at `self_cost::sacrifice_leaf_cost`.
 fn default_sacrifice_land_penalty() -> f64 {
-    4.0
+    4.5
+}
+
+fn default_devotion_pip_progress() -> f64 {
+    0.35
+}
+
+fn default_devotion_god_activation() -> f64 {
+    2.5
+}
+fn default_draw_payoff_bonus() -> f64 {
+    0.6
+}
+fn default_vehicle_deployment_bonus() -> f64 {
+    0.5
+}
+fn default_cost_reduction_deploy_bonus() -> f64 {
+    0.2
+}
+fn default_cost_reduction_defer_penalty() -> f64 {
+    -0.25
+}
+fn default_discard_payoff_bonus() -> f64 {
+    0.6
 }
 fn default_sacrifice_token_cost() -> f64 {
     0.5
@@ -568,6 +905,47 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 /// vector yet.
 pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
+        "devotion_pip_progress",
+        "CR 700.5 per-pip devotion progress weight — awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "devotion_god_activation",
+        "CR 700.5 god-threshold-crossing swing weight — awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "draw_payoff_bonus",
+        "CR 121.1 per-engine draw-payoff weight — awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "vehicle_deployment_bonus",
+        "CR 702.122a crewable-Vehicle deployment weight — awaiting a paired-seed \
+         ai-gate calibration.",
+    ),
+    (
+        "cost_reduction_deploy_bonus",
+        "CR 601.2f per-saved-mana deployment weight — awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "cost_reduction_defer_penalty",
+        "CR 601.2f sequencing nudge for casting past a cheaper unplayed reducer — \
+         awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "discard_payoff_bonus",
+        "CR 701.9 per-engine discard-payoff weight — awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "poison_clock_pressure",
+        "CR 104.3d win-detector weight — a critical-band term whose magnitude is \
+         load-bearing for correctness, not taste. Promote to ACTIVE only with a \
+         paired-seed ai-gate calibration.",
+    ),
+    (
+        "graveyard_types_progress",
+        "CR 205.2a delirium-threshold progress weight — awaiting a paired-seed \
+         ai-gate calibration before promotion to ACTIVE.",
+    ),
+    (
         "artifact_cost_payoff_bonus",
         "new ArtifactSynergyPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
     ),
@@ -614,6 +992,70 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "energy_cast_bonus",
         "new EnergyPayoffPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "wasted_cast_penalty",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "untap_own_tapped_bonus",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "untap_opponent_tapped_penalty",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "untap_untapped_penalty",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "tapped_removal_no_urgency_penalty",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "self_cost_pay_life_per_point",
+        "new SelfCostValuePolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "self_cost_discard_per_card",
+        "new SelfCostValuePolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "self_cost_exile_graveyard_per_card",
+        "new SelfCostValuePolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "cycling_patience_penalty",
+        "CyclingDisciplinePolicy one-card-equivalent value cancels the generic +1 activation prior; explicitly untuned pending broader paired-seed calibration",
+    ),
+    (
+        "cycling_needed_land_penalty",
+        "CyclingDisciplinePolicy sole-needed-land value occupies the finite strong band; explicitly untuned pending broader paired-seed calibration",
+    ),
+    (
+        "payment_selection_needed_land_penalty",
+        "PaymentSelectionPolicy retains the final playable hand land at the authoritative PayCost selection boundary; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "sacrifice_needed_land_penalty",
+        "SacrificeValuePolicy land guard at PayCost{Sacrifice}/WardSacrificeChoice; its magnitude is pinned strictly above NONCREATURE_SACRIFICE_CAP by invariant test, so CMA-ES must not be free to train it under that floor — the exposure this knob exists to close",
+    ),
+    (
+        "crew_no_immediate_use_penalty",
+        "CrewTimingPolicy timing guard; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "combat_withdrawal_futile_penalty",
+        "CombatWithdrawalPolicy exact-combat rescue guard; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "self_cost_counter_replacement_prevented_penalty",
+        "SelfCostValuePolicy replacement-aware counter-replenishment guard; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "loop_shortcut_winning_declare_bonus",
+        "LoopShortcutPolicy band selector for a game-deciding CR 104.2a crown; deliberately kept OUT of the CMA-ES penalties vector — win-rate gradients from games that never reach a WaitingFor::LoopShortcut node would tune a win-detector into noise",
     ),
 ];
 
@@ -668,6 +1110,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::None,
                 projection_min_budget_ms: 0,
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::Easy => (
@@ -691,6 +1134,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::None,
                 projection_min_budget_ms: 0,
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::Medium => (
@@ -714,6 +1158,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::ArchetypeOnly,
                 projection_min_budget_ms: 2000,
+                // K=0: perfect-information search. Product decision 2026-07-18 —
+                // all search tiers ship the strength floor; determinized sampling
+                // (K>0) remains config-reachable for experiments/measurement but
+                // cost the ladder its monotonicity when shipped (see
+                // .agents/ai-strength/u1-all-tiers-cheat/PLAN.md).
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::Hard => (
@@ -737,6 +1187,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::Full,
                 projection_min_budget_ms: 2000,
+                // K=0: perfect-information search. Product decision 2026-07-18 —
+                // all search tiers ship the strength floor; determinized sampling
+                // (K>0) remains config-reachable for experiments/measurement but
+                // cost the ladder its monotonicity when shipped (see
+                // .agents/ai-strength/u1-all-tiers-cheat/PLAN.md).
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::VeryHard => (
@@ -760,6 +1216,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::Full,
                 projection_min_budget_ms: 2000,
+                // K=0: perfect-information search. Product decision 2026-07-18 —
+                // all search tiers ship the strength floor; determinized sampling
+                // (K>0) remains config-reachable for experiments/measurement but
+                // cost the ladder its monotonicity when shipped (see
+                // .agents/ai-strength/u1-all-tiers-cheat/PLAN.md).
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::CEDH => (
@@ -785,6 +1247,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 // == AI_SEARCH_TIME_BUDGET_MS: projections only at turn start,
                 // before nodes consume the budget
                 projection_min_budget_ms: 1500,
+                // K=0: perfect-information search. Product decision 2026-07-18 —
+                // all search tiers ship the strength floor; determinized sampling
+                // (K>0) remains config-reachable for experiments/measurement but
+                // cost the ladder its monotonicity when shipped (see
+                // .agents/ai-strength/u1-all-tiers-cheat/PLAN.md).
+                determinization_samples: 0,
             },
         ),
     };
@@ -805,11 +1273,14 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
     };
 
     // WASM platform constraints: reduce search budgets. AI computation runs in
-    // a Web Worker so it does not block the UI thread. Wall-clock deadlines are
-    // intentionally absent — bounds are set by `max_depth` / `max_nodes` /
-    // `rollout_depth` instead, so AI quality is consistent regardless of host
-    // speed. Wall-clock capping was previously needed to hide a deep-clone
-    // perf regression; the Arc-share migration removed that cost.
+    // a Web Worker so it does not block the UI thread. Budgets are reduced via
+    // `max_depth` / `max_nodes` / `rollout_depth`. The wall-clock deadline
+    // remains live on WASM per `AI_SEARCH_TIME_BUDGET_MS` (the single source of
+    // truth, applied across all difficulties and platforms): it caps
+    // user-visible latency on slow browser hardware and is load-bearing for
+    // `can_afford_projection`'s projection throttle (`policies/context.rs`),
+    // which treats a missing deadline as "always affordable" and would otherwise
+    // run uncached ~1.5s multi-turn projections on every decision.
     if platform == Platform::Wasm {
         config.search.max_depth = config.search.max_depth.min(2);
         config.search.max_nodes = config.search.max_nodes * 2 / 3;
@@ -904,6 +1375,10 @@ mod tests {
         assert_eq!(config.search.max_depth, 2);
         assert_eq!(config.search.max_nodes, 24);
         assert_eq!(config.search.rollout_depth, 1);
+        // Every shipped preset is perfect-information search (K=0); Medium is no
+        // longer a special "floor" but the universal setting (product decision
+        // 2026-07-18).
+        assert_eq!(config.search.determinization_samples, 0);
     }
 
     #[test]
@@ -914,6 +1389,8 @@ mod tests {
         assert_eq!(config.search.max_depth, 3);
         assert_eq!(config.search.max_nodes, 48);
         assert_eq!(config.search.rollout_depth, 2);
+        // Hard ships perfect-information search (K=0) like every tier.
+        assert_eq!(config.search.determinization_samples, 0);
     }
 
     #[test]
@@ -925,6 +1402,7 @@ mod tests {
         assert_eq!(config.search.max_nodes, 64);
         assert_eq!(config.search.max_branching, 5);
         assert_eq!(config.search.rollout_samples, 2);
+        assert_eq!(config.search.determinization_samples, 0);
     }
 
     #[test]
@@ -935,6 +1413,33 @@ mod tests {
         assert!(wasm.search.max_depth <= 2);
         assert!(wasm.search.max_nodes < native.search.max_nodes);
         assert!(wasm.search.rollout_depth <= native.search.rollout_depth);
+        assert_eq!(wasm.search.determinization_samples, 0);
+    }
+
+    #[test]
+    fn all_search_tiers_ship_perfect_information() {
+        // Product decision 2026-07-18: every shipped preset is K=0 (perfect-info
+        // "strength floor") on every platform and player count. K>0 is an
+        // experiment/measurement knob only — the ensemble machinery is covered by
+        // search.rs ensemble tests, which set K manually.
+        for diff in [
+            AiDifficulty::VeryEasy,
+            AiDifficulty::Easy,
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+            AiDifficulty::CEDH,
+        ] {
+            for platform in [Platform::Native, Platform::Wasm] {
+                for players in [2u8, 4, 6] {
+                    let c = create_config_for_players(diff, platform, players);
+                    assert_eq!(
+                        c.search.determinization_samples, 0,
+                        "{diff:?}/{platform:?}/{players}p"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1071,6 +1576,65 @@ mod tests {
     }
 
     #[test]
+    fn accepted_difficulty_labels_round_trip_through_from_label() {
+        for label in ACCEPTED_DIFFICULTY_LABELS {
+            assert_eq!(
+                &format!("{:?}", AiDifficulty::from_label(label)),
+                label,
+                "{label} does not round-trip through from_label"
+            );
+        }
+    }
+
+    #[test]
+    fn every_difficulty_variant_appears_in_accepted_labels() {
+        // The reverse direction of the round-trip test above: every enum variant
+        // must be a listed accepted label (and round-trip back). Two layers keep
+        // this honest: the wildcard-free `label_of` match fails to compile when a
+        // variant is added until it is given a label, and the `all.len()` vs
+        // label-count assertion at the end catches an `all` array (or label list)
+        // that drifts out of step. `all` itself is hand-maintained — nothing
+        // forces a new variant into it except that final length check failing.
+        fn label_of(d: AiDifficulty) -> &'static str {
+            match d {
+                AiDifficulty::VeryEasy => "VeryEasy",
+                AiDifficulty::Easy => "Easy",
+                AiDifficulty::Medium => "Medium",
+                AiDifficulty::Hard => "Hard",
+                AiDifficulty::VeryHard => "VeryHard",
+                AiDifficulty::CEDH => "CEDH",
+            }
+        }
+        let all = [
+            AiDifficulty::VeryEasy,
+            AiDifficulty::Easy,
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+            AiDifficulty::CEDH,
+        ];
+        for d in all {
+            let label = label_of(d);
+            assert!(
+                ACCEPTED_DIFFICULTY_LABELS.contains(&label),
+                "{label} missing from ACCEPTED_DIFFICULTY_LABELS"
+            );
+            assert_eq!(
+                AiDifficulty::from_label(label),
+                d,
+                "{label} does not round-trip back to its variant"
+            );
+        }
+        // Catches an entry added to the label list without a matching variant
+        // (the direction the per-variant loop above cannot see).
+        assert_eq!(
+            all.len(),
+            ACCEPTED_DIFFICULTY_LABELS.len(),
+            "variant count and accepted-label count diverged"
+        );
+    }
+
+    #[test]
     fn cedh_preset_values() {
         let config = create_config(AiDifficulty::CEDH, Platform::Native);
         assert_eq!(config.difficulty, AiDifficulty::CEDH);
@@ -1096,6 +1660,7 @@ mod tests {
         ));
         assert_eq!(config.search.projection_min_budget_ms, 1500);
         assert_eq!(config.search.time_budget_ms, AI_SEARCH_TIME_BUDGET_MS);
+        assert_eq!(config.search.determinization_samples, 0);
     }
 
     #[test]
@@ -1148,6 +1713,122 @@ mod tests {
         let p = PolicyPenalties::default();
         assert_eq!(p.combo_progress_this_turn_bonus, 15.0);
         assert_eq!(p.combo_progress_next_turn_bonus, 5.0);
+    }
+
+    /// Value-identity guard for the `AntiSelfHarmPolicy` magnitudes migrated from
+    /// raw literals into config. Each default MUST equal the exact literal the
+    /// bespoke code used before the lift, so a mistyped port is caught here.
+    #[test]
+    fn policy_penalties_default_anti_self_harm_migrated_magnitudes() {
+        let p = PolicyPenalties::default();
+        assert_eq!(p.wasted_cast_penalty, -8.0);
+        assert_eq!(p.untap_own_tapped_bonus, 8.0);
+        assert_eq!(p.untap_opponent_tapped_penalty, -20.0);
+        assert_eq!(p.untap_untapped_penalty, -6.0);
+        assert_eq!(p.tapped_removal_no_urgency_penalty, -5.0);
+    }
+
+    #[test]
+    fn policy_penalties_default_cycling_discipline_magnitudes() {
+        let p = PolicyPenalties::default();
+        assert_eq!(p.cycling_patience_penalty, -1.0);
+        assert_eq!(p.cycling_needed_land_penalty, -2.0);
+    }
+
+    /// Artifact compatibility: `ai_tune` deserializes a persisted
+    /// `policy_penalties` section straight into `PolicyPenalties`
+    /// (`bin/ai_tune.rs`, `TuneGroup::Penalties`), so an artifact written
+    /// before `poison_clock_pressure` existed must still load — with its own
+    /// tuned values intact and the new field filled from the shared default.
+    #[test]
+    fn policy_penalties_load_pre_poison_clock_artifact() {
+        let mut artifact = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let object = artifact.as_object_mut().expect("serializes as object");
+        object
+            .remove("poison_clock_pressure")
+            .expect("field must be present before removal");
+        // A value CMA-ES could plausibly have tuned, to prove the round-trip
+        // reads the artifact rather than silently falling back to Default.
+        object.insert("wasted_cast_penalty".into(), serde_json::json!(-3.5));
+
+        let loaded: PolicyPenalties = serde_json::from_value(artifact)
+            .expect("a pre-poison_clock_pressure artifact must still deserialize");
+        assert_eq!(loaded.wasted_cast_penalty, -3.5, "tuned value preserved");
+        assert_eq!(
+            loaded.poison_clock_pressure,
+            default_poison_clock_pressure(),
+            "absent field must fall back to the shared default"
+        );
+        assert_eq!(
+            PolicyPenalties::default().poison_clock_pressure,
+            default_poison_clock_pressure(),
+            "Default and serde must share one source of truth"
+        );
+    }
+
+    /// Artifact compatibility: `ai_tune` deserializes a persisted
+    /// `policy_penalties` section straight into `PolicyPenalties`
+    /// (`bin/ai_tune.rs`, `TuneGroup::Penalties`), so an artifact written
+    /// before `graveyard_types_progress` existed must still load — with its own
+    /// tuned values intact and the new field filled from the shared default.
+    #[test]
+    fn policy_penalties_load_pre_graveyard_types_artifact() {
+        let mut artifact = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let object = artifact.as_object_mut().expect("serializes as object");
+        object
+            .remove("graveyard_types_progress")
+            .expect("field must be present before removal");
+        // A value CMA-ES could plausibly have tuned, to prove the round-trip
+        // reads the artifact rather than silently falling back to Default.
+        object.insert("wasted_cast_penalty".into(), serde_json::json!(-3.5));
+
+        let loaded: PolicyPenalties = serde_json::from_value(artifact)
+            .expect("a pre-graveyard_types_progress artifact must still deserialize");
+        assert_eq!(loaded.wasted_cast_penalty, -3.5, "tuned value preserved");
+        assert_eq!(
+            loaded.graveyard_types_progress,
+            default_graveyard_types_progress(),
+            "absent field must fall back to the shared default"
+        );
+        assert_eq!(
+            PolicyPenalties::default().graveyard_types_progress,
+            default_graveyard_types_progress(),
+            "Default and serde must share one source of truth"
+        );
+    }
+
+    #[test]
+    fn policy_penalties_load_pre_devotion_artifact() {
+        let mut artifact = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let object = artifact.as_object_mut().expect("serializes as object");
+        object
+            .remove("devotion_pip_progress")
+            .expect("field must be present before removal");
+        object
+            .remove("devotion_god_activation")
+            .expect("field must be present before removal");
+        // A value CMA-ES could plausibly have tuned, to prove the round-trip
+        // reads the artifact rather than silently falling back to Default.
+        object.insert("wasted_cast_penalty".into(), serde_json::json!(-3.5));
+
+        let loaded: PolicyPenalties = serde_json::from_value(artifact)
+            .expect("a pre-devotion artifact must still deserialize");
+        assert_eq!(loaded.wasted_cast_penalty, -3.5, "tuned value preserved");
+        assert_eq!(
+            loaded.devotion_pip_progress,
+            default_devotion_pip_progress(),
+            "absent pip field must fall back to the shared default"
+        );
+        assert_eq!(
+            loaded.devotion_god_activation,
+            default_devotion_god_activation(),
+            "absent god-activation field must fall back to the shared default"
+        );
+        assert_eq!(
+            PolicyPenalties::default().devotion_pip_progress,
+            default_devotion_pip_progress(),
+            "Default and serde must share one source of truth"
+        );
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -47,6 +48,8 @@ pub fn resolve(
     events.push(GameEvent::PlayerPerformedAction {
         player_id: surveil_player,
         action: PlayerActionKind::Surveil,
+        look_count: None,
+        scry_bottom_count: None,
     });
 
     let cards: Vec<_> = player
@@ -64,6 +67,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -117,6 +121,7 @@ mod tests {
             GameEvent::PlayerPerformedAction {
                 player_id,
                 action: PlayerActionKind::Surveil,
+                ..
             } if *player_id == PlayerId(0)
         )));
 

@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GameState } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
-import { buildGameObject } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState, buildPlayers } from "../../../test/factories/gameStateFactory.ts";
 import { CardChoiceModal } from "../CardChoiceModal.tsx";
 
 const dispatchMock = vi.fn();
@@ -37,22 +38,13 @@ function makeState(): GameState {
     },
   });
 
-  return {
+  return buildGameState({
     turn_number: 2,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
+    players: buildPlayers([0, 1]),
     priority_player: 0,
-    objects: { 10: existing, 11: newCopy },
+    objects: buildObjectMap(existing, newCopy),
     next_object_id: 12,
     battlefield: [10, 11],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
     waiting_for: {
       type: "ChooseLegend",
       data: {
@@ -61,15 +53,8 @@ function makeState(): GameState {
         candidates: [10, 11],
       },
     },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
     next_timestamp: 3,
-    eliminated_players: [],
-  } as unknown as GameState;
+  });
 }
 
 describe("LegendChoiceModal", () => {

@@ -34,7 +34,18 @@ afterEach(() => {
 
 describe("flashStartingPlayerContest", () => {
   it("builds a startingPlayer die payload from the engine contest event", () => {
-    flashStartingPlayerContest([contest([[[0, 17], [1, 9]]], 0), gameStarted], 0);
+    const turnOrder = [
+      { player: 0, slot_index: 0, turns_from_now: 0, turn_number: 1, is_starting_player: true },
+      { player: 1, slot_index: 1, turns_from_now: 1, turn_number: 2 },
+      { player: 2, slot_index: 2, turns_from_now: 2, turn_number: 3, is_viewer: true },
+      { player: 3, slot_index: 3, turns_from_now: 3, turn_number: 4 },
+    ];
+    flashStartingPlayerContest(
+      [contest([[[0, 17], [1, 9]]], 0), gameStarted],
+      0,
+      turnOrder,
+      3,
+    );
     const d = useUiStore.getState().diceRoll;
     expect(d).toMatchObject({ kind: "die", sides: 20, context: "startingPlayer", winner: 0 });
     expect(d?.kind === "die" && d.rounds).toEqual([
@@ -48,6 +59,8 @@ describe("flashStartingPlayerContest", () => {
       { playerId: 0, value: 17 },
       { playerId: 1, value: 9 },
     ]);
+    expect(d?.kind === "die" && d.turnOrder).toEqual(turnOrder);
+    expect(d?.kind === "die" && d.viewerTurnNumber).toBe(3);
   });
 
   it("preserves the per-round structure across a tie reroll", () => {
@@ -72,6 +85,7 @@ describe("flashStartingPlayerContest", () => {
         gameStarted,
       ],
       0,
+      undefined,
     );
     const d = useUiStore.getState().diceRoll;
     expect(d?.kind === "die" && d.rounds).toEqual([
@@ -93,18 +107,18 @@ describe("flashStartingPlayerContest", () => {
   it("uses the engine winner, never recomputed from the rolls (lowest-seat fallback)", () => {
     // The engine's all-tied-at-cap fallback picks the lowest seat; the winner is
     // passed in, not derived from the shown dice.
-    flashStartingPlayerContest([contest([[[0, 7], [1, 7]]], 0), gameStarted], 0);
+    flashStartingPlayerContest([contest([[[0, 7], [1, 7]]], 0), gameStarted], 0, undefined);
     expect(useUiStore.getState().diceRoll).toMatchObject({ winner: 0 });
   });
 
   it("no-ops when the starter was chosen explicitly (no contest event)", () => {
-    flashStartingPlayerContest([gameStarted], 1);
+    flashStartingPlayerContest([gameStarted], 1, undefined);
     expect(useUiStore.getState().diceRoll).toBeNull();
   });
 
   it("skips the overlay entirely at instant animation speed (0)", () => {
     usePreferencesStore.setState({ animationSpeedMultiplier: 0 });
-    flashStartingPlayerContest([contest([[[0, 5], [1, 3]]], 0), gameStarted], 0);
+    flashStartingPlayerContest([contest([[[0, 5], [1, 3]]], 0), gameStarted], 0, undefined);
     expect(useUiStore.getState().diceRoll).toBeNull();
   });
 });
@@ -125,6 +139,13 @@ describe("flashInGameRolls", () => {
       won: true,
       context: "ability",
     });
+  });
+
+  it("queues every coin flip in an event batch", () => {
+    flashInGameRolls([coin(1, true), coin(1, false)]);
+    const state = useUiStore.getState();
+    expect(state.diceRoll).toMatchObject({ kind: "coin", playerId: 1, won: true });
+    expect(state.diceRollQueue).toMatchObject([{ kind: "coin", playerId: 1, won: false }]);
   });
 
   it("no-ops on a batch containing neither dice nor coins", () => {

@@ -79,6 +79,7 @@ fn empty_back_face() -> BackFaceData {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: Default::default(),
         mana_cost: Default::default(),
@@ -171,6 +172,7 @@ mod tests {
     fn empty_lki() -> LKISnapshot {
         LKISnapshot {
             name: String::new(),
+            token_image_ref: None,
             power: None,
             toughness: None,
             base_power: None,
@@ -185,6 +187,9 @@ mod tests {
             colors: vec![],
             chosen_attributes: vec![],
             counters: Default::default(),
+            tapped: false,
+            is_suspected: false,
+            attachments: Vec::new(),
         }
     }
 

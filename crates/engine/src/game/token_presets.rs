@@ -1,13 +1,15 @@
 //! CR 111.1 + CR 111.10 + CR 111.4: Debug-only catalog of pre-defined token
-//! presets. Loaded from `crates/engine/data/known-tokens.toml` (committed
+//! presets. Sourced from `crates/engine/data/known-tokens.toml` (committed
 //! phase-native source generated from MTGJSON set token data by the
-//! `tokens-gen` bin).
+//! `tokens-gen` bin), converted to JSON at build time by `build.rs`, and
+//! embedded via `include_bytes!` — the debug-mode toml_edit parse of the
+//! ~5.9MB catalog cost ~1s per test process under nextest's
+//! process-per-test model.
 //!
-//! The catalog is a fixed engine resource — versioned with code, embedded via
-//! `include_str!`. Frontend reads it through a single WASM export and renders
-//! a debug-create dropdown grouped by `TokenCategory`. No game logic
-//! consumes presets; the catalog exists purely to give the debug UI a
-//! discoverable, engine-typed list of bodies.
+//! The catalog is a fixed engine resource — versioned with code. Runtime
+//! token-art resolution, named-token parsing, token ability materialization,
+//! and the debug-create UI all consume this single engine-typed list of
+//! bodies.
 
 use std::sync::LazyLock;
 
@@ -94,6 +96,32 @@ pub enum PresetFidelity {
     PartialMissingAbilities,
 }
 
+/// Catalog-only provenance for token P/T values. Runtime token creation still
+/// uses concrete `TokenCharacteristics`; this field records when MTGJSON's
+/// token entry used source-defined or dynamic P/T text that cannot be widened
+/// into a fixed body without inventing rules text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TokenPtProvenance {
+    #[default]
+    FixedOrAbsent,
+    SourceDefinedOrDynamic {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        toughness: Option<String>,
+    },
+}
+
+impl TokenPtProvenance {
+    pub fn is_fixed_or_absent(&self) -> bool {
+        matches!(self, Self::FixedOrAbsent)
+    }
+
+    fn is_source_defined_or_dynamic(&self) -> bool {
+        matches!(self, Self::SourceDefinedOrDynamic { .. })
+    }
+}
+
 /// A single debug-spawnable preset. `body` is shared with `TokenSpec`'s
 /// characteristics — single source of truth on the body shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +129,8 @@ pub struct TokenPreset {
     pub id: String,
     pub category: TokenCategory,
     pub fidelity: PresetFidelity,
+    #[serde(default, skip_serializing_if = "TokenPtProvenance::is_fixed_or_absent")]
+    pub pt_provenance: TokenPtProvenance,
     pub body: TokenCharacteristics,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_card_names: Vec<String>,
@@ -138,11 +168,12 @@ struct CatalogFile {
     token: Vec<TokenPreset>,
 }
 
-/// Embedded catalog data. Path is relative to this source file:
-/// `crates/engine/src/game/token_presets.rs` → `crates/engine/data/known-tokens.toml`.
+/// Embedded catalog data: `data/known-tokens.toml` converted to JSON in
+/// `OUT_DIR` by `build.rs` (structural conversion — same serde shape).
 static PRESETS: LazyLock<Vec<TokenPreset>> = LazyLock::new(|| {
-    let raw = include_str!("../../data/known-tokens.toml");
-    let parsed: CatalogFile = toml::from_str(raw).expect("known-tokens.toml well-formed");
+    let raw = include_bytes!(concat!(env!("OUT_DIR"), "/known-tokens.json"));
+    let parsed: CatalogFile =
+        serde_json::from_slice(raw).expect("build.rs-converted known-tokens.json well-formed");
     // Duplicate-id assertion: every preset must be addressable by a unique
     // stable id (used by the FE for selection state and React keys).
     let mut seen = std::collections::HashSet::new();
@@ -156,8 +187,11 @@ static PRESETS: LazyLock<Vec<TokenPreset>> = LazyLock::new(|| {
     parsed.token
 });
 
-/// Returns the full set of debug-spawnable token presets, sorted by category
-/// then id for stable display order.
+/// Returns the full set of debug-spawnable token presets, in catalog order:
+/// ascending id, which is what `tokens-gen` emits so that a regen produces a
+/// minimal diff (asserted by `catalog_is_ordered_and_self_consistent`). Ids are
+/// MTGJSON uuids, so this is not a display order — consumers impose their own
+/// (the debug UI groups by category and sorts by power/toughness/name).
 pub fn known_token_presets() -> &'static [TokenPreset] {
     &PRESETS
 }
@@ -241,8 +275,11 @@ pub fn find_card_linked_copy_token_ref(
 #[derive(Clone, Copy)]
 enum TokenRefMatchMode {
     /// `CreateToken` path: a unique `source_related_token_ids` link may resolve
-    /// without a body match when the card names exactly one preset.
+    /// only with exact body matching unless the source identity is confirmed.
     Exact,
+    /// `CreateToken` path after source oracle/face identity has narrowed the
+    /// preset. Source-defined P/T presets may then match concrete runtime P/T.
+    SourceLinkedExact,
     /// `CopyTokenOf` path: always require an exact body match so copies that
     /// keep source P/T (Twinflame, Populate) do not inherit offspring presets.
     CardLinkedCopy,
@@ -260,6 +297,19 @@ fn find_token_ref_with_mode(
         .unwrap_or(&[]);
     let source_oracle =
         source.and_then(|obj| obj.printed_ref.as_ref().map(|r| r.oracle_id.as_str()));
+    let name_only_offspring_copy = source.is_some_and(|obj| {
+        obj.keywords
+            .iter()
+            .chain(obj.base_keywords.iter())
+            .any(|keyword| matches!(keyword, crate::types::keywords::Keyword::Offspring(_)))
+    });
+    if matches!(mode, TokenRefMatchMode::CardLinkedCopy)
+        && related_ids.is_empty()
+        && source_oracle.is_none()
+        && !name_only_offspring_copy
+    {
+        return None;
+    }
     let source_face = source.and_then(|obj| obj.printed_ref.as_ref().map(|r| r.face_name.as_str()));
     let source_name = source
         .map(|obj| obj.name.as_str())
@@ -270,22 +320,53 @@ fn find_token_ref_with_mode(
     }
 
     if !related_ids.is_empty() {
-        let mut matches = known_token_presets()
+        let related_presets: Vec<_> = related_ids
             .iter()
-            .filter(|preset| related_ids.iter().any(|id| id == &preset.id));
+            .filter_map(|id| known_token_preset_by_id(id))
+            .collect();
 
         if matches!(mode, TokenRefMatchMode::Exact) {
-            let first = matches.next()?;
-            if matches.next().is_none() {
-                return first.token_image_ref.clone();
+            if let [preset] = related_presets.as_slice() {
+                let source_matches = source_oracle.is_some_and(|oracle_id| {
+                    token_preset_has_source_ref(preset, oracle_id, source_face)
+                });
+                let match_mode = if source_matches {
+                    TokenRefMatchMode::SourceLinkedExact
+                } else {
+                    TokenRefMatchMode::Exact
+                };
+                if (source_matches || source_oracle.is_none())
+                    && token_preset_body_matches(preset, body, match_mode)
+                {
+                    return preset.token_image_ref.clone();
+                }
+                return None;
             }
         }
 
-        let mut matches = known_token_presets().iter().filter(|preset| {
-            related_ids.iter().any(|id| id == &preset.id) && token_body_matches(&preset.body, body)
-        });
-        let first = matches.next()?;
-        if matches.next().is_some() {
+        let matches: Vec<_> = if let Some(oracle_id) = source_oracle {
+            let match_mode = if matches!(mode, TokenRefMatchMode::Exact) {
+                TokenRefMatchMode::SourceLinkedExact
+            } else {
+                mode
+            };
+            related_presets
+                .into_iter()
+                .filter(|preset| token_preset_has_source_ref(preset, oracle_id, source_face))
+                .filter(|preset| token_preset_body_matches(preset, body, match_mode))
+                .collect()
+        } else {
+            related_presets
+                .into_iter()
+                .filter(|preset| token_body_matches(&preset.body, body))
+                .collect()
+        };
+        let first = matches.first()?;
+        if !matches
+            .iter()
+            .skip(1)
+            .all(|preset| token_preset_semantics_match(first, preset))
+        {
             return None;
         }
         return first.token_image_ref.clone();
@@ -296,15 +377,7 @@ fn find_token_ref_with_mode(
             return false;
         }
         if let Some(oracle_id) = source_oracle {
-            return preset.source_card_refs.iter().any(|source_ref| {
-                source_ref.scryfall_oracle_id.as_deref() == Some(oracle_id)
-                    && source_face.is_none_or(|face| {
-                        source_ref
-                            .face_name
-                            .as_deref()
-                            .is_none_or(|candidate| candidate == face)
-                    })
-            });
+            return token_preset_has_source_ref(preset, oracle_id, source_face);
         }
         if let Some(name) = source_name {
             return preset
@@ -322,15 +395,68 @@ fn find_token_ref_with_mode(
     first.token_image_ref.clone()
 }
 
+/// CR 111.10: The engine names a Role token "<Role> Role" (e.g. "Monster Role",
+/// the parser/token-creation convention), but catalog presets — generated from
+/// MTGJSON — name the same token by its bare role word ("Monster"). Reconcile the
+/// trailing " Role" so a "Monster Role" token body matches its "Monster" face
+/// preset. Without this a DFC Role token ("Monster // Sorcerer"), whose source
+/// card links to BOTH face presets and so skips the single-preset fast path,
+/// never resolves an image ref and renders with no art. Non-Role names have no
+/// " Role" suffix and are unaffected; the accompanying subtype/type comparison
+/// still prevents a Role body from matching a non-Role preset.
+fn role_normalized_display_name(name: &str) -> &str {
+    name.strip_suffix(" Role").unwrap_or(name)
+}
+
 fn token_body_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
-    a.display_name == b.display_name
-        && a.power == b.power
-        && a.toughness == b.toughness
+    token_body_identity_matches(a, b) && a.power == b.power && a.toughness == b.toughness
+}
+
+fn token_body_identity_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
+    role_normalized_display_name(&a.display_name) == role_normalized_display_name(&b.display_name)
         && sorted_debug(&a.core_types) == sorted_debug(&b.core_types)
         && sorted_strings(&a.subtypes) == sorted_strings(&b.subtypes)
         && sorted_debug(&a.supertypes) == sorted_debug(&b.supertypes)
         && sorted_debug(&a.colors) == sorted_debug(&b.colors)
         && sorted_debug(&a.keywords) == sorted_debug(&b.keywords)
+}
+
+fn token_preset_body_matches(
+    preset: &TokenPreset,
+    body: &TokenCharacteristics,
+    mode: TokenRefMatchMode,
+) -> bool {
+    token_body_identity_matches(&preset.body, body)
+        && ((preset.body.power == body.power && preset.body.toughness == body.toughness)
+            || (matches!(mode, TokenRefMatchMode::SourceLinkedExact)
+                && preset.pt_provenance.is_source_defined_or_dynamic()))
+}
+
+fn token_preset_semantics_match(a: &TokenPreset, b: &TokenPreset) -> bool {
+    // Used only to deduplicate source-related presets that already matched the
+    // emitted runtime body/rules semantics. P/T provenance is catalog metadata,
+    // not a runtime semantic difference after body matching has selected both
+    // candidates.
+    a.category == b.category
+        && a.fidelity == b.fidelity
+        && token_body_matches(&a.body, &b.body)
+        && a.rules_text == b.rules_text
+}
+
+fn token_preset_has_source_ref(
+    preset: &TokenPreset,
+    oracle_id: &str,
+    source_face: Option<&str>,
+) -> bool {
+    preset.source_card_refs.iter().any(|source_ref| {
+        source_ref.scryfall_oracle_id.as_deref() == Some(oracle_id)
+            && source_face.is_none_or(|face| {
+                source_ref
+                    .face_name
+                    .as_deref()
+                    .is_none_or(|candidate| candidate == face)
+            })
+    })
 }
 
 fn sorted_strings(values: &[String]) -> Vec<&str> {
@@ -348,15 +474,150 @@ fn sorted_debug<T: std::fmt::Debug>(values: &[T]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::card::PrintedCardRef;
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::{ManaColor, ManaCost};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
 
-    /// Forces `LazyLock` evaluation in `cargo test -p engine` so a malformed
-    /// `known-tokens.toml`, an unknown `Keyword`/`CoreType`/`ManaColor`
-    /// variant, or a duplicate id panics in CI rather than at first
-    /// production access.
+    const FIXED_OOZE_PRESET_ID: &str = "25b62fd5-b036-5c64-88fd-8f50d0675e4d";
+    const SOURCE_DEFINED_OOZE_PRESET_ID: &str = "1545ee29-d9c1-57ff-acae-431cfd6d60cf";
+    const ROT_LIKE_ORACLE_ID: &str = "8f47c236-46b6-47cb-9ea9-7adfef8fd8ce";
+    const SLIME_MOLDING_ORACLE_ID: &str = "e01c8122-9159-4f28-ac6c-338bd889650e";
+    const FANATIC_OF_RHONAS_PRESET_ID: &str = "001dd45c-851b-5eb3-9a53-fc9fb2c0e322";
+    const IRIDESCENT_VINELASHER_PRESET_ID: &str = "c39bbf40-9bf9-5400-8be3-0fb961f0a643";
+
+    fn green_ooze_body(power: Option<i32>, toughness: Option<i32>) -> TokenCharacteristics {
+        TokenCharacteristics {
+            display_name: "Ooze".to_string(),
+            power,
+            toughness,
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Ooze".to_string()],
+            supertypes: Vec::new(),
+            colors: vec![ManaColor::Green],
+            keywords: Vec::new(),
+        }
+    }
+
+    fn fanatic_of_rhonas_body() -> TokenCharacteristics {
+        TokenCharacteristics {
+            display_name: "Fanatic of Rhonas".to_string(),
+            power: Some(4),
+            toughness: Some(4),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![
+                "Zombie".to_string(),
+                "Snake".to_string(),
+                "Druid".to_string(),
+            ],
+            supertypes: Vec::new(),
+            colors: vec![ManaColor::Black],
+            keywords: Vec::new(),
+        }
+    }
+
+    fn iridescent_vinelasher_offspring_body() -> TokenCharacteristics {
+        TokenCharacteristics {
+            display_name: "Iridescent Vinelasher".to_string(),
+            power: Some(1),
+            toughness: Some(1),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Lizard".to_string(), "Assassin".to_string()],
+            supertypes: Vec::new(),
+            colors: vec![ManaColor::Black],
+            keywords: Vec::new(),
+        }
+    }
+
+    fn state_with_source(
+        source_name: &str,
+        oracle_id: Option<&str>,
+        related_ids: &[&str],
+    ) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            source_name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        if let Some(oracle_id) = oracle_id {
+            obj.printed_ref = Some(PrintedCardRef {
+                oracle_id: oracle_id.to_string(),
+                face_name: source_name.to_string(),
+            });
+        }
+        obj.source_related_token_ids
+            .extend(related_ids.iter().map(|id| (*id).to_string()));
+        (state, source)
+    }
+
+    /// Forces `LazyLock` evaluation in `cargo test -p engine` so an unknown
+    /// `Keyword`/`CoreType`/`ManaColor` variant or a duplicate id panics in
+    /// CI rather than at first production access. (Malformed TOML fails
+    /// earlier, in `build.rs`; the structural conversion there cannot catch
+    /// these typed-schema violations.)
     #[test]
     fn catalog_loads_and_validates() {
         let presets = known_token_presets();
         assert!(!presets.is_empty(), "catalog must contain entries");
+    }
+
+    /// Structural properties of `tokens-gen` output, checked against the
+    /// committed catalog. Both are per-entry properties with no pinned totals,
+    /// so a weekly refresh that only adds tokens stays green.
+    ///
+    /// Scope, stated precisely because it is narrow: these catch entries
+    /// *reordered* relative to generator output, and an image ref pointing at a
+    /// different preset. They do NOT catch a body-only rewrite (nothing here
+    /// ties `body`/`fidelity`/`source_card_refs` to an identity) nor a deleted
+    /// entry (removing from the middle keeps the sequence ascending) — a
+    /// deletion is the count floors' job, in
+    /// `analyze_token_coverage_treats_source_defined_pt_as_represented`.
+    ///
+    /// And none of it establishes provenance — that the catalog is tokens-gen's
+    /// output for its declared vintage — which needs the gitignored generator
+    /// input, absent at test time. See the comment on that coverage test for
+    /// the by-hand `tokens-gen`/`cmp` recipe.
+    #[test]
+    fn catalog_is_ordered_and_self_consistent() {
+        let presets = known_token_presets();
+
+        // `tokens_gen.rs` emits `presets.sort_by(|a, b| a.id.cmp(&b.id))`, so a
+        // strictly ascending id sequence is a property of every generated
+        // catalog. Strict (not `<=`) also re-states the LazyLock's duplicate-id
+        // guard at the ordering level.
+        for pair in presets.windows(2) {
+            assert!(
+                pair[0].id < pair[1].id,
+                "known-tokens.toml is not strictly id-ascending: `{}` precedes `{}`",
+                pair[0].id,
+                pair[1].id
+            );
+        }
+
+        // The generator builds each preset's image ref from the same MTGJSON
+        // uuid it uses for `TokenPreset::id`, so a ref pointing at a different
+        // preset means the entry was assembled by something other than
+        // tokens-gen. Consistency is asserted only where a ref exists: a token
+        // with no Scryfall image is legal upstream data, and requiring one
+        // would re-introduce a weekly false-red.
+        for preset in presets {
+            let Some(image_ref) = &preset.token_image_ref else {
+                continue;
+            };
+            assert_eq!(
+                image_ref.preset_id, preset.id,
+                "preset `{}` carries an image ref for `{}`",
+                preset.id, image_ref.preset_id
+            );
+        }
     }
 
     /// Every `PredefinedArtifact { kind }` preset must carry the matching
@@ -384,5 +645,112 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn fixed_source_related_token_requires_exact_body_match() {
+        let (state, source) = state_with_source(
+            "Rot Like the Scum You Are",
+            Some(ROT_LIKE_ORACLE_ID),
+            &[FIXED_OOZE_PRESET_ID],
+        );
+
+        assert!(find_exact_token_ref(&state, source, &green_ooze_body(None, None)).is_none());
+        assert!(find_exact_token_ref(&state, source, &green_ooze_body(Some(3), Some(3))).is_none());
+    }
+
+    #[test]
+    fn fixed_source_related_token_matches_exact_body() {
+        let (state, source) = state_with_source(
+            "Rot Like the Scum You Are",
+            Some(ROT_LIKE_ORACLE_ID),
+            &[FIXED_OOZE_PRESET_ID],
+        );
+
+        let image = find_exact_token_ref(&state, source, &green_ooze_body(Some(2), Some(2)))
+            .expect("fixed Ooze body should match linked preset image");
+
+        assert_eq!(image.preset_id, FIXED_OOZE_PRESET_ID);
+    }
+
+    #[test]
+    fn source_defined_source_related_token_may_ignore_runtime_pt_for_create_token() {
+        let (state, source) = state_with_source(
+            "Slime Molding",
+            Some(SLIME_MOLDING_ORACLE_ID),
+            &[SOURCE_DEFINED_OOZE_PRESET_ID],
+        );
+
+        let image = find_exact_token_ref(&state, source, &green_ooze_body(Some(7), Some(7)))
+            .expect("source-defined Ooze should match after source identity is known");
+
+        assert_eq!(image.preset_id, SOURCE_DEFINED_OOZE_PRESET_ID);
+    }
+
+    #[test]
+    fn source_defined_pt_mismatch_is_not_global_or_copy_match() {
+        let body = green_ooze_body(Some(7), Some(7));
+        let (global_state, global_source) =
+            state_with_source("Slime Molding", Some(SLIME_MOLDING_ORACLE_ID), &[]);
+        assert!(find_exact_token_ref(&global_state, global_source, &body).is_none());
+
+        let (ambiguous_state, ambiguous_source) =
+            state_with_source("Slime Molding", None, &[SOURCE_DEFINED_OOZE_PRESET_ID]);
+        assert!(find_exact_token_ref(&ambiguous_state, ambiguous_source, &body).is_none());
+
+        let (copy_state, copy_source) = state_with_source(
+            "Slime Molding",
+            Some(SLIME_MOLDING_ORACLE_ID),
+            &[SOURCE_DEFINED_OOZE_PRESET_ID],
+        );
+        assert!(find_card_linked_copy_token_ref(&copy_state, copy_source, &body).is_none());
+    }
+
+    #[test]
+    fn card_linked_copy_does_not_use_name_only_source_fallback() {
+        let body = fanatic_of_rhonas_body();
+        let (state, source) = state_with_source("Fanatic of Rhonas", None, &[]);
+
+        assert!(find_card_linked_copy_token_ref(&state, source, &body).is_none());
+    }
+
+    #[test]
+    fn offspring_card_linked_copy_keeps_name_only_source_fallback() {
+        let body = iridescent_vinelasher_offspring_body();
+        let (mut state, source) = state_with_source("Iridescent Vinelasher", None, &[]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .keywords
+            .push(Keyword::Offspring(ManaCost::generic(2)));
+
+        let image = find_card_linked_copy_token_ref(&state, source, &body)
+            .expect("offspring copy token may use name-only source context");
+
+        assert_eq!(image.preset_id, IRIDESCENT_VINELASHER_PRESET_ID);
+    }
+
+    #[test]
+    fn card_linked_copy_matches_related_token_body_without_printed_ref() {
+        let body = fanatic_of_rhonas_body();
+        let (state, source) =
+            state_with_source("Fanatic of Rhonas", None, &[FANATIC_OF_RHONAS_PRESET_ID]);
+
+        let image = find_card_linked_copy_token_ref(&state, source, &body)
+            .expect("related Fanatic copy token body should match linked preset");
+
+        assert_eq!(image.preset_id, FANATIC_OF_RHONAS_PRESET_ID);
+    }
+
+    #[test]
+    fn exact_create_token_keeps_name_only_source_fallback() {
+        let body = fanatic_of_rhonas_body();
+        let (state, source) = state_with_source("Fanatic of Rhonas", None, &[]);
+
+        let image = find_exact_token_ref(&state, source, &body)
+            .expect("exact create-token lookup may use name-only source context");
+
+        assert_eq!(image.preset_id, FANATIC_OF_RHONAS_PRESET_ID);
     }
 }

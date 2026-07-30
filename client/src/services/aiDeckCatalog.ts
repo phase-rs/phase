@@ -20,6 +20,7 @@ export interface AiDeckCandidate {
   name: string;
   source: AiDeckSource;
   deck: ParsedDeck;
+  knownFormat?: GameFormat;
   coveragePct: number | null;
   archetype: DeckArchetype | null;
   bracket: CommanderBracket | null;
@@ -76,10 +77,10 @@ async function resolveBracket(
 }
 
 async function legalCandidate(
-  candidate: AiDeckCandidate & { knownFormat?: GameFormat },
+  candidate: AiDeckCandidate,
   options: AiDeckCatalogOptions,
 ): Promise<AiDeckCandidate | null> {
-  const { knownFormat, ...base } = candidate;
+  const { knownFormat } = candidate;
   if (knownFormat && options.selectedFormat && knownFormat !== options.selectedFormat) return null;
 
   // Precon decks MUST still pass the legality check (CR 903 + the Commander
@@ -95,11 +96,11 @@ async function legalCandidate(
   });
   if (result.selected_format_compatible !== true) return null;
   return {
-    ...base,
-    bracket: await resolveBracket(candidate.deck, base.bracket, options.selectedFormat ?? undefined),
+    ...candidate,
+    bracket: await resolveBracket(candidate.deck, candidate.bracket, options.selectedFormat ?? undefined),
     coveragePct: result.coverage && result.coverage.total_unique > 0
       ? Math.round((result.coverage.supported_unique / result.coverage.total_unique) * 100)
-      : base.coveragePct,
+      : candidate.coveragePct,
   };
 }
 

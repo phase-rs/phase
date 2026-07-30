@@ -38,6 +38,7 @@ export interface PrintingEntry {
   set: string;
   set_name: string;
   collector_number: string;
+  released_at: string;
   border_color: string;
   frame_effects: string[];
   full_art: boolean;
@@ -121,7 +122,8 @@ export function resolvePrintingImageUrl(
   size: ImageSize,
 ): string | null {
   const face = printing.faces[faceIndex] ?? printing.faces[0];
-  return face?.[size === "small" || size === "large" ? "normal" : size] ?? null;
+  const url = localFaceImageUrl(face, size) ?? null;
+  return url && !isPlaceholderImageUrl(url) ? url : null;
 }
 
 export function findPrintingById(
@@ -129,6 +131,17 @@ export function findPrintingById(
   scryfallId: string,
 ): PrintingEntry | undefined {
   return printings.find((p) => p.id === scryfallId);
+}
+
+/** Pick the earliest printing by release date, breaking ties by collector number. */
+export function pickOldestPrinting(printings: PrintingEntry[]): PrintingEntry {
+  return [...printings].sort((a, b) => {
+    const byDate = a.released_at.localeCompare(b.released_at);
+    if (byDate !== 0) return byDate;
+    return a.collector_number.localeCompare(b.collector_number, undefined, {
+      numeric: true,
+    });
+  })[0];
 }
 
 export function resolveOracleIdSync(cardName: string): string | null {
@@ -180,7 +193,90 @@ const SCRYFALL_DELAY_MS = 100;
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
 
-export type ImageSize = "small" | "normal" | "large" | "art_crop";
+const IMAGE_SIZES = ["small", "normal", "large", "art_crop"] as const;
+
+export type ImageSize = (typeof IMAGE_SIZES)[number];
+
+/**
+ * Intrinsic pixel width of each Scryfall image variant, measured from the JPEG
+ * SOF markers of the assets themselves. Only the two rungs the `srcset` ladder
+ * offers are listed — see `deriveImageUrl` for why `large` is not one of them.
+ */
+export const IMAGE_SIZE_WIDTHS: Record<"small" | "normal", number> = {
+  small: 146,
+  normal: 488,
+};
+
+/**
+ * A Scryfall CDN image URL carries exactly five path segments, the first of
+ * which is the size variant:
+ *
+ *   `https://cards.scryfall.io/normal/front/w/r/war-room.jpg?1783905318`
+ *                              └─ 1 ──┘└─ 2 ┘└3┘└4┘└──── 5 ────┘
+ *
+ * Splitting (rather than `new URL()`) is deliberate: this runs on every image
+ * the client renders, including `""` for face-down cards and bare filenames
+ * from test mocks, and `new URL()` *throws* on both. `URL.parse()` returns null
+ * instead of throwing but is Chrome 126+/Safari 18+ only — narrower than the
+ * browsers this ladder's `200px` fallback exists to serve. String splitting
+ * has no failure mode: unrecognized input simply isn't size-derivable.
+ *
+ * Returns null for anything that is not a five-segment sized URL, which
+ * correctly excludes `CARD_BACK_URL` (four segments) and the
+ * `errors.scryfall.com/soon.jpg` placeholder (one) — the latter must stay
+ * byte-identical or `isPlaceholderImageUrl`'s `===` stops gating the
+ * printing-fallback chain.
+ */
+function splitSizedImageUrl(
+  url: string | null | undefined,
+): { scheme: string; segments: string[]; size: ImageSize } | null {
+  if (!url) return null;
+  const [scheme, rest, ...extra] = url.split("://");
+  if (rest === undefined || extra.length > 0) return null;
+  // `segments[0]` is the host; the five path segments follow it.
+  const segments = rest.split("/");
+  if (segments.length !== 6) return null;
+  const size = segments[1];
+  if (!IMAGE_SIZES.includes(size as ImageSize)) return null;
+  return { scheme, segments, size: size as ImageSize };
+}
+
+/** The size variant a Scryfall image URL serves, or null if it isn't one. */
+export function imageUrlSize(url: string | null | undefined): ImageSize | null {
+  return splitSizedImageUrl(url)?.size ?? null;
+}
+
+/**
+ * Rewrite a Scryfall image URL to a different size variant, returning the input
+ * unchanged when it isn't a size-derivable URL. The query string rides on the
+ * final path segment, so it is preserved without special handling.
+ */
+export function deriveImageUrl(url: string, size: ImageSize): string {
+  const parsed = splitSizedImageUrl(url);
+  if (!parsed) return url;
+  const segments = [...parsed.segments];
+  segments[1] = size;
+  return `${parsed.scheme}://${segments.join("/")}`;
+}
+
+/**
+ * Resolve one stored local face to a URL for the requested size.
+ *
+ * `scryfall-data.json` stores only `normal` and `art_crop` per face; `small` is
+ * derived from the `normal` URL. `large` deliberately collapses to `normal`:
+ * the 672px asset is ~+51 KB and ~+90% more decoded bitmap per card, and the
+ * only `large` consumer (`AttachmentFan`) renders at 176-384 CSS px where it
+ * would buy nothing — on a platform with this app's documented Safari/iOS OOM
+ * history. Do not "fix" this without measuring that memory cost.
+ */
+function localFaceImageUrl(
+  face: { normal: string; art_crop: string } | undefined,
+  size: ImageSize,
+): string | undefined {
+  if (!face) return undefined;
+  if (size === "art_crop") return face.art_crop;
+  return size === "small" ? deriveImageUrl(face.normal, "small") : face.normal;
+}
 
 export interface CardImageAsset {
   src: string;
@@ -365,7 +461,23 @@ function resolveNameLookupKey(name: string): string {
   if (!scryfallDataResolved) return normalized;
   if (scryfallDataResolved[normalized]) return normalized;
   const folded = foldDiacritics(normalized);
-  return scryfallFoldedNameIndex?.get(folded) ?? normalized;
+  const foldedHit = scryfallFoldedNameIndex?.get(folded);
+  if (foldedHit) return foldedHit;
+  // A combined multi-face name ("Front // Back", or a hand-typed glued
+  // "Front//Back") is not itself an export key — multi-face cards are keyed by
+  // oracle id, spaced display name, and front-face name. When the combined form
+  // misses, fall back to the front face so the card still resolves to its
+  // entry. A single card whose own name contains "//" (e.g. "SP//dr, Piloted by
+  // Peni") is a primary key and already returned above, so it never splits here.
+  if (normalized.includes("//")) {
+    const frontFace = normalized.split("//")[0].trim();
+    if (frontFace && frontFace !== normalized) {
+      if (scryfallDataResolved[frontFace]) return frontFace;
+      const frontFolded = scryfallFoldedNameIndex?.get(foldDiacritics(frontFace));
+      if (frontFolded) return frontFolded;
+    }
+  }
+  return normalized;
 }
 
 function lookupEntryByName(name: string): ScryfallDataEntry | undefined {
@@ -464,7 +576,7 @@ export async function fetchCardImageAsset(
     throw new Error(`Card image not in local data: "${normalizeCardName(cardName)}"`);
   }
   const name = resolveNameLookupKey(cardName);
-  return resolveImageAsset(entry, faceIndex, size, name);
+  return resolveImageAssetWithPrintingFallback(entry, faceIndex, size, name);
 }
 
 /**
@@ -504,7 +616,7 @@ export async function fetchCardImageAssetByOracleId(
   const faceIndex = faceName
     ? Math.max(0, entry.face_names.indexOf(faceName.toLowerCase()))
     : 0;
-  return resolveImageAsset(entry, faceIndex, size, entry.name);
+  return resolveImageAssetWithPrintingFallback(entry, faceIndex, size, entry.name);
 }
 
 function resolveImageAsset(
@@ -519,6 +631,38 @@ function resolveImageAsset(
   };
 }
 
+function isPlaceholderImageUrl(url: string): boolean {
+  return url === "https://errors.scryfall.com/soon.jpg";
+}
+
+function resolvePrintingFallbackImageUrl(
+  oracleId: string,
+  faceIndex: number,
+  size: ImageSize,
+): string | null {
+  const printings = printingsDataResolved?.[oracleId.toLowerCase()] ?? [];
+  for (const printing of printings) {
+    if (printing.set === "plst") continue;
+    const url = resolvePrintingImageUrl(printing, faceIndex, size);
+    if (url && !isPlaceholderImageUrl(url)) return url;
+  }
+  return null;
+}
+
+async function resolveImageAssetWithPrintingFallback(
+  entry: ScryfallDataEntry,
+  faceIndex: number,
+  size: ImageSize,
+  diagnosticName: string,
+): Promise<CardImageAsset> {
+  const asset = resolveImageAsset(entry, faceIndex, size, diagnosticName);
+  if (!isPlaceholderImageUrl(asset.src)) return asset;
+
+  await loadPrintingsData();
+  const fallback = resolvePrintingFallbackImageUrl(entry.oracle_id, faceIndex, size);
+  return fallback ? { ...asset, src: fallback } : asset;
+}
+
 function resolveImageUrl(
   entry: ScryfallDataEntry,
   faceIndex: number,
@@ -526,7 +670,7 @@ function resolveImageUrl(
   diagnosticName: string,
 ): string {
   const face = entry.faces[faceIndex] ?? entry.faces[0];
-  const url = face?.[size === "small" || size === "large" ? "normal" : size];
+  const url = localFaceImageUrl(face, size);
   if (!url) {
     throw new Error(`No ${size} image for "${diagnosticName}"`);
   }
@@ -661,7 +805,7 @@ async function fetchTokenImageFromLocal(
   const entry = data?.[key];
   if (!entry) return null;
   const face = entry.faces[0];
-  return face?.[size === "small" || size === "large" ? "normal" : size] ?? null;
+  return localFaceImageUrl(face, size) ?? null;
 }
 
 function buildTokenQuery(

@@ -58,8 +58,7 @@ expression: "&lowered"
             "condition": null,
             "optional_targeting": false,
             "optional": false,
-            "forward_result": false,
-            "sub_link": "SequentialSibling"
+            "forward_result": false
           },
           "uses_tracked_set": true
         },
@@ -71,7 +70,8 @@ expression: "&lowered"
         "condition": null,
         "optional_targeting": false,
         "optional": false,
-        "forward_result": false
+        "forward_result": false,
+        "sub_link": "SequentialSibling"
       },
       "duration": null,
       "description": "{U}: Exile ~. Return it to the battlefield under its owner's control at the beginning of the next end step.",

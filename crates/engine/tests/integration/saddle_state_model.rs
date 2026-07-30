@@ -10,6 +10,9 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
+use engine::types::statics::{CrewAction, CrewContributionKind, StaticMode};
+use engine::types::{StaticDefinition, TargetFilter};
+use std::sync::Arc;
 
 /// CR 702.171c: after a Saddle activation resolves, the Mount records the
 /// creatures that saddled it in `saddled_by`; CR 702.171b: the record clears at
@@ -178,5 +181,88 @@ fn cancel_saddle_restores_priority_without_side_effects() {
     assert!(
         !runner.state().objects.get(&mount).unwrap().is_saddled,
         "cancelling must leave the Mount unsaddled"
+    );
+}
+
+fn grant_saddle_power_delta(
+    runner: &mut engine::game::scenario::GameRunner,
+    rider: engine::types::identifiers::ObjectId,
+) {
+    let static_def = StaticDefinition::new(StaticMode::CrewContribution {
+        kind: CrewContributionKind::PowerDelta { delta: 2 },
+        actions: vec![CrewAction::Saddle],
+    })
+    .affected(TargetFilter::SelfRef);
+    let obj = runner.state_mut().objects.get_mut(&rider).unwrap();
+    Arc::make_mut(&mut obj.base_static_definitions).push(static_def.clone());
+    obj.static_definitions.push(static_def);
+}
+
+/// CR 702.171a: Saddle uses the same adjusted contribution authority as Crew.
+/// A 1/1 creature with "saddles Mounts as though its power were 2 greater"
+/// contributes exactly 3, so it can saddle a Saddle 3 Mount but cannot saddle a
+/// Saddle 4 Mount.
+#[test]
+fn saddle_activation_uses_adjusted_contribution() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mount = {
+        let mut b = scenario.add_creature(P0, "Test Mount", 0, 4);
+        b.with_keyword(Keyword::Saddle(3));
+        b.id()
+    };
+    let rider = scenario.add_creature(P0, "Low Power Rider", 1, 1).id();
+    let mut runner = scenario.build();
+    grant_saddle_power_delta(&mut runner, rider);
+
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: mount,
+            creature_ids: vec![],
+        })
+        .expect("1/1 rider with +2 saddle contribution must enter SaddleMount");
+    match &runner.state().waiting_for {
+        engine::types::game_state::WaitingFor::SaddleMount {
+            eligible_creatures,
+            contributions,
+            ..
+        } => {
+            let index = eligible_creatures
+                .iter()
+                .position(|&id| id == rider)
+                .expect("rider must be eligible");
+            assert_eq!(
+                contributions[index], 3,
+                "saddle contribution must be base power 1 plus the +2 delta"
+            );
+        }
+        other => panic!("Expected SaddleMount, got {other:?}"),
+    }
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: mount,
+            creature_ids: vec![rider],
+        })
+        .expect("adjusted saddle contribution 3 must satisfy Saddle 3");
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mount = {
+        let mut b = scenario.add_creature(P0, "Test Mount", 0, 4);
+        b.with_keyword(Keyword::Saddle(4));
+        b.id()
+    };
+    let rider = scenario.add_creature(P0, "Low Power Rider", 1, 1).id();
+    let mut runner = scenario.build();
+    grant_saddle_power_delta(&mut runner, rider);
+
+    assert!(
+        runner
+            .act(GameAction::SaddleMount {
+                mount_id: mount,
+                creature_ids: vec![],
+            })
+            .is_err(),
+        "adjusted saddle contribution is exactly 3 and must not satisfy Saddle 4"
     );
 }

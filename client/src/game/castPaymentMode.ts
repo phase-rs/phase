@@ -3,45 +3,52 @@ import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
 
 const MANUAL_CAST_PAYMENT_MODE: CastPaymentMode = { type: "Manual" };
+const AUTO_EXCEPT_SACRIFICIAL_MANA_PAYMENT_MODE: CastPaymentMode = {
+  type: "AutoExceptSacrificialMana",
+};
 
 export function applySpellPaymentPreference(action: GameAction): GameAction {
-  // Two intended sources of truth: the durable `spellPaymentMode` preference and
-  // the ephemeral per-game `manualManaOverride` toggle. Manual wins if EITHER is on.
-  const manual =
-    usePreferencesStore.getState().spellPaymentMode === "manual" ||
-    useUiStore.getState().manualManaOverride;
-  if (!manual) return action;
+  // Manual is the per-game escape hatch and deliberately dominates the saved
+  // preference. Otherwise stamp every cast-family action with the exact engine
+  // mode so all alternate casting routes share the same payment semantics.
+  const preference = usePreferencesStore.getState().spellPaymentMode;
+  const mode = useUiStore.getState().manualManaOverride || preference === "manual"
+    ? MANUAL_CAST_PAYMENT_MODE
+    : preference === "autoExceptSacrificialMana"
+      ? AUTO_EXCEPT_SACRIFICIAL_MANA_PAYMENT_MODE
+      : null;
+  if (!mode) return action;
 
   switch (action.type) {
     case "CastSpell":
       return {
         ...action,
-        data: { ...action.data, payment_mode: MANUAL_CAST_PAYMENT_MODE },
+        data: { ...action.data, payment_mode: mode },
       };
     case "CastSpellForFree":
       return {
         ...action,
-        data: { ...action.data, payment_mode: MANUAL_CAST_PAYMENT_MODE },
+        data: { ...action.data, payment_mode: mode },
       };
     case "CastSpellAsMiracle":
       return {
         ...action,
-        data: { ...action.data, payment_mode: MANUAL_CAST_PAYMENT_MODE },
+        data: { ...action.data, payment_mode: mode },
       };
     case "CastSpellAsMadness":
       return {
         ...action,
-        data: { ...action.data, payment_mode: MANUAL_CAST_PAYMENT_MODE },
+        data: { ...action.data, payment_mode: mode },
       };
     case "CastSpellAsSneak":
       return {
         ...action,
-        data: { ...action.data, payment_mode: MANUAL_CAST_PAYMENT_MODE },
+        data: { ...action.data, payment_mode: mode },
       };
     case "CastSpellAsWebSlinging":
       return {
         ...action,
-        data: { ...action.data, payment_mode: MANUAL_CAST_PAYMENT_MODE },
+        data: { ...action.data, payment_mode: mode },
       };
     default:
       return action;

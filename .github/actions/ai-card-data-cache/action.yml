@@ -1,0 +1,40 @@
+name: AI card data cache
+description: Restore MTGJSON and generated card data for AI gate jobs.
+
+outputs:
+  cardgen-cache-hit:
+    description: Whether generated card data was restored from cache.
+    value: ${{ steps.cardgen-cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set cache keys
+      id: cache-keys
+      shell: bash
+      run: echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache MTGJSON data
+      id: mtgjson-cache
+      uses: actions/cache@v4
+      with:
+        path: data/mtgjson/AtomicCards.json
+        key: mtgjson-atomic-${{ steps.cache-keys.outputs.week }}
+
+    - name: Download MTGJSON data
+      shell: bash
+      run: |
+        if [ ! -f data/mtgjson/AtomicCards.json ]; then
+          mkdir -p data/mtgjson
+          source scripts/lib/mtgjson-fetch.sh
+          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+        fi
+
+    - name: Restore generated card data
+      id: cardgen-cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          data/card-data.json
+          data/card-names.json
+        key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}

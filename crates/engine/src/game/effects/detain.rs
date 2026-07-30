@@ -35,6 +35,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Detain,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())

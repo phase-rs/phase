@@ -6,6 +6,8 @@ import {
   GROUPED_COMBAT_DAMAGE_DURATION_MS,
   GROUPED_COMBAT_DAMAGE_THRESHOLD,
   GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS,
+  GROUPED_EVENT_RUN_THRESHOLD,
+  GROUPED_TOKEN_CREATION_THRESHOLD,
   defaultPacingMultipliers,
   eventCategory,
 } from "./types";
@@ -504,6 +506,92 @@ interface FallbackRun {
   step: AnimationStep;
 }
 
+interface EventRunCollapseRule {
+  threshold: number;
+  maxAnimatedUnits: number;
+  unitLength: (events: GameEvent[], index: number) => number;
+}
+
+function tokenCreationUnitLength(events: GameEvent[], index: number): number {
+  const event = events[index];
+  const next = events[index + 1];
+  if (event?.type === "TokenCreated") return 1;
+  if (
+    event?.type === "ZoneChanged" &&
+    event.data.to === "Battlefield" &&
+    next?.type === "TokenCreated" &&
+    next.data.object_id === event.data.object_id
+  ) {
+    return 2;
+  }
+  return 0;
+}
+
+function sameTypeUnitLength(eventType: GameEvent["type"]): EventRunCollapseRule["unitLength"] {
+  return (events, index) => (events[index]?.type === eventType ? 1 : 0);
+}
+
+const EVENT_RUN_COLLAPSE_RULES: EventRunCollapseRule[] = [
+  {
+    threshold: GROUPED_TOKEN_CREATION_THRESHOLD,
+    maxAnimatedUnits: GROUPED_TOKEN_CREATION_THRESHOLD,
+    unitLength: tokenCreationUnitLength,
+  },
+  {
+    threshold: GROUPED_EVENT_RUN_THRESHOLD,
+    maxAnimatedUnits: GROUPED_EVENT_RUN_THRESHOLD,
+    unitLength: sameTypeUnitLength("CounterAdded"),
+  },
+  {
+    threshold: GROUPED_EVENT_RUN_THRESHOLD,
+    maxAnimatedUnits: GROUPED_EVENT_RUN_THRESHOLD,
+    unitLength: sameTypeUnitLength("CounterRemoved"),
+  },
+];
+
+function findCollapsedEventRun(
+  events: GameEvent[],
+  startIndex: number,
+  pacingMultipliers: Record<PacingCategory, number>,
+  rule: EventRunCollapseRule,
+): FallbackRun | null {
+  const effects: StepEffect[] = [];
+  let unitCount = 0;
+  let index = startIndex;
+
+  while (index < events.length) {
+    const unitLength = rule.unitLength(events, index);
+    if (unitLength === 0) break;
+
+    unitCount++;
+    if (unitCount <= rule.maxAnimatedUnits) {
+      for (let offset = 0; offset < unitLength; offset++) {
+        effects.push(toEffect(events[index + offset], pacingMultipliers));
+      }
+    }
+    index += unitLength;
+  }
+
+  if (unitCount <= rule.threshold) return null;
+
+  return {
+    nextIndex: index,
+    step: { effects, duration: stepDuration(effects) },
+  };
+}
+
+function findCollapsedEventRunByRule(
+  events: GameEvent[],
+  startIndex: number,
+  pacingMultipliers: Record<PacingCategory, number>,
+): FallbackRun | null {
+  for (const rule of EVENT_RUN_COLLAPSE_RULES) {
+    const run = findCollapsedEventRun(events, startIndex, pacingMultipliers, rule);
+    if (run) return run;
+  }
+  return null;
+}
+
 function matchingAdjacentDamageUnit(
   events: GameEvent[],
   index: number,
@@ -631,6 +719,13 @@ export function normalizeEvents(
     if (skipIndices.has(index)) {
       const replacement = replacementByAggregateIndex.get(index);
       if (replacement) steps.push(...replacement.steps);
+      continue;
+    }
+
+    const collapsedRun = findCollapsedEventRunByRule(events, index, pacingMultipliers);
+    if (collapsedRun) {
+      steps.push(collapsedRun.step);
+      index = collapsedRun.nextIndex - 1;
       continue;
     }
 

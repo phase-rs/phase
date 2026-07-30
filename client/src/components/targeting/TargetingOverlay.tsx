@@ -16,6 +16,7 @@ import {
 } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
 import type { GameEvent, GameObject } from "../../adapter/types.ts";
+import { GAME_Z_LAYER } from "../../constants/ui.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 
 export function TargetingOverlay() {
@@ -64,6 +65,12 @@ export function TargetingOverlay() {
     : (selection?.current_slot ?? 0);
   const activeSlot = targetSlots[currentTargetSlot];
   const isOptionalCurrentSlot = activeSlot?.optional === true;
+  // CR 601.2c: display-only hint that this slot is announced by a non-controller
+  // ("of an opponent's choice", e.g. Volcanic Offering). The engine routes the
+  // prompt's `WaitingFor.player` to that announcer — who is exactly the viewer of
+  // this overlay — so the slot is labelled whenever it carries any `chooser`.
+  // This only labels the slot; no game logic in the client.
+  const isOpponentChosenSlot = activeSlot?.chooser != null;
   const sourceId = boardChoice?.sourceId ?? (
     waitingFor?.type === "TriggerTargetSelection"
       ? waitingFor.data.source_id
@@ -175,7 +182,7 @@ export function TargetingOverlay() {
   return (
     <AnimatePresence>
       <motion.div
-        className="pointer-events-none fixed inset-0 z-40"
+        className={`pointer-events-none fixed inset-0 ${GAME_Z_LAYER.dialogHost}`}
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
@@ -188,7 +195,10 @@ export function TargetingOverlay() {
             opponent's face-down hand (low-value space) and clears the
             opponent-HUD tab rail below it — the rail carries life/creature/land
             counts that must stay readable and clickable during targeting. */}
-        <div className="absolute left-0 right-0 top-1 flex flex-col items-center gap-1">
+        <div
+          className="absolute left-0 right-0 flex flex-col items-center gap-1"
+          style={{ top: "var(--game-targeting-prompt-top, 0.25rem)" }}
+        >
           {sourceName && (
             <div className="rounded-md bg-gray-800/90 px-4 py-1 text-sm font-medium text-amber-300 shadow">
               {sourceName}
@@ -197,6 +207,11 @@ export function TargetingOverlay() {
           <div className="rounded-lg bg-gray-900/90 px-6 py-2 text-lg font-semibold text-cyan-400 shadow-lg">
             <RichLabel text={overlayPrompt} />
           </div>
+          {isOpponentChosenSlot && (
+            <div className="rounded-md bg-gray-800/90 px-3 py-1 text-xs font-medium text-amber-300 shadow">
+              {t("targeting.opponentChoice")}
+            </div>
+          )}
           {enginePrompt && (
             <div className="max-w-md rounded-md bg-gray-800/90 px-4 py-1 text-center text-xs text-gray-300 shadow">
               <RichLabel text={enginePrompt} size="xs" />
@@ -437,6 +452,12 @@ function boardChoicePrompt(
         selected: boardChoiceSelectedPower(choice, selectedIds, objects),
         required: choice.selection.power,
       });
+    case "totalPowerAtMost":
+      return t("boardChoice.prompt.totalPowerAtMost", {
+        action,
+        selected: boardChoiceSelectedPower(choice, selectedIds, objects),
+        max: choice.selection.power,
+      });
   }
 }
 
@@ -485,6 +506,11 @@ function boardChoiceConfirmLabel(
         selected: boardChoiceSelectedPower(choice, selectedIds, objects),
         required: choice.selection.power,
       });
+    case "totalPowerAtMost":
+      return t("boardChoice.confirmPowerAtMost", {
+        selected: boardChoiceSelectedPower(choice, selectedIds, objects),
+        max: choice.selection.power,
+      });
   }
 }
 
@@ -503,6 +529,7 @@ function boardChoiceConfirmClass(choice: BoardChoiceView): string {
     case "crew":
     case "saddle":
     case "station":
+    case "keep":
       return "bg-sky-700 hover:bg-sky-600";
   }
 }

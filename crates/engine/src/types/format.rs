@@ -83,7 +83,9 @@ pub enum SideboardPolicy {
     Unlimited,
 }
 
-/// Per-card override to the default constructed copy limit.
+/// A deck-construction copy ceiling for one card name: either unbounded or
+/// capped at `n`. Used at both levels of the rule — the format's default
+/// (see [`GameFormat::default_deck_copy_limit`]) and a card's printed override.
 ///
 /// CR 100.2a sets the default constructed limit to four of any card with a
 /// particular English name (basic lands excepted). A handful of cards print an
@@ -131,6 +133,13 @@ pub struct FormatConfig {
     pub starting_life: i32,
     pub min_players: u8,
     pub max_players: u8,
+    /// CR 100.5: the format's **minimum** deck size. There is no maximum deck
+    /// size for non-Commander decks, so a 61-card Standard deck is legal and
+    /// this must be compared with `<`, never `==`.
+    ///
+    /// The command-zone formats are the exception: CR 903.5a makes 100 both the
+    /// minimum and the maximum, so an exact comparison is correct there — but
+    /// only there, and only when gated on `command_zone`.
     pub deck_size: u16,
     pub singleton: bool,
     pub command_zone: bool,
@@ -239,6 +248,54 @@ impl GameFormat {
             | GameFormat::Archenemy
             | GameFormat::Planechase
             | GameFormat::Limited => SideboardPolicy::Unlimited,
+        }
+    }
+
+    /// CR 100.2a / CR 100.2b / CR 903.5b: Per-format default copy limit for a
+    /// single card name, before per-card overrides and the basic-land
+    /// exemption are applied.
+    ///
+    /// - `UpTo(4)` — CR 100.2a: constructed decks may contain no more than four
+    ///   of any card with a particular English name. Planechase and Archenemy
+    ///   build a constructed deck plus a supplementary deck (CR 100.2d), so
+    ///   they inherit the same limit.
+    /// - `UpTo(1)` — CR 903.5b: the Commander singleton rule, shared by every
+    ///   command-zone singleton variant.
+    /// - `Unlimited` — CR 100.2b: a limited deck may contain as many duplicates
+    ///   of a card as the product provides. Free-for-All and Two-Headed Giant
+    ///   are casual variants that restrict no card pool, and Momir supplies a
+    ///   fixed deck (CR 100.2a's limit never applies to a deck players do not
+    ///   construct).
+    ///
+    /// This is the format half of the copy rule only. `max_deck_copies` in
+    /// `game::deck_validation` is the single authority that combines it with
+    /// the basic-land exemption and a card's printed [`DeckCopyLimit`]
+    /// override; callers wanting "how many copies of this card are legal"
+    /// must use that, never this method alone.
+    pub fn default_deck_copy_limit(self) -> DeckCopyLimit {
+        match self {
+            GameFormat::Standard
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::Planechase
+            | GameFormat::Archenemy => DeckCopyLimit::UpTo(4),
+            GameFormat::Commander
+            | GameFormat::PauperCommander
+            | GameFormat::DuelCommander
+            | GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl => DeckCopyLimit::UpTo(1),
+            GameFormat::Limited
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Momir => DeckCopyLimit::Unlimited,
         }
     }
 
@@ -449,7 +506,7 @@ impl GameFormat {
                 format: GameFormat::HistoricBrawl,
                 label: "Historic Brawl",
                 short_label: "HBR",
-                description: "60-card eternal singleton",
+                description: "100-card eternal singleton",
                 group: FormatGroup::Commander,
                 default_config: FormatConfig::historic_brawl(),
             },
@@ -767,10 +824,13 @@ impl FormatConfig {
         }
     }
 
-    /// Historic Brawl: same rules as Brawl but with the broader Historic card pool.
+    /// Historic Brawl: Brawl's structural rules with the broader Historic card
+    /// pool and a 100-card deck (Arena's 100-card Brawl, formerly "Historic
+    /// Brawl" — distinct from 60-card Standard Brawl).
     pub fn historic_brawl() -> Self {
         FormatConfig {
             format: GameFormat::HistoricBrawl,
+            deck_size: 100,
             ..Self::brawl()
         }
     }
@@ -1002,6 +1062,20 @@ mod tests {
         assert_eq!(config.commander_damage_threshold, None);
         assert!(!config.uses_commander);
         assert!(!config.team_based);
+    }
+
+    #[test]
+    fn format_config_brawl_deck_sizes() {
+        // Standard Brawl is 60 cards; Historic Brawl (Arena's 100-card Brawl)
+        // is 100. Both share the remaining structural rules.
+        let brawl = FormatConfig::brawl();
+        assert_eq!(brawl.deck_size, 60);
+        let historic = FormatConfig::historic_brawl();
+        assert_eq!(historic.deck_size, 100);
+        assert_eq!(historic.starting_life, brawl.starting_life);
+        assert!(historic.singleton);
+        assert!(historic.command_zone);
+        assert_eq!(historic.commander_damage_threshold, Some(21));
     }
 
     #[test]

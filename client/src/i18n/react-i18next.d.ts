@@ -9,6 +9,7 @@ import type draft from "./locales/en/draft.json";
 import type game from "./locales/en/game.json";
 import type menu from "./locales/en/menu.json";
 import type multiplayer from "./locales/en/multiplayer.json";
+import type replay from "./locales/en/replay.json";
 import type settings from "./locales/en/settings.json";
 
 declare module "react-i18next" {
@@ -22,6 +23,7 @@ declare module "react-i18next" {
       draft: typeof draft;
       settings: typeof settings;
       multiplayer: typeof multiplayer;
+      replay: typeof replay;
     };
   }
 }

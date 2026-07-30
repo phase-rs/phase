@@ -6,6 +6,99 @@ use engine::types::ability::{
 };
 use engine::types::keywords::Keyword;
 use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
+
+/// CR 701.57c + CR 608.2c: Hit the Mother Lode — Discover 10 followed by a
+/// conditional "create a number of tapped Treasure tokens equal to the
+/// difference". The follow-up clause's bare "the difference" anaphor must bind
+/// to the `Difference` of the leading `QuantityCheck` condition's operands
+/// (`ObjectManaValue { CostPaidObject }` vs `Fixed(10)`), the token must be
+/// `tapped: true`, and NOTHING may remain `Unimplemented`. Reverting the token
+/// anaphor recognition, the shared difference binder, or the spell-seam
+/// invocation flips the token count back to a dead `Variable("difference")`
+/// placeholder (or drops the whole token clause to `Unimplemented`).
+#[test]
+fn hit_the_mother_lode_binds_difference_token_count() {
+    use engine::types::ability::{
+        AbilityCondition, Comparator, Effect, ObjectScope, QuantityExpr, QuantityRef,
+    };
+
+    fn any_unimplemented(def: &engine::types::ability::AbilityDefinition) -> bool {
+        matches!(&*def.effect, Effect::Unimplemented { .. })
+            || def.sub_ability.as_deref().is_some_and(any_unimplemented)
+            || def.else_ability.as_deref().is_some_and(any_unimplemented)
+    }
+
+    let result = parse(
+        "Discover 10. If the discovered card's mana value is less than 10, create a number of tapped Treasure tokens equal to the difference.",
+        "Hit the Mother Lode",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+
+    let top = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::Discover { .. }))
+        .unwrap_or_else(|| panic!("no Discover ability parsed: {result:#?}"));
+    assert!(
+        !any_unimplemented(top),
+        "Hit the Mother Lode must have no Unimplemented residual: {top:#?}"
+    );
+
+    let token_def = top
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("Discover has no follow-up token sub: {top:#?}"));
+
+    let expected_mv = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectManaValue {
+            scope: ObjectScope::CostPaidObject,
+        },
+    };
+    let expected_difference = QuantityExpr::Difference {
+        left: Box::new(expected_mv.clone()),
+        right: Box::new(QuantityExpr::Fixed { value: 10 }),
+    };
+
+    match &*token_def.effect {
+        Effect::Token {
+            name,
+            tapped,
+            count,
+            ..
+        } => {
+            assert_eq!(name, "Treasure", "token is a Treasure: {token_def:#?}");
+            assert!(*tapped, "Treasure tokens enter tapped: {token_def:#?}");
+            assert_eq!(
+                count, &expected_difference,
+                "token count binds to Difference{{ObjectManaValue(CostPaidObject), Fixed(10)}}: {token_def:#?}"
+            );
+        }
+        other => panic!("expected a Token effect sub, got {other:#?}"),
+    }
+
+    match token_def.condition.as_ref() {
+        Some(AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        }) => {
+            assert_eq!(
+                lhs, &expected_mv,
+                "condition lhs is the discovered card's mana value"
+            );
+            assert_eq!(*comparator, Comparator::LT, "condition uses less-than");
+            assert_eq!(
+                rhs,
+                &QuantityExpr::Fixed { value: 10 },
+                "condition rhs is 10"
+            );
+        }
+        other => panic!("expected a QuantityCheck condition on the token sub, got {other:#?}"),
+    }
+}
 
 fn parse(
     oracle_text: &str,
@@ -134,8 +227,53 @@ fn snapshot_rancor() {
     insta::assert_json_snapshot!(result);
 }
 
+fn assert_same_is_true_type_recipients(affected: &Option<TargetFilter>) {
+    let Some(TargetFilter::Or { filters }) = affected else {
+        panic!("expected battlefield, stack, and owned-card recipient arms, got {affected:?}");
+    };
+    assert_eq!(filters.len(), 3);
+
+    let TargetFilter::Typed(battlefield) = &filters[0] else {
+        panic!("expected a typed battlefield recipient arm")
+    };
+    assert_eq!(battlefield.controller, Some(ControllerRef::You));
+    assert!(battlefield.type_filters.contains(&TypeFilter::Creature));
+    assert!(battlefield.properties.contains(&FilterProp::InZone {
+        zone: Zone::Battlefield,
+    }));
+
+    let TargetFilter::Typed(stack) = &filters[1] else {
+        panic!("expected a typed stack recipient arm")
+    };
+    assert_eq!(stack.controller, Some(ControllerRef::You));
+    assert!(stack.type_filters.contains(&TypeFilter::Creature));
+    assert!(stack
+        .properties
+        .contains(&FilterProp::InZone { zone: Zone::Stack }));
+
+    let TargetFilter::Typed(cards) = &filters[2] else {
+        panic!("expected a typed owned-card recipient arm")
+    };
+    assert_eq!(cards.controller, None);
+    assert!(cards.type_filters.contains(&TypeFilter::Creature));
+    assert!(cards.properties.contains(&FilterProp::Owned {
+        controller: ControllerRef::You,
+    }));
+    assert!(cards.properties.contains(&FilterProp::RepresentedByCard));
+    assert!(cards.properties.contains(&FilterProp::InAnyZone {
+        zones: vec![
+            Zone::Library,
+            Zone::Hand,
+            Zone::Graveyard,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command,
+        ],
+    }));
+}
+
 #[test]
-fn arcane_adaptation_full_oracle_splits_battlefield_static_and_unimplemented_tail() {
+fn arcane_adaptation_full_oracle_models_all_same_is_true_recipients() {
     let result = parse(
         "As Arcane Adaptation enters, choose a creature type.\nCreatures you control are the chosen type in addition to their other types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.",
         "Arcane Adaptation",
@@ -154,13 +292,7 @@ fn arcane_adaptation_full_oracle_splits_battlefield_static_and_unimplemented_tai
             kind: ChosenSubtypeKind::CreatureType
         }
     )));
-    match &static_def.affected {
-        Some(TargetFilter::Typed(filter)) => {
-            assert_eq!(filter.controller, Some(ControllerRef::You));
-            assert!(filter.type_filters.contains(&TypeFilter::Creature));
-        }
-        other => panic!("expected battlefield creature filter, got {other:?}"),
-    }
+    assert_same_is_true_type_recipients(&static_def.affected);
 
     let unimplemented: Vec<_> = result
         .abilities
@@ -173,24 +305,17 @@ fn arcane_adaptation_full_oracle_splits_battlefield_static_and_unimplemented_tai
             _ => None,
         })
         .collect();
-    assert_eq!(
-        unimplemented,
-        vec![
-            "The same is true for creature spells you control and creature cards you own that aren't on the battlefield."
-        ]
+    assert!(
+        unimplemented.is_empty(),
+        "Arcane Adaptation's continuation is fully modeled: {unimplemented:?}"
     );
 }
 
-// CR 613.1d + CR 205.3m: Maskwood Nexus's full Oracle text shares Arcane
-// Adaptation's two-sentence shape — a battlefield static plus the
-// "the same is true for creature spells / creature cards you own that aren't
-// on the battlefield" tail. The dispatcher in `oracle.rs` must split the
-// battlefield static (Layer 4 `AddAllCreatureTypes` on creatures you
-// control) from the non-battlefield tail, which is parked as
-// `Unimplemented` because layer-applied type changes outside the
-// battlefield aren't modeled.
+// CR 611.3a + CR 613.1d + CR 205.3m: Maskwood Nexus's complete two-sentence
+// static reaches controlled permanents and spells plus owned cards outside the
+// battlefield through one Layer-4 continuous effect.
 #[test]
-fn maskwood_nexus_full_oracle_splits_battlefield_static_and_unimplemented_tail() {
+fn maskwood_nexus_full_oracle_models_all_same_is_true_recipients() {
     let result = parse(
         "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 2/2 blue Shapeshifter creature token with changeling.",
         "Maskwood Nexus",
@@ -206,13 +331,7 @@ fn maskwood_nexus_full_oracle_splits_battlefield_static_and_unimplemented_tail()
         .modifications
         .iter()
         .any(|modification| matches!(modification, ContinuousModification::AddAllCreatureTypes)));
-    match &static_def.affected {
-        Some(TargetFilter::Typed(filter)) => {
-            assert_eq!(filter.controller, Some(ControllerRef::You));
-            assert!(filter.type_filters.contains(&TypeFilter::Creature));
-        }
-        other => panic!("expected battlefield creature filter, got {other:?}"),
-    }
+    assert_same_is_true_type_recipients(&static_def.affected);
 
     let unimplemented: Vec<_> = result
         .abilities
@@ -225,11 +344,9 @@ fn maskwood_nexus_full_oracle_splits_battlefield_static_and_unimplemented_tail()
             _ => None,
         })
         .collect();
-    assert_eq!(
-        unimplemented,
-        vec![
-            "The same is true for creature spells you control and creature cards you own that aren't on the battlefield."
-        ]
+    assert!(
+        unimplemented.is_empty(),
+        "Maskwood Nexus's continuation is fully modeled: {unimplemented:?}"
     );
 }
 
@@ -403,6 +520,7 @@ fn sawhorn_nemesis_damage_replacement_scopes_to_source_chosen_player() {
         replacement.damage_target_filter,
         Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::SourceChosenPlayer,
+            permanent_type: None,
         })
     );
 }

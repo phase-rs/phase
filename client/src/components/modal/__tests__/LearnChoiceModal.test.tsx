@@ -6,6 +6,8 @@ import { CardChoiceModal } from "../CardChoiceModal.tsx";
 import { isWaitingForHandled } from "../../../game/waitingForRegistry.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState, buildPlayers } from "../../../test/factories/gameStateFactory.ts";
 
 const dispatchMock = vi.fn();
 
@@ -14,40 +16,14 @@ vi.mock("../../../hooks/useGameDispatch.ts", () => ({
 }));
 
 function makeHandCard(id: number, name: string) {
-  return {
+  return buildGameObjectWithCoreTypes(["Sorcery"], {
     id,
     card_id: id,
-    owner: 0,
-    controller: 0,
-    zone: "Hand" as const,
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
+    zone: "Hand",
     name,
-    power: null,
-    toughness: null,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: ["Sorcery"], subtypes: [] },
-    mana_cost: { type: "NoCost" as const },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
-    base_color: [],
     timestamp: 1,
     entered_battlefield_turn: 1,
-  };
+  });
 }
 
 const learnChoice: WaitingFor = {
@@ -56,35 +32,16 @@ const learnChoice: WaitingFor = {
 };
 
 function makeState(): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [42, 43], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
-    priority_player: 0,
-    objects: {
-      42: makeHandCard(42, "Lightning Bolt"),
-      43: makeHandCard(43, "Counterspell"),
-    },
+  return buildGameState({
+    players: buildPlayers([{ id: 0, hand: [42, 43] }, 1]),
+    objects: buildObjectMap(
+      makeHandCard(42, "Lightning Bolt"),
+      makeHandCard(43, "Counterspell"),
+    ),
     next_object_id: 100,
-    battlefield: [],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
     waiting_for: learnChoice,
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
     next_timestamp: 2,
-    eliminated_players: [],
-  } as unknown as GameState;
+  });
 }
 
 describe("LearnModal (via CardChoiceModal)", () => {

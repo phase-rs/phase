@@ -59,6 +59,10 @@ fn issue_1995_removed_counter_type_not_proliferated() {
         "creature with no positive counters must not open proliferate choice"
     );
     assert!(
+        state.active_proliferate_frame().is_none(),
+        "an empty proliferate action must not park a target-choice frame"
+    );
+    assert!(
         events
             .iter()
             .any(|e| matches!(e, GameEvent::PlayerPerformedAction { .. })),

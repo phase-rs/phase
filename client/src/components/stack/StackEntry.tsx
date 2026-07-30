@@ -1,20 +1,24 @@
-import type { CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { UnimplementedMechanicsBadge } from "../card/UnimplementedMechanicsBadge.tsx";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import { cardImageLookup } from "../../services/cardImageLookup.ts";
+import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { PopoverMenu } from "../menu/PopoverMenu.tsx";
+import { YieldMuteIcon } from "./YieldMuteIcon.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import type { StackEntry as StackEntryType, StackEntryDisplay, StackPaidFactView } from "../../adapter/types.ts";
 
@@ -52,6 +56,12 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const inspectObject = useUiStore((s) => s.inspectObject);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const priorityYields = useGameStore((s) => s.gameState?.priority_yields);
+  // CR 117.3d: a triggered ability can be pre-committed to auto-pass priority via
+  // the always-visible yield pill rendered below (the menu it opens dispatches
+  // SetPriorityYield through PopoverMenu). Long-press stays uniformly bound to
+  // inspect-and-pin for every entry, so it never competes with the mobile
+  // card-preview gesture and the yield control isn't a hidden gesture.
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
     inspectObject(entry.source_id);
     setPreviewSticky(true);
@@ -69,13 +79,21 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const imageLookup = sourceObj
     ? cardImageLookup(sourceObj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
+  const sourceIsToken = sourceObj?.display_source === "Token" || Boolean(details?.token_image_ref);
+  const sourceTokenImageRef =
+    sourceObj?.display_source === "Token" ? sourceObj.token_image_ref : details?.token_image_ref;
 
-  const { src, isLoading } = useCardImage(imageLookup.name, {
+  const { src, isLoading } = useCardImage(sourceObj ? imageLookup.name : sourceName, {
     size: "normal",
     faceIndex: imageLookup.faceIndex,
+    isToken: sourceIsToken,
+    tokenFilters: sourceObj?.display_source === "Token" ? tokenFiltersForObject(sourceObj) : undefined,
+    tokenImageRef: sourceTokenImageRef,
     oracleId: imageLookup.oracleId,
     faceName: imageLookup.faceName,
   });
+  const [artError, setArtError] = useState(false);
+  useEffect(() => setArtError(false), [src]);
 
   const isSpell = entry.kind.type === "Spell";
   const displayManaCost =
@@ -83,6 +101,31 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       ? pendingCast.cost
       : sourceObj?.mana_cost;
   const isTriggered = entry.kind.type === "TriggeredAbility";
+  // CR 400.7 + CR 704.5d: the card identity an `AllCopies` yield matches on.
+  // Prefer the engine-stamped `source_card_id` (set on triggered abilities so it
+  // survives the source ceasing — a token that left the battlefield is gone from
+  // `objects`), falling back to the live object for entries that carry no stamp.
+  const yieldCardId =
+    (entry.kind.type === "TriggeredAbility" ? entry.kind.data.ability.source_card_id : undefined) ??
+    sourceObj?.card_id;
+  // CR 117.3d: a stored yield the viewer already holds for this entry, so the
+  // menu can surface a Revoke that echoes the exact engine-owned YieldTarget
+  // (the frontend never constructs an incarnation or card_id itself).
+  // The per-trigger `description` this entry carries — the G5 discriminator.
+  const entryDescription =
+    entry.kind.type === "TriggeredAbility" ? entry.kind.data.description ?? undefined : undefined;
+  const matchingYield = priorityYields?.find((y) => {
+    // Mirror the engine's None-wildcard rule (game_state.rs `is_priority_yielded`):
+    // an absent/null `trigger_description` matches ANY entry description (coarse/
+    // legacy yields), while a value matches only that exact trigger. A strict-only
+    // compare would wrongly hide the Revoke pill for legacy yields still held.
+    const stored = "ThisObject" in y.target ? y.target.ThisObject : y.target.AllCopies;
+    const descMatches =
+      stored.trigger_description == null || stored.trigger_description === entryDescription;
+    return "ThisObject" in y.target
+      ? y.target.ThisObject.source_id === entry.source_id && descMatches
+      : yieldCardId !== undefined && y.target.AllCopies.card_id === yieldCardId && descMatches;
+  });
   // Triggered abilities show "Triggered — From <source>" so the player can
   // tell which permanent owns the trigger without hovering the card image.
   // Activated abilities don't carry a pre-resolved source name (different
@@ -99,6 +142,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         ? entry.kind.data.description && renderDescription(entry.kind.data.description, sourceName)
         : undefined;
   const targetLabels = details?.targets?.map((target) => target.label) ?? [];
+  const selectedModeLabels = isSpell ? details?.selected_mode_labels ?? [] : [];
   // The chosen {X} is a resolved value (like a chosen color), not just a cost —
   // pull it out for a dedicated, always-visible badge and drop it from the
   // capped paid-chip row so it isn't shown twice.
@@ -180,10 +224,20 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         style={{ width: cardSize.width, height: cardSize.height }}
         className={`overflow-hidden rounded-lg shadow-lg ${ringClass}`}
       >
-        {isLoading || !src ? (
+        {isLoading ? (
           <div
             className="animate-pulse rounded-lg bg-gray-700 border border-gray-600"
             style={{ width: cardSize.width, height: cardSize.height }}
+          />
+        ) : !src || artError ? (
+          // Issue #6156 on the stack: this path is explicitly token-aware
+          // (`sourceIsToken` / `sourceTokenImageRef` above), so an artless
+          // token's triggered or activated ability landed here and pulsed
+          // forever — worse than a blank square, since it implies the art is
+          // still coming. Name the source instead.
+          <CardArtFallback
+            name={sourceName}
+            className="h-full w-full rounded-lg border border-gray-600"
           />
         ) : (
           <img
@@ -191,12 +245,26 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
             alt={sourceName}
             className="h-full w-full object-cover"
             draggable={false}
+            onError={() => setArtError(true)}
           />
         )}
-        {isSpell && displayManaCost && (
-          <ManaCostPips cost={displayManaCost} size="sm" className="absolute right-[5%] top-[2.5%]" />
-        )}
       </div>
+      {/* @container overlay sized to the card (sibling of the overflow-hidden
+          image wrapper, so the pip backdrop isn't clipped at the card edge).
+          absolute inset-0 takes its width from the relative outer wrapper, so
+          container-type can't collapse it; pips scale in cqi with the stack
+          card's width instead of a fixed px size. */}
+      {isSpell && displayManaCost && (
+        <div className="pointer-events-none absolute inset-0 @container">
+          <ManaCostPips cost={displayManaCost} size="fluid" />
+        </div>
+      )}
+
+      {/* Badge: unimplemented-mechanics warning (issue #4711). Hand and
+          battlefield cards already surface this through CardImage; a spell is
+          most consequential while it is on the stack about to resolve, so the
+          same badge is shown here from the same engine-provided projection. */}
+      <UnimplementedMechanicsBadge mechanics={sourceObj?.unimplemented_mechanics} variant="corner" />
 
       {/* Badge: ×N coalesce count for engine-grouped mass triggers. */}
       {groupCount > 1 && (
@@ -249,6 +317,22 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         </div>
       )}
 
+      {selectedModeLabels.length > 0 && (
+        <section
+          aria-label={t("stack.selectedModes")}
+          className="absolute inset-x-0 bottom-0 rounded-b-lg border-t border-white/10 bg-gray-900/95 px-1.5 py-1 backdrop-blur-sm"
+        >
+          <span className="block text-[9px] font-semibold uppercase tracking-wide text-purple-300">
+            {t("stack.selectedModes")}
+          </span>
+          <ul className="mt-0.5 list-inside list-disc text-[8px] leading-tight text-gray-300">
+            {selectedModeLabels.map((label, index) => (
+              <li key={`${index}-${label}`}>{renderDescription(label, sourceName)}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       {(targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (
         <div className="absolute left-1 right-1 top-5 flex flex-wrap gap-1">
           {targetLabels.slice(0, 2).map((label) => (
@@ -281,6 +365,139 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         </div>
       )}
 
+      {/* CR 117.3d: discoverable auto-pass (yield) control on triggered abilities.
+          A quiet icon-button (hover-expands to its label; amber when a yield
+          stands) is the trigger; the options menu renders through
+          PopoverMenu — portaled to <body>, so it escapes the stack panel's
+          clipping/transform context, paints above the target-arc overlay, and
+          dismisses on outside-click/Escape (the bespoke in-card menu did none of
+          these). Each option dispatches SetPriorityYield; the frontend only names
+          the source + scope (Add) or echoes a stored YieldTarget (Remove). */}
+      {isTriggered && (
+        <PopoverMenu
+          ariaLabel={matchingYield ? t("priorityYield.menuButtonActive") : t("priorityYield.menuButton")}
+          menuWidthPx={248}
+          onOpenChange={(menuOpen) => {
+            // Drop any hover/sticky card preview when the menu opens so it isn't
+            // left lingering on screen while the player reads the options.
+            if (menuOpen) {
+              inspectObject(null);
+              setPreviewSticky(false);
+              onHoverChange?.(false);
+            }
+          }}
+          renderTrigger={({ ref, open, toggle }) => {
+            // A yield already standing is meaningful *state*, so the active chip
+            // is loud (amber) and always shows its label. An available-but-unused
+            // control is tertiary chrome: a quiet icon that only unfurls its
+            // "Auto-pass" label on hover/focus (progressive disclosure), so it
+            // never out-shouts the card at rest.
+            const active = matchingYield != null;
+            return (
+              <button
+                ref={ref}
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={open}
+                aria-label={active ? t("priorityYield.menuButtonActive") : t("priorityYield.menuButton")}
+                aria-pressed={active}
+                title={active ? t("priorityYield.menuButtonActive") : t("priorityYield.menuButton")}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={toggle}
+                className={`group absolute right-1 top-1/2 z-30 flex -translate-y-1/2 items-center rounded-full p-2 shadow-md ring-1 backdrop-blur-sm transition-colors ${
+                  active
+                    ? "bg-amber-500/95 text-black ring-amber-300"
+                    : open
+                      ? "bg-black/70 text-white ring-white/40"
+                      : "bg-black/45 text-white/85 ring-white/25 hover:bg-black/70 hover:text-white hover:ring-white/40"
+                }`}
+              >
+                <YieldMuteIcon muted={active} />
+                <span
+                  className={`overflow-hidden whitespace-nowrap text-[10px] font-semibold leading-none transition-all duration-150 ${
+                    active
+                      ? "ml-1 max-w-[6rem] opacity-100"
+                      : "ml-0 max-w-0 opacity-0 group-hover:ml-1 group-hover:max-w-[6rem] group-hover:opacity-100 group-focus-visible:ml-1 group-focus-visible:max-w-[6rem] group-focus-visible:opacity-100"
+                  }`}
+                >
+                  {active ? t("priorityYield.menuButtonShortActive") : t("priorityYield.menuButtonShort")}
+                </span>
+              </button>
+            );
+          }}
+        >
+          {(close) => (
+            <>
+              {/* Explanatory header — the "full context" of what this control does,
+                  so the scope options below read as a refinement, not a mystery. */}
+              <div className="px-3 pb-2 pt-1.5">
+                <div className="flex items-center gap-1.5 text-sm font-bold text-white">
+                  <YieldMuteIcon muted={false} />
+                  {t("priorityYield.menuHeader")}
+                </div>
+                <p className="mt-1 text-xs font-normal leading-snug text-gray-400">
+                  {t("priorityYield.menuExplainer")}
+                </p>
+              </div>
+              <div className="mx-2 mb-1 border-t border-white/10" />
+              <button
+                role="menuitem"
+                type="button"
+                className="flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left transition-colors hover:bg-white/10"
+                onClick={() => {
+                  dispatchAction({
+                    type: "SetPriorityYield",
+                    data: { op: { type: "Add", data: { source_id: entry.source_id, scope: "ThisObject" } } },
+                  });
+                  close();
+                }}
+              >
+                <span className="text-sm font-semibold text-purple-200">{t("priorityYield.yieldThis")}</span>
+                <span className="text-xs font-normal leading-tight text-gray-400">
+                  {t("priorityYield.yieldThisHint", { source: sourceName })}
+                </span>
+              </button>
+              <button
+                role="menuitem"
+                type="button"
+                className="flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left transition-colors hover:bg-white/10"
+                onClick={() => {
+                  dispatchAction({
+                    type: "SetPriorityYield",
+                    data: { op: { type: "Add", data: { source_id: entry.source_id, scope: "AllCopies" } } },
+                  });
+                  close();
+                }}
+              >
+                <span className="text-sm font-semibold text-purple-200">{t("priorityYield.yieldAllCopies")}</span>
+                <span className="text-xs font-normal leading-tight text-gray-400">
+                  {t("priorityYield.allCopiesHint", { source: sourceName })}
+                </span>
+              </button>
+              {matchingYield && (
+                <button
+                  role="menuitem"
+                  type="button"
+                  className="flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left transition-colors hover:bg-white/10"
+                  onClick={() => {
+                    dispatchAction({
+                      type: "SetPriorityYield",
+                      data: { op: { type: "Remove", data: { target: matchingYield.target } } },
+                    });
+                    close();
+                  }}
+                >
+                  <span className="text-sm font-semibold text-amber-200">{t("priorityYield.revoke")}</span>
+                  <span className="text-xs font-normal leading-tight text-gray-400">
+                    {t("priorityYield.revokeHint")}
+                  </span>
+                </button>
+              )}
+            </>
+          )}
+        </PopoverMenu>
+      )}
+
       {/* Controller seat avatar — colored initial anchors identity to every surface
           where this player appears (stack, HUD, log). */}
       <span
@@ -296,6 +513,9 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   );
 }
 
+// Bell (will stop for this trigger) vs. bell-off (auto-passing / muted). An SVG
+// glyph is theme-aware via `currentColor` and crisp at badge size, unlike an
+// emoji whose rendering varies by platform. Paths adapted from Lucide (MIT).
 function formatPaidFact(fact: StackPaidFactView, t: TFunction<"game">): string {
   switch (fact.type) {
     case "XValue":

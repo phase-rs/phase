@@ -44,6 +44,11 @@ export interface GroupedPermanent {
   ids: ObjectId[];
   count: number;
   representative: CardViewProps;
+  /**
+   * CR 732.2a: every member of this group is part of an accepted object-growth
+   * loop's engine-authored "∞ pile", so the group renders `∞` instead of `×N`.
+   */
+  isUnboundedPile: boolean;
 }
 
 export function partitionByType(objects: GameObject[]): BattlefieldPartition {
@@ -86,10 +91,12 @@ export function partitionByType(objects: GameObject[]): BattlefieldPartition {
 }
 
 const NO_RING_BEARERS: ReadonlySet<ObjectId> = new Set();
+const NO_UNBOUNDED_PILE: ReadonlySet<ObjectId> = new Set();
 
 export function groupByName(
   objects: GameObject[],
   ringBearerIds: ReadonlySet<ObjectId> = NO_RING_BEARERS,
+  unboundedPileIds: ReadonlySet<ObjectId> = NO_UNBOUNDED_PILE,
 ): GroupedPermanent[] {
   const groups = new Map<string, GameObject[]>();
 
@@ -117,6 +124,12 @@ export function groupByName(
       ids: members.map((m) => m.id),
       count: members.length,
       representative: toCardProps(members[0]),
+      // `.every()` is the fail-safe direction: groupKey (above) already splits on
+      // tapped/power/toughness/counters/damage/summoning-sickness, so those never make
+      // a group heterogeneous in pile membership. Fields object_content_eq compares but
+      // groupKey omits could split membership within a visual group — in which case
+      // `.every()` correctly degrades to `×N` (never a false `∞`).
+      isUnboundedPile: members.every((m) => unboundedPileIds.has(m.id)),
     });
   }
 

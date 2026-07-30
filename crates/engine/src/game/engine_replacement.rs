@@ -1,17 +1,21 @@
+use std::collections::HashSet;
+
 use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::types::ability::{
-    AbilityDefinition, Effect, PostReplacementContinuation, ResolvedAbility, TargetFilter,
-    TargetRef,
+    AbilityDefinition, CopyTargetPurpose, Effect, PostReplacementContinuation, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{
+    GameState, PendingCostMoveResume, PendingCounterPostAction, TokenEntryEventEmission, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{AppliedReplacementKey, CounterPlacement, ProposedEvent};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -20,12 +24,28 @@ use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::apply_draw_after_replacement;
-use super::effects::life::{apply_life_gain_after_replacement, apply_life_loss_after_replacement};
+use super::effects::life::{
+    apply_life_gain_after_replacement, apply_life_loss_after_replacement,
+    drain_pending_life_total_assignment,
+};
 use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
 use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
+
+/// CR 101.4 + CR 616.1: In a Prevented replacement-resume arm, resume a parked
+/// `EachPlayerCopyChosen` walk once its inner copy/counter primitive has fully
+/// drained and state is back at Priority. No-op if nothing is parked.
+fn maybe_drain_each_player_copy_chosen(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.active_each_player_copy_chosen().is_some()
+        && state.active_copy_token().is_none()
+        && state.active_counter_additions().is_none()
+    {
+        effects::each_player_copy_chosen::drain_pending(state, events);
+    }
+}
 
 /// CR 614.13a + CR 702.82a/c: matches the broad as-enters shape of a Devour
 /// sacrifice replacement — a `Moved` (ETB-style) event whose post-effect is a
@@ -66,7 +86,7 @@ pub(crate) fn object_has_devour_replacement(state: &GameState, id: ObjectId) -> 
 
 /// CR 701.50a + CR 614.5 + CR 616.1f: drain a deferred connive whose leading
 /// Draw link parked a replacement-ordering choice. Runs only when the dedicated
-/// `pending_connive_reentry` slot is set (the connive applier's parked-draw
+/// stack-owned Connive re-entry is set (the connive applier's parked-draw
 /// path). `propose_connive` re-enters with the already-applied rids excluded
 /// (CR 614.5) so the CR 616.1f repeat covers the remaining connive replacements.
 /// Called from BOTH the Execute arm (the leading draw delivered) and the
@@ -74,11 +94,11 @@ pub(crate) fn object_has_devour_replacement(state: &GameState, id: ObjectId) -> 
 /// THEN that creature connives" still runs the connive step — the prevention
 /// replaced only the draw). Returns the parked `WaitingFor` (ConniveDiscard /
 /// fresh ReplacementChoice) if `propose_connive` parked one, else `None`.
-fn drain_pending_connive_reentry(
+pub(crate) fn drain_pending_connive_reentry(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    let reentry = state.pending_connive_reentry.take()?;
+    let reentry = state.take_active_connive_reentry()?;
     let _ = crate::game::effects::connive::propose_connive(
         state,
         reentry.conniver,
@@ -97,10 +117,50 @@ pub(super) fn handle_replacement_choice(
     index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return Err(EngineError::InvalidAction(
+            "replacement choice has no pending replacement".to_string(),
+        ));
+    };
+    let option_count = super::replacement::pending_replacement_option_count(state, pending);
+    if index >= option_count {
+        return Err(EngineError::InvalidAction(format!(
+            "replacement choice index {index} is outside 0..{option_count}"
+        )));
+    }
+    let replacement_action_event_start = events.len();
+    let parked_search_found_replacement = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| matches!(pending.proposed, ProposedEvent::SearchFound { .. }))
+        .cloned();
     let pending_was_counter_move = state
         .pending_replacement
         .as_ref()
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::MoveCounter { .. }));
+    // CR 107.1c + CR 608.2h: mirror of `pending_was_counter_move` for the
+    // "remove any number of counters" drain — captured before
+    // `continue_replacement` consumes the pending record so the Prevented arm
+    // can resume the remaining removals even when this one was fully prevented.
+    let pending_was_counter_removal = state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::RemoveCounter { .. }));
+    // CR 106.4 + CR 119.3 + CR 616.1f: Yurlok's aggregate LifeLoss can pause
+    // the APNAP phase-transition drain on an ordering choice. Capture that
+    // ownership before `continue_replacement` consumes the pending record.
+    // The LifeLoss event is the sole resume authority; the already-applied
+    // EmptyManaPool event must never be replayed.
+    let pending_was_phase_drain_life_loss = state
+        .pending_phase_transition_progress
+        .as_ref()
+        .is_some_and(|progress| {
+            progress.drain_state == crate::types::game_state::PhaseTransitionDrainState::Ready
+        })
+        && state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::LifeLoss { .. }));
     // CR 701.24a: capture the parked library placement (W3) BEFORE
     // `continue_replacement` consumes (`.take()`s) the pending record, so the
     // ZoneChange resume arm below can thread it into the delivery `DeliveryCtx`
@@ -110,6 +170,32 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.library_placement.clone());
+    // CR 120.4a + CR 702.15b: capture the excess-redirect rider and the deferred
+    // lifelink bonus BEFORE `continue_replacement` consumes the pending record, so
+    // the Damage resume arm can restore them onto the ctx it rebuilds from the
+    // source (which cannot re-derive either).
+    let parked_excess_recipient = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.excess_recipient);
+    let parked_lifelink_bonus = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.lifelink_bonus)
+        .unwrap_or(0);
+    // CR 701.21a + CR 614.1: An inner graveyard move can have parked after a
+    // sacrifice was accepted. The resumed payload is only a ZoneChange, so
+    // capture the enclosing sacrifice before `continue_replacement` consumes
+    // the pending record; the ZoneChange arm below emits its trigger event only
+    // after delivery succeeds.
+    let parked_sacrifice_provenance = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.sacrifice_provenance);
+    // A replacement-paused zone move belongs to its logical owner by both the
+    // pre-move incarnation and the exact proposed event. Capture this before
+    // `continue_replacement` consumes the pending record.
+    let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -147,7 +233,7 @@ pub(super) fn handle_replacement_choice(
                 //     `post_replacement_continuation` drain; the epilogue below
                 //     keeps draining WITH the spell-resolution ctx and with
                 //     `post_replacement_source` cleared for zone changes.
-                // (2) `pending_spell_resolution` ordering is therefore
+                // (2) SpellResolution frame ordering is therefore
                 //     untouched: `apply_pending_spell_resolution` still runs in
                 //     the epilogue before that drain.
                 // (3) PLAN OQ#3 (RESOLVED): play/cast provenance is not a ctx
@@ -176,6 +262,7 @@ pub(super) fn handle_replacement_choice(
                     else {
                         unreachable!("arm pattern guarantees a ZoneChange payload");
                     };
+                    let delivery_start = events.len();
                     match crate::game::zone_pipeline::deliver(
                         state,
                         approved,
@@ -200,11 +287,72 @@ pub(super) fn handle_replacement_choice(
                         // epilogue still owns the continuation drain). Surface
                         // the parked prompt; the epilogue must not run yet.
                         crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                            if let (Some(provenance), Some(pending)) = (
+                                parked_sacrifice_provenance,
+                                state.pending_replacement.as_mut(),
+                            ) {
+                                if pending.proposed.affected_object_id()
+                                    == Some(provenance.object_id)
+                                {
+                                    pending.sacrifice_provenance = Some(provenance);
+                                }
+                            }
                             return Ok(state.waiting_for.clone());
+                        }
+                    }
+                    if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                        state.capture_paused_zone_change_delivery(
+                            paused.member,
+                            &paused.expected_event,
+                            &events[delivery_start..],
+                            crate::game::zone_pipeline::zone_move_completion_from_delivery(
+                                paused.member,
+                                &events[delivery_start..],
+                            ),
+                        );
+                    }
+                    if let Some(provenance) = parked_sacrifice_provenance {
+                        if provenance.object_id == object_id {
+                            // CR 701.21a + CR 603.2: The resumed move is the
+                            // terminal part of the already-accepted sacrifice.
+                            // Emit this exactly once, after the move completes,
+                            // so sacrifice triggers see its real event rather
+                            // than a generic ZoneChanged surrogate.
+                            events.push(GameEvent::PermanentSacrificed {
+                                object_id,
+                                player_id: provenance.player_id,
+                            });
                         }
                     }
                     enters_battlefield = to == Zone::Battlefield;
                     zone_change_object_id = Some(object_id);
+                }
+                event @ ProposedEvent::TokenEntry { entry_ref, .. } => {
+                    if state.has_post_replacement_drain() {
+                        if let Some(waiting_for) = apply_pending_post_replacement_effect(
+                            state,
+                            Some(entry_ref),
+                            None,
+                            Some(ReplacementEvent::Moved),
+                            events,
+                        ) {
+                            state.pending_liminal_entry_resume =
+                                Some(crate::types::game_state::PendingLiminalEntryResume::Token {
+                                    source_id: entry_ref,
+                                    player: waiting_for
+                                        .acting_player()
+                                        .unwrap_or(state.active_player),
+                                    event,
+                                });
+                            state.waiting_for = waiting_for;
+                            return Ok(state.waiting_for.clone());
+                        }
+                    }
+                    if !crate::game::effects::token::commit_liminal_token_entry_and_continue_copy_batch(
+                        state, event, events,
+                    ) {
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 120.3 + CR 120.4b: Damage accepted after replacement choice — apply via the
                 // shared helper so wither/infect/planeswalker/excess/lifelink paths match
@@ -215,14 +363,21 @@ pub(super) fn handle_replacement_choice(
                     is_combat,
                     ..
                 } => {
-                    let ctx = DamageContext::from_source(state, source_id).unwrap_or_else(|| {
-                        let controller = state
-                            .objects
-                            .get(&source_id)
-                            .map(|obj| obj.controller)
-                            .unwrap_or(state.active_player);
-                        DamageContext::fallback(source_id, controller)
-                    });
+                    let mut ctx =
+                        DamageContext::from_source(state, source_id).unwrap_or_else(|| {
+                            let controller = state
+                                .objects
+                                .get(&source_id)
+                                .map(|obj| obj.controller)
+                                .unwrap_or(state.active_player);
+                            DamageContext::fallback(source_id, controller)
+                        });
+                    // CR 120.4a + CR 702.15b: restore the excess-redirect rider and
+                    // the deferred lifelink bonus dropped by the source-derived ctx
+                    // rebuild, so the resumed hit still redirects and a resumed redirect
+                    // leg still gains the combined lifelink total.
+                    ctx.excess_recipient = parked_excess_recipient;
+                    ctx.lifelink_bonus = parked_lifelink_bonus;
                     let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
@@ -283,8 +438,14 @@ pub(super) fn handle_replacement_choice(
                 }
                 // CR 701.26a: Tap accepted after replacement choice.
                 ProposedEvent::Tap { object_id, .. } => {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        obj.tapped = true;
+                    if crate::game::object_state::resolve_and_apply_object_edit(
+                        state,
+                        object_id,
+                        crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                        true,
+                    )
+                    .is_ok()
+                    {
                         events.push(GameEvent::PermanentTapped {
                             object_id,
                             caused_by: None,
@@ -293,8 +454,14 @@ pub(super) fn handle_replacement_choice(
                 }
                 // CR 701.26b: Untap accepted after replacement choice.
                 ProposedEvent::Untap { object_id, .. } => {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        obj.tapped = false;
+                    if crate::game::object_state::resolve_and_apply_object_edit(
+                        state,
+                        object_id,
+                        crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                        false,
+                    )
+                    .is_ok()
+                    {
                         events.push(GameEvent::PermanentUntapped { object_id });
                     }
                 }
@@ -303,6 +470,34 @@ pub(super) fn handle_replacement_choice(
                 // does not prevent the turn-up), so there is nothing to apply on
                 // the post-replacement Execute path here.
                 ProposedEvent::TurnFaceUp { .. } => {}
+                // CR 701.3a + CR 616.1: Attach accepted after a replacement
+                // ordering choice (2+ "as it becomes attached, choose …"
+                // definitions on the same attachment). Unreachable today — the
+                // parser pool has exactly one `ReplacementEvent::Attached`
+                // producer (Psychic Paper) — but wired for correctness if a
+                // future card shares the class. `source_id` for the
+                // `EffectResolved` push is approximated as `attachment_id`:
+                // `ProposedEvent::Attach` doesn't carry the original ability's
+                // source, which only differs from the attachment for a
+                // non-Equip "attach ~ to" effect (e.g. a triggered ability on
+                // another permanent) — no such card has BOTH that shape AND a
+                // second Attached-event replacement to order against today.
+                ProposedEvent::Attach {
+                    attachment_id,
+                    target_id,
+                    ..
+                } => {
+                    if let Some(waiting_for) = crate::game::effects::attach::deliver_attach(
+                        state,
+                        attachment_id,
+                        target_id,
+                        attachment_id,
+                        events,
+                    ) {
+                        state.waiting_for = waiting_for;
+                        return Ok(state.waiting_for.clone());
+                    }
+                }
                 // CR 121.1 + CR 614.6 + CR 614.11: Draw accepted after
                 // replacement choice — delegate to the shared post-replacement
                 // helper so library-zone move + per-turn accounting match the
@@ -311,7 +506,20 @@ pub(super) fn handle_replacement_choice(
                 // the count and the central `post_replacement_continuation`
                 // drain below runs the chain (Choose → RevealUntil).
                 draw @ ProposedEvent::Draw { player_id, .. } => {
-                    apply_draw_after_replacement(state, draw, events);
+                    let drawn_count = apply_draw_after_replacement(state, draw, events);
+                    // CR 121.6b + CR 608.2c: this Draw arm settles the ONE unit
+                    // that was paused (the choice just answered) — it does not go
+                    // through the sequence driver's own delivery closure, so its
+                    // actually-drawn count is folded into the active instruction's
+                    // frame here, BEFORE the drain below resumes that frame. Without
+                    // this the eventual `last_effect_count` commit would omit every
+                    // unit that paused, and a chained "discard that many" would read
+                    // short.
+                    if let Some(frame) = state.active_draw_sequence_mut() {
+                        if frame.player == player_id {
+                            frame.accumulated += drawn_count;
+                        }
+                    }
                     // CR 805.4b: if this resumed draw IS the front of the
                     // team draw-step queue (the active player's mandatory
                     // draw, parked here by a CR 616.1 competing-replacement
@@ -344,11 +552,12 @@ pub(super) fn handle_replacement_choice(
                 // already repeated over and exhausted every applicable connive
                 // replacement, so no connive replacement remains to apply here and
                 // a direct `resolve_connive_effect` is correct.
-                ProposedEvent::Connive {
-                    object_id, count, ..
-                } => {
+                ProposedEvent::Connive { subject, count, .. } => {
                     let _ = crate::game::effects::connive::resolve_connive_effect(
-                        state, object_id, count, events,
+                        state,
+                        crate::types::game_state::ConniveSubject { snapshot: *subject },
+                        count,
+                        events,
                     );
                 }
                 // CR 701.34a: Proliferate accepted after replacement choice.
@@ -366,7 +575,7 @@ pub(super) fn handle_replacement_choice(
                 // CR 616.1: a milled card's own `Moved` replacements (Rest in
                 // Peace + Leyline of the Void class) can surface a per-card
                 // ordering choice mid-delivery. The helper parks that prompt
-                // (`state.waiting_for` set, tail in `pending_batch_deliveries`)
+                // (`state.waiting_for` set, tail in the active BatchDelivery frame)
                 // and returns `false`. Early-return so the unconditional
                 // `waiting_for = Priority` reset below does NOT clobber the
                 // parked prompt — mirroring the `apply_etb_counters`
@@ -435,12 +644,18 @@ pub(super) fn handle_replacement_choice(
                     // already no-ops on a missing player, so emitting unconditionally
                     // would report mana that was never added).
                     if state.players.iter().any(|p| p.id == player_id) {
+                        // CR 107.4h + CR 106.3: mana produced by a snow source is snow mana
+                        // (payable for {S}), even when the ProduceMana replacement surfaces as
+                        // an interactive choice.
+                        let source_is_snow =
+                            crate::game::mana_sources::source_is_snow(state, source_id);
                         for _ in 0..count {
                             let unit = crate::types::mana::ManaUnit {
                                 color: mana_type,
                                 source_id,
                                 pip_id: crate::types::mana::ManaPipId(0),
-                                supertype: None,
+                                supertype: source_is_snow
+                                    .then_some(crate::types::mana::ManaSupertype::Snow),
                                 source_could_produce_two_or_more_colors: false,
                                 restrictions: Vec::new(),
                                 grants: Vec::new(),
@@ -448,7 +663,7 @@ pub(super) fn handle_replacement_choice(
                             };
                             // CR 118.3a: stamp a stable pip id on pool entry so the unit
                             // can be pinned to direct payment.
-                            state.add_mana_to_pool(player_id, unit);
+                            let _ = state.add_mana_to_pool(player_id, unit);
                             events.push(GameEvent::ManaAdded {
                                 player_id,
                                 mana_type,
@@ -475,6 +690,16 @@ pub(super) fn handle_replacement_choice(
                     debug_assert!(
                         false,
                         "handle_replacement_choice: BeginPhase is a mandatory-skip replacement and should never surface as a choice"
+                    );
+                }
+                // CR 701.31 + CR 901.9c: Planeswalk is a mandatory full-replacement
+                // (Fixed Point in Time). A single mandatory candidate is applied
+                // inline by `pipeline_loop` and never surfaces a CR 616.1 choice, so
+                // this arm is unreachable in practice.
+                ProposedEvent::Planeswalk { .. } => {
+                    debug_assert!(
+                        false,
+                        "handle_replacement_choice: Planeswalk is a mandatory full-replacement and should never surface as a choice"
                     );
                 }
                 // CR 701.8a + CR 614: Destroy accepted after replacement choice —
@@ -516,13 +741,12 @@ pub(super) fn handle_replacement_choice(
                 // still set, drain remaining APNAP-ordered players — that
                 // call may itself pause again on another player's choice
                 // (CR 616.1e iteration).
-                ProposedEvent::EmptyManaPool {
-                    player_id, units, ..
-                } => {
-                    crate::types::mana::apply_empty_mana_pool_decisions(
-                        state, player_id, &units, events,
-                    );
-                    state.pending_step_end_mana_handlers.clear();
+                event @ ProposedEvent::EmptyManaPool { .. } => {
+                    if super::turns::apply_empty_mana_pool_event(state, event, events)
+                        == super::turns::EmptyManaPoolApplyOutcome::Deferred
+                    {
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 705.1 + CR 614.1a: Coin-flip replacements (Krark's Thumb)
                 // are always Mandatory and applied inline by
@@ -535,6 +759,21 @@ pub(super) fn handle_replacement_choice(
                         "CoinFlip replacement reached the optional-choice resume path"
                     );
                 }
+                // CR 701.23a + CR 614.6: modified SearchFound events are delivered by
+                // the search-resolution continuation. This arm is reached only
+                // when CR 616 ordering required a replacement choice; the bound
+                // modified event remains authoritative and is not rescanned.
+                event @ ProposedEvent::SearchFound { .. } => {
+                    return match super::engine_resolution_choices::resume_search_found_after_replacement(
+                        state, event, events,
+                    ) {
+                        Ok(waiting) => Ok(waiting),
+                        Err(error) => {
+                            state.pending_replacement = parked_search_found_replacement;
+                            Err(error)
+                        }
+                    };
+                }
             }
 
             let mut waiting_for = WaitingFor::Priority {
@@ -543,14 +782,21 @@ pub(super) fn handle_replacement_choice(
             state.waiting_for = waiting_for.clone();
 
             let mut replacement_ctx = None;
-            if let Some(ctx) = state.pending_spell_resolution.take() {
+            if zone_change_object_id.is_some_and(|object_id| {
+                state
+                    .active_spell_resolution()
+                    .is_some_and(|ctx| object_id == ctx.object_id)
+            }) {
+                let ctx = state
+                    .take_active_spell_resolution()
+                    .expect("matching spell-resolution context was checked above");
                 if enters_battlefield {
                     apply_pending_spell_resolution(state, &ctx, events);
                 }
                 replacement_ctx = Some(ctx);
             }
 
-            if state.post_replacement_continuation.is_some() {
+            if state.has_post_replacement_drain() {
                 // CR 614.12a + CR 614.1c: For ZoneChange events the post-effect
                 // resolves against the zone-changing object, not the replacement
                 // source — drop the source slot so it doesn't leak into an
@@ -563,7 +809,7 @@ pub(super) fn handle_replacement_choice(
                 // Abundance's controller, not `ObjectId(0)` / active_player.
                 let is_zone_change = zone_change_object_id.is_some();
                 if is_zone_change {
-                    state.post_replacement_source = None;
+                    state.clear_post_replacement_source();
                 }
                 if let Some(next_waiting_for) = apply_pending_post_replacement_effect(
                     state,
@@ -574,6 +820,23 @@ pub(super) fn handle_replacement_choice(
                 ) {
                     waiting_for = next_waiting_for;
                 }
+            }
+
+            // CR 702.143a-c + CR 614.1 + CR 616.1: A Foretell cost move may
+            // deliver its card and then surface an interactive post-replacement
+            // effect. Complete the special action at the delivery boundary,
+            // before preserving that non-priority prompt, so the card cannot be
+            // left face up or with a stranded cost continuation.
+            if zone_change_object_id.is_some_and(|object_id| {
+                matches!(
+                    state.pending_cost_move_resume.as_ref(),
+                    Some(PendingCostMoveResume::Foretell {
+                        object_id: pending_object_id,
+                        ..
+                    }) if *pending_object_id == object_id
+                )
+            }) {
+                super::casting::complete_foretell_cost_move(state, events);
             }
 
             // CR 805.4b: a draw-step draw that paused on the choice just
@@ -594,6 +857,34 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 121.6b: a draw instruction (`Effect::Draw{count: N}`) paused
+            // mid-sequence because a per-unit replacement (Dredge, Notion Thief,
+            // Hullbreacher, a count-doubling static, etc.) needed this choice. The
+            // just-resolved unit was settled above (Draw arm); resume the frame to
+            // drive its remaining units. `resume_draw_sequence` leaves the frame
+            // parked and sets `state.waiting_for` (via `draw_through_replacement`)
+            // if the next unit surfaces its own choice, so an arbitrary number of
+            // sequential re-pauses compose — each resume re-addresses the same
+            // frame by ID.
+            while matches!(waiting_for, WaitingFor::Priority { .. }) {
+                let Some(frame_id) = state.active_draw_sequence().map(|frame| frame.frame_id)
+                else {
+                    break;
+                };
+                let _ = crate::game::effects::draw::resume_draw_sequence(state, frame_id, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                    break;
+                }
+                if state
+                    .active_draw_sequence()
+                    .is_some_and(|frame| frame.frame_id == frame_id)
+                {
+                    // No frame completed or paused; avoid retrying a stalled frame.
+                    break;
+                }
+            }
+
             // CR 701.50a + CR 614.5 + CR 616.1f: resume a deferred connive whose
             // leading Draw link parked this just-resolved ReplacementChoice. The
             // draw fully delivered above (Draw arm), so "draw a card, THEN that
@@ -610,7 +901,7 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_counter_moves.is_some()
+                && state.active_counter_moves().is_some()
             {
                 effects::counters::drain_pending_counter_moves(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -618,10 +909,33 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 107.1c + CR 608.2h: a "remove any number of counters" batch
+            // (Rhys, Tetravus) paused mid-removal because a per-removal
+            // replacement needed a choice. The chosen event was applied above;
+            // drain the parked tail (which re-parks if the next removal surfaces
+            // its own choice, setting state.waiting_for for us to propagate).
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_counter_additions.is_some()
+                && state.active_counter_removals().is_some()
+            {
+                effects::counters::drain_pending_counter_removals(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.active_counter_additions().is_some()
             {
                 effects::counters::drain_pending_counter_additions(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.active_life_total_assignment().is_some()
+            {
+                drain_pending_life_total_assignment(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     waiting_for = state.waiting_for.clone();
                 }
@@ -635,7 +949,7 @@ pub(super) fn handle_replacement_choice(
             // next object surfaces its own prompt — in that case it sets
             // `state.waiting_for` for us to propagate.
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_batch_deliveries.is_some()
+                && state.active_batch_delivery().is_some()
             {
                 crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -644,7 +958,7 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_copy_token_resolution.is_some()
+                && state.active_copy_token().is_some()
             {
                 effects::token_copy::drain_pending_copy_token_resolution(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -653,19 +967,67 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && (state.pending_continuation.is_some()
-                    || state.pending_change_zone_iteration.is_some())
+                && state.pending_player_scope_sacrifice_choice.is_some()
+            {
+                // CR 101.4: a simultaneous each-player sacrifice paused by a
+                // CR 616.1 replacement choice resumes the already-announced
+                // remaining sacrifices before any parked continuation can run.
+                match effects::drain_pending_player_scope_sacrifice_after_replacement(state, events)
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                {
+                    effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {}
+                    effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
+                        waiting_for = state.waiting_for.clone();
+                    }
+                    effects::PendingPlayerScopeSacrificeOutcome::Completed { .. } => {
+                        effects::drain_pending_continuation(state, events);
+                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                            waiting_for = state.waiting_for.clone();
+                        }
+                    }
+                }
+            }
+
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && (state.active_ability_continuation().is_some()
+                    || state.active_change_zone_frame().is_some())
+                // CR 118.12 + CR 605.3b + CR 616.1: A mana-source cost pause
+                // owns the unpaid cost suffix.  Do not drain the ordinary
+                // effect rider before that typed root has settled it.
+                && !matches!(
+                    state.pending_cost_move_resume,
+                    Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+                )
             {
                 // CR 614.12b + CR 614.1c + CR 614.13: drain BOTH the chained
                 // continuation and the multi-target ChangeZone iteration that
-                // paused on this replacement choice (issue #535). The drain
-                // helper covers both: it runs the continuation chain (if any)
-                // then the ChangeZone iteration drain hook.
+                // paused on this replacement choice (issue #535). This runs
+                // AFTER a collected simultaneous sacrifice queue: CR 101.4
+                // requires every already-announced sacrifice to finish before
+                // the original ability's later instructions resume.
                 effects::drain_pending_continuation(state, events);
                 // CR 616.1e: The continuation may itself pause on another replacement
                 // (e.g., the second direction of fight damage hitting the same shield),
                 // in which case it sets `state.waiting_for` to the next ReplacementChoice.
                 // Propagate that back so the engine surfaces the correct prompt.
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
+            // CR 101.4 + CR 616.1: An `EachPlayerCopyChosen` per-player step
+            // paused on a replacement choice for its inner token copy or its
+            // +1/+1 counter placement. Both primitives drained above (copy at the
+            // copy-token block, counters at the counter-additions block); this
+            // hook then drives the counter step (copy-pause resume) or advances
+            // the APNAP walk (counter-pause resume). The `drain_pending` guards
+            // re-park if either primitive re-paused under a second replacement.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.active_each_player_copy_chosen().is_some()
+                && state.active_copy_token().is_none()
+                && state.active_counter_additions().is_none()
+            {
+                effects::each_player_copy_chosen::drain_pending(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     waiting_for = state.waiting_for.clone();
                 }
@@ -699,12 +1061,63 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
-            // CR 601.2h + CR 602.2b + CR 616.1: Resume cast/activation cost payment paused for a
-            // replacement choice during discard or sacrifice cost payment.
+            // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A delivered cost
+            // move resumes through the single typed dispatcher before ordinary
+            // effect continuations. Foretell completed above at its dedicated
+            // delivery boundary and is intentionally ineligible here.
+            if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(resumed) = super::engine::drain_pending_cost_move_resume(
+                    state,
+                    events,
+                    super::engine::CostMoveDrainBoundary::ReplacementDelivered {
+                        action_event_start: replacement_action_event_start,
+                    },
+                )? {
+                    waiting_for = resumed;
+                }
+            }
+
+            // CR 118.12 + CR 605.3b + CR 616.1: The ordinary effect rider may
+            // resume only after the whole typed mana-cost root has either paid
+            // or failed its suffix.  This mirrors the prevention path below.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && (state.active_ability_continuation().is_some()
+                    || state.active_change_zone_frame().is_some())
+            {
+                effects::drain_pending_continuation(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
+            // CR 601.2h + CR 602.2b + CR 616.1: Resume a non-move cast or
+            // activation cost payment paused during discard or sacrifice.
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
             {
-                waiting_for = super::casting_costs::resume_interrupted_cost_payment(state, events)?;
+                let resume_cost_event_start = state
+                    .pending_discard_for_cost
+                    .is_some()
+                    .then_some(replacement_action_event_start);
+                waiting_for = super::casting_costs::resume_interrupted_cost_payment(
+                    state,
+                    events,
+                    resume_cost_event_start,
+                )?;
+            }
+
+            // CR 614.6 + CR 500.5: Finish every terminal replacement-choice
+            // Execute path through the shared continuation boundary. In
+            // particular, a nested non-preventing LifeLoss ordering choice can
+            // be the last child of an interactive substitute that owns a
+            // parked APNAP phase transition; the direct phase drain above
+            // deliberately rejects that cursor while it is Awaiting. The
+            // shared resumer first retires the outer continuation/frame, then
+            // advances the typed phase owner exactly once.
+            if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                state.waiting_for = waiting_for;
+                super::engine::resume_pending_continuation_if_priority(state, events)?;
+                waiting_for = state.waiting_for.clone();
             }
 
             Ok(waiting_for)
@@ -721,12 +1134,38 @@ pub(super) fn handle_replacement_choice(
                 if pending.library_placement.is_none() {
                     pending.library_placement = parked_library_placement.clone();
                 }
+                // CR 120.4a: a SECOND material replacement ordering choice on the
+                // same damage event re-parked a fresh record with
+                // `excess_recipient: None`. Reapply the rider captured before
+                // `continue_replacement` consumed the prior record so the eventual
+                // delivery still redirects the excess to the creature's controller.
+                if pending.excess_recipient.is_none() {
+                    pending.excess_recipient = parked_excess_recipient;
+                }
+                // CR 702.15b: likewise carry the deferred lifelink bonus onto the
+                // re-parked record so a second ordering choice cannot drop it.
+                if pending.lifelink_bonus == 0 {
+                    pending.lifelink_bonus = parked_lifelink_bonus;
+                }
+                if let Some(provenance) = parked_sacrifice_provenance {
+                    if pending.proposed.affected_object_id() == Some(provenance.object_id) {
+                        pending.sacrifice_provenance = Some(provenance);
+                    }
+                }
             }
             Ok(super::replacement::replacement_choice_waiting_for(
                 player, state,
             ))
         }
         super::replacement::ReplacementResult::Prevented => {
+            if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                state.capture_paused_zone_change_delivery(
+                    paused.member,
+                    &paused.expected_event,
+                    &[],
+                    crate::types::game_state::ZoneMoveCompletion::Prevented,
+                );
+            }
             // CR 616.1f + CR 701.50a: a full-substitution applier (the Leader,
             // Super-Genius connive replacement) can park its OWN interactive
             // choice while running the replacing action. Two shapes occur:
@@ -757,6 +1196,49 @@ pub(super) fn handle_replacement_choice(
             {
                 return Ok(state.waiting_for.clone());
             }
+            if pending_was_phase_drain_life_loss {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                // CR 614.6: A cross-event replacement's substitute completes
+                // before the original phase-transition drain may resume. If it
+                // pauses again, preserve the phase cursor and surface that
+                // prompt; its eventual replacement epilogue will resume here.
+                if state.has_post_replacement_drain() {
+                    if let Some(waiting_for) =
+                        apply_pending_post_replacement_effect(state, None, None, None, events)
+                    {
+                        state.waiting_for = waiting_for;
+                        super::turns::mark_phase_transition_awaiting_post_replacement(state);
+                    }
+                }
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    super::turns::drain_pending_phase_transition_progress(state, events);
+                }
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 614.6 + CR 616.1f + CR 500.5: A prevented LifeLoss choice
+            // raised *inside* an interactive substitute is a child of the
+            // parked phase-transition owner, not a second root. Resume the
+            // outer ability continuation and its exact post-replacement frame
+            // before the generic prevented-spell teardown below can discard
+            // that work. The shared resumer advances the phase cursor only
+            // after the outer frame is terminal; a further choice leaves the
+            // cursor Awaiting and surfaces that prompt.
+            if state
+                .pending_phase_transition_progress
+                .as_ref()
+                .is_some_and(|progress| {
+                    progress.drain_state
+                        == crate::types::game_state::PhaseTransitionDrainState::AwaitingPostReplacementContinuation
+                })
+            {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                super::engine::resume_pending_continuation_if_priority(state, events)?;
+                return Ok(state.waiting_for.clone());
+            }
             // CR 701.50a + CR 614.5 + CR 616.1f: the leading Draw of a connive
             // replacement was PREVENTED (a draw-Prevent replacement ordered
             // first). The prevention replaced only the draw — CR 701.50a's
@@ -771,7 +1253,7 @@ pub(super) fn handle_replacement_choice(
             // ReplacementChoice — surface it. If the slot is None (every
             // non-connive Prevented resolution) skip entirely so control falls
             // through to the existing pending-* blocks unchanged.
-            if state.pending_connive_reentry.is_some() {
+            if state.active_connive_reentry().is_some() {
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };
@@ -780,16 +1262,26 @@ pub(super) fn handle_replacement_choice(
                 }
                 return Ok(state.waiting_for.clone());
             }
-            if state.pending_counter_additions.is_some() {
+            if state.active_life_total_assignment().is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                drain_pending_life_total_assignment(state, events);
+                return Ok(state.waiting_for.clone());
+            }
+            if state.active_counter_additions().is_some() {
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };
                 effects::counters::drain_pending_counter_additions(state, events);
                 if matches!(state.waiting_for, WaitingFor::Priority { .. })
-                    && state.pending_copy_token_resolution.is_some()
+                    && state.active_copy_token().is_some()
                 {
                     effects::token_copy::drain_pending_copy_token_resolution(state, events);
                 }
+                // CR 101.4 + CR 616.1: resume an `EachPlayerCopyChosen` walk whose
+                // counter placement was prevented — advance to the next player.
+                maybe_drain_each_player_copy_chosen(state, events);
                 return Ok(state.waiting_for.clone());
             }
             if pending_was_counter_move {
@@ -802,20 +1294,63 @@ pub(super) fn handle_replacement_choice(
                 }
                 return Ok(state.waiting_for.clone());
             }
-            if state.pending_copy_token_resolution.is_some() {
+            if pending_was_counter_removal {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                effects::counters::drain_pending_counter_removals(state, events);
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    effects::drain_pending_continuation(state, events);
+                }
+                return Ok(state.waiting_for.clone());
+            }
+            if state.active_copy_token().is_some() {
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };
                 effects::token_copy::drain_pending_copy_token_resolution(state, events);
+                // CR 101.4 + CR 616.1: resume an `EachPlayerCopyChosen` walk whose
+                // inner token copy was prevented — drive the counter step.
+                maybe_drain_each_player_copy_chosen(state, events);
                 return Ok(state.waiting_for.clone());
             }
             // CR 603.10a + CR 616.1: the paused batch object's event was
             // prevented outright — the remaining parked tail still delivers.
-            if state.pending_batch_deliveries.is_some() {
+            if state.active_batch_delivery().is_some() {
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };
                 crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 601.2h + CR 602.2b + CR 614.12a + CR 616.1: A fully
+            // substituted cost move still completes that cost-payment step.
+            // No fresh prompt remains at this point, so restore the normal
+            // reducer boundary before draining its typed continuation.
+            state.waiting_for = WaitingFor::Priority {
+                player: state.active_player,
+            };
+            let resumed_mana_ability_cost = matches!(
+                state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+            );
+            if let Some(waiting_for) = super::engine::drain_pending_cost_move_resume(
+                state,
+                events,
+                super::engine::CostMoveDrainBoundary::ReplacementPrevented {
+                    action_event_start: replacement_action_event_start,
+                },
+            )? {
+                // CR 118.12 + CR 605.3b + CR 616.1: A prevented mana cost has
+                // the same rider ordering as a delivered one: its typed root
+                // settles before any ordinary continuation drains.
+                if resumed_mana_ability_cost
+                    && matches!(waiting_for, WaitingFor::Priority { .. })
+                    && (state.active_ability_continuation().is_some()
+                        || state.active_change_zone_frame().is_some())
+                {
+                    effects::drain_pending_continuation(state, events);
+                }
                 return Ok(state.waiting_for.clone());
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
@@ -834,8 +1369,12 @@ pub(super) fn handle_replacement_choice(
             // the next resume's epilogue to drain; on a pause, surface the
             // parked prompt (its resume delivers the chosen event through the
             // ZoneChange arm above).
-            state.pending_continuation = None;
-            if let Some(ctx) = state.pending_spell_resolution.take() {
+            if state.active_ability_continuation().is_some() {
+                let _ = state
+                    .clear_active_ability_continuation()
+                    .expect("replacement cancellation cannot clear a buried continuation");
+            }
+            if let Some(ctx) = state.take_active_spell_resolution() {
                 match crate::game::zone_pipeline::move_object(
                     state,
                     crate::game::zone_pipeline::ZoneMoveRequest::spell_resolution_default(
@@ -858,6 +1397,202 @@ pub(super) fn handle_replacement_choice(
     }
 }
 
+/// CR 707.2c + CR 614.12a + CR 613.1a: Answer path for Metamorphic Alteration's
+/// "As this Aura enters, choose a creature." Latches the chosen creature's
+/// copiable values (fixed here, per CR 707.2c, as the copy effect first starts
+/// to apply — later changes to the chosen creature never propagate, CR 707.2b)
+/// and installs them as a Layer-1 `CopyValues` transient continuous effect
+/// SOURCED FROM the Aura and applied to the Aura's enchanted host. The Aura
+/// itself is left untouched (it does not become a copy). The install reuses the
+/// single copy-values authority (`become_copy::apply_precomputed_copy_values`),
+/// which strips exceptions / flushes layers / emits `EffectResolved`.
+fn handle_persist_chosen_attribute_choice(
+    state: &mut GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    donor_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 707.2c: copiable values are determined at the moment the effect first
+    // starts to apply — snapshot the donor now.
+    let values = crate::game::layers::compute_current_copiable_values(state, donor_id).ok_or(
+        EngineError::InvalidAction("Chosen copy source no longer exists".to_string()),
+    )?;
+    // CR 111.1 + CR 707.2: art routing follows the copy (token vs printed
+    // source), captured alongside the values — NOT a copiable value itself.
+    let (display_source, printed_ref, token_image_ref) = state
+        .objects
+        .get(&donor_id)
+        .map(|o| {
+            (
+                o.display_source,
+                o.printed_ref.clone(),
+                o.token_image_ref.clone(),
+            )
+        })
+        .unwrap_or_default();
+
+    // CR 400.7: persist the frozen snapshot on the Aura so it is cleared
+    // automatically when the Aura changes zones (exactly the copy's lifetime).
+    let snapshot = crate::types::ability::LatchedCopiableSnapshot {
+        values: values.clone(),
+        display_source,
+        printed_ref: printed_ref.clone(),
+        token_image_ref: token_image_ref.clone(),
+    };
+    if let Some(aura) = state.objects.get_mut(&source_id) {
+        aura.chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::CopiableSnapshot(
+                Box::new(snapshot),
+            ));
+    }
+
+    // CR 608.3c + CR 614.12a: Spell-path mid-entry `CopyTargetChoice` is raised
+    // from the CallerEpilogue post-replacement drain AFTER CR 608.3c Aura
+    // attach — `attached_to` is already the cast host. The stash pushed there
+    // (`PendingSpellResolution`) still carries `spell_targets` so this answer
+    // path can apply cast-link stamps and prefer the CR 303.4a spell target as
+    // the copy recipient (re-attach via `apply_pending_spell_resolution` is
+    // idempotent).
+    //
+    // CR 303.4f: Non-spell Aura entry attaches during delivery (before this
+    // choice), so `attached_to` is already set and there is no spell-resolution
+    // frame — fall through to the attached host / enter-time attach consult.
+    let mut host_from_spell: Option<ObjectId> = None;
+    let mut took_spell_resolution = false;
+    if state
+        .active_spell_resolution()
+        .is_some_and(|ctx| ctx.object_id == source_id)
+    {
+        let ctx = state
+            .take_active_spell_resolution()
+            .expect("active spell-resolution frame checked above");
+        took_spell_resolution = true;
+        host_from_spell = ctx.spell_targets.first().and_then(|t| match t {
+            crate::types::ability::TargetRef::Object(id) => Some(*id),
+            _ => None,
+        });
+        apply_pending_spell_resolution(state, &ctx, events);
+    }
+
+    // CR 303.4f: Non-spell path may still be unattached if entry skipped the
+    // auto-attach consult (e.g. liminal copy → Aura). Resolve it now.
+    // Never use this Enchant-filter consult as a CR 608.3c spell-path fallback
+    // — a resolving Aura spell's host is the target chosen at cast (CR 303.4a),
+    // carried on `PendingSpellResolution.spell_targets`.
+    if !took_spell_resolution
+        && state
+            .objects
+            .get(&source_id)
+            .is_some_and(|aura| aura.attached_to.is_none())
+    {
+        match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+            crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
+            | crate::game::zone_pipeline::EnteringAuraAttachment::Resolved => {}
+            crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice { .. } => {
+                return Err(EngineError::InvalidAction(
+                    "PersistChosenAttribute requires a resolved Aura host before the copy installs"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    // CR 303.4 + CR 702.5: the Aura enchants a creature — its host is the
+    // recipient of the copy effect. Prefer the spell-target host established
+    // above (spell-cast path), then the live attachment (non-spell / after
+    // attach). Never silently no-op if the host is missing.
+    let host_id = host_from_spell
+        .or_else(|| {
+            state
+                .objects
+                .get(&source_id)
+                .and_then(|aura| aura.attached_to.as_ref())
+                .and_then(|attach| attach.as_object())
+        })
+        .ok_or_else(|| {
+            EngineError::InvalidAction(
+                "Metamorphic Alteration copy choice answered without a resolved Aura host \
+                 (CR 608.3c spell target / CR 303.4f attach)"
+                    .to_string(),
+            )
+        })?;
+
+    // CR 707.2c + CR 613.1a + CR 611.2a: install the copy as a transient
+    // continuous effect sourced from the Aura, applied to the host, ending
+    // when the Aura leaves the battlefield (`UntilHostLeavesPlay` prunes on
+    // `tce.source_id` leaving — the Aura). `duration_subject_id` tracks the
+    // host for any recipient-relative duration reads (harmless here).
+    let copy = super::effects::become_copy::PrecomputedCopyValues {
+        source_id,
+        controller,
+        duration_subject_id: host_id,
+        duration: crate::types::ability::Duration::UntilHostLeavesPlay,
+        values,
+        display_source,
+        printed_ref,
+        token_image_ref,
+        additional_modifications: Vec::new(),
+        effect_kind: crate::types::ability::EffectKind::ChoosePermanent,
+    };
+    super::effects::become_copy::apply_precomputed_copy_values(state, host_id, copy, events)
+        .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+    // CR 707.4: installing the host copy must not disturb the Aura's attachment.
+    debug_assert!(
+        state
+            .objects
+            .get(&source_id)
+            .is_some_and(|aura| aura.attached_to.is_some()),
+        "the Aura must remain attached after installing the host copy"
+    );
+
+    // CR 615.5 + CR 614.12a: PersistChosenAttribute's ChoosePermanent work is
+    // complete once the host copy is installed. Retire the paused post-
+    // replacement drain BEFORE replaying deferred entry events — otherwise a
+    // nested OrderTriggers / trigger-target pause can return while the same
+    // ChoosePermanent drain is still resident, and a later post-action pass
+    // re-drains it into a second `CopyTargetChoice`.
+    //
+    // Clear the prompt we just answered first: `state.waiting_for` is still the
+    // inbound `CopyTargetChoice`, and the completion tail below used to echo it
+    // via `if !Priority { return waiting_for }` — the cast driver then re-answered
+    // the same prompt until its 64-iteration cap, leaving sequential Metamorphic
+    // casts blocked (two_auras). Nested prompts raised during copy install /
+    // entry replay still overwrite `waiting_for` and propagate below.
+    //
+    // Divergence from the BecomeCopy completion tail (`:1878+`): that sibling
+    // retires the drain *after* replay and brackets replay with
+    // `capture_paused_zone_change_delivery_for_member` +
+    // `drain_pending_batch_deliveries`. Those steps are for liminal / multi-
+    // member batch deliveries (meld, ninjutsu copy tokens) that can park further
+    // co-arrivers behind the mid-entry choice. An Aura *spell* entry is a
+    // single-object `CallerEpilogue` delivery with no active batch frame — there
+    // is nothing for delivery-capture or batch-drain to preserve — so this path
+    // intentionally omits them. Retiring before replay is required here because
+    // `Effect::ChoosePermanent` (unlike `BecomeCopy`) is itself the post-
+    // replacement continuation being answered; leaving it paused through replay
+    // lets a nested prompt return and then re-surface the same ChoosePermanent.
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    state.finish_active_paused_post_replacement_dispatch();
+
+    // CR 614.12a + CR 603.2: replay the Aura's deferred battlefield-entry event
+    // now that the host copy is realized, so ETB observers see the final state
+    // (mirrors the BecomeCopy completion tail, but with the drain already
+    // retired — see above).
+    if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
+        return Ok(waiting_for);
+    }
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return Ok(state.waiting_for.clone());
+    }
+    Ok(WaitingFor::Priority {
+        player: state.active_player,
+    })
+}
+
 pub(super) fn handle_copy_target_choice(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -868,6 +1603,7 @@ pub(super) fn handle_copy_target_choice(
         player,
         source_id,
         valid_targets,
+        purpose,
         ..
     } = waiting_for
     else {
@@ -885,6 +1621,251 @@ pub(super) fn handle_copy_target_choice(
         }
     };
 
+    // CR 707.2c + CR 614.12a: Metamorphic Alteration — the chosen creature's
+    // copiable values are latched onto the source Aura and installed as a
+    // Layer-1 copy effect on the Aura's enchanted host. The entering Aura is
+    // NEVER turned into a copy (never `BecomeCopy`), and this path never runs
+    // the enter-as-a-copy / copy-token completion tail below.
+    if matches!(purpose, CopyTargetPurpose::PersistChosenAttribute) {
+        return handle_persist_chosen_attribute_choice(state, source_id, player, target_id, events);
+    }
+
+    if state.liminal_entries.contains_key(&source_id) {
+        let Some(resume) = state.pending_liminal_entry_resume.take() else {
+            return Err(EngineError::InvalidAction(
+                "Missing liminal entry resume".to_string(),
+            ));
+        };
+        let (resume_source_id, resume_player) = match &resume {
+            crate::types::game_state::PendingLiminalEntryResume::Token {
+                source_id,
+                player,
+                ..
+            }
+            | crate::types::game_state::PendingLiminalEntryResume::Meld {
+                source_id, player, ..
+            } => (*source_id, *player),
+        };
+        if resume_source_id != source_id || resume_player != player {
+            return Err(EngineError::InvalidAction(
+                "Mismatched liminal entry resume".to_string(),
+            ));
+        }
+        let mut ability = copy_effect_for_source(state, source_id)
+            .map(|effect_def| {
+                build_resolved_from_def_with_targets(
+                    effect_def,
+                    source_id,
+                    player,
+                    vec![TargetRef::Object(target_id)],
+                )
+            })
+            .unwrap_or_else(|| {
+                ResolvedAbility::new(
+                    Effect::BecomeCopy {
+                        target: TargetFilter::Any,
+                        recipient: TargetFilter::SelfRef,
+                        duration: None,
+                        mana_value_limit: None,
+                        additional_modifications: Vec::new(),
+                    },
+                    vec![TargetRef::Object(target_id)],
+                    source_id,
+                    player,
+                )
+            });
+        if let crate::types::game_state::PendingLiminalEntryResume::Meld { context, .. } = resume {
+            // The empty batch record only carried `MeldEntry` across the copy
+            // choice. The typed liminal resume now owns completion, including a
+            // possible counter-replacement pause, so remove that superseded
+            // record before the generic copy finisher tries to drain it.
+            if state.active_batch_delivery().is_some_and(|pending| {
+                pending.remaining.is_empty()
+                    && matches!(
+                        &pending.completion,
+                        Some(crate::types::game_state::BatchCompletion::MeldEntry { .. })
+                    )
+            }) {
+                state
+                    .take_active_batch_delivery()
+                    .expect("MeldEntry batch delivery must own the active frame");
+            }
+            if !crate::game::meld::commit_meld_battlefield(state, &context) {
+                crate::game::meld::finish_deferred_meld_resolution(state, source_id, events);
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 707.9: the copy effect is installed after the meld result's
+            // layer-1 identity, so its later timestamp determines the entering
+            // permanent's copiable values.
+            let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+            let post_actions = vec![PendingCounterPostAction::FinishMeldEntry {
+                context: context.clone(),
+            }];
+            if let Some(waiting_for) =
+                finish_copy_target_choice_entry(state, source_id, events, post_actions, false)?
+            {
+                if state.active_counter_additions().is_none() {
+                    crate::game::meld::finish_deferred_meld_entry(state, context, events);
+                }
+                return Ok(waiting_for);
+            }
+            crate::game::meld::finish_deferred_meld_entry(state, context, events);
+            return Ok(state.waiting_for.clone());
+        }
+        let crate::types::game_state::PendingLiminalEntryResume::Token {
+            event: resume_event,
+            ..
+        } = resume
+        else {
+            unreachable!("meld resume returned above")
+        };
+        let entry_events = state
+            .liminal_entries
+            .get(&source_id)
+            .map(|entry| (entry.name.clone(), entry.source_id));
+        let copy_continuation = state.liminal_entries.get(&source_id).and_then(|entry| {
+            entry.copy_resume.as_ref().and_then(|copy| {
+                (entry.remaining_count > 0).then(|| {
+                    (
+                        entry.object.owner,
+                        copy.clone(),
+                        entry.enter_tapped,
+                        entry.enter_with_counters.clone(),
+                        entry.remaining_count,
+                    )
+                })
+            })
+        });
+        // CR 707.9b: a copy effect's "except" clauses (Embalm/Eternalize's
+        // "the token has no mana cost, it's white, and it's a Zombie in
+        // addition to its other types", etc.) are part of the copy's COPIABLE
+        // values, so they must be folded into the `BecomeCopy` that copies the
+        // chosen source rather than re-applied as a separate layered effect on
+        // top of it. Fold the pending `CopyTokenSpec` exceptions (from the
+        // synthesized Embalm/Eternalize `CopyTokenOf`, which reach this liminal
+        // accept path only because the copied card carries its own "enter as a
+        // copy" replacement) into the `BecomeCopy`'s `additional_modifications`.
+        // `become_copy::resolve` is the single authority that consumes
+        // `RemoveManaCost` / `SetStartingLoyalty` into the copiable values and
+        // layers the remaining exceptions atop the `CopyValues` clone — the
+        // only rules-correct home for stamp-only modifications that must never
+        // be layered directly.
+        let copy_token_exceptions = state.liminal_entries.get(&source_id).and_then(|entry| {
+            entry.copy_resume.as_ref().map(|copy| {
+                (
+                    copy.extra_keywords.clone(),
+                    copy.additional_modifications.clone(),
+                )
+            })
+        });
+        if let Some((extra_keywords, additional_modifications)) = copy_token_exceptions {
+            if let Effect::BecomeCopy {
+                additional_modifications: become_copy_mods,
+                ..
+            } = &mut ability.effect
+            {
+                become_copy_mods.extend(additional_modifications);
+                // CR 707.2 + CR 702: "except it has [keyword]" grants ride the
+                // typed `extra_keywords` channel on the token spec; carry them
+                // through as layered `AddKeyword` exceptions so they become
+                // part of the copy's copiable keyword set.
+                become_copy_mods.extend(extra_keywords.into_iter().map(|keyword| {
+                    crate::types::ability::ContinuousModification::AddKeyword { keyword }
+                }));
+            }
+        }
+        if !super::effects::token::commit_liminal_token_entry_with_event_emission(
+            state,
+            resume_event,
+            events,
+            TokenEntryEventEmission::Suppress,
+        ) {
+            return Ok(state.waiting_for.clone());
+        }
+        // CR 614.12a: the copy target was chosen before the token entered; the
+        // `BecomeCopy` here overwrites the token's copiable values with the
+        // chosen source's values, then layers/consumes the folded copy
+        // exceptions (CR 707.9b).
+        let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+        let mut counter_pause_post_actions = Vec::new();
+        if let Some((name, event_source_id)) = entry_events.clone() {
+            counter_pause_post_actions.push(
+                PendingCounterPostAction::EmitCommittedCopyTokenEntry {
+                    object_id: source_id,
+                    name,
+                    source_id: event_source_id,
+                },
+            );
+        }
+        if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
+            copy_continuation.clone()
+        {
+            counter_pause_post_actions.push(PendingCounterPostAction::ContinueCopyTokenCreation {
+                owner,
+                copy,
+                enter_tapped,
+                enter_with_counters,
+                remaining_count,
+            });
+        }
+        if let Some(waiting_for) = finish_copy_target_choice_entry(
+            state,
+            source_id,
+            events,
+            counter_pause_post_actions,
+            true,
+        )? {
+            return Ok(waiting_for);
+        }
+        if let Some((name, event_source_id)) = entry_events {
+            super::effects::token::push_committed_token_entry_events(
+                state,
+                source_id,
+                name,
+                event_source_id,
+                events,
+            );
+        }
+        if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
+            copy_continuation
+        {
+            let initial_created_ids = state.last_created_token_ids.clone();
+            let status =
+                super::effects::token_copy::apply_copy_token_after_replacement_with_created_ids(
+                    state,
+                    owner,
+                    *copy,
+                    enter_tapped,
+                    enter_with_counters,
+                    remaining_count,
+                    initial_created_ids,
+                    events,
+                );
+            match status.completion {
+                super::effects::token_copy::CopyTokenApplyCompletion::Completed => {
+                    state.last_created_token_ids = status.created_ids;
+                }
+                super::effects::token_copy::CopyTokenApplyCompletion::Paused => {
+                    state.last_created_token_ids = status.created_ids;
+                    return Ok(state.waiting_for.clone());
+                }
+            }
+        }
+        let created_ids = state.last_created_token_ids.clone();
+        if let Some(pending) = state.active_copy_token_mut() {
+            pending.created_ids = created_ids;
+        }
+        if state.active_copy_token().is_some() {
+            super::effects::token_copy::drain_pending_copy_token_resolution(state, events);
+        }
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Ok(state.waiting_for.clone());
+        }
+        return Ok(WaitingFor::Priority {
+            player: state.active_player,
+        });
+    }
+
     let ability = copy_effect_for_source(state, source_id)
         .map(|effect_def| {
             build_resolved_from_def_with_targets(
@@ -898,6 +1879,7 @@ pub(super) fn handle_copy_target_choice(
             ResolvedAbility::new(
                 Effect::BecomeCopy {
                     target: TargetFilter::Any,
+                    recipient: TargetFilter::SelfRef,
                     duration: None,
                     mana_value_limit: None,
                     additional_modifications: Vec::new(),
@@ -908,6 +1890,23 @@ pub(super) fn handle_copy_target_choice(
             )
         });
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+    if let Some(waiting_for) =
+        finish_copy_target_choice_entry(state, source_id, events, Vec::new(), true)?
+    {
+        return Ok(waiting_for);
+    }
+    Ok(WaitingFor::Priority {
+        player: state.active_player,
+    })
+}
+
+fn finish_copy_target_choice_entry(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+    counter_pause_post_actions: Vec<PendingCounterPostAction>,
+    replay_entry_events: bool,
+) -> Result<Option<WaitingFor>, EngineError> {
     // Force a full layer pass after the copy chain so the realized
     // characteristics below (enter-tapped, ETB counters) read post-copy state.
     crate::game::layers::mark_layers_full(state);
@@ -920,7 +1919,28 @@ pub(super) fn handle_copy_target_choice(
         }
     }
     if !apply_etb_counters(state, source_id, &enter_modifiers.counters, events) {
-        return Ok(state.waiting_for.clone());
+        super::effects::counters::append_pending_counter_post_actions(
+            state,
+            counter_pause_post_actions,
+        );
+        return Ok(Some(state.waiting_for.clone()));
+    }
+    // CR 614.12 + CR 707.9: Surface any mandatory "as this enters, choose ..."
+    // replacement choice acquired from entering as a copy before replaying the entry.
+    if let Some(choice) =
+        super::replacement::current_self_enter_replacement_choice(state, source_id)
+    {
+        if let Some(waiting_for) = apply_post_replacement_effect(
+            state,
+            &choice,
+            Some(source_id),
+            None,
+            Some(&ReplacementEvent::Moved),
+            HashSet::new(),
+            events,
+        ) {
+            return Ok(Some(waiting_for));
+        }
     }
     crate::game::layers::mark_layers_full(state);
     // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
@@ -937,21 +1957,81 @@ pub(super) fn handle_copy_target_choice(
     // on the battlefield — concede / error / chained-replacement paths can
     // leave a stale event in the vec, and we discard rather than fire a
     // phantom entry trigger.
-    if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
-        return Ok(waiting_for);
+    if replay_entry_events {
+        let delivery_start = events.len();
+        if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
+            state.capture_paused_zone_change_delivery_for_member(
+                source_id,
+                &events[delivery_start..],
+            );
+            return Ok(Some(waiting_for));
+        }
+        state.capture_paused_zone_change_delivery_for_member(source_id, &events[delivery_start..]);
     }
+    // CR 615.5: a CopyTargetChoice raised by a general post-replacement
+    // continuation has now completed its own copy work. Retire only that
+    // active paused drain before exposing the outer batch-delivery completion;
+    // a later nested choice returned above and therefore keeps the drain
+    // resident with its event context intact.
+    state.finish_active_paused_post_replacement_dispatch();
     // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
     // while paused on `CopyTargetChoice` must run combat placement after the copy
     // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).
-    if state.pending_batch_deliveries.is_some() {
+    if replay_entry_events && state.active_batch_delivery().is_some() {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            return Ok(state.waiting_for.clone());
+            return Ok(Some(state.waiting_for.clone()));
         }
     }
-    Ok(WaitingFor::Priority {
-        player: state.active_player,
-    })
+    // CR 303.4f + CR 303.4g: Copy Enchantment (and any "enter as a copy of an
+    // enchantment" effect) can realize into an Aura only AFTER `BecomeCopy` has
+    // applied the copied characteristics. `BecomeCopy` is resolved post-entry, so
+    // the object was still its pre-copy, non-Aura self when the normal aura-attach
+    // slot ran in `move_object` — that consult was skipped and the copy sits
+    // unattached, dying to the CR 704.5m unattached-Aura SBA before its copied
+    // "level up"/Class ability can matter. Resolve the entering Aura's attachment
+    // now that the copy is realized and layers are flushed. This runs LAST — after
+    // the entry-trigger replay and batch drain above — so a multi-host player
+    // choice can pause on `ReturnAsAuraTarget` with nothing left to strand along
+    // the NON-liminal (real Copy Enchantment) caller: the pause resumes straight
+    // to priority, and any entry trigger already placed on the stack resolves with
+    // the host chosen (CR 303.4f). The auto-attach (0/1 host) branch never pauses.
+    //
+    // Liminal-path caveat: the copy-token caller (`handle_copy_target_choice`,
+    // ~1236) has a `copy_continuation` / committed-token-entry tail that runs only
+    // if this function returns `Ok(None)`. A multi-host `NeedsChoice` pause here
+    // would return `Ok(Some(..))` and skip that tail — the same drop the existing
+    // `replay_deferred_entry_events` pause above already causes. No card reaches
+    // that intersection today (the liminal accept path requires the COPIED card to
+    // carry its own enter-as-a-copy replacement, and none of those realize into a
+    // multi-host Aura with a token continuation); if one ever does, thread the
+    // continuation through the resume like the ETB-counter pause does.
+    match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+        crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
+        | crate::game::zone_pipeline::EnteringAuraAttachment::Resolved => {}
+        crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice {
+            controller,
+            legal_targets,
+        } => {
+            state.waiting_for = WaitingFor::ReturnAsAuraTarget {
+                player: controller,
+                source_id,
+                returned_id: source_id,
+                legal_targets,
+                pending_effect: Box::new(ResolvedAbility::new(
+                    Effect::Attach {
+                        attachment: TargetFilter::SelfRef,
+                        target: TargetFilter::Any,
+                    },
+                    Vec::new(),
+                    source_id,
+                    controller,
+                )),
+            };
+            return Ok(Some(state.waiting_for.clone()));
+        }
+    }
+    Ok(None)
 }
 
 /// CR 603.2 + CR 614.12a: Replay the deferred battlefield-entry `ZoneChanged`
@@ -1035,6 +2115,17 @@ pub(super) fn replay_deferred_entry_events(
 }
 
 fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&AbilityDefinition> {
+    if let Some(entry) = state.liminal_entries.get(&source_id) {
+        return entry
+            .object
+            .replacement_definitions
+            .iter_all()
+            .filter_map(|replacement| replacement.execute.as_deref())
+            .find_map(|effect_def| {
+                super::replacement::EventModifiers::first_non_modifier_ability(Some(effect_def))
+                    .filter(|real| matches!(&*real.effect, Effect::BecomeCopy { .. }))
+            });
+    }
     state.objects.get(&source_id)?;
     // CR 702.26b + CR 114.4: `active_replacements` filters out phased-out /
     // non-emblem command-zone sources.
@@ -1060,18 +2151,36 @@ pub(super) fn apply_post_replacement_effect(
     state: &mut GameState,
     effect_def: &AbilityDefinition,
     object_id: Option<ObjectId>,
-    spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
+    // CR 400.7d: for AmountSpentToCastSource ceilings the entering object's
+    // cast-payment stamp is authoritative — this spell-resolution context is
+    // intentionally unused (issue #6440). Kept so call sites stay stable.
+    _spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
     event: Option<&ReplacementEvent>,
+    replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    let (source_id, controller) = object_id
+    // Dual objects→liminal lookup (same as source identity): also yields the
+    // entering object's cast-payment stamp for copy MV ceilings.
+    let (source_id, controller, mana_spent_stamp) = object_id
         .and_then(|obj_id| {
             state
                 .objects
                 .get(&obj_id)
-                .map(|obj| (obj_id, super::replacement::replacement_source_player(obj)))
+                .or_else(|| {
+                    state
+                        .liminal_entries
+                        .get(&obj_id)
+                        .map(|entry| &entry.object)
+                })
+                .map(|obj| {
+                    (
+                        obj_id,
+                        super::replacement::replacement_source_player(obj),
+                        obj.mana_spent_to_cast_amount,
+                    )
+                })
         })
-        .unwrap_or((ObjectId(0), state.active_player));
+        .unwrap_or((ObjectId(0), state.active_player, 0));
 
     // CR 614.1c: Walk past modifier-only effects (Tap/Untap/PutCounter/ChangeZone)
     // in the sub_ability chain to find the real work. Composable replacements like
@@ -1083,21 +2192,33 @@ pub(super) fn apply_post_replacement_effect(
             .unwrap_or(effect_def);
 
     if let Effect::BecomeCopy { ref target, .. } = *real_work.effect {
-        let max_mana_value = spell_resolution
-            .and_then(|ctx| copy_target_mana_value_ceiling(ctx.actual_mana_spent, real_work));
+        // CR 400.7d: a permanent may reference mana spent to cast the spell that
+        // became it. Uncast put-onto-battlefield (Chord of Calling → Mockingbird,
+        // issue #6440) never received cast finalization (CR 601.2h is the stamp
+        // *write* site), so the stamp stays 0 and the ceiling is Some(0) — never
+        // unconstrained None from a missing PendingSpellResolution.
+        let max_mana_value = copy_target_mana_value_ceiling(mana_spent_stamp, real_work);
         let valid_targets = find_copy_targets(state, target, source_id, controller, max_mana_value);
         if valid_targets.is_empty() {
             return None;
         }
-        // CR 607.2a: For ExiledCardByIndex (The Mimeoplasm), the target is already
-        // determined by the index - no choice prompt needed. Directly resolve the copy.
-        if matches!(target, TargetFilter::ExiledCardByIndex { .. }) {
+        // CR 614.12a + CR 707.2: Some copy sources are already determined before
+        // the permanent enters (indexed exiled cards, or the `SpecificObject`
+        // frozen by a Mystic Reflection-style ChangeZone shield). No new choice
+        // prompt is made for those shapes; resolve the copy directly. Do not
+        // generalize every `SpecificObject` ETB copy replacement here: existing
+        // Moved enter-as-copy paths still use `CopyTargetChoice` to defer the
+        // frontend entry event until the final copy snapshot is chosen.
+        let specific_change_zone_copy = matches!(target, TargetFilter::SpecificObject { .. })
+            && matches!(event, Some(ReplacementEvent::ChangeZone));
+        if matches!(target, TargetFilter::ExiledCardByIndex { .. }) || specific_change_zone_copy {
             let targets = valid_targets
                 .into_iter()
                 .map(TargetRef::Object)
                 .collect::<Vec<_>>();
-            let resolved =
+            let mut resolved =
                 build_resolved_from_def_with_targets(real_work, source_id, controller, targets);
+            resolved.set_replacement_applied_recursive(replacement_applied);
             let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
             return match &state.waiting_for {
                 WaitingFor::Priority { .. } => None,
@@ -1109,8 +2230,31 @@ pub(super) fn apply_post_replacement_effect(
                 source_id,
                 valid_targets,
                 max_mana_value,
+                purpose: CopyTargetPurpose::BecomeCopy,
             });
         }
+    }
+
+    // CR 614.12a + CR 707.2c: "As this Aura enters, choose a creature." The
+    // chosen permanent's copiable values are latched onto the source Aura and
+    // installed as a copy effect on the Aura's enchanted host at the answer
+    // (`PersistChosenAttribute`) — never onto the entering Aura itself. This
+    // reuses the same `CopyTargetChoice` machinery as `BecomeCopy` (it is a
+    // choice, not targeting — hexproof/shroud don't apply, CR 115.10a) but is
+    // discriminated by `purpose`. Empty legal-choice set → no prompt (CR 609.3:
+    // an effect does only as much as possible).
+    if let Effect::ChoosePermanent { ref filter } = *real_work.effect {
+        let valid_targets = find_copy_targets(state, filter, source_id, controller, None);
+        if valid_targets.is_empty() {
+            return None;
+        }
+        return Some(WaitingFor::CopyTargetChoice {
+            player: controller,
+            source_id,
+            valid_targets,
+            max_mana_value: None,
+            purpose: CopyTargetPurpose::PersistChosenAttribute,
+        });
     }
 
     // CR 614.1c: The injected `Object(source)` target is the source-as-SelfRef
@@ -1138,7 +2282,9 @@ pub(super) fn apply_post_replacement_effect(
             .into_iter()
             .collect::<Vec<_>>()
     };
-    let resolved = build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
+    let mut resolved =
+        build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
+    resolved.set_replacement_applied_recursive(replacement_applied);
     let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
 
     match &state.waiting_for {
@@ -1147,14 +2293,13 @@ pub(super) fn apply_post_replacement_effect(
     }
 }
 
-pub(super) fn apply_pending_post_replacement_effect(
+pub(crate) fn apply_pending_post_replacement_effect(
     state: &mut GameState,
     object_id: Option<ObjectId>,
     spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
     event: Option<ReplacementEvent>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    let source = state.post_replacement_source.take().or(object_id);
     // CR 614.12a (approximation): sacrifice prompt fires after ZoneChange completes,
     // matching Siege/Tribute precedent. A strict reading of 614.12a says the choice
     // is made *before* the permanent enters, but the engine's pipeline applies the
@@ -1162,25 +2307,70 @@ pub(super) fn apply_pending_post_replacement_effect(
     // observable behavior is equivalent for as-enters sacrifice/counter mechanics
     // (Devour, Siege protector, Tribute) where the choice doesn't gate entry.
     //
-    // CR 614.12a + CR 615.5: Single dispatch on the unified continuation slot.
-    // `Resolved` carries captured targets (prevention follow-ups); `Template`
-    // is an AST that resolves against `source` for ETB / Optional accept.
-    let waiting_for = match state.post_replacement_continuation.take() {
-        Some(PostReplacementContinuation::Resolved(resolved)) => {
-            apply_post_replacement_resolved_effect(state, &resolved, events)
+    // CR 615.5 + CR 616.1g: Resident-top dispatch. `begin_dispatch` takes the
+    // continuation and marks the drain `Dispatching` WITHOUT removing it, so:
+    //   * a nested `has_post_replacement_drain()` taken while the effect runs sees
+    //     no ready work and cannot re-drain this one (the old slot was likewise
+    //     empty at this point — the continuation had been moved out of it), and
+    //   * the effect can still read this drain's event context (CR 615.5), which is
+    //     how `PostReplacementSourceController` resolves "the source's controller
+    //     draws cards" for Swans of Bryn Argoll.
+    // The typed dispatch handle keeps cleanup attached to that exact resident
+    // entry. A nested replacement can push its own drain above it, but cannot
+    // cause the outer post-dispatch cleanup to mark or pop the nested top.
+    //
+    // `Resolved` carries captured targets (prevention follow-ups); `Template` is an
+    // AST that resolves against `source` for ETB / Optional accept.
+    let source = state.post_replacement_source().or(object_id);
+    let replacement_applied = state
+        .active_post_replacement_drains_mut()
+        .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+        .map(|drain| std::mem::take(&mut drain.applied))
+        .unwrap_or_default();
+
+    let (continuation, dispatch) = state
+        .active_post_replacement_drains_mut()?
+        .begin_dispatch()?;
+    let waiting_for = match continuation {
+        PostReplacementContinuation::Resolved(resolved) => {
+            apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
         }
-        Some(PostReplacementContinuation::Template(effect_def)) => apply_post_replacement_effect(
+        PostReplacementContinuation::Template(effect_def) => apply_post_replacement_effect(
             state,
             &effect_def,
             source,
             spell_resolution,
             event.as_ref(),
+            replacement_applied,
             events,
         ),
-        None => None,
     };
-    state.post_replacement_event_source = None;
-    state.post_replacement_event_target = None;
+    // CR 615.5: a direct pause retains this dispatch's context on its own entry.
+    // If a nested drain owns the prompt instead, this continuation has completed;
+    // retire its exact `Dispatching` entry below the nested top.
+    if waiting_for.is_some()
+        && state
+            .active_post_replacement_drains()
+            .is_some_and(|drains| drains.dispatch_is_resident_top(dispatch))
+    {
+        let _ = state
+            .active_post_replacement_drains_mut()
+            .is_some_and(|drains| drains.pause_dispatch(dispatch));
+    } else {
+        let _ = state
+            .active_post_replacement_drains_mut()
+            .and_then(|drains| drains.finish_dispatch(dispatch));
+        state.remove_empty_active_post_replacement_frame();
+    }
+    // NOTE: the inherited token-choice applied seed is intentionally NOT cleared
+    // here. This drain runs for EVERY replacement continuation — including a
+    // nested one that pauses inside an outer token-choice ChooseOneOf (issue
+    // #4886). Clearing here on "waiting_for is not ChooseOneOfBranch" wipes the
+    // outer originating seed when the nested continuation drains, letting the
+    // same token-choice replacement re-prompt on a later token sub-ability. The
+    // seed is cleared by
+    // `effects::clear_post_replacement_token_choice_seed_if_resolution_drained`
+    // only once priority returns with an empty resolution stack.
     // CR 614.12a + CR 707.9: When the post-effect pauses on `CopyTargetChoice`,
     // the entering object's battlefield-entry `ZoneChanged` event is already
     // in `events` (emitted by the prior `move_to_zone`). `BecomeCopy` and its
@@ -1218,8 +2408,8 @@ fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
 /// CR 603.2 + CR 614.12a: When a permanent's battlefield entry pauses on a
 /// mid-entry player choice — `CopyTargetChoice` (enter as a copy), a
 /// `ChooseOneOfBranch` that `is_enters_counter_choice` (enter with your choice
-/// of counter), or a persisted `NamedChoice` whose `source_id` is the entering
-/// permanent (the "As it enters, choose a color/creature type/…" shape, e.g.
+/// of counter), or a persisted `NamedChoice` with an exact binding to the
+/// entering permanent (the "As it enters, choose a color/creature type/…" shape, e.g.
 /// Valgavoth's Lair) — clone any battlefield-entry `ZoneChanged` events for the
 /// entering source into `state.deferred_entry_events`. The original `events`
 /// vec is preserved so the frontend animates the entry as soon as the spell /
@@ -1246,7 +2436,7 @@ fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
 fn capture_deferred_entry_events_if_mid_entry_choice(
     state: &mut GameState,
     waiting_for: Option<&WaitingFor>,
-    events: &[GameEvent],
+    events: &mut Vec<GameEvent>,
 ) {
     let source_id = match waiting_for {
         Some(WaitingFor::CopyTargetChoice { source_id, .. }) => *source_id,
@@ -1260,16 +2450,16 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
         }) if is_enters_counter_choice(branches) => *source_id,
         // CR 603.2 + CR 614.12a: an "As it enters, choose …" replacement
         // (Valgavoth's Lair, the Thriving lands, Voice of All) pauses the entry
-        // on a persisted `NamedChoice` whose `source_id` is the entering
-        // permanent. Defer the entry event exactly like the copy/counter shapes
+        // on an exact-object `NamedChoice`. Defer the entry event exactly like
+        // the copy/counter shapes
         // so ETB observers fire against the post-choice object once the player
         // answers. The entry-event filter in the capture loop scopes this to the
         // entering source — a persisted `NamedChoice` with no matching entry
         // event in `events` (Pithing Needle naming) captures nothing.
         Some(WaitingFor::NamedChoice {
-            source_id: Some(source_id),
+            source: Some(source),
             ..
-        }) => *source_id,
+        }) if source.is_exact_object_and_resolution() => source.prompt.identity.reference.object_id,
         _ => return,
     };
     // CR 614.12b boundary (inherited from the CopyTargetChoice path, NOT expanded
@@ -1279,7 +2469,7 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
     // events. This already affects CopyTargetChoice today, is unreachable in real
     // cards, and is the CR 614.12b simultaneous-entry boundary.
     state.deferred_entry_events.clear();
-    for event in events {
+    for event in events.iter() {
         if matches!(
             event,
             GameEvent::ZoneChanged { object_id, to, .. }
@@ -1288,14 +2478,38 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
             state.deferred_entry_events.push(event.clone());
         }
     }
+    let is_meld_entry = state.liminal_entries.get(&source_id).is_some_and(|entry| {
+        matches!(
+            entry.kind,
+            crate::types::game_state::LiminalEntryKind::Meld { .. }
+        )
+    });
+    if is_meld_entry {
+        // The final copy characteristics and CR 508.4 combat status are not
+        // known yet. Unlike ordinary copy entry animation, emit this meld entry
+        // only after its final snapshot has been refreshed.
+        events.retain(|event| {
+            !matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == source_id
+            )
+        });
+    }
 }
 
 fn apply_post_replacement_resolved_effect(
     state: &mut GameState,
     resolved: &ResolvedAbility,
+    replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    let _ = effects::resolve_ability_chain(state, resolved, events, 0);
+    let mut resolved = resolved.clone();
+    resolved.set_replacement_applied_recursive(replacement_applied);
+    let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
 
     match &state.waiting_for {
         WaitingFor::Priority { .. } => None,
@@ -1306,7 +2520,7 @@ fn apply_post_replacement_resolved_effect(
 /// CR 608.3: Complete post-resolution work for a permanent spell whose ETB
 /// went through the replacement pipeline and required a player choice.
 /// Applies cast_from_zone, aura attachment, and warp delayed triggers.
-fn apply_pending_spell_resolution(
+pub(crate) fn apply_pending_spell_resolution(
     state: &mut GameState,
     ctx: &crate::types::game_state::PendingSpellResolution,
     events: &mut Vec<GameEvent>,
@@ -1483,7 +2697,7 @@ pub(super) fn apply_etb_counters(
     true
 }
 
-fn find_copy_targets(
+pub(super) fn find_copy_targets(
     state: &GameState,
     filter: &TargetFilter,
     source_id: ObjectId,
@@ -1499,7 +2713,9 @@ fn find_copy_targets(
             // Check mana value constraint if present
             if let Some(max) = max_mana_value {
                 if let Some(obj) = state.objects.get(&card_id) {
-                    if obj.mana_cost.mana_value() > max {
+                    // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
+                    // a split card's mana value is its combined halves.
+                    if obj.effective_mana_value() > max {
                         return vec![];
                     }
                 }
@@ -1522,7 +2738,10 @@ fn find_copy_targets(
         .filter(|(id, obj)| {
             obj.zone == source_zone
                 && **id != source_id
-                && max_mana_value.is_none_or(|max| obj.mana_cost.mana_value() <= max)
+                // CR 202.3d + CR 709.4b: `source_zone` is a non-stack zone
+                // (battlefield/graveyard/exile), so a split clone source reports
+                // its combined mana value for the MV cap.
+                && max_mana_value.is_none_or(|max| obj.effective_mana_value() <= max)
                 && super::filter::matches_target_filter(state, **id, filter, &ctx)
         })
         .map(|(id, _)| *id)
@@ -1531,6 +2750,8 @@ fn find_copy_targets(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::super::game_object::GameObject;
     use super::*;
     use crate::game::engine::apply_as_current;
@@ -1544,7 +2765,7 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::proposed_event::ProposedEvent;
+    use crate::types::proposed_event::{ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
 
     /// Helper: install an Optional replacement on a battlefield object so the
@@ -1582,6 +2803,89 @@ mod tests {
         id
     }
 
+    /// CR 400.7 + CR 616.1: A Connive event parked for replacement ordering
+    /// carries the original subject snapshot. Its terminal delivery must not
+    /// recapture a returned object that reused the same storage id.
+    #[test]
+    fn connive_replacement_ordering_keeps_original_subject_after_same_id_return() {
+        let mut state = GameState::new_two_player(42);
+        let conniver = make_creature(&mut state, PlayerId(0), "Original conniver");
+        let original_subject = state
+            .capture_connive_subject(conniver)
+            .expect("fixture conniver exists before the ordering pause");
+
+        // A real zone round trip creates a new object incarnation while
+        // preserving the engine's storage ObjectId.
+        crate::game::zones::move_to_zone(&mut state, conniver, Zone::Graveyard, &mut Vec::new());
+        crate::game::zones::move_to_zone(&mut state, conniver, Zone::Battlefield, &mut Vec::new());
+        assert_ne!(
+            original_subject.identity(),
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&conniver]),
+            "reach guard: the battlefield return must be a new CR 400.7 incarnation"
+        );
+
+        // The candidate deliberately has no execute payload. Choosing it takes
+        // the actual `continue_replacement` path, marks it applied, and delivers
+        // the terminal Connive survivor through `handle_replacement_choice`.
+        let candidate = install_optional_replacement(&mut state, ReplacementEvent::Connive);
+        state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            proposed: ProposedEvent::Connive {
+                object_id: conniver,
+                subject: Box::new(original_subject.snapshot.clone()),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: vec![ReplacementId {
+                source: candidate,
+                index: 0,
+            }],
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: true,
+            library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
+
+        let draw_card_id = CardId(state.next_object_id);
+        let draw = create_object(
+            &mut state,
+            draw_card_id,
+            PlayerId(0),
+            "Discarded by the original connive".to_string(),
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+        handle_replacement_choice(&mut state, 0, &mut events)
+            .expect("resume the parked Connive replacement choice");
+
+        assert!(state.players[0].graveyard.contains(&draw));
+        assert_eq!(
+            state.objects[&conniver]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "the same-id return is not the original conniver and receives no counter"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::Connive,
+                    subject: Some(subject),
+                    ..
+                } if subject.identity == original_subject.identity()
+            )),
+            "completion event retains the original exact subject for Connive triggers"
+        );
+    }
+
     /// CR 805.4b + CR 616.1: regression for a review-flagged bug where the
     /// active player's draw-step draw, after pausing on a CR 616.1
     /// competing-replacement choice and being resumed via the REAL
@@ -1614,6 +2918,7 @@ mod tests {
         );
         shield_obj.replacement_definitions.push(
             ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
                 .mode(ReplacementMode::Optional { decline: None })
                 .description("Draw Shield".to_string()),
         );
@@ -1884,9 +3189,232 @@ mod tests {
         );
     }
 
+    /// Install Displaced Dinosaurs on the battlefield under `controller`, carrying
+    /// the parsed "As a historic permanent you control enters, it becomes a 7/7
+    /// Dinosaur creature in addition to its other types" replacement. Returns the
+    /// host's ObjectId.
+    fn install_displaced_dinosaurs(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        use crate::parser::oracle_replacement::parse_replacement_line;
+
+        let host = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            "Displaced Dinosaurs".to_string(),
+            Zone::Battlefield,
+        );
+        let repl = parse_replacement_line(
+            "As a historic permanent you control enters, it becomes a 7/7 Dinosaur \
+             creature in addition to its other types.",
+            "Displaced Dinosaurs",
+        )
+        .expect("Displaced Dinosaurs replacement must parse");
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .replacement_definitions = vec![repl].into();
+        host
+    }
+
+    /// CR 614.1c + CR 614.12 + CR 700.6 + CR 205.1b + CR 208.2b: end-to-end
+    /// runtime proof for Displaced Dinosaurs' non-self "becomes-in-addition"
+    /// replacement. A historic ENTRANT (here a plain artifact — historic via its
+    /// artifact card type, CR 700.6) entering under the host's controller is
+    /// animated into a 7/7 Dinosaur creature that RETAINS its prior artifact type
+    /// (CR 205.1b), and the animation persists after the host leaves (CR 208.2b /
+    /// 707.2).
+    ///
+    /// This is the gate confirming the "no runtime edits" hypothesis: a non-self
+    /// `Moved` replacement whose execute is a `GenericEffect` post-replacement
+    /// continuation binds its `SelfRef` "becomes" to the separate entrant (CR
+    /// 614.12a) and the layer system applies it. Mirrors
+    /// `resumed_entry_receives_enters_with_additional_counters_static`.
+    #[test]
+    fn displaced_dinosaurs_animates_historic_entrant_and_persists() {
+        use crate::game::layers::evaluate_layers;
+        use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let host = install_displaced_dinosaurs(&mut state, PlayerId(0));
+
+        // Entrant: a plain artifact (historic via its artifact card type),
+        // P0-owned, entering from hand.
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mishra's Bauble".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&entrant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let mut events = Vec::new();
+        let result = zone_pipeline::move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entrant, Zone::Battlefield, entrant),
+            &mut events,
+        );
+        assert!(
+            matches!(result, ZoneMoveResult::Done),
+            "a single Mandatory becomes replacement must deliver the entry without parking"
+        );
+
+        evaluate_layers(&mut state);
+        let obj = &state.objects[&entrant];
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "entrant must be on the battlefield"
+        );
+        // CR 613.4b: base power/toughness set to 7/7.
+        assert_eq!(obj.power, Some(7), "entrant power must be set to 7");
+        assert_eq!(obj.toughness, Some(7), "entrant toughness must be set to 7");
+        // CR 613.1d: Creature type added.
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Creature),
+            "entrant must become a creature"
+        );
+        // CR 205.1b: prior artifact type retained (additive).
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Artifact),
+            "CR 205.1b: entrant must retain its artifact type"
+        );
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "entrant must gain the Dinosaur subtype"
+        );
+
+        // CR 208.2b + CR 707.2: the characteristics are locked in at entry and
+        // persist after the host (Displaced Dinosaurs) leaves the battlefield —
+        // the becomes continuous is sourced on the entrant, not the host.
+        state.battlefield.retain(|id| *id != host);
+        state.objects.remove(&host);
+        evaluate_layers(&mut state);
+        let obj = &state.objects[&entrant];
+        assert_eq!(
+            obj.power,
+            Some(7),
+            "CR 208.2b: 7/7 must persist after the host leaves"
+        );
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "CR 208.2b: Dinosaur subtype must persist after the host leaves"
+        );
+    }
+
+    /// CR 700.6: a non-historic entrant (a vanilla creature — no artifact,
+    /// legendary, or Saga) is NOT animated by Displaced Dinosaurs' historic-only
+    /// replacement. Discriminates the `FilterProp::Historic` subject guard.
+    #[test]
+    fn displaced_dinosaurs_does_not_animate_nonhistoric_entrant() {
+        use crate::game::layers::evaluate_layers;
+        use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        install_displaced_dinosaurs(&mut state, PlayerId(0));
+
+        // Entrant: a vanilla 2/2 creature (non-historic), P0-owned.
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&entrant).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        let mut events = Vec::new();
+        let result = zone_pipeline::move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entrant, Zone::Battlefield, entrant),
+            &mut events,
+        );
+        assert!(
+            matches!(result, ZoneMoveResult::Done),
+            "entry must complete"
+        );
+
+        evaluate_layers(&mut state);
+        let obj = &state.objects[&entrant];
+        assert_eq!(
+            obj.power,
+            Some(2),
+            "non-historic creature power must be unchanged"
+        );
+        assert_eq!(
+            obj.toughness,
+            Some(2),
+            "non-historic creature toughness must be unchanged"
+        );
+        assert!(
+            !obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "non-historic creature must not gain the Dinosaur subtype"
+        );
+    }
+
+    /// CR 603.6d: the replacement applies only as a permanent ENTERS. An artifact
+    /// already on the battlefield when Displaced Dinosaurs is present is never
+    /// animated — there is no entry event for it.
+    #[test]
+    fn displaced_dinosaurs_does_not_animate_preexisting_artifact() {
+        use crate::game::layers::evaluate_layers;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        install_displaced_dinosaurs(&mut state, PlayerId(0));
+
+        // A historic artifact already on the battlefield (no entry event fires).
+        let preexisting = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&preexisting)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        evaluate_layers(&mut state);
+        let obj = &state.objects[&preexisting];
+        assert_ne!(
+            obj.power,
+            Some(7),
+            "a pre-existing artifact must not be animated into a 7/7"
+        );
+        assert!(
+            !obj.card_types.core_types.contains(&CoreType::Creature),
+            "a pre-existing artifact must not become a creature"
+        );
+        assert!(
+            !obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "a pre-existing artifact must not gain the Dinosaur subtype"
+        );
+    }
+
     /// CR 608.3e + CR 614.6 discriminating test (fail-first): when a permanent
     /// spell's ETB is fully prevented after a replacement choice
-    /// (`ReplacementResult::Prevented` while `pending_spell_resolution` is set),
+    /// (`ReplacementResult::Prevented` while SpellResolution is active),
     /// the graveyard fallback is a FRESH, never-consulted event — it must route
     /// through the zone pipeline so a board-wide `Moved` graveyard→exile
     /// redirect (Rest in Peace / Leyline of the Void) fires on the discarded
@@ -1897,7 +3425,7 @@ mod tests {
     /// today, so the natural entry-prevention pause is not constructible
     /// end-to-end; the parked choice is staged as a regeneration-shield Destroy
     /// prevention (the canonical `Prevented` producer) with
-    /// `pending_spell_resolution` set. The assertion target —
+    /// the SpellResolution frame set. The assertion target —
     /// `handle_replacement_choice`'s Prevented-arm CR 608.3e fallback — is
     /// driven through the real `GameAction::ChooseReplacement` resume entry.
     #[test]
@@ -1938,13 +3466,15 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 ))]
             .into();
 
         // The paused entry's spell-resolution bookkeeping.
-        state.pending_spell_resolution = Some(PendingSpellResolution {
+        state.push_spell_resolution(PendingSpellResolution {
             object_id: spell,
             controller: PlayerId(0),
             casting_variant: CastingVariant::Normal,
@@ -1977,18 +3507,32 @@ mod tests {
                 cant_regenerate: false,
                 applied: std::collections::HashSet::new(),
             },
+            sacrifice_provenance: None,
             candidates: vec![ReplacementId {
                 source: bear,
                 index: 0,
             }],
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);
+
+        let serialized = serde_json::to_string(
+            &crate::types::resolution::ResolutionStateWire::from_game_state(state),
+        )
+        .expect("spell-resolution prompt serializes as v2 frames");
+        let mut state =
+            serde_json::from_str::<crate::types::resolution::ResolutionStateWire>(&serialized)
+                .expect("spell-resolution prompt restores from v2 frames")
+                .into_game_state();
+        state.rehydrate_rng();
 
         apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("resume replacement choice");
@@ -2237,7 +3781,9 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 ))
                 .description("Rest in Peace".to_string()),
@@ -2337,6 +3883,152 @@ mod tests {
         );
     }
 
+    /// CR 101.4 + CR 616.1 + CR 701.21a: A player-scope sacrifice batch whose
+    /// final announced permanent pauses on an inner graveyard-move replacement
+    /// must retain its terminal bookkeeping through the real replacement
+    /// response. In particular, an empty remaining queue must still publish the
+    /// completed count and changed id before any chained effect could continue.
+    #[test]
+    fn final_player_scope_sacrifice_replacement_resume_commits_batch_bookkeeping() {
+        use crate::game::effects::{
+            perform_collected_player_scope_sacrifices, PendingPlayerScopeSacrificeOutcome,
+        };
+        use crate::types::ability::EffectKind;
+
+        let mut state = GameState::new_two_player(42);
+        let victim = make_creature(&mut state, PlayerId(0), "Final sacrifice victim");
+        // The outer Sacrifice proposal proceeds, then this optional Moved
+        // replacement pauses its inner Battlefield→graveyard move.
+        install_optional_replacement(&mut state, ReplacementEvent::Moved);
+
+        let mut events = Vec::new();
+        let outcome = perform_collected_player_scope_sacrifices(
+            &mut state,
+            ObjectId(9_999),
+            PlayerId(0),
+            vec![(PlayerId(0), vec![victim])],
+            &mut events,
+        )
+        .expect("the announced sacrifice must enter the replacement pipeline");
+        assert!(matches!(
+            outcome,
+            PendingPlayerScopeSacrificeOutcome::PausedForReplacement
+        ));
+        let pending = state
+            .pending_player_scope_sacrifice_choice
+            .as_ref()
+            .expect("the final paused sacrifice must retain a terminal batch record");
+        assert!(
+            pending.selections.is_empty(),
+            "the regression requires the replacement to pause the final queue item"
+        );
+        assert_eq!(pending.completion.announced, vec![victim]);
+
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accepting the replacement must drain the empty sacrifice queue");
+
+        assert!(state.players[0].graveyard.contains(&victim));
+        assert_eq!(state.last_effect_count, Some(1));
+        assert_eq!(state.last_zone_changed_ids, vec![victim]);
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Sacrifice,
+                    source_id,
+                    subject: None,
+                } if *source_id == ObjectId(9_999)
+            )),
+            "the empty queue still has to publish its terminal sacrifice result"
+        );
+    }
+
+    /// CR 603.10a + CR 616.1 + CR 701.21a: two permanents announced for one
+    /// simultaneous sacrifice instruction remain one co-departure group even
+    /// when the second permanent's inner move pauses for a replacement choice.
+    /// The first action must not leak a partial `ZoneChanged` event span; the
+    /// replacement response reunites both events, stamps reciprocal
+    /// `co_departed` values, and updates the per-turn LKI records.
+    #[test]
+    fn player_scope_sacrifice_replacement_resume_stamps_the_full_departure_batch() {
+        use crate::game::effects::{
+            perform_collected_player_scope_sacrifices, PendingPlayerScopeSacrificeOutcome,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let first = make_creature(&mut state, PlayerId(0), "First sacrifice victim");
+        let paused = make_creature(&mut state, PlayerId(0), "Paused sacrifice victim");
+        let shield = install_optional_replacement(&mut state, ReplacementEvent::Moved);
+        state
+            .objects
+            .get_mut(&shield)
+            .unwrap()
+            .replacement_definitions[0]
+            .valid_card = Some(TargetFilter::SpecificObject { id: paused });
+
+        let mut events = Vec::new();
+        let outcome = perform_collected_player_scope_sacrifices(
+            &mut state,
+            ObjectId(9_998),
+            PlayerId(0),
+            vec![(PlayerId(0), vec![first, paused])],
+            &mut events,
+        )
+        .expect("the second sacrifice must pause on its selected Moved replacement");
+        assert!(matches!(
+            outcome,
+            PendingPlayerScopeSacrificeOutcome::PausedForReplacement
+        ));
+        assert!(
+            events.is_empty(),
+            "the first departed permanent's events must stay pending until the full batch completes"
+        );
+        let pending = state
+            .pending_player_scope_sacrifice_choice
+            .as_ref()
+            .expect("the pause must retain the full sacrifice completion");
+        assert!(pending.completion.spans_replacement_pause);
+        assert!(pending.completion.deferred_events.iter().any(
+            |event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == first)
+        ));
+
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accepting the replacement must complete the whole sacrifice batch");
+        assert!(state.players[0].graveyard.contains(&first));
+        assert!(state.players[0].graveyard.contains(&paused));
+
+        let event_co_departed = |object_id| {
+            result
+                .events
+                .iter()
+                .find_map(|event| match event {
+                    GameEvent::ZoneChanged {
+                        object_id: changed,
+                        from: Some(Zone::Battlefield),
+                        record,
+                        ..
+                    } if *changed == object_id => Some(record.co_departed.clone()),
+                    _ => None,
+                })
+                .expect("every sacrifice batch member must be present in the terminal event span")
+        };
+        assert_eq!(event_co_departed(first), vec![paused]);
+        assert_eq!(event_co_departed(paused), vec![first]);
+
+        let record_co_departed = |object_id| {
+            state
+                .zone_changes_this_turn
+                .iter()
+                .find_map(|record| {
+                    (record.object_id == object_id && record.from_zone == Some(Zone::Battlefield))
+                        .then(|| record.co_departed.clone())
+                })
+                .expect("terminal stamping must update the authoritative LKI record")
+        };
+        assert_eq!(record_co_departed(first), vec![paused]);
+        assert_eq!(record_co_departed(paused), vec![first]);
+    }
+
     /// CR 701.21a + CR 614.6: When the inner ZoneChange is redirected (e.g.,
     /// sacrifice → exile via a `Moved` replacement), the helper honors the
     /// redirect. Proves pipeline composition for the sacrifice path.
@@ -2357,6 +4049,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -2452,6 +4145,866 @@ mod tests {
         assert!(token.keywords.contains(&Keyword::Flying));
     }
 
+    /// CR 614.6 + CR 111.1: A Jinnie Fay-class optional token replacement
+    /// that pauses on `ChooseOneOfBranch` must replace the original token
+    /// event, not create it and then prompt again on the chosen branch's
+    /// substitute token event.
+    #[test]
+    fn create_token_choice_replacement_does_not_reprompt_or_create_original_tokens() {
+        use crate::types::ability::{AbilityDefinition, Effect, PlayerFilter, PtValue};
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaColor;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut jinnie = GameObject::new(
+            replacement_source,
+            CardId(1001),
+            PlayerId(0),
+            "Jinnie Fay".to_string(),
+            Zone::Battlefield,
+        );
+        let make_branch = |name: &str, types: Vec<&str>, colors: Vec<ManaColor>| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: name.to_string(),
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(2),
+                    types: types.into_iter().map(str::to_string).collect(),
+                    colors,
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: crate::types::ability::TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            )
+        };
+        jinnie.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .mode(ReplacementMode::Optional { decline: None })
+                .description("Jinnie Fay".to_string())
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![
+                            make_branch("Cat", vec!["Creature", "Cat"], vec![ManaColor::White]),
+                            make_branch("Dog", vec!["Creature", "Dog"], vec![ManaColor::Green]),
+                        ],
+                    },
+                )),
+        );
+        state.objects.insert(replacement_source, jinnie);
+        state.battlefield.push_back(replacement_source);
+
+        let treasure_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Treasure".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: "c_a_treasure".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: replacement_source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let battlefield_before = state.battlefield.clone();
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(treasure_spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: std::collections::HashSet::new(),
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept token replacement");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "accepting the replacement must park on the branch choice, got {:?}",
+            state.waiting_for
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 1 })
+            .expect("choose dog branch");
+
+        let new_ids: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter(|id| !battlefield_before.contains(id))
+            .copied()
+            .collect();
+        assert_eq!(
+            new_ids.len(),
+            1,
+            "the replacement must create exactly the chosen substitute token"
+        );
+        let token = &state.objects[&new_ids[0]];
+        assert_eq!(token.name, "Dog");
+        assert!(
+            token.card_types.subtypes.iter().any(|s| s == "Dog"),
+            "chosen branch token must be the Dog substitute"
+        );
+        assert!(
+            !token.card_types.subtypes.iter().any(|s| s == "Treasure"),
+            "original Treasure token must not be created when the replacement is accepted"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "chosen substitute token event must not re-prompt the same replacement"
+        );
+        assert!(
+            state.post_replacement_token_choice_applied.is_none(),
+            "replacement-choice applied seed must be cleared after the chosen branch resolves"
+        );
+    }
+
+    /// CR 614.6 + CR 111.1: The inherited `applied` set for a Jinnie Fay-class
+    /// token replacement must stay live for the full paused branch-choice
+    /// continuation, not just the first token proposal. Nested `ChooseOneOf`
+    /// branches and a branch with a second token sub-ability must not re-prompt
+    /// the same replacement mid-continuation.
+    #[test]
+    fn nested_token_choice_replacement_keeps_applied_set_for_full_branch_chain() {
+        use crate::types::ability::{AbilityDefinition, Effect, PlayerFilter, PtValue};
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaColor;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut jinnie = GameObject::new(
+            replacement_source,
+            CardId(1002),
+            PlayerId(0),
+            "Jinnie Fay".to_string(),
+            Zone::Battlefield,
+        );
+        let make_token = |name: &str, types: Vec<&str>, colors: Vec<ManaColor>| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: name.to_string(),
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(2),
+                    types: types.into_iter().map(str::to_string).collect(),
+                    colors,
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: crate::types::ability::TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            )
+        };
+        let mut dog_then_cat = make_token("Dog", vec!["Creature", "Dog"], vec![ManaColor::Green]);
+        dog_then_cat.sub_ability = Some(Box::new(make_token(
+            "Cat",
+            vec!["Creature", "Cat"],
+            vec![ManaColor::White],
+        )));
+        let nested_choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![
+                    make_token("Cat", vec!["Creature", "Cat"], vec![ManaColor::White]),
+                    dog_then_cat,
+                ],
+            },
+        );
+        jinnie.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .mode(ReplacementMode::Optional { decline: None })
+                .description("Jinnie Fay".to_string())
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![
+                            nested_choice,
+                            make_token("Dog", vec!["Creature", "Dog"], vec![ManaColor::Green]),
+                        ],
+                    },
+                )),
+        );
+        state.objects.insert(replacement_source, jinnie);
+        state.battlefield.push_back(replacement_source);
+
+        let treasure_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Treasure".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: "c_a_treasure".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: replacement_source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let battlefield_before = state.battlefield.clone();
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(treasure_spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: std::collections::HashSet::new(),
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept token replacement");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "accepting the replacement must park on the outer branch choice, got {:?}",
+            state.waiting_for
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("choose nested branch");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "nested branch must park on the inner token choice, got {:?}",
+            state.waiting_for
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 1 })
+            .expect("choose dog-then-cat branch");
+
+        let new_ids: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter(|id| !battlefield_before.contains(id))
+            .copied()
+            .collect();
+        assert_eq!(
+            new_ids.len(),
+            2,
+            "nested continuation must create both substitute tokens without recreating Treasure"
+        );
+        let names: Vec<_> = new_ids
+            .iter()
+            .map(|id| state.objects[id].name.clone())
+            .collect();
+        assert_eq!(names, vec!["Dog".to_string(), "Cat".to_string()]);
+        assert!(
+            !new_ids.iter().any(|id| state.objects[id]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|s| s == "Treasure")),
+            "original Treasure token must not be created when the replacement is accepted"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "nested substitute tokens must not re-prompt the same replacement"
+        );
+        assert!(
+            state.post_replacement_token_choice_applied.is_none(),
+            "replacement-choice applied seed must clear after the nested branch chain drains"
+        );
+    }
+
+    /// CR 614.6 + CR 111.1 + issue #4886 (review #6): a token created by the
+    /// `sub_ability` tail chained AFTER the whole `ChooseOneOf` — not by one of
+    /// its own branches — must still be recognized as part of the token-choice
+    /// replacement so the applied set is seeded. Pre-fix, `is_token_replacement_choice`
+    /// only scanned the `ChooseOneOf`'s branches (both non-token GainLife here),
+    /// so it missed the token-creating tail entirely: the tail token was never
+    /// seeded and could re-prompt the same replacement on its own substitute
+    /// event.
+    #[test]
+    fn token_choice_replacement_seeds_applied_set_for_tail_token_after_branches() {
+        use crate::types::ability::{
+            AbilityDefinition, Effect, PlayerFilter, PtValue, QuantityExpr,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaColor;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut jinnie = GameObject::new(
+            replacement_source,
+            CardId(1003),
+            PlayerId(0),
+            "Jinnie Fay".to_string(),
+            Zone::Battlefield,
+        );
+
+        let make_token = |name: &str, types: Vec<&str>, colors: Vec<ManaColor>| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: name.to_string(),
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(2),
+                    types: types.into_iter().map(str::to_string).collect(),
+                    colors,
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: crate::types::ability::TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            )
+        };
+        let make_gain_life = |amount: i32| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: crate::types::ability::TargetFilter::Controller,
+                },
+            )
+        };
+
+        // Branches create no tokens; the token comes from `sub_ability`, chained
+        // after the WHOLE ChooseOneOf resolves — not from any branch.
+        let mut choose_then_token = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![make_gain_life(1), make_gain_life(2)],
+            },
+        );
+        choose_then_token.sub_ability = Some(Box::new(make_token(
+            "Dog",
+            vec!["Creature", "Dog"],
+            vec![ManaColor::Green],
+        )));
+
+        jinnie.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .mode(ReplacementMode::Optional { decline: None })
+                .description("Jinnie Fay".to_string())
+                .execute(choose_then_token),
+        );
+        state.objects.insert(replacement_source, jinnie);
+        state.battlefield.push_back(replacement_source);
+
+        let treasure_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Treasure".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: "c_a_treasure".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: replacement_source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let battlefield_before = state.battlefield.clone();
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(treasure_spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: std::collections::HashSet::new(),
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept token replacement");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "accepting the replacement must park on the branch choice, got {:?}",
+            state.waiting_for
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("choose a non-token branch; the tail sub_ability then creates the token");
+
+        let new_ids: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter(|id| !battlefield_before.contains(id))
+            .copied()
+            .collect();
+        assert_eq!(
+            new_ids.len(),
+            1,
+            "only the tail sub_ability's Dog token must be created, not the original Treasure"
+        );
+        let token = &state.objects[&new_ids[0]];
+        assert_eq!(token.name, "Dog");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "the tail token created after the branch choice must not re-prompt the same \
+             replacement (pre-fix: is_token_replacement_choice only scanned branches and \
+             missed this tail, so the applied set was never seeded)"
+        );
+        assert!(
+            state.post_replacement_token_choice_applied.is_none(),
+            "replacement-choice applied seed must clear after the tail continuation drains"
+        );
+    }
+
+    /// Issue #4886 (HIGH review finding): the inherited token-choice applied
+    /// seed must survive an intervening replacement whose own continuation
+    /// drains mid-branch. Pre-fix, `apply_pending_post_replacement_effect`
+    /// cleared `post_replacement_token_choice_applied` whenever its waiting_for
+    /// was not a `ChooseOneOfBranch`, and `continue_replacement_impl`'s
+    /// `_ => None` arm re-wiped it for every non-token-choice nested
+    /// replacement. Either path let the originating token-choice replacement
+    /// re-prompt on a later token sub-ability (the loop). This test pre-seeds
+    /// the applied set the way the originating token-choice does, drives a
+    /// non-token-choice continuation through the drain, and asserts the seed is
+    /// preserved — pinning the fix at both removal sites.
+    #[test]
+    fn token_choice_applied_seed_survives_intervening_continuation_drain() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr};
+        use crate::types::card_type::CoreType;
+        use crate::types::proposed_event::{
+            AppliedReplacementKey, ReplacementId, TokenCharacteristics, TokenSpec,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let jinnie_source = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let jinnie_rid = ReplacementId {
+            source: jinnie_source,
+            index: 0,
+        };
+        let mut seed = std::collections::HashSet::new();
+        seed.insert(AppliedReplacementKey::object(
+            jinnie_rid.source,
+            jinnie_rid.index,
+        ));
+        // Simulate the originating token-choice continuation being mid-drain:
+        // its applied set is live so substitute-token proposals pre-mark Jinnie.
+        state.post_replacement_token_choice_applied = Some(seed.clone());
+
+        // A non-token-choice continuation — e.g. an Optional accept that draws
+        // a card. Its drain must NOT clear the token-choice seed (pre-fix, the
+        // `if !ChooseOneOfBranch { clear }` arm wiped it here).
+        let draw_continuation = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                target: crate::types::ability::TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        state.install_ready_continuation(
+            crate::types::ability::PostReplacementContinuation::Template(Box::new(
+                draw_continuation,
+            )),
+        );
+        state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+            .expect("a drain must be resident")
+            .source = Some(jinnie_source);
+
+        let mut events = Vec::new();
+        let waiting_for = apply_pending_post_replacement_effect(
+            &mut state,
+            Some(jinnie_source),
+            None,
+            Some(ReplacementEvent::CreateToken),
+            &mut events,
+        );
+
+        // The draw continuation is not a ChooseOneOf; before the fix this is
+        // exactly the frame that wiped the seed. It must now survive.
+        assert_eq!(
+            state.post_replacement_token_choice_applied,
+            Some(seed),
+            "intervening non-token-choice continuation drain must preserve the originating token-choice applied seed (issue #4886)"
+        );
+        assert!(
+            !matches!(waiting_for, Some(WaitingFor::ChooseOneOfBranch { .. })),
+            "non-token-choice continuation should not surface a branch choice"
+        );
+
+        // A substitute token proposed while the seed is live inherits the
+        // originating id, so the same token-choice replacement cannot match it.
+        let dog_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Dog".to_string(),
+                power: Some(2),
+                toughness: Some(2),
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Dog".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::Green],
+                keywords: Vec::new(),
+            },
+            script_name: "c_a_dog".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: jinnie_source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let applied = state
+            .post_replacement_token_choice_applied
+            .clone()
+            .unwrap_or_default();
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(dog_spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied,
+        };
+        assert!(
+            proposed
+                .applied_set()
+                .iter()
+                .any(|rid| rid.source() == jinnie_source),
+            "substitute token proposal must inherit the originating replacement id from the live seed"
+        );
+    }
+
+    /// Issue #4886 (HIGH review finding #3): the originating token-choice
+    /// applied seed must survive a branch that parks on a *non-token*
+    /// `ChooseOneOf` and then resumes a stashed token sub-ability. Pre-fix,
+    /// `choose_one_of.rs` cleared the global seed the moment its branch
+    /// resolved back to priority — but the ChooseBranch handler drains the
+    /// stashed token sub-ability only afterward (`engine_resolution_choices.rs`
+    /// → `drain_pending_continuation`). The later token proposal then lost the
+    /// inherited replacement id and re-prompted the same Jinnie replacement.
+    ///
+    /// Branch shape under test: Jinnie execute = ChooseOneOf([
+    ///   { effect: ChooseOneOf([GainLife, GainLife]), sub_ability: Token(Dog) },
+    ///   Token(Cat),
+    /// ])
+    /// Choosing branch 0 parks on the inner non-token choice; resolving it
+    /// stashes the Dog sub-ability, which must still see the Jinnie id.
+    #[test]
+    fn token_choice_seed_survives_non_token_choose_one_of_before_token_sub_ability() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, PlayerFilter, PtValue,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaColor;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+
+        let mut state = GameState::new_two_player(42);
+        let jinnie_source = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut jinnie = GameObject::new(
+            jinnie_source,
+            CardId(1020),
+            PlayerId(0),
+            "Jinnie Fay".to_string(),
+            Zone::Battlefield,
+        );
+        let make_token = |name: &str, types: Vec<&str>, colors: Vec<ManaColor>| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: name.to_string(),
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(2),
+                    types: types.into_iter().map(str::to_string).collect(),
+                    colors,
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: crate::types::ability::TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            )
+        };
+        let make_gain_life = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: crate::types::ability::TargetFilter::Controller,
+                },
+            )
+        };
+        // Branch 0: a NON-TOKEN inner choice, with the token in a sub-ability.
+        let mut branch_with_nontoken_choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![make_gain_life(), make_gain_life()],
+            },
+        );
+        branch_with_nontoken_choice.sub_ability = Some(Box::new(make_token(
+            "Dog",
+            vec!["Creature", "Dog"],
+            vec![ManaColor::Green],
+        )));
+        jinnie.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .mode(ReplacementMode::Optional { decline: None })
+                .description("Jinnie Fay".to_string())
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![
+                            branch_with_nontoken_choice,
+                            make_token("Cat", vec!["Creature", "Cat"], vec![ManaColor::White]),
+                        ],
+                    },
+                )),
+        );
+        state.objects.insert(jinnie_source, jinnie);
+        state.battlefield.push_back(jinnie_source);
+
+        let treasure_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Treasure".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: "c_a_treasure".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: jinnie_source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let battlefield_before = state.battlefield.clone();
+
+        // Propose Treasure → Jinnie is the only matching replacement.
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(treasure_spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: std::collections::HashSet::new(),
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept Jinnie");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "accepting Jinnie must park on the outer token choice, got {:?}",
+            state.waiting_for
+        );
+
+        // Pick branch 0 — the non-token inner choice. Must park on the inner
+        // ChooseOneOf (not create the token yet).
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("choose branch with nested non-token choice");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "branch 0 must park on the inner non-token choice before the token sub-ability, got {:?}",
+            state.waiting_for
+        );
+
+        // Resolve the inner non-token choice. The Dog sub-ability is stashed
+        // into pending_continuation and drains after this returns. Pre-fix,
+        // choose_one_of.rs cleared the seed at this point — before the stashed
+        // Dog sub-ability proposed — so Dog re-prompted Jinnie.
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("resolve inner non-token choice");
+
+        // The chain must have drained fully: Dog created, no Jinnie re-prompt,
+        // no Treasure, seed cleared at full-drain. With the bug, `waiting_for`
+        // parked on a second Jinnie ChooseOneOfBranch / ReplacementChoice for
+        // the Dog token instead of draining.
+        assert!(
+            !matches!(
+                state.waiting_for,
+                WaitingFor::ChooseOneOfBranch { .. } | WaitingFor::ReplacementChoice { .. }
+            ),
+            "Dog sub-ability must not re-prompt Jinnie after the nested non-token choice; got {:?}",
+            state.waiting_for
+        );
+
+        let new_ids: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter(|id| !battlefield_before.contains(id))
+            .copied()
+            .collect();
+        assert_eq!(
+            new_ids.len(),
+            1,
+            "the Dog substitute must be created exactly once (no loop, no original Treasure)"
+        );
+        let token = &state.objects[&new_ids[0]];
+        assert_eq!(token.name, "Dog");
+        assert!(
+            !token.card_types.subtypes.iter().any(|s| s == "Treasure"),
+            "original Treasure token must not be created"
+        );
+        assert!(
+            state.post_replacement_token_choice_applied.is_none(),
+            "originating token-choice seed must clear at full-drain, after the stashed sub-ability"
+        );
+    }
+
+    /// Issue #4886 (MED review finding #4): the originating token-choice applied
+    /// seed must survive a repeat-until frame drain. Pre-fix,
+    /// `drain_pending_continuation` cleared the seed BEFORE calling
+    /// `drain_active_repeat_until`; that drain re-enters `resolve_ability_chain`
+    /// (effects/mod.rs:721 / :744) and can emit further token proposals, which
+    /// then lost the inherited replacement id and re-prompted the same Jinnie
+    /// replacement. The seed must be treated as part of the originating frame
+    /// and cleared only once the repeat-until continuation has fully drained or
+    /// stopped — i.e. only at true full-drain.
+    #[test]
+    fn token_choice_seed_survives_repeat_until_frame_drain() {
+        use crate::types::ability::{
+            AbilityKind, Effect, QuantityExpr, RepeatContinuation, ResolvedAbility,
+        };
+        use crate::types::game_state::PendingRepeatUntil;
+        use crate::types::proposed_event::ReplacementId;
+
+        let mut state = GameState::new_two_player(42);
+        let jinnie_source = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let jinnie_rid = ReplacementId {
+            source: jinnie_source,
+            index: 0,
+        };
+        let mut seed = std::collections::HashSet::new();
+        seed.insert(AppliedReplacementKey::object(
+            jinnie_rid.source,
+            jinnie_rid.index,
+        ));
+        state.post_replacement_token_choice_applied = Some(seed.clone());
+
+        // A repeat-until ability whose body would propose further tokens if
+        // re-entered. `repeat_until: ControllerChoice` re-prompts after each
+        // iteration, so the repeat-until frame drain parks the engine on
+        // `RepeatDecision` — a non-Priority waiting_for that MUST preserve the
+        // seed (the controller may accept another iteration that proposes a
+        // token carrying the inherited id).
+        let mut repeat_ability = ResolvedAbility::new(
+            Effect::Draw {
+                target: crate::types::ability::TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            Vec::new(),
+            jinnie_source,
+            PlayerId(0),
+        );
+        repeat_ability.kind = AbilityKind::Spell;
+        repeat_ability.repeat_until = Some(RepeatContinuation::ControllerChoice);
+        state.push_repeat_until(PendingRepeatUntil {
+            ability: Box::new(repeat_ability),
+        });
+        // Simulate the moment the review describes: a paused repeat-until
+        // frame re-entering from priority.
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let mut events = Vec::new();
+        effects::drain_pending_continuation(&mut state, &mut events);
+
+        // The repeat-until re-prompted (RepeatDecision), so the originating
+        // token-choice frame has NOT fully drained. The seed must survive —
+        // pre-fix it was wiped before this drain ran.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
+            "repeat-until frame drain must re-prompt the controller for the repeat decision, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.post_replacement_token_choice_applied,
+            Some(seed),
+            "seed must survive the repeat-until frame drain (issue #4886 review #4): a repeated iteration may still propose tokens carrying the inherited id"
+        );
+    }
+
     // ── Zone-qualified clone source (Superior Spider-Man) ──
     // CR 707.9 + CR 400.1: `find_copy_targets` scans the zone encoded on the
     // filter's `FilterProp::InZone`. When the filter has no zone property,
@@ -2513,6 +5066,86 @@ mod tests {
     }
 
     #[test]
+    fn find_copy_targets_gates_on_zone_changed_this_turn_predicate() {
+        // CR 400.7 + CR 707.9: The Fourteenth Doctor copies "a Doctor card in
+        // your graveyard that was put there from your library this turn". Only a
+        // Doctor milled Library->Graveyard THIS turn is a legal source — a
+        // Doctor already in the graveyard from a prior turn (no zone-change
+        // record) and a Doctor on the battlefield are both excluded. This proves
+        // the Fix A (mill records the Library->Graveyard change) <-> Fix B (copy
+        // source predicate reads it) runtime seam that couples the card's two
+        // abilities.
+        use crate::types::ability::{FilterProp, TypeFilter, TypedFilter};
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        let make_doctor = |state: &mut GameState, cid: u64, zone: Zone| -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(cid),
+                PlayerId(0),
+                format!("Doctor {cid}"),
+                zone,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types.subtypes = vec!["Doctor".to_string()];
+            obj.card_types.subtypes = vec!["Doctor".to_string()];
+            id
+        };
+
+        let milled = make_doctor(&mut state, 1, Zone::Graveyard);
+        let prior_turn = make_doctor(&mut state, 2, Zone::Graveyard);
+        let on_battlefield = make_doctor(&mut state, 3, Zone::Battlefield);
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "The Fourteenth Doctor".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Only `milled` carries a Library->Graveyard record this turn.
+        state
+            .zone_changes_this_turn
+            .push_back(ZoneChangeRecord::test_minimal(
+                milled,
+                Some(Zone::Library),
+                Zone::Graveyard,
+            ));
+
+        // The exact filter The Fourteenth Doctor's replacement produces.
+        let filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Subtype("Doctor".to_string())).properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+                FilterProp::ZoneChangedThisTurn {
+                    from: Some(Zone::Library),
+                    to: Some(Zone::Graveyard),
+                },
+            ]),
+        );
+
+        let targets = find_copy_targets(&state, &filter, source, PlayerId(0), None);
+        assert!(
+            targets.contains(&milled),
+            "Doctor milled from library this turn must be a legal copy source"
+        );
+        assert!(
+            !targets.contains(&prior_turn),
+            "Doctor in graveyard from a prior turn (no zone-change record) must be excluded"
+        );
+        assert!(
+            !targets.contains(&on_battlefield),
+            "Doctor on the battlefield must be excluded (wrong zone)"
+        );
+    }
+
+    #[test]
     fn find_copy_targets_defaults_to_battlefield_for_classic_clone_filter() {
         use crate::types::ability::{TypeFilter, TypedFilter};
         use crate::types::zones::Zone;
@@ -2564,6 +5197,172 @@ mod tests {
         );
     }
 
+    /// CR 303.4 + CR 707.9: Copy Enchantment copies "any enchantment on the
+    /// battlefield". An Aura — including a Curse attached to a player — is an
+    /// enchantment permanent (CR 303.4a), so being attached must not remove it
+    /// from the copy-choice pool. Reported in #5289.
+    #[test]
+    fn find_copy_targets_includes_attached_auras_and_curses() {
+        use crate::game::game_object::AttachTarget;
+        use crate::types::ability::Effect;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        fn make_enchantment(
+            state: &mut GameState,
+            card: u64,
+            name: &str,
+            aura: bool,
+        ) -> crate::types::ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            if aura {
+                obj.base_card_types.subtypes = vec!["Aura".to_string()];
+                obj.card_types.subtypes = vec!["Aura".to_string()];
+            }
+            id
+        }
+
+        let prison = make_enchantment(&mut state, 1, "Ghostly Prison", false);
+        let host = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+        // CR 303.4f: an Aura attached to a permanent.
+        let pacifism = make_enchantment(&mut state, 3, "Pacifism", true);
+        state.objects.get_mut(&pacifism).unwrap().attached_to = Some(AttachTarget::Object(host));
+        // CR 303.4: a Curse attached to a player.
+        let curse = make_enchantment(&mut state, 4, "Cruel Reality", true);
+        state.objects.get_mut(&curse).unwrap().attached_to =
+            Some(AttachTarget::Player(PlayerId(1)));
+
+        let source = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Copy Enchantment".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Use the REAL parsed copy filter so this pins parser + runtime together.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "You may have this enchantment enter as a copy of any enchantment on the battlefield.",
+            "Copy Enchantment",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let filter = parsed
+            .replacements
+            .iter()
+            .find_map(|r| match r.execute.as_deref()?.effect.as_ref() {
+                Effect::BecomeCopy { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("Copy Enchantment must parse a BecomeCopy clone replacement");
+
+        let targets = find_copy_targets(&state, &filter, source, PlayerId(0), None);
+
+        assert!(
+            targets.contains(&prison),
+            "unattached enchantment must be copyable"
+        );
+        assert!(
+            targets.contains(&pacifism),
+            "#5289: an Aura attached to a creature is still an enchantment permanent"
+        );
+        assert!(
+            targets.contains(&curse),
+            "#5289: a Curse attached to a player is still an enchantment permanent"
+        );
+        assert!(
+            !targets.contains(&host),
+            "the creature host is not an enchantment"
+        );
+    }
+
+    /// CR 400.1 + CR 122.1: The Master, Formed Anew — the copy source is "a
+    /// creature card in exile with a takeover counter on it". `find_copy_targets`
+    /// must scan EXILE (per `InZone { Exile }`) and honor the takeover-counter
+    /// `FilterProp::Counters` predicate, returning only the marked exile card and
+    /// excluding an unmarked exile creature (and the battlefield entirely). This
+    /// is the runtime proof that the parsed source filter selects correctly.
+    #[test]
+    fn find_copy_targets_honors_exile_zone_and_takeover_counter_predicate() {
+        use crate::types::ability::{Comparator, FilterProp, TypeFilter, TypedFilter};
+        use crate::types::counter::CounterMatch;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        let make_creature = |state: &mut GameState, card: u64, zone: Zone| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Bear {card}"),
+                zone,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+            id
+        };
+
+        let marked_exile = make_creature(&mut state, 1, Zone::Exile);
+        state
+            .objects
+            .get_mut(&marked_exile)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("takeover".to_string()), 1);
+        let unmarked_exile = make_creature(&mut state, 2, Zone::Exile);
+        let bf_creature = make_creature(&mut state, 3, Zone::Battlefield);
+        let source = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "The Master".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Filter: "a creature card in exile with a takeover counter on it"
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+            FilterProp::InZone { zone: Zone::Exile },
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Generic("takeover".to_string())),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ]));
+
+        let targets = find_copy_targets(&state, &filter, source, PlayerId(0), None);
+        assert_eq!(
+            targets,
+            vec![marked_exile],
+            "only the takeover-marked exile creature is a legal copy source"
+        );
+        assert!(!targets.contains(&unmarked_exile));
+        assert!(!targets.contains(&bf_creature));
+    }
+
     /// 2026-05-09 audit M4 regression: the unified
     /// `post_replacement_continuation` slot dispatches a `Template` arm by
     /// resolving the AST against the supplied source — the pre-fold path
@@ -2587,8 +5386,7 @@ mod tests {
                 target: None,
             },
         );
-        state.post_replacement_continuation =
-            Some(PostReplacementContinuation::Template(Box::new(template)));
+        state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(template)));
 
         let mut events = Vec::new();
         let waiting = apply_pending_post_replacement_effect(
@@ -2601,7 +5399,7 @@ mod tests {
 
         // Resolved cleanly — no follow-up WaitingFor and slot drained.
         assert!(waiting.is_none(), "Template path resolved without prompt");
-        assert!(state.post_replacement_continuation.is_none());
+        assert!(!state.has_post_replacement_drain());
         // Source's controller (P0) lost 2 life.
         assert_eq!(state.players[0].life, initial_life - 2);
     }
@@ -2644,8 +5442,7 @@ mod tests {
                 destination: Zone::Graveyard,
             },
         );
-        state.post_replacement_continuation =
-            Some(PostReplacementContinuation::Template(Box::new(template)));
+        state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(template)));
 
         let mut events = Vec::new();
         let waiting = apply_pending_post_replacement_effect(
@@ -2690,8 +5487,7 @@ mod tests {
             source,
             PlayerId(1),
         );
-        state.post_replacement_continuation =
-            Some(PostReplacementContinuation::Resolved(Box::new(resolved)));
+        state.install_ready_continuation(PostReplacementContinuation::Resolved(Box::new(resolved)));
 
         let mut events = Vec::new();
         let waiting = apply_pending_post_replacement_effect(
@@ -2703,40 +5499,244 @@ mod tests {
         );
 
         assert!(waiting.is_none(), "Resolved path resolved without prompt");
-        assert!(state.post_replacement_continuation.is_none());
+        assert!(!state.has_post_replacement_drain());
         // Resolved ability's own controller (P1) lost 3 life.
         assert_eq!(state.players[1].life, initial_life - 3);
     }
 
-    /// 2026-05-09 audit M4 backward-compat: legacy serialized GameState with
-    /// the pre-fold `post_replacement_effect` field (Template binding state)
-    /// migrates into the new unified slot when `finalize_public_state` runs
-    /// (driven here by calling `migrate_post_replacement_continuation`
-    /// directly).
+    /// G4 regression: a general post-replacement drain that begins a true draw
+    /// retains its event context across a save/reload at a replacement pause,
+    /// through its context-dependent follow-up.
     #[test]
-    fn migrate_post_replacement_continuation_lifts_legacy_template() {
+    fn phase0_g4_general_drain_loses_event_context_across_pausing_draw_resume() {
+        use crate::types::ability::{
+            AbilityDefinition, Effect, PostReplacementContinuation, QuantityModification,
+            TargetFilter,
+        };
+
         let mut state = GameState::new_two_player(42);
-        let template = AbilityDefinition::new(
+        let shield = make_creature(&mut state, PlayerId(0), "Swans-class shield");
+        let damage_source = make_creature(&mut state, PlayerId(1), "Damage source");
+
+        for player in [PlayerId(0), PlayerId(1)] {
+            for index in 0..6 {
+                let card_id = CardId(state.next_object_id);
+                create_object(
+                    &mut state,
+                    card_id,
+                    player,
+                    format!("P{} library {index}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+        // Two one-shot mandatory modifiers produce one real replacement-ordering
+        // pause; after the selected modifier applies the lone survivor finishes
+        // automatically, matching the paused-draw seam G4 needs.
+        for modification in [
+            QuantityModification::Times { factor: 2 },
+            QuantityModification::Plus { value: 1 },
+        ] {
+            let host = make_creature(&mut state, PlayerId(0), "Draw replacement host");
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
+            replacement.quantity_modification = Some(modification);
+            replacement.consume_on_apply = true;
+            state
+                .objects
+                .get_mut(&host)
+                .expect("draw replacement host exists")
+                .replacement_definitions
+                .push(replacement);
+        }
+
+        let mut draw_then_context_draw = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: None,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
         );
-        // Simulate legacy deserialization: only the legacy slot is populated.
-        state.legacy_post_replacement_effect = Some(Box::new(template.clone()));
-        assert!(state.post_replacement_continuation.is_none());
+        draw_then_context_draw.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::PostReplacementSourceController,
+            },
+        )));
+        state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(
+            draw_then_context_draw,
+        )));
+        let drain = state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+            .expect("general drain is resident");
+        drain.source = Some(shield);
+        drain.event_source = Some(damage_source);
 
-        state.migrate_post_replacement_continuation();
+        let mut events = Vec::new();
+        let waiting = apply_pending_post_replacement_effect(
+            &mut state,
+            Some(shield),
+            None,
+            Some(ReplacementEvent::DamageDone),
+            &mut events,
+        );
+        assert!(
+            matches!(waiting, Some(WaitingFor::ReplacementChoice { .. }))
+                && matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "reach guard: general drain's first draw must pause on a replacement consult"
+        );
+        assert!(
+            matches!(
+                state
+                    .active_post_replacement_drains()
+                    .and_then(crate::types::game_state::PostReplacementDrainStack::resident),
+                Some(crate::types::game_state::PostReplacementDrain {
+                    status: crate::types::game_state::DrainStatus::Paused,
+                    ..
+                })
+            ),
+            "the paused drain must own its event context across the paused draw"
+        );
 
-        match state.post_replacement_continuation {
-            Some(PostReplacementContinuation::Template(ref def)) => {
-                assert_eq!(**def, template);
+        let serialized = serde_json::to_string(
+            &crate::types::resolution::ResolutionStateWire::from_game_state(state),
+        )
+        .expect("save paused state");
+        let mut restored =
+            serde_json::from_str::<crate::types::resolution::ResolutionStateWire>(&serialized)
+                .expect("reload paused state")
+                .into_game_state();
+        restored.rehydrate_rng();
+        apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
+            .expect("resume the paused draw after reload");
+
+        assert!(
+            !restored.players[0].hand.is_empty(),
+            "reach guard: the first draw completed after the replacement consult"
+        );
+        assert_eq!(
+            restored.players[1].hand.len(),
+            1,
+            "the resumed PostReplacementSourceController follow-up must draw for P1 from the persisted drain context"
+        );
+        assert!(
+            restored.active_post_replacement_drains().is_none(),
+            "the drain is retired only after its resumed continuation completes"
+        );
+    }
+
+    /// CR 615.5 + CR 616.1g: an outer post-replacement draw can install and
+    /// immediately dispatch an inner post-replacement draw. If the inner draw
+    /// pauses on its own replacement choice, the completed outer drain must be
+    /// retired by its typed dispatch handle rather than stranding below the
+    /// inner pause.
+    #[test]
+    fn nested_post_replacement_draw_pause_retires_completed_outer_drain() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, DrawReplacementScope, Effect,
+            PostReplacementContinuation, QuantityModification, ReplacementDefinition,
+            ReplacementPlayerScope, TargetFilter,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let outer_source = make_creature(&mut state, PlayerId(0), "Outer draw source");
+        for player in [PlayerId(0), PlayerId(1)] {
+            for index in 0..4 {
+                let card_id = CardId(state.next_object_id);
+                create_object(
+                    &mut state,
+                    card_id,
+                    player,
+                    format!("P{} nested library {index}", player.0),
+                    Zone::Library,
+                );
             }
-            other => panic!("expected Template after migration, got {other:?}"),
         }
-        assert!(state.legacy_post_replacement_effect.is_none());
-        assert!(state.legacy_post_replacement_resolved_effect.is_none());
+
+        // P0's outer draw is replaced by an equivalent draw plus a P1 draw in
+        // its post-replacement tail. The first replacement therefore installs
+        // and dispatches an inner drain while the outer drain is still running.
+        let replacement_host = make_creature(&mut state, PlayerId(1), "Nested draw host");
+        let nested_draw = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let mut outer_draw_replacement = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        outer_draw_replacement.sub_ability = Some(Box::new(nested_draw));
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(DrawReplacementScope::IndividualDraw)
+            .execute(outer_draw_replacement);
+        replacement.valid_player = Some(ReplacementPlayerScope::Opponent);
+        state.objects[&replacement_host]
+            .replacement_definitions
+            .push(replacement);
+
+        // Only the inner P1 draw sees these two modifiers, so it alone pauses
+        // on CR 616.1 ordering while the completed P0 outer draw is unwinding.
+        for modification in [
+            QuantityModification::Times { factor: 2 },
+            QuantityModification::Plus { value: 1 },
+        ] {
+            let host = make_creature(&mut state, PlayerId(1), "Inner draw modifier");
+            let mut modifier = ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(DrawReplacementScope::IndividualDraw);
+            modifier.valid_player = Some(ReplacementPlayerScope::You);
+            modifier.quantity_modification = Some(modification);
+            modifier.consume_on_apply = true;
+            state.objects[&host].replacement_definitions.push(modifier);
+        }
+
+        state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ),
+        )));
+        let mut events = Vec::new();
+        let waiting = apply_pending_post_replacement_effect(
+            &mut state,
+            Some(outer_source),
+            None,
+            Some(ReplacementEvent::DamageDone),
+            &mut events,
+        );
+        assert!(
+            matches!(waiting, Some(WaitingFor::ReplacementChoice { .. })),
+            "reach guard: the inner P1 draw pauses while the outer drain unwinds"
+        );
+        assert!(
+            matches!(
+                state
+                    .active_post_replacement_drains()
+                    .and_then(crate::types::game_state::PostReplacementDrainStack::resident),
+                Some(crate::types::game_state::PostReplacementDrain {
+                    status: crate::types::game_state::DrainStatus::Paused,
+                    ..
+                })
+            ),
+            "the inner draw owns the sole resident paused context"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("resume the inner draw replacement choice");
+        assert!(
+            state.active_post_replacement_drains().is_none(),
+            "resuming the inner draw retires it without leaving the completed outer drain"
+        );
     }
 
     /// Issue #575: Non-Moved `Sacrifice { Typed }` post-replacements (Dralnu)
@@ -2776,6 +5776,7 @@ mod tests {
             Some(dralnu),
             None,
             Some(&ReplacementEvent::DealtDamage),
+            Default::default(),
             &mut events,
         );
 
@@ -2837,6 +5838,7 @@ mod tests {
             Some(devourer),
             None,
             Some(&ReplacementEvent::Moved),
+            Default::default(),
             &mut events,
         );
 
@@ -2851,76 +5853,6 @@ mod tests {
             Zone::Battlefield,
             "devourer must not be auto-sacrificed via source injection"
         );
-    }
-
-    /// 2026-05-09 audit M4 backward-compat: legacy serialized GameState with
-    /// the pre-fold `post_replacement_resolved_effect` field (Resolved
-    /// binding state) migrates into the new unified slot. Resolved wins over
-    /// Template if both are (impossibly) populated, mirroring the pre-fold
-    /// dispatcher precedence at `apply_pending_post_replacement_effect`.
-    #[test]
-    fn migrate_post_replacement_continuation_lifts_legacy_resolved() {
-        let mut state = GameState::new_two_player(42);
-        let resolved = ResolvedAbility::new(
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: Some(TargetFilter::Controller),
-            },
-            Vec::new(),
-            ObjectId(1),
-            PlayerId(0),
-        );
-        state.legacy_post_replacement_resolved_effect = Some(Box::new(resolved.clone()));
-
-        state.migrate_post_replacement_continuation();
-
-        match state.post_replacement_continuation {
-            Some(PostReplacementContinuation::Resolved(ref boxed)) => {
-                assert_eq!(**boxed, resolved);
-            }
-            other => panic!("expected Resolved after migration, got {other:?}"),
-        }
-        assert!(state.legacy_post_replacement_effect.is_none());
-        assert!(state.legacy_post_replacement_resolved_effect.is_none());
-    }
-
-    /// 2026-05-09 audit M4 backward-compat (defensive): when both legacy
-    /// slots happen to deserialize alongside a new-shape slot — for instance
-    /// because a producer wrote a hybrid blob — the new slot wins and the
-    /// legacy fields are cleared. Migration is idempotent.
-    #[test]
-    fn migrate_post_replacement_continuation_prefers_new_slot_when_present() {
-        let mut state = GameState::new_two_player(42);
-        let new_template = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 5 },
-                target: None,
-            },
-        );
-        state.post_replacement_continuation = Some(PostReplacementContinuation::Template(
-            Box::new(new_template.clone()),
-        ));
-        // Legacy slots also populated (corrupted/hybrid input).
-        state.legacy_post_replacement_effect = Some(Box::new(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::SetTapState {
-                target: TargetFilter::SelfRef,
-                scope: EffectScope::Single,
-                state: TapStateChange::Untap,
-            },
-        )));
-
-        state.migrate_post_replacement_continuation();
-
-        match state.post_replacement_continuation {
-            Some(PostReplacementContinuation::Template(ref def)) => {
-                assert_eq!(**def, new_template);
-            }
-            other => panic!("new slot must survive migration, got {other:?}"),
-        }
-        assert!(state.legacy_post_replacement_effect.is_none());
-        assert!(state.legacy_post_replacement_resolved_effect.is_none());
     }
 
     /// CR 614.12a + CR 707.9 + CR 603.2: Drive Callidus Assassin's full path —
@@ -3009,6 +5941,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::BecomeCopy {
+                            recipient: TargetFilter::SelfRef,
                             target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
                             duration: None,
                             mana_value_limit: None,
@@ -3033,6 +5966,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -3103,7 +6037,7 @@ mod tests {
         assert!(
             copy.trigger_definitions
                 .iter_all()
-                .any(|t| t == &granted_trigger),
+                .any(|t| t.definition == granted_trigger),
             "GrantTrigger must place the destroy-trigger on the copy"
         );
         assert!(
@@ -3123,6 +6057,464 @@ mod tests {
         assert!(
             trigger_fired,
             "Callidus's granted destroy-same-name trigger must fire from the deferred entry replay"
+        );
+    }
+
+    /// Build a "Level Up"-style Aura source (Enchantment with the `Aura` subtype
+    /// and `Enchant creature`) plus `num_hosts` legal creature hosts, then drive
+    /// Copy Enchantment through `Stack → Battlefield` with its real parsed
+    /// `BecomeCopy` replacement, accept the "may", and surface `CopyTargetChoice`.
+    /// Returns the state paused on the copy-target choice, the Copy Enchantment
+    /// object, the Aura source, and the host ids. Callers then pick the Aura as
+    /// the copy source and assert the CR 303.4f/303.4g attachment outcome.
+    fn drive_copy_enchantment_of_aura(
+        num_hosts: usize,
+    ) -> (GameState, ObjectId, ObjectId, Vec<ObjectId>) {
+        use crate::types::ability::{Effect, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(42);
+
+        let hosts: Vec<ObjectId> = (0..num_hosts)
+            .map(|i| make_creature(&mut state, PlayerId(0), &format!("Grizzly Bears {i}")))
+            .collect();
+
+        // "Enchant creature" — the copiable Enchant keyword the copy inherits.
+        let enchant_creature =
+            Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+
+        // Aura copy SOURCE (stands in for Level Up): a real Enchantment/Aura on
+        // the battlefield with `Enchant creature`. Set base_* so the layer system
+        // (which `finish_copy_target_choice_entry` flushes) recomputes the copy's
+        // live characteristics from copiable values.
+        let aura = create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Level Up".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            obj.base_card_types.subtypes = vec!["Aura".to_string()];
+            obj.card_types.subtypes = vec!["Aura".to_string()];
+            obj.base_keywords = vec![enchant_creature.clone()];
+            obj.keywords = vec![enchant_creature];
+        }
+
+        // Copy Enchantment on the stack, entering the battlefield.
+        let copy_ench = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "Copy Enchantment".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&copy_ench).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+        }
+
+        // Use the REAL parsed copy filter so the test pins parser + runtime.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "You may have this enchantment enter as a copy of any enchantment on the battlefield.",
+            "Copy Enchantment",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let copy_filter = parsed
+            .replacements
+            .iter()
+            .find_map(|r| match r.execute.as_deref()?.effect.as_ref() {
+                Effect::BecomeCopy { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("Copy Enchantment must parse a BecomeCopy clone replacement");
+
+        state
+            .objects
+            .get_mut(&copy_ench)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::BecomeCopy {
+                            recipient: TargetFilter::SelfRef,
+                            target: copy_filter,
+                            duration: None,
+                            mana_value_limit: None,
+                            additional_modifications: Vec::new(),
+                        },
+                    )),
+            );
+
+        // Propose the Stack → Battlefield entry so the replacement pipeline
+        // surfaces the optional "may enter as a copy" choice.
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::ZoneChange {
+            object_id: copy_ench,
+            from: Zone::Stack,
+            to: Zone::Battlefield,
+            cause: None,
+            attach_to: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            enter_as_copy: None,
+            applied: std::collections::HashSet::new(),
+            face_down_profile: None,
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for Copy Enchantment's optional copy, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept Copy Enchantment's enter-as-a-copy");
+
+        // The mid-entry copy target choice must now be pending, with the Aura as
+        // the only legal copy source (a creature host is not an enchantment).
+        let WaitingFor::CopyTargetChoice { valid_targets, .. } = state.waiting_for.clone() else {
+            panic!(
+                "expected CopyTargetChoice after accepting the copy, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert!(
+            valid_targets.contains(&aura),
+            "the Level Up Aura must be a legal copy source"
+        );
+
+        (state, copy_ench, aura, hosts)
+    }
+
+    /// Build an "Enchant player" Aura source plus Copy Enchantment entering
+    /// through the real `BecomeCopy` replacement. Both players are legal hosts,
+    /// so picking the Aura as the copy source must pause on
+    /// `ReturnAsAuraTarget` with `TargetRef::Player` choices.
+    fn drive_copy_enchantment_of_player_aura() -> (GameState, ObjectId, ObjectId) {
+        use crate::types::ability::Effect;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(42);
+
+        let enchant_player = Keyword::Enchant(TargetFilter::Player);
+
+        let aura = create_object(
+            &mut state,
+            CardId(302),
+            PlayerId(0),
+            "Psychic Venom".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            obj.base_card_types.subtypes = vec!["Aura".to_string()];
+            obj.card_types.subtypes = vec!["Aura".to_string()];
+            obj.base_keywords = vec![enchant_player.clone()];
+            obj.keywords = vec![enchant_player];
+        }
+
+        let copy_ench = create_object(
+            &mut state,
+            CardId(303),
+            PlayerId(0),
+            "Copy Enchantment".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&copy_ench).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+        }
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "You may have this enchantment enter as a copy of any enchantment on the battlefield.",
+            "Copy Enchantment",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let copy_filter = parsed
+            .replacements
+            .iter()
+            .find_map(|r| match r.execute.as_deref()?.effect.as_ref() {
+                Effect::BecomeCopy { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("Copy Enchantment must parse a BecomeCopy clone replacement");
+
+        state
+            .objects
+            .get_mut(&copy_ench)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::BecomeCopy {
+                            recipient: TargetFilter::SelfRef,
+                            target: copy_filter,
+                            duration: None,
+                            mana_value_limit: None,
+                            additional_modifications: Vec::new(),
+                        },
+                    )),
+            );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::ZoneChange {
+            object_id: copy_ench,
+            from: Zone::Stack,
+            to: Zone::Battlefield,
+            cause: None,
+            attach_to: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            enter_as_copy: None,
+            applied: std::collections::HashSet::new(),
+            face_down_profile: None,
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for Copy Enchantment's optional copy, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept Copy Enchantment's enter-as-a-copy");
+
+        let WaitingFor::CopyTargetChoice { valid_targets, .. } = state.waiting_for.clone() else {
+            panic!(
+                "expected CopyTargetChoice after accepting the copy, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert!(
+            valid_targets.contains(&aura),
+            "the enchant-player Aura must be a legal copy source"
+        );
+
+        (state, copy_ench, aura)
+    }
+
+    /// CR 303.4f + CR 704.5m: Copy Enchantment entering as a copy of an Aura
+    /// ("Level Up") with exactly one legal host must AUTO-ATTACH to that host as
+    /// the copy is realized, then SURVIVE the unattached-Aura state-based action.
+    /// Before the fix, `BecomeCopy` realized the Aura post-entry — after the
+    /// normal `move_object` aura-attach slot had already been skipped (the object
+    /// was still a non-Aura enchantment then) — so the copy sat unattached and
+    /// was destroyed by CR 704.5m before its copied ability could ever matter.
+    #[test]
+    fn copy_enchantment_becomes_aura_copy_auto_attaches_and_survives_sba() {
+        use crate::game::game_object::AttachTarget;
+
+        let (mut state, copy_ench, aura, hosts) = drive_copy_enchantment_of_aura(1);
+        let host = hosts[0];
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(crate::types::ability::TargetRef::Object(aura)),
+            },
+        )
+        .expect("pick the Aura as the copy source");
+
+        let copy = &state.objects[&copy_ench];
+        assert!(
+            copy.card_types.subtypes.iter().any(|s| s == "Aura"),
+            "the copy must have realized into an Aura"
+        );
+        assert_eq!(
+            copy.attached_to,
+            Some(AttachTarget::Object(host)),
+            "CR 303.4f: the copied Aura must auto-attach to its sole legal host"
+        );
+
+        // CR 704.5m: the attached Aura must survive the state-based action that
+        // sends UNATTACHED Auras to the graveyard.
+        let mut events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+        assert!(
+            state.battlefield.contains(&copy_ench),
+            "the attached copy must survive the unattached-Aura SBA"
+        );
+    }
+
+    /// CR 303.4g + CR 704.5m: With NO legal host on the battlefield, the copied
+    /// Aura stays unattached (the engine's post-entry equivalent of "it doesn't
+    /// enter") and is moved to its owner's graveyard by the unattached-Aura SBA.
+    #[test]
+    fn copy_enchantment_becomes_aura_copy_with_no_host_dies_to_sba() {
+        let (mut state, copy_ench, _aura, _hosts) = drive_copy_enchantment_of_aura(0);
+
+        // The only battlefield permanent is the Aura source itself (an
+        // Enchantment, not a creature), so "Enchant creature" has no legal host.
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(crate::types::ability::TargetRef::Object(_aura)),
+            },
+        )
+        .expect("pick the Aura as the copy source");
+
+        assert!(
+            state.objects[&copy_ench].attached_to.is_none(),
+            "with no legal host the copied Aura must stay unattached"
+        );
+
+        let mut events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+        assert!(
+            !state.battlefield.contains(&copy_ench),
+            "CR 704.5m: an unattached Aura copy must be moved off the battlefield by SBA"
+        );
+        assert_eq!(
+            state.objects[&copy_ench].zone,
+            Zone::Graveyard,
+            "CR 303.4g: the unattached Aura copy goes to its owner's graveyard"
+        );
+    }
+
+    /// CR 303.4f: With MULTIPLE legal hosts, the copied Aura must PAUSE on
+    /// `ReturnAsAuraTarget` for the controller's choice, then attach to the
+    /// chosen host and survive SBA. Exercises the interactive branch of the
+    /// entering-Aura attachment building block.
+    #[test]
+    fn copy_enchantment_becomes_aura_copy_multi_host_prompts_then_attaches() {
+        use crate::game::game_object::AttachTarget;
+
+        let (mut state, copy_ench, _aura, hosts) = drive_copy_enchantment_of_aura(2);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(crate::types::ability::TargetRef::Object(_aura)),
+            },
+        )
+        .expect("pick the Aura as the copy source");
+
+        // Two legal hosts → the controller must choose which to enchant.
+        let WaitingFor::ReturnAsAuraTarget {
+            returned_id,
+            legal_targets,
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected ReturnAsAuraTarget for the multi-host attach choice, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            returned_id, copy_ench,
+            "the entering copy is the Aura to attach"
+        );
+        assert!(
+            hosts
+                .iter()
+                .all(|h| legal_targets.contains(&TargetRef::Object(*h))),
+            "both creatures must be offered as legal Aura hosts"
+        );
+
+        let chosen = hosts[1];
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(chosen)),
+            },
+        )
+        .expect("choose the Aura's host");
+
+        assert_eq!(
+            state.objects[&copy_ench].attached_to,
+            Some(AttachTarget::Object(chosen)),
+            "the copied Aura must attach to the chosen host"
+        );
+        let mut events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+        assert!(
+            state.battlefield.contains(&copy_ench),
+            "the attached copy must survive the unattached-Aura SBA"
+        );
+    }
+
+    /// CR 303.4f: With multiple legal player hosts, an entering copied
+    /// "Enchant player" Aura must offer player hosts and attach to the chosen
+    /// player. This guards the shared `ReturnAsAuraTarget` resume path for
+    /// `TargetRef::Player`, not only object hosts.
+    #[test]
+    fn copy_enchantment_becomes_enchant_player_aura_prompts_then_attaches_to_player() {
+        use crate::game::game_object::AttachTarget;
+
+        let (mut state, copy_ench, aura) = drive_copy_enchantment_of_player_aura();
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(aura)),
+            },
+        )
+        .expect("pick the enchant-player Aura as the copy source");
+
+        let WaitingFor::ReturnAsAuraTarget {
+            returned_id,
+            legal_targets,
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected ReturnAsAuraTarget for the multi-player attach choice, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            returned_id, copy_ench,
+            "the entering copy is the Aura to attach"
+        );
+        assert!(
+            legal_targets.contains(&TargetRef::Player(PlayerId(0)))
+                && legal_targets.contains(&TargetRef::Player(PlayerId(1))),
+            "both players must be offered as legal Aura hosts"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+        )
+        .expect("choose the Aura's player host");
+
+        assert_eq!(
+            state.objects[&copy_ench].attached_to,
+            Some(AttachTarget::Player(PlayerId(1))),
+            "the copied Aura must attach to the chosen player"
+        );
+        let mut events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+        assert!(
+            state.battlefield.contains(&copy_ench),
+            "the attached player-enchanting copy must survive the unattached-Aura SBA"
         );
     }
 
@@ -3212,6 +6604,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -3227,7 +6620,7 @@ mod tests {
         // continuation (the ChooseOneOf execute).
         crate::game::zones::move_to_zone(&mut state, object_id, to, &mut events);
         assert!(
-            state.post_replacement_continuation.is_some(),
+            state.has_post_replacement_drain(),
             "ChooseOneOf execute must stash a post-replacement continuation"
         );
         let waiting = apply_pending_post_replacement_effect(
@@ -3372,6 +6765,7 @@ mod tests {
             branch_descriptions: Vec::new(),
             parent_targets: Vec::new(),
             context: Default::default(),
+            replacement_applied: Default::default(),
             remaining_players: Vec::new(),
         };
         state.priority_player = PlayerId(0);
@@ -3393,5 +6787,269 @@ mod tests {
             state.deferred_entry_events.is_empty(),
             "deferred entry must remain empty for an unrelated choice"
         );
+    }
+
+    /// Issue #6440 — Mockingbird-class AmountSpentToCastSource ceiling.
+    fn mockingbird_become_copy() -> AbilityDefinition {
+        use crate::types::ability::{CopyManaValueLimit, Duration, Effect, TargetFilter};
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                recipient: TargetFilter::SelfRef,
+                duration: Some(Duration::Permanent),
+                mana_value_limit: Some(CopyManaValueLimit::AmountSpentToCastSource),
+                additional_modifications: Vec::new(),
+            },
+        )
+    }
+
+    fn clone_become_copy() -> AbilityDefinition {
+        use crate::types::ability::{Duration, Effect, TargetFilter};
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                recipient: TargetFilter::SelfRef,
+                duration: Some(Duration::Permanent),
+                mana_value_limit: None,
+                additional_modifications: Vec::new(),
+            },
+        )
+    }
+
+    fn make_creature_with_mv(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        mv: u32,
+    ) -> ObjectId {
+        let id = make_creature(state, owner, name);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.mana_cost = crate::types::mana::ManaCost::generic(mv);
+        id
+    }
+
+    fn chord_like_spell_resolution(
+        chord_id: ObjectId,
+        actual_mana_spent: u32,
+    ) -> crate::types::game_state::PendingSpellResolution {
+        use crate::types::game_state::{CastingVariant, PendingSpellResolution};
+        PendingSpellResolution {
+            object_id: chord_id,
+            controller: PlayerId(0),
+            casting_variant: CastingVariant::Normal,
+            cast_from_zone: None,
+            cast_controller: None,
+            cast_timing_permission: None,
+            spell_targets: vec![],
+            actual_mana_spent,
+            kickers_paid: vec![],
+            additional_cost_payment_count: 0,
+            additional_cost_payments: vec![],
+            convoked_creatures: vec![],
+        }
+    }
+
+    /// Hostile: uncast stamp 0 + Chord-like ctx spent 5 → ceiling Some(0); MV2 excluded.
+    #[test]
+    fn issue_6440_uncast_stamp_ignores_spell_resolution_mana_spent() {
+        let mut state = GameState::new_two_player(42);
+        let mv0 = make_creature_with_mv(&mut state, PlayerId(0), "Mv0", 0);
+        let mv2 = make_creature_with_mv(&mut state, PlayerId(0), "Mv2", 2);
+        let mockingbird = make_creature(&mut state, PlayerId(0), "Mockingbird");
+        // Uncast: stamp stays at default 0.
+        assert_eq!(state.objects[&mockingbird].mana_spent_to_cast_amount, 0);
+
+        let chord = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Chord of Calling".to_string(),
+            Zone::Stack,
+        );
+        let hostile_ctx = chord_like_spell_resolution(chord, 5);
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &mockingbird_become_copy(),
+            Some(mockingbird),
+            Some(&hostile_ctx),
+            None,
+            Default::default(),
+            &mut events,
+        );
+
+        match waiting {
+            Some(WaitingFor::CopyTargetChoice {
+                max_mana_value,
+                valid_targets,
+                ..
+            }) => {
+                assert_eq!(
+                    max_mana_value,
+                    Some(0),
+                    "uncast stamp must yield Some(0), not unconstrained None"
+                );
+                assert!(
+                    valid_targets.contains(&mv0),
+                    "MV 0 must remain legal; got {valid_targets:?}"
+                );
+                assert!(
+                    !valid_targets.contains(&mv2),
+                    "MV 2 must be excluded under ceiling 0; got {valid_targets:?}"
+                );
+            }
+            other => panic!("expected CopyTargetChoice, got {other:?}"),
+        }
+    }
+
+    /// Cast stamp 2 → ceiling Some(2); ctx spent 99 must not override.
+    #[test]
+    fn issue_6440_cast_stamp_drives_ceiling_not_ctx() {
+        let mut state = GameState::new_two_player(42);
+        let mv2 = make_creature_with_mv(&mut state, PlayerId(0), "Mv2", 2);
+        let mv3 = make_creature_with_mv(&mut state, PlayerId(0), "Mv3", 3);
+        let mockingbird = make_creature(&mut state, PlayerId(0), "Mockingbird");
+        state
+            .objects
+            .get_mut(&mockingbird)
+            .unwrap()
+            .mana_spent_to_cast_amount = 2;
+
+        let chord = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Unrelated Spell".to_string(),
+            Zone::Stack,
+        );
+        let hostile_ctx = chord_like_spell_resolution(chord, 99);
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &mockingbird_become_copy(),
+            Some(mockingbird),
+            Some(&hostile_ctx),
+            None,
+            Default::default(),
+            &mut events,
+        );
+
+        match waiting {
+            Some(WaitingFor::CopyTargetChoice {
+                max_mana_value,
+                valid_targets,
+                ..
+            }) => {
+                assert_eq!(max_mana_value, Some(2));
+                assert!(valid_targets.contains(&mv2));
+                assert!(!valid_targets.contains(&mv3));
+            }
+            other => panic!("expected CopyTargetChoice, got {other:?}"),
+        }
+    }
+
+    /// Liminal-only source: stamp read via dual lookup (Gap 1).
+    #[test]
+    fn issue_6440_liminal_stamp_drives_ceiling() {
+        use crate::types::game_state::{LiminalEntry, LiminalEntryKind};
+        use crate::types::zones::EtbTapState;
+
+        let mut state = GameState::new_two_player(42);
+        let mv0 = make_creature_with_mv(&mut state, PlayerId(0), "Mv0", 0);
+        let mv2 = make_creature_with_mv(&mut state, PlayerId(0), "Mv2", 2);
+
+        let liminal_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut liminal = GameObject::new(
+            liminal_id,
+            CardId(50),
+            PlayerId(0),
+            "Liminal Mockingbird".to_string(),
+            Zone::Battlefield,
+        );
+        liminal.card_types.core_types.push(CoreType::Creature);
+        liminal.mana_spent_to_cast_amount = 0;
+        assert!(!state.objects.contains_key(&liminal_id));
+        state.liminal_entries.insert(
+            liminal_id,
+            LiminalEntry {
+                object: liminal,
+                name: "Liminal Mockingbird".to_string(),
+                source_id: ObjectId(999),
+                controller: PlayerId(0),
+                enters_attacking: false,
+                attach_to: None,
+                sacrifice_at: None,
+                remaining_count: 0,
+                created_ids: Vec::new(),
+                copy_resume: None,
+                spec_resume: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enter_with_counters: Vec::new(),
+                kind: LiminalEntryKind::Token,
+                replacement_applied: HashSet::new(),
+            },
+        );
+
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &mockingbird_become_copy(),
+            Some(liminal_id),
+            None,
+            None,
+            Default::default(),
+            &mut events,
+        );
+
+        match waiting {
+            Some(WaitingFor::CopyTargetChoice {
+                max_mana_value,
+                valid_targets,
+                ..
+            }) => {
+                assert_eq!(max_mana_value, Some(0));
+                assert!(valid_targets.contains(&mv0));
+                assert!(!valid_targets.contains(&mv2));
+            }
+            other => panic!("expected CopyTargetChoice from liminal stamp, got {other:?}"),
+        }
+    }
+
+    /// Clone sibling: no mana_value_limit → unconstrained even when uncast.
+    #[test]
+    fn issue_6440_clone_without_limit_stays_unconstrained() {
+        let mut state = GameState::new_two_player(42);
+        let mv2 = make_creature_with_mv(&mut state, PlayerId(0), "Mv2", 2);
+        let clone = make_creature(&mut state, PlayerId(0), "Clone");
+        assert_eq!(state.objects[&clone].mana_spent_to_cast_amount, 0);
+
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &clone_become_copy(),
+            Some(clone),
+            Some(&chord_like_spell_resolution(ObjectId(1), 5)),
+            None,
+            Default::default(),
+            &mut events,
+        );
+
+        match waiting {
+            Some(WaitingFor::CopyTargetChoice {
+                max_mana_value,
+                valid_targets,
+                ..
+            }) => {
+                assert_eq!(max_mana_value, None);
+                assert!(
+                    valid_targets.contains(&mv2),
+                    "Clone without limit must still allow MV 2"
+                );
+            }
+            other => panic!("expected CopyTargetChoice, got {other:?}"),
+        }
     }
 }

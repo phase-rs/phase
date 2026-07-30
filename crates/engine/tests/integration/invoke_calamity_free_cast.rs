@@ -20,8 +20,9 @@
 //! CR 614.1a: spells cast this way are exiled instead of going to the graveyard.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastOfferKind, CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -184,6 +185,10 @@ fn invoke_calamity_opens_free_cast_window_and_exiles_cast_spells() {
                 candidates.contains(&hand_sorcery),
                 "the MV-3 hand sorcery still fits the remaining budget of 4",
             );
+            assert!(
+                !candidates.contains(&gy_instant),
+                "the spell already cast this way must not be offered a second time",
+            );
         }
         other => panic!("the window must re-offer after the first free cast, got {other:?}"),
     }
@@ -319,5 +324,167 @@ fn invoke_calamity_free_casts_hand_spell_for_zero_mana() {
         0,
         "free-casting from HAND must not consume any mana (the pool was already \
          empty; a non-free cast would have failed or charged mana)",
+    );
+}
+
+/// CR 601.2c + CR 608.2g: a during-resolution cast cannot select a spell whose
+/// required target does not exist. The unrelated draw spell remains castable.
+#[test]
+fn invoke_calamity_does_not_offer_spell_without_required_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let invoke_id = scenario
+        .add_spell_to_hand_from_oracle(P0, "Invoke Calamity", true, INVOKE_CALAMITY_TEXT)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let draw_spell = scenario
+        .add_spell_to_graveyard(P0, "Graveyard Draw", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .from_oracle_text("Draw a card.")
+        .id();
+    let removal = scenario
+        .add_spell_to_graveyard(P0, "Graveyard Removal", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .from_oracle_text("Destroy target creature.")
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    let invoke_card_id = runner.state().objects[&invoke_id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: invoke_id,
+            card_id: invoke_card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Invoke Calamity must succeed");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    match runner.state().waiting_for.clone() {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::FreeCastWindow { candidates, .. },
+            ..
+        } => {
+            assert!(candidates.contains(&draw_spell));
+            assert!(
+                !candidates.contains(&removal),
+                "a spell requiring a creature target must not be offered on an empty battlefield"
+            );
+        }
+        other => panic!("expected FreeCastWindow to open, got {other:?}"),
+    }
+}
+
+/// CR 601.2c + CR 608.2g: the resolving Invoke remains a legal target for a
+/// counterspell cast by its own window, then exiles before that spell resolves.
+#[test]
+fn invoke_calamity_can_target_resolving_source_with_first_counterspell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let invoke_id = scenario
+        .add_spell_to_hand_from_oracle(P0, "Invoke Calamity", true, INVOKE_CALAMITY_TEXT)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let draw_spell = scenario
+        .add_spell_to_graveyard(P0, "Graveyard Draw", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .from_oracle_text("Draw a card.")
+        .id();
+    let counterspell = scenario
+        .add_spell_to_graveyard(P0, "Graveyard Counter", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .from_oracle_text("Counter target spell.")
+        .id();
+    scenario.add_card_to_library_top(P0, "Draw Filler");
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    let invoke_card_id = runner.state().objects[&invoke_id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: invoke_id,
+            card_id: invoke_card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Invoke Calamity must succeed");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    match runner.state().waiting_for.clone() {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::FreeCastWindow { candidates, .. },
+            ..
+        } => {
+            assert!(candidates.contains(&draw_spell));
+            assert!(
+                candidates.contains(&counterspell),
+                "the resolving Invoke Calamity is a legal target for the first counterspell"
+            );
+        }
+        other => panic!("expected FreeCastWindow to open, got {other:?}"),
+    }
+    runner
+        .act(GameAction::FreeCastWindowChoice {
+            selection: Some(counterspell),
+        })
+        .expect("free-casting the counterspell must succeed");
+    let counter_entry = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.id == counterspell)
+        .expect("the free-cast counterspell must be on the stack");
+    let StackEntryKind::Spell {
+        ability: Some(ability),
+        ..
+    } = &counter_entry.kind
+    else {
+        panic!("the free-cast counterspell must have its resolved spell ability");
+    };
+    assert!(
+        ability.targets.contains(&TargetRef::Object(invoke_id)),
+        "the first counterspell must target the currently resolving Invoke Calamity"
+    );
+    match runner.state().waiting_for.clone() {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::FreeCastWindow { candidates, .. },
+            ..
+        } => assert!(candidates.contains(&draw_spell)),
+        other => panic!("expected the second FreeCastWindow, got {other:?}"),
+    }
+    runner
+        .act(GameAction::FreeCastWindowChoice {
+            selection: Some(draw_spell),
+        })
+        .expect("free-casting the draw spell must succeed");
+    assert_eq!(runner.state().objects[&invoke_id].zone, Zone::Exile);
+    for _ in 0..12 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority to resolve the free-cast stack must succeed");
+    }
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().objects[&counterspell].zone,
+        Zone::Exile,
+        "the counterspell loses its only target and is exiled by Invoke's rider"
     );
 }

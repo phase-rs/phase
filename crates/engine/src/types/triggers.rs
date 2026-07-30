@@ -198,6 +198,18 @@ pub enum AttackTargetFilter {
     PlayerOrPermanents,
 }
 
+/// CR 701.31 + CR 701.31d: which role the trigger's source must occupy in the
+/// planeswalk event. `From` binds the source to the plane/phenomenon walked away
+/// from, `To` binds it to the plane/phenomenon walked to (the encounter/arrival
+/// endpoint), and `Any` is source-independent — it fires for any planeswalk
+/// (CR 901.11), used by delayed "when a player planeswalks" triggers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlaneswalkRole {
+    From,
+    To,
+    Any,
+}
+
 /// All trigger modes from Forge's TriggerType enum (CR 603).
 ///
 /// Triggered abilities have a trigger condition and an effect, written as
@@ -405,6 +417,12 @@ pub enum TriggerMode {
     /// (e.g., "an ability of an artifact source") live on `valid_card` — both
     /// reuse existing infrastructure shared with `KeywordAbilityActivated`.
     AbilityActivated,
+    /// CR 606.2 + CR 603.2: Triggers when a player activates a loyalty ability
+    /// (a planeswalker activated ability paid with loyalty counters). Listens to
+    /// `GameEvent::AbilityActivated` with `kind == ActivatedAbilityKind::Loyalty`.
+    /// The activated planeswalker is filtered via `valid_card` ("a Chandra
+    /// planeswalker", "enchanted planeswalker"); player scope via `valid_target`.
+    LoyaltyAbilityActivated,
     /// CR 702.100a: Evolve keyword trigger — when a creature enters with greater power/toughness.
     Evolve,
     /// CR 702.100b: Triggers when a creature evolves.
@@ -451,8 +469,16 @@ pub enum TriggerMode {
 
     // Planar
     PlanarDice,
-    PlaneswalkedFrom,
-    PlaneswalkedTo,
+    /// CR 701.31 + CR 701.31d + CR 901.11: planeswalk trigger, parameterized by
+    /// which endpoint of the `GameEvent::Planeswalked` event the trigger's source
+    /// must bind to. `role: From` = walked away from the source plane, `role: To`
+    /// = walked to (encounter) the source plane, `role: Any` = source-independent
+    /// "whenever a player planeswalks" (e.g. The Doctor's Childhood Barn's delayed
+    /// phase-in). All three share the same event and player-validity check; only
+    /// the endpoint binding differs.
+    Planeswalked {
+        role: PlaneswalkRole,
+    },
     ChaosEnsues,
 
     // Dice / coin
@@ -534,6 +560,14 @@ pub enum TriggerMode {
     EntersOrAttacks,
     /// "Whenever ~ attacks or blocks" — fires on both attack (CR 508.3a) and block (CR 509.1h) events.
     AttacksOrBlocks,
+    /// CR 509.1h + CR 509.3d: "~ blocks or becomes blocked" — fires on either the
+    /// blocker-declaration event or the becomes-blocked event, with per-firing
+    /// blocker/attacker disambiguation available to the effect body.
+    BlocksOrBecomesBlocked,
+    /// CR 702.55c: "~ enters or the creature it haunts dies" — parsed as one compound
+    /// trigger; the ETB half fires on the battlefield and synthesis clones the effect into
+    /// a `HauntedCreatureDies` trigger in exile for the haunted-dies half.
+    EntersOrHauntedCreatureDies,
 
     /// CR 603.8: State trigger — fires when a game-state condition becomes true, rather than
     /// in response to an event. Checked whenever a player would receive priority.
@@ -594,6 +628,7 @@ impl FromStr for TriggerMode {
             "BecomesTargetOnce" => TriggerMode::BecomesTargetOnce,
             "BlockersDeclared" => TriggerMode::BlockersDeclared,
             "Blocks" => TriggerMode::Blocks,
+            "BlocksOrBecomesBlocked" => TriggerMode::BlocksOrBecomesBlocked,
             "CaseSolved" => TriggerMode::CaseSolved,
             "Championed" => TriggerMode::Championed,
             "ChangesController" => TriggerMode::ChangesController,
@@ -640,6 +675,7 @@ impl FromStr for TriggerMode {
             "Enlisted" => TriggerMode::Enlisted,
             "AttacksOrBlocks" => TriggerMode::AttacksOrBlocks,
             "EntersOrAttacks" => TriggerMode::EntersOrAttacks,
+            "EntersOrHauntedCreatureDies" => TriggerMode::EntersOrHauntedCreatureDies,
             "Evolve" => TriggerMode::Evolve,
             "Evolved" => TriggerMode::Evolved,
             "ExcessDamage" => TriggerMode::ExcessDamage,
@@ -661,6 +697,7 @@ impl FromStr for TriggerMode {
             "LandPlayed" => TriggerMode::LandPlayed,
             "PlayCard" => TriggerMode::PlayCard,
             "LeavesBattlefield" => TriggerMode::LeavesBattlefield,
+            "LoyaltyAbilityActivated" => TriggerMode::LoyaltyAbilityActivated,
             "LifeChanged" => TriggerMode::LifeChanged,
             "LifeGained" => TriggerMode::LifeGained,
             "LifeLost" => TriggerMode::LifeLost,
@@ -687,8 +724,15 @@ impl FromStr for TriggerMode {
             "PhaseOut" => TriggerMode::PhaseOut,
             "PhaseOutAll" => TriggerMode::PhaseOutAll,
             "PlanarDice" => TriggerMode::PlanarDice,
-            "PlaneswalkedFrom" => TriggerMode::PlaneswalkedFrom,
-            "PlaneswalkedTo" => TriggerMode::PlaneswalkedTo,
+            "PlaneswalkedFrom" => TriggerMode::Planeswalked {
+                role: PlaneswalkRole::From,
+            },
+            "PlaneswalkedTo" => TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To,
+            },
+            "PlayerPlaneswalked" => TriggerMode::Planeswalked {
+                role: PlaneswalkRole::Any,
+            },
             "Proliferate" => TriggerMode::Proliferate,
             "Revealed" => TriggerMode::Revealed,
             "RingTemptsYou" => TriggerMode::RingTemptsYou,
@@ -802,6 +846,68 @@ mod tests {
     }
 
     #[test]
+    fn loyalty_ability_activated_mode_string_round_trips() {
+        // CR 606.2: the new mode must survive Display -> from_str without
+        // degrading to `Unknown` (the from-string map has a `_ => Unknown`
+        // fallback, so a missing arm would silently no-fire the trigger).
+        let mode = TriggerMode::LoyaltyAbilityActivated;
+        assert_eq!(mode.to_string(), "LoyaltyAbilityActivated");
+        assert_eq!(
+            TriggerMode::from_str(&mode.to_string()).unwrap(),
+            TriggerMode::LoyaltyAbilityActivated
+        );
+        assert_eq!(
+            TriggerMode::from_str("LoyaltyAbilityActivated").unwrap(),
+            TriggerMode::LoyaltyAbilityActivated
+        );
+    }
+
+    /// CR 701.31 / CR 701.31d / CR 901.11: the parameterized planeswalk mode must
+    /// survive both the Forge-string `from_str` path and serde round-trips without
+    /// degrading to `Unknown` (a missing arm would silently no-fire the trigger).
+    /// The three legacy Forge strings each map onto a distinct `PlaneswalkRole`.
+    #[test]
+    fn planeswalked_roles_round_trip() {
+        // Forge-string import path: each legacy string resolves to the right role.
+        assert_eq!(
+            TriggerMode::from_str("PlaneswalkedFrom").unwrap(),
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::From
+            }
+        );
+        assert_eq!(
+            TriggerMode::from_str("PlaneswalkedTo").unwrap(),
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To
+            }
+        );
+        assert_eq!(
+            TriggerMode::from_str("PlayerPlaneswalked").unwrap(),
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::Any
+            }
+        );
+
+        // Serde is the card-data persistence path. Externally-tagged struct
+        // variant → `{"Planeswalked":{"role":"..."}}`. Locking this format also
+        // documents the on-disk shape used by the integration-card fixture.
+        for (role, json) in [
+            (PlaneswalkRole::From, r#"{"Planeswalked":{"role":"From"}}"#),
+            (PlaneswalkRole::To, r#"{"Planeswalked":{"role":"To"}}"#),
+            (PlaneswalkRole::Any, r#"{"Planeswalked":{"role":"Any"}}"#),
+        ] {
+            let mode = TriggerMode::Planeswalked { role };
+            let serialized = serde_json::to_string(&mode).unwrap();
+            assert_eq!(serialized, json);
+            assert_eq!(
+                serde_json::from_str::<TriggerMode>(json).unwrap(),
+                mode,
+                "serde round-trip must preserve the planeswalk role"
+            );
+        }
+    }
+
+    #[test]
     fn trigger_mode_case_sensitive() {
         // Forge uses CamelCase -- lowercase should be Unknown
         assert_eq!(
@@ -864,6 +970,7 @@ mod tests {
             "BecomesTargetOnce",
             "BlockersDeclared",
             "Blocks",
+            "BlocksOrBecomesBlocked",
             "CaseSolved",
             "Championed",
             "ChangesController",
@@ -908,6 +1015,7 @@ mod tests {
             "ElementalBend",
             "Enlisted",
             "EntersOrAttacks",
+            "EntersOrHauntedCreatureDies",
             "Evolve",
             "Evolved",
             "ExcessDamage",
@@ -934,6 +1042,7 @@ mod tests {
             "LifeLost",
             "LifeLostAll",
             "LosesGame",
+            "LoyaltyAbilityActivated",
             "ManaAdded",
             "ManaExpend",
             "ManifestDread",
@@ -958,6 +1067,7 @@ mod tests {
             "PlanarDice",
             "PlaneswalkedFrom",
             "PlaneswalkedTo",
+            "PlayerPlaneswalked",
             "Proliferate",
             "Revealed",
             "RingTemptsYou",

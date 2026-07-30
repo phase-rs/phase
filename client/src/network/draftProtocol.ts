@@ -20,6 +20,10 @@ import type {
   SeatPublicView,
 } from "../adapter/draft-adapter";
 import type { DeckCardCount, MatchConfig, MatchScore } from "../adapter/types";
+import type {
+  DraftIntergameCommand,
+  DraftIntergameCommandAck,
+} from "../services/intergameCommandLedger";
 
 // ── Protocol Version ───────────────────────────────────────────────────
 
@@ -31,8 +35,11 @@ import type { DeckCardCount, MatchConfig, MatchScore } from "../adapter/types";
  *   2 — add timer sync, match start, round advance messages (Phase 57)
  *   3 — add Bo3 sideboard and game-level result messages (Phase 58)
  *   4 — add deck-carrying tournament match launch descriptors
+ *   5 — bind match settlement to a durable pod-issued capability
+ *   6 — durable authorized Bo3 intergame command ledger
+ *   7 — forward authenticated match-host between-games observations
  */
-export const DRAFT_PROTOCOL_VERSION = 4 as const;
+export const DRAFT_PROTOCOL_VERSION = 7 as const;
 
 /**
  * Typed reason for a draft pause, used over the wire and on the i18n key path.
@@ -65,6 +72,28 @@ export interface DraftMatchDeckPayload {
   ai_decks: DraftDeckPayload[];
 }
 
+/**
+ * Pod-issued capability for exactly one tournament match authority.  The
+ * random lease and nonce are intentionally opaque: a match result is valid
+ * only when it echoes the complete binding issued for its current round.
+ */
+export interface DraftMatchBinding {
+  podId: string;
+  matchId: string;
+  round: number;
+  sessionKey: string;
+  lease: string;
+  nonce: string;
+  revision: number;
+  matchAuthoritySeat: number;
+}
+
+export interface DraftMatchSettlement {
+  binding: DraftMatchBinding;
+  receiptId: string;
+  winnerSeat: number | null;
+}
+
 export type DraftMatchLaunch =
   | {
       type: "HumanHost";
@@ -77,6 +106,7 @@ export type DraftMatchLaunch =
       matchHostPeerId: string;
       deckPayload: DraftMatchDeckPayload;
       matchConfig: MatchConfig;
+      binding: DraftMatchBinding;
     }
   | {
       type: "HumanGuest";
@@ -89,6 +119,7 @@ export type DraftMatchLaunch =
       matchHostPeerId: string;
       localDeck: DraftDeckPayload;
       matchConfig: MatchConfig;
+      binding: DraftMatchBinding;
     }
   | {
       type: "Bot";
@@ -99,6 +130,7 @@ export type DraftMatchLaunch =
       botName: string;
       deckPayload: DraftMatchDeckPayload;
       matchConfig: MatchConfig;
+      binding: DraftMatchBinding;
     };
 
 // ── Message Types ──────────────────────────────────────────────────────
@@ -189,6 +221,18 @@ export type DraftP2PMessage =
       winnerSeat: number | null;
     }
   | {
+      /** Match-authority seat → pod host: authenticated result settlement. */
+      type: "draft_match_settlement";
+      settlement: DraftMatchSettlement;
+    }
+  | {
+      /** Pod host → match-authority seat: durable exact-once receipt. */
+      type: "draft_match_settlement_ack";
+      matchId: string;
+      receiptId: string;
+      revision: number;
+    }
+  | {
       type: "draft_paused";
       reason: DraftPauseReason;
     }
@@ -233,11 +277,36 @@ export type DraftP2PMessage =
       timerMs: number;
     }
   | {
+      /** Match host → pod host: authenticated observation of an engine between-games state. */
+      type: "draft_bo3_between_games";
+      matchId: string;
+      gameNumber: number;
+      score: MatchScore;
+      loserSeat: number | null;
+    }
+  | {
       /** Guest → Host: player submits their sideboarded deck for the next game. */
       type: "draft_bo3_sideboard_submit";
       matchId: string;
       mainDeck: string[];
       sideboard: DeckCardCount[];
+    }
+  | {
+      /** Participant → pod: a durable, still-held intergame command. */
+      type: "draft_bo3_intergame_command";
+      command: DraftIntergameCommand;
+    }
+  | {
+      /** Pod → participant: the exact held command is now executable. */
+      type: "draft_bo3_intergame_authorized";
+      command: DraftIntergameCommand;
+      acknowledgement: DraftIntergameCommandAck;
+    }
+  | {
+      /** Participant → pod: the authorized command reached its local sink. */
+      type: "draft_bo3_intergame_receipt";
+      acknowledgement: DraftIntergameCommandAck;
+      receiptId: string;
     }
   | {
       /** Host → Guest: prompt the loser to choose play or draw for the next game. */
@@ -293,6 +362,8 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_kicked",
   "draft_pairing",
   "draft_match_result",
+  "draft_match_settlement",
+  "draft_match_settlement_ack",
   "draft_paused",
   "draft_resumed",
   "draft_lobby_update",
@@ -301,7 +372,11 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_request_advance",
   "draft_match_start",
   "draft_bo3_sideboard_prompt",
+  "draft_bo3_between_games",
   "draft_bo3_sideboard_submit",
+  "draft_bo3_intergame_command",
+  "draft_bo3_intergame_authorized",
+  "draft_bo3_intergame_receipt",
   "draft_bo3_play_draw_prompt",
   "draft_bo3_play_draw_choice",
   "draft_bo3_game_start",

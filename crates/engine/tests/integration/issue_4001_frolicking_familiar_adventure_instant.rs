@@ -30,6 +30,7 @@ fn blow_off_steam_back_face() -> BackFaceData {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut ct = CardType::default();
@@ -48,6 +49,7 @@ fn blow_off_steam_back_face() -> BackFaceData {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )],
         trigger_definitions: Default::default(),

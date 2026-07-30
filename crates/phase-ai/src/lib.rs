@@ -2,6 +2,8 @@ pub mod ability_chain;
 pub mod auto_play;
 pub mod card_advantage;
 pub mod card_hints;
+// Every item in `card_value` is `pub(crate)`; the module follows.
+pub(crate) mod card_value;
 pub mod cast_facts;
 pub mod combat_ai;
 pub mod combo;
@@ -11,6 +13,7 @@ pub mod damage_reflection;
 pub mod decision_kind;
 pub mod deck_knowledge;
 pub mod deck_profile;
+pub mod determinize;
 pub mod draft_eval;
 pub mod duel_suite;
 pub mod eval;
@@ -26,6 +29,8 @@ pub mod session;
 pub mod strategy_profile;
 pub mod synergy;
 pub mod tactical_gate;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod threat_profile;
 pub mod tribute_eval;
 pub mod zone_eval;
@@ -46,4 +51,8 @@ pub use eval::{
     threat_level_projected, EvalWeightSet, EvalWeights, EvaluationBreakdown, KeywordBonuses,
     StrategicIntent,
 };
-pub use search::{choose_action, score_candidates, softmax_select_pairs};
+pub use search::{
+    choose_action, choose_action_with_session, fallback_action, score_candidates,
+    score_candidates_with_session, softmax_select_pairs,
+};
+pub use session::{deck_pools_fingerprint, AiSession, SessionCache};

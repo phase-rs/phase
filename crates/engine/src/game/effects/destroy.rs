@@ -227,6 +227,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -373,6 +374,7 @@ pub fn resolve_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1027,7 +1029,7 @@ mod tests {
         let WaitingFor::ReplacementChoice {
             player,
             candidate_count,
-            candidate_descriptions,
+            candidates,
         } = &state.waiting_for
         else {
             panic!(
@@ -1038,11 +1040,12 @@ mod tests {
         };
         assert_eq!(*player, PlayerId(0));
         assert_eq!(*candidate_count, 2);
+        let descriptions: Vec<&str> = candidates.iter().map(|c| c.description.as_str()).collect();
         assert_eq!(
-            candidate_descriptions.as_slice(),
+            descriptions.as_slice(),
             &[
-                "Remove a shield counter".to_string(),
-                "Umbra armor: destroy Hyena Umbra instead".to_string(),
+                "Remove a shield counter",
+                "Umbra armor: destroy Hyena Umbra instead",
             ]
         );
         assert_eq!(

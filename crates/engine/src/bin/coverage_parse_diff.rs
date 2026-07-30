@@ -57,6 +57,24 @@ impl ChangeKind {
             ChangeKind::SupportFlip => "support",
         }
     }
+
+    fn section_heading(self) -> &'static str {
+        match self {
+            ChangeKind::ItemAdded => "🟢 Added",
+            ChangeKind::ItemRemoved => "🔴 Removed",
+            ChangeKind::FieldChanged => "🟡 Modified fields",
+            ChangeKind::SupportFlip => "🔵 Support status",
+        }
+    }
+
+    fn marker(self) -> &'static str {
+        match self {
+            ChangeKind::ItemAdded => "➕",
+            ChangeKind::ItemRemoved => "➖",
+            ChangeKind::FieldChanged => "🔄",
+            ChangeKind::SupportFlip => "↕️",
+        }
+    }
 }
 
 /// One field-level change, attributed to a card.
@@ -464,7 +482,7 @@ fn describe(c: &Cluster) -> String {
     let label = truncate(&c.label, 80);
     match c.kind {
         ChangeKind::FieldChanged => format!(
-            "{}/{} · field `{}`: `{}` → `{}`",
+            "{}/{} · changed field `{}`: `{}` → `{}`",
             c.category,
             label,
             c.key,
@@ -472,9 +490,19 @@ fn describe(c: &Cluster) -> String {
             truncate(&c.after, 120),
         ),
         ChangeKind::SupportFlip => {
+            let before = if c.before == "true" {
+                "supported"
+            } else {
+                "unsupported"
+            };
+            let after = if c.after == "true" {
+                "supported"
+            } else {
+                "unsupported"
+            };
             format!(
                 "{}/{} · support: `{}` → `{}`",
-                c.category, label, c.before, c.after
+                c.category, label, before, after
             )
         }
         ChangeKind::ItemAdded => {
@@ -493,6 +521,56 @@ fn describe(c: &Cluster) -> String {
                 truncate(&c.before, 160)
             )
         }
+    }
+}
+
+const CHANGE_KIND_ORDER: [ChangeKind; 4] = [
+    ChangeKind::ItemAdded,
+    ChangeKind::ItemRemoved,
+    ChangeKind::FieldChanged,
+    ChangeKind::SupportFlip,
+];
+
+fn render_cluster_sections(s: &mut String, clusters: &[Cluster], show_cards: bool) {
+    for kind in CHANGE_KIND_ORDER {
+        let signature_count = clusters.iter().filter(|c| c.kind == kind).count();
+        if signature_count == 0 {
+            continue;
+        }
+        let signature_label = if signature_count == 1 {
+            "signature"
+        } else {
+            "signatures"
+        };
+        let _ = writeln!(
+            s,
+            "#### {} ({} {})\n",
+            kind.section_heading(),
+            signature_count,
+            signature_label,
+        );
+
+        for c in clusters.iter().filter(|c| c.kind == kind) {
+            let card_label = if c.cards.len() == 1 { "card" } else { "cards" };
+            let _ = writeln!(
+                s,
+                "- **{} {}** · {} {}",
+                c.cards.len(),
+                card_label,
+                c.kind.marker(),
+                describe(c),
+            );
+            if show_cards {
+                let cards: Vec<&str> = c.cards.iter().take(3).map(String::as_str).collect();
+                let more = c.cards.len().saturating_sub(cards.len());
+                let _ = write!(s, "  - Affected (first 3): {}", cards.join(", "));
+                if more > 0 {
+                    let _ = write!(s, " (+{more} more)");
+                }
+                s.push('\n');
+            }
+        }
+        s.push('\n');
     }
 }
 
@@ -523,29 +601,20 @@ fn render_markdown(
     );
 
     let shown = clusters.len().min(max_clusters);
-    for c in &clusters[..shown] {
-        let _ = writeln!(s, "#### {} card(s) · {}", c.cards.len(), describe(c));
-        let examples: Vec<&str> = c.cards.iter().take(3).map(String::as_str).collect();
-        let more = c.cards.len().saturating_sub(examples.len());
-        let _ = write!(s, "Examples: {}", examples.join(", "));
-        if more > 0 {
-            let _ = write!(s, " (+{more} more)");
-        }
-        s.push_str("\n\n");
-    }
+    render_cluster_sections(&mut s, &clusters[..shown], true);
 
     if clusters.len() > shown {
         let tail = &clusters[shown..];
         let tail_cards: usize = tail.iter().map(|c| c.cards.len()).sum();
+        let tail_shown = tail.len().min(200);
         let _ = write!(
             s,
-            "<details><summary>… {} more signature(s) ({} card-changes) — see <code>parse-diff.json</code></summary>\n\n",
+            "<details><summary>… {} more signature(s) ({} card-changes) — showing first {}; see <code>parse-diff.json</code></summary>\n\n",
             tail.len(),
             tail_cards,
+            tail_shown,
         );
-        for c in tail.iter().take(200) {
-            let _ = writeln!(s, "- {} card(s) · {}", c.cards.len(), describe(c));
-        }
+        render_cluster_sections(&mut s, &tail[..tail_shown], false);
         s.push_str("\n</details>\n\n");
     }
 
@@ -638,6 +707,25 @@ mod tests {
         out
     }
 
+    fn cluster(
+        kind: ChangeKind,
+        label: &str,
+        key: &str,
+        before: &str,
+        after: &str,
+        cards: &[&str],
+    ) -> Cluster {
+        Cluster {
+            category: "ability",
+            label: label.to_string(),
+            kind,
+            key: key.to_string(),
+            before: before.to_string(),
+            after: after.to_string(),
+            cards: cards.iter().map(|card| (*card).to_string()).collect(),
+        }
+    }
+
     #[test]
     fn identical_items_produce_no_change() {
         let base = vec![item("DealDamage", &[("target", "creature")], true)];
@@ -684,6 +772,120 @@ mod tests {
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].kind, ChangeKind::ItemRemoved);
         assert_eq!(removed[0].label, "B");
+    }
+
+    #[test]
+    fn markdown_groups_signatures_by_kind_with_direction_markers() {
+        let clusters = vec![
+            cluster(
+                ChangeKind::FieldChanged,
+                "DealDamage",
+                "target",
+                "creature",
+                "creature or battle",
+                &["Field Card"],
+            ),
+            cluster(
+                ChangeKind::SupportFlip,
+                "Mill",
+                "",
+                "false",
+                "true",
+                &["Support Card"],
+            ),
+            cluster(
+                ChangeKind::ItemRemoved,
+                "static_structure",
+                "",
+                "static_structure",
+                "∅",
+                &["Removed Card"],
+            ),
+            cluster(
+                ChangeKind::ItemAdded,
+                "CastWithKeyword(Cascade)",
+                "",
+                "∅",
+                "CastWithKeyword(Cascade) (affects=in hand)",
+                &["Added Card", "Second Added Card"],
+            ),
+        ];
+
+        let markdown = render_markdown("e085a8d5fa08", &clusters, 4, 5, 0, &[], &[]);
+
+        for section in [
+            "#### 🟢 Added (1 signature)",
+            "#### 🔴 Removed (1 signature)",
+            "#### 🟡 Modified fields (1 signature)",
+            "#### 🔵 Support status (1 signature)",
+        ] {
+            assert!(markdown.contains(section), "missing section: {section}");
+        }
+        assert!(markdown.contains(
+            "- **2 cards** · ➕ ability/CastWithKeyword(Cascade) · added: `CastWithKeyword(Cascade) (affects=in hand)`"
+        ));
+        assert!(markdown
+            .contains("- **1 card** · ➖ ability/static_structure · removed: `static_structure`"));
+        assert!(markdown.contains(
+            "- **1 card** · 🔄 ability/DealDamage · changed field `target`: `creature` → `creature or battle`"
+        ));
+        assert!(markdown
+            .contains("- **1 card** · ↕️ ability/Mill · support: `unsupported` → `supported`"));
+        assert!(markdown.contains("Affected (first 3): Added Card, Second Added Card"));
+
+        let added = markdown.find("#### 🟢 Added").unwrap();
+        let removed = markdown.find("#### 🔴 Removed").unwrap();
+        let field = markdown.find("#### 🟡 Modified fields").unwrap();
+        let support = markdown.find("#### 🔵 Support status").unwrap();
+        assert!(added < removed && removed < field && field < support);
+    }
+
+    #[test]
+    fn markdown_keeps_direction_markers_in_collapsed_tail() {
+        let clusters = vec![
+            cluster(
+                ChangeKind::FieldChanged,
+                "DealDamage",
+                "target",
+                "creature",
+                "creature or battle",
+                &["Field Card"],
+            ),
+            cluster(
+                ChangeKind::SupportFlip,
+                "Mill",
+                "",
+                "false",
+                "true",
+                &["Support Card"],
+            ),
+            cluster(
+                ChangeKind::ItemRemoved,
+                "static_structure",
+                "",
+                "static_structure",
+                "∅",
+                &["Removed Card"],
+            ),
+            cluster(
+                ChangeKind::ItemAdded,
+                "CastWithKeyword(Cascade)",
+                "",
+                "∅",
+                "CastWithKeyword(Cascade)",
+                &["Added Card"],
+            ),
+        ];
+
+        let markdown = render_markdown("e085a8d5fa08", &clusters, 1, 4, 0, &[], &[]);
+
+        assert!(markdown.contains(
+            "<details><summary>… 3 more signature(s) (3 card-changes) — showing first 3;"
+        ));
+        for marker in ["➕", "➖", "↕️"] {
+            assert!(markdown.contains(marker), "missing tail marker: {marker}");
+        }
+        assert!(!markdown.contains("Affected (first 3): Added Card"));
     }
 
     /// Regression guard for the sibling-collision case: two items share

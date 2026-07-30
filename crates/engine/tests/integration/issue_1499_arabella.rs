@@ -60,13 +60,14 @@ fn issue_1499_arabella_attack_deals_x_and_gains_x() {
     scenario.add_creature(P0, "Small A", 1, 1);
     scenario.add_creature(P0, "Small B", 1, 1);
     scenario.add_creature(P0, "Large", 3, 3);
+    let blocker = scenario.add_creature(P1, "Wall", 0, 4).id();
 
     let mut runner = scenario.build();
 
     let p1_life_before = runner.life(P1);
     let p0_life_before = runner.life(P0);
 
-    run_combat(&mut runner, vec![arabella], vec![]);
+    run_combat(&mut runner, vec![arabella], vec![(blocker, arabella)]);
     runner.advance_until_stack_empty();
 
     assert!(

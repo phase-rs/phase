@@ -9,9 +9,9 @@ extracts just those (plus any faces sharing their `scryfall_oracle_id`, so
 multi-face cards keep their back faces) into a small committed fixture that
 `tests::integration::support::shared_card_db` loads instead.
 
-Scans both the integration tests under `crates/engine/tests` and the four
-inline-`#[cfg(test)]` `src/` files listed in `SRC_TEST_FILES`, which load the
-same fixture through `crate::test_support::shared_card_db`.
+Scans the integration tests under `crates/engine/tests`, source-side test
+modules under `crates/engine/src`, and source files that load the same fixture
+through `crate::test_support::shared_card_db`.
 
 Re-run after adding a test that references a new card:
 
@@ -30,12 +30,20 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPORT_PATH = REPO_ROOT / "client/public/card-data.json"
 TESTS_DIR = REPO_ROOT / "crates/engine/tests"
+SRC_DIR = REPO_ROOT / "crates/engine/src"
 FIXTURE_PATH = REPO_ROOT / "crates/engine/tests/fixtures/integration_cards.json"
 
-# Inline `#[cfg(test)]` unit tests in `src/` also load the fixture (via
-# `crate::test_support::shared_card_db`), so scan their card-name literals too.
-SRC_TEST_FILES = [
+# This fixture must exercise Witherbloom Apprentice and Sakashima of a
+# Thousand Faces through the raw-MTGJSON parser, not a hand-maintained
+# card-data export entry. Keep the set narrow: every other referenced card is
+# selected from the production export below.
+PARSER_BACKED_FIXTURE_CARDS = {"witherbloom apprentice", "sakashima of a thousand faces"}
+
+# A few non-test-named source files contain test-only card references or corpus
+# rows consumed by tests that load the curated fixture.
+ALWAYS_SCAN_SRC_FILES = [
     REPO_ROOT / "crates/engine/src/analysis/corpus_tests.rs",
+    REPO_ROOT / "crates/engine/src/analysis/corpus.rs",
     REPO_ROOT / "crates/engine/src/database/synthesis.rs",
     REPO_ROOT / "crates/engine/src/game/engine.rs",
     REPO_ROOT / "crates/engine/src/game/meld_tests.rs",
@@ -43,6 +51,19 @@ SRC_TEST_FILES = [
 
 # Double-quoted Rust string literal contents (handles \" escapes).
 STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def src_fixture_files() -> list[Path]:
+    """Source files whose test card-name literals should be fixture-backed."""
+    files = {path for path in ALWAYS_SCAN_SRC_FILES if path.exists()}
+    files.update(SRC_DIR.rglob("*tests.rs"))
+
+    for rs in SRC_DIR.rglob("*.rs"):
+        text = rs.read_text(encoding="utf-8", errors="ignore")
+        if "shared_card_db" in text:
+            files.add(rs)
+
+    return sorted(files)
 
 
 def referenced_card_keys(export: dict[str, object]) -> set[str]:
@@ -53,7 +74,7 @@ def referenced_card_keys(export: dict[str, object]) -> set[str]:
     file. Card-name literals are single-line, so this loses nothing.
     """
     keys: set[str] = set()
-    for rs in [*TESTS_DIR.rglob("*.rs"), *SRC_TEST_FILES]:
+    for rs in [*TESTS_DIR.rglob("*.rs"), *src_fixture_files()]:
         text = rs.read_text(encoding="utf-8", errors="ignore")
         for line in text.splitlines():
             for raw in STRING_LITERAL.findall(line):
@@ -75,6 +96,7 @@ def main() -> int:
     export: dict[str, object] = json.loads(EXPORT_PATH.read_text(encoding="utf-8"))
 
     referenced = referenced_card_keys(export)
+    export_referenced = referenced - PARSER_BACKED_FIXTURE_CARDS
 
     # Group keys by oracle id so a referenced front face pulls in its siblings.
     by_oracle: dict[str, list[str]] = {}
@@ -83,8 +105,8 @@ def main() -> int:
         if oid:
             by_oracle.setdefault(oid, []).append(key)
 
-    selected: set[str] = set(referenced)
-    for key in referenced:
+    selected: set[str] = set(export_referenced)
+    for key in export_referenced:
         value = export[key]
         oid = value.get("scryfall_oracle_id") if isinstance(value, dict) else None
         if oid:
@@ -103,6 +125,13 @@ def main() -> int:
                 f"error: fixture is stale — {len(missing)} card(s) not covered:\n  "
                 f"{listed}\nregenerate with `python3 scripts/gen-test-fixture.py`"
             )
+        parser_backed = current & PARSER_BACKED_FIXTURE_CARDS
+        if parser_backed:
+            listed = "\n  ".join(sorted(parser_backed))
+            sys.exit(
+                "error: parser-backed cards leaked into the export fixture:\n  "
+                f"{listed}\nregenerate with `python3 scripts/gen-test-fixture.py`"
+            )
         print(f"ok: fixture covers all {len(selected)} referenced cards")
         return 0
 
@@ -112,10 +141,10 @@ def main() -> int:
     serialized = json.dumps(fixture, separators=(",", ":"), ensure_ascii=False)
     FIXTURE_PATH.write_text(serialized + "\n", encoding="utf-8")
 
-    siblings = len(selected) - len(referenced)
+    siblings = len(selected) - len(export_referenced)
     print(
         f"wrote {len(selected)} cards "
-        f"({len(referenced)} referenced + {siblings} sibling faces) to "
+        f"({len(export_referenced)} export-referenced + {siblings} sibling faces) to "
         f"{FIXTURE_PATH.relative_to(REPO_ROOT)} "
         f"({len(serialized) / 1024:.0f} KB)"
     )

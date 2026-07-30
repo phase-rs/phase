@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 server-core = { path = "../server-core" }
 lobby-broker = { path = "../lobby-broker" }
-engine = { path = "../engine" }
+engine = { path = "../engine", package = "phase-engine" }
 phase-ai = { path = "../phase-ai" }
 seat-reducer = { path = "../seat-reducer" }
 draft-core = { path = "../draft-core" }
@@ -19,10 +19,14 @@ rand = "0.9"
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive", "env"] }
 http = "1"
+minisign-verify = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["brotli", "rustls-tls-webpki-roots"] }
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors"] }
 serde = { workspace = true }
 serde_json = "1"
+tempfile = "3"
 tracing = { workspace = true }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
@@ -37,4 +41,5 @@ ngrok = { version = "0.18", optional = true }
 ngrok = ["dep:ngrok"]
 
 [dev-dependencies]
-tempfile = "3"
+futures-util = "0.3"
+tokio-tungstenite = "0.29"

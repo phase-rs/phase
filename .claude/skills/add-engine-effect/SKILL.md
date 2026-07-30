@@ -74,6 +74,9 @@ When you build a helper like this, you're not adding complexity — you're **red
 - [ ] **`crates/engine/src/types/ability.rs` — `EffectKind` enum + `From<&Effect>`**
   Add an `EffectKind` variant and the corresponding `From<&Effect>` match arm. `EffectKind` is used for effect categorization and coverage tracking.
 
+- [ ] **Does the effect carry an amount that can be X?** Use a `QuantityExpr` field — never a bare `i32` you resolve yourself.
+  X is **locked at announcement** (CR 601.2b / CR 602.2b), not at resolution: CR 107.3c lets the value drift while the object is on the stack, so re-measuring X in a resolver reads a different, legal board and silently produces a wrong number. `publish_announced_x()` (`game/ability_utils.rs`) is the single publish authority; it writes `ResolvedAbility::chosen_x`, which every `QuantityRef::Variable("X")` already reads. The three carriers (`GameObject::cost_x_paid` = CR 107.3m cast-X, `GameState::announced_source_x` = CR 107.3a/d announce-X, `chosen_x` = the object's published channel, CR 107.3i) are **not** interchangeable — see `/casting-stack-conditions` § "The X Channels". If you are computing X inside an effect handler, you are in the wrong layer.
+
 ### Phase 2 — Effect Handler (Resolver)
 
 **Goal:** The engine can execute the effect at runtime.
@@ -268,8 +271,9 @@ Only needed if the effect reveals or hides information (hands, face-down cards, 
 
 Tilt-preferred / direct-cargo fallback (see CLAUDE.md § "Canonical verification pattern"):
 
+- [ ] **Discriminating runtime test** — At least one test drives the real pipeline via the `/card-test` recipe (`GameScenario` + `GameRunner::cast(..).resolve()` + `CastOutcome` deltas, verbatim Oracle text) and would FAIL if the change were reverted. Parser AST-shape tests (Phase 4) and snapshots do NOT satisfy this — they are shape tests, not regression tests. Negative assertions need a paired positive reach-guard (see `/card-test` foot-gun 6).
 - [ ] **`cargo fmt --all`** — Always direct (Tilt doesn't auto-format).
-- [ ] **Clippy + tests** — If `tilt get uiresource clippy >/dev/null 2>&1` succeeds: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine`. Otherwise: `cargo clippy --all-targets -- -D warnings` followed by `cargo test -p engine`.
+- [ ] **Clippy + tests** — If `tilt get uiresource clippy >/dev/null 2>&1` succeeds: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine`. Otherwise: `cargo clippy --all-targets -- -D warnings` followed by `cargo test -p phase-engine`.
 - [ ] **Snapshot test** — If the effect changes a card's parsed abilities, update or add an `insta` snapshot in `crates/engine/tests/oracle_parser.rs`.
 - [ ] **`cargo coverage`** — One-shot binary (always direct). Verifies the new effect reduces `Unimplemented` count for the target cards.
 
@@ -293,6 +297,9 @@ Tilt-preferred / direct-cargo fallback (see CLAUDE.md § "Canonical verification
 | Effect reveals info but no `filter.rs` update | Opponent sees hidden cards in multiplayer, or revealed cards stay hidden | Update `filter_state_for_player` in `server-core/src/filter.rs` |
 | Building a multi-step mega-effect | One-off variant that only works for one card template | Decompose into `sub_ability` chain of single-purpose effects |
 | Missing AI legal action generation | AI hangs on `WaitingFor` with no valid response | Add the `WaitingFor` variant to `engine/src/ai_support/candidates.rs` |
+| Shape-only or vacuous-negative tests | Effect parses but is never proven to resolve; negatives pass via `Effect::Unimplemented` early-returns | Add a `/card-test` runtime test with a revert-failing assertion; pair every negative with a positive reach-guard |
+| New field on an existing variant dropped at one seam | Field parses but is a silent no-op in production (resume paths, batch handlers, adapter constructors) | Grep every construction/consumption site of the variant; thread the field or justify the default at each |
+| Resolving X inside the effect handler | Rules-wrong (CR 107.3c): X is fixed at announce, and the resolving board differs — a silently wrong amount, not a crash | Carry a `QuantityExpr`; read the published `chosen_x`. See `/casting-stack-conditions` § "The X Channels" |
 
 ---
 

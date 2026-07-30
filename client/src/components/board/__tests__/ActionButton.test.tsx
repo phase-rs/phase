@@ -1,10 +1,18 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameState, WaitingFor } from "../../../adapter/types";
+import { dispatchAction, dispatchResolveAll } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore";
+import { DRAFT_BOT_AI_SEAT, useMultiplayerDraftStore } from "../../../stores/multiplayerDraftStore";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore";
 import { useUiStore } from "../../../stores/uiStore";
+import {
+  buildGameState,
+  buildPlayers,
+  buildPriorityWaitingFor,
+  buildStackEntry,
+} from "../../../test/factories/gameStateFactory.ts";
 import { ActionButton } from "../ActionButton";
 
 vi.mock("../../../game/dispatch.ts", () => ({
@@ -23,43 +31,27 @@ function blockerPrompt(): WaitingFor {
   };
 }
 
+function priorityPrompt(player = 0): WaitingFor {
+  return buildPriorityWaitingFor({ data: { player } });
+}
+
+function spellStackEntry(controller = 0) {
+  return buildStackEntry({
+    id: 1,
+    source_id: 1,
+    controller,
+    kind: { type: "Spell", data: { card_id: 1 } },
+  });
+}
+
 function createGameState(waitingFor: WaitingFor): GameState {
-  return {
+  return buildGameState({
     turn_number: 4,
     active_player: 1,
     phase: "DeclareBlockers",
-    players: [
-      {
-        id: 0,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 2,
-      },
-      {
-        id: 1,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 2,
-      },
-    ],
+    players: buildPlayers([{ id: 0, turns_taken: 2 }, { id: 1, turns_taken: 2 }]),
     priority_player: 0,
-    objects: {},
     next_object_id: 201,
-    battlefield: [],
-    stack: [],
-    exile: [],
     rng_seed: 42,
     combat: {
       attackers: [{ object_id: 200, defending_player: 0, attack_target: { type: "Player", data: 0 } }],
@@ -74,15 +66,8 @@ function createGameState(waitingFor: WaitingFor): GameState {
       regular_damage_done: false,
     },
     waiting_for: waitingFor,
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
-    auto_pass: { 0: { type: "UntilEndOfTurn" } },
-  };
+    auto_pass: { 0: { type: "UntilTurnBoundary", until: "EndOfCurrentTurn" } },
+  });
 }
 
 describe("ActionButton", () => {
@@ -101,6 +86,7 @@ describe("ActionButton", () => {
       combatClickHandler: null,
     });
     useMultiplayerStore.setState({ actionPending: false });
+    useMultiplayerDraftStore.setState({ matchPairing: null });
   });
 
   afterEach(() => {
@@ -118,51 +104,31 @@ describe("ActionButton", () => {
     useGameStore.setState({
       gameMode: "online",
       gameState: {
-        ...createGameState({
-          type: "Priority",
-          data: { player: 0 },
-        }),
+        ...createGameState(priorityPrompt()),
         turn_decision_controller: 1,
         active_player: 0,
-        stack: [
-          {
-            id: 1,
-            source_id: 1,
-            controller: 0,
-            kind: { type: "Spell", data: { card_id: 1 } },
-          },
-        ],
+        stack: [spellStackEntry()],
       },
-      waitingFor: { type: "Priority", data: { player: 0 } },
+      waitingFor: priorityPrompt(),
       legalActions: [],
     });
     useMultiplayerStore.setState({ activePlayerId: 1, actionPending: false });
 
     render(<ActionButton />);
 
-    expect(screen.getByRole("button", { name: /^Resolve Pass priority/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resolve" })).toBeInTheDocument();
   });
 
   it("disables resolve controls while Resolve All is draining", () => {
     useGameStore.setState({
       gameMode: "online",
       gameState: {
-        ...createGameState({
-          type: "Priority",
-          data: { player: 0 },
-        }),
+        ...createGameState(priorityPrompt()),
         phase: "PostCombatMain",
         auto_pass: {},
-        stack: [
-          {
-            id: 1,
-            source_id: 1,
-            controller: 0,
-            kind: { type: "Spell", data: { card_id: 1 } },
-          },
-        ],
+        stack: [spellStackEntry()],
       },
-      waitingFor: { type: "Priority", data: { player: 0 } },
+      waitingFor: priorityPrompt(),
       legalActions: [],
       isResolvingAll: true,
     });
@@ -170,9 +136,211 @@ describe("ActionButton", () => {
 
     render(<ActionButton />);
 
-    expect(screen.getByRole("button", { name: /^Resolve Pass priority/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("button", { name: "Resolve" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Resolve All" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Resolve All" })).toHaveAttribute("aria-busy", "true");
+  });
+
+  it("passes an empty AI-seat list in local hotseat so Resolve All auto-yields instead of AI-driving human seats (#4978)", () => {
+    useGameStore.setState({
+      gameMode: "local",
+      gameState: {
+        ...createGameState(priorityPrompt()),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [spellStackEntry()],
+      },
+      waitingFor: priorityPrompt(),
+      legalActions: [],
+    });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, []);
+  });
+
+  it("builds the AI seat list for Resolve All when the other seats are AI-driven", () => {
+    useGameStore.setState({
+      gameMode: "ai",
+      gameState: {
+        ...createGameState(priorityPrompt()),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [spellStackEntry()],
+      },
+      waitingFor: priorityPrompt(),
+      legalActions: [],
+    });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, [
+      { playerId: 1, difficulty: "Medium" },
+    ]);
+  });
+
+  it("uses the live controller's bot seat binding for a Bot draft match", () => {
+    useGameStore.setState({
+      gameMode: "draft-match",
+      gameState: {
+        ...createGameState(priorityPrompt()),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [spellStackEntry()],
+      },
+      waitingFor: priorityPrompt(),
+      legalActions: [],
+    });
+    useMultiplayerDraftStore.setState({ matchPairing: { type: "Bot" } as never });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, [DRAFT_BOT_AI_SEAT]);
+  });
+
+  it("claims no AI seats for a vs-human draft match", () => {
+    useGameStore.setState({
+      gameMode: "draft-match",
+      gameState: {
+        ...createGameState(priorityPrompt()),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [spellStackEntry()],
+      },
+      waitingFor: priorityPrompt(),
+      legalActions: [],
+    });
+    useMultiplayerDraftStore.setState({ matchPairing: { type: "HumanHost" } as never });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, []);
+  });
+
+  it("surfaces an armed UntilStackEmpty session with a cancel affordance while an opponent holds priority", () => {
+    useGameStore.setState({
+      gameMode: "online",
+      gameState: {
+        ...createGameState(priorityPrompt(1)),
+        phase: "PostCombatMain",
+        auto_pass: { 0: { type: "UntilStackEmpty", initial_stack_len: 1 } },
+        stack: [spellStackEntry(1)],
+      },
+      waitingFor: priorityPrompt(1),
+      legalActions: [],
+      isResolvingAll: false,
+    });
+    useMultiplayerStore.setState({ activePlayerId: 0, actionPending: false });
+
+    render(<ActionButton />);
+
+    const cancel = screen.getByRole("button", { name: "Resolving Stack..." });
+    expect(cancel).toBeEnabled();
+    fireEvent.click(cancel);
+    expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({ type: "CancelAutoPass" });
+  });
+
+  it("no longer client-gates Confirm/Skip on a must-attack creature (engine is the authority)", () => {
+    const target = { type: "Player", data: 1 } as const;
+    const wf: WaitingFor = {
+      type: "DeclareAttackers",
+      data: {
+        player: 0,
+        valid_attacker_ids: [100],
+        valid_attack_targets: [target],
+        valid_attack_targets_by_attacker: { "100": [target] },
+        attacker_constraints: { "100": { kind: "MustAttack", players: [] } },
+      },
+    };
+    useGameStore.setState({
+      gameState: { ...createGameState(wf), phase: "DeclareAttackers", active_player: 0, auto_pass: {} },
+      waitingFor: wf,
+      legalActions: [],
+    });
+    useUiStore.setState({ selectedAttackers: [], blockerAssignments: new Map() });
+
+    render(<ActionButton />);
+    // Discriminating: the old build DISABLED "Attack with None" whenever a
+    // must-attack creature was unselected. The engine now rejects illegal
+    // submissions, so the client must NOT veto — the button stays enabled.
+    expect(screen.getByRole("button", { name: "Attack with None" })).toBeEnabled();
+
+    // Selecting the creature enables Confirm, which dispatches the exact engine
+    // action shape with the engine-provided target (no client default target).
+    act(() => {
+      useUiStore.setState({ selectedAttackers: [100] });
+    });
+    const confirm = screen.getByRole("button", { name: "Confirm Attackers (1)" });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({
+      type: "DeclareAttackers",
+      data: { attacks: [[100, target]] },
+    });
+  });
+
+  it("does not client-gate Block with None on an unassigned must-block creature", () => {
+    const wf: WaitingFor = {
+      type: "DeclareBlockers",
+      data: {
+        player: 0,
+        valid_blocker_ids: [100],
+        valid_block_targets: { "100": [200] },
+        blocker_constraints: { "100": { kind: "MustBlock" } },
+      },
+    };
+    useGameStore.setState({ gameState: createGameState(wf), waitingFor: wf, legalActions: [] });
+    useUiStore.setState({ selectedAttackers: [], blockerAssignments: new Map() });
+
+    render(<ActionButton />);
+    expect(screen.getByRole("button", { name: "Block with None" })).toBeEnabled();
+  });
+
+  it("submits every selected blocker pair without client-side requirement gating", () => {
+    const wf: WaitingFor = {
+      type: "DeclareBlockers",
+      data: {
+        player: 0,
+        valid_blocker_ids: [100],
+        valid_block_targets: { "100": [200, 201] },
+        blocker_constraints: { "100": { kind: "MustBlock" } },
+      },
+    };
+    useGameStore.setState({ gameState: createGameState(wf), waitingFor: wf, legalActions: [] });
+    useUiStore.setState({
+      selectedAttackers: [],
+      blockerAssignments: new Map([[100, new Set([200, 201])]]),
+    });
+
+    render(<ActionButton />);
+    const confirm = screen.getByRole("button", { name: "Confirm Blockers (2)" });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({
+      type: "DeclareBlockers",
+      data: { assignments: [[100, 200], [100, 201]] },
+    });
+  });
+
+  it("clears a pending blocker when the engine supplies a new declaration prompt", () => {
+    render(<ActionButton />);
+
+    act(() => useUiStore.getState().combatClickHandler?.(100));
+    expect(screen.getByText("Select the attacker this blocker should defend against")).toBeInTheDocument();
+
+    const nextPrompt = blockerPrompt();
+    act(() => {
+      useGameStore.setState({
+        gameState: createGameState(nextPrompt),
+        waitingFor: nextPrompt,
+      });
+    });
+
+    expect(screen.queryByText("Select the attacker this blocker should defend against")).not.toBeInTheDocument();
   });
 
   it("shows blocker controls when turn decision controller differs from blocking player (issue #1199)", () => {

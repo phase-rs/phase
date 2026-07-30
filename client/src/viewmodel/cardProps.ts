@@ -3,8 +3,14 @@ import { isChangeling } from "./keywordProps";
 
 const ROMAN = ["", "I", "II", "III", "IV", "V"] as const;
 export const FACE_DOWN_CARD_NAME = "Face-down card";
-/** Convert a small integer (1–5) to a Roman numeral string. */
-export function toRoman(n: number): string { return ROMAN[n] ?? String(n); }
+/** Convert a small integer (1–5) to a Roman numeral string. Values outside the
+ *  table fall back to the arabic numeral for a positive integer, or "" for a
+ *  non-positive / non-integer input — so a missing/NaN class level renders blank
+ *  rather than the literal string "undefined"/"NaN" (`ROMAN[undefined]` is
+ *  `undefined`, and the old `?? String(n)` stringified it onto the card badge). */
+export function toRoman(n: number): string {
+  return ROMAN[n] ?? (Number.isInteger(n) && n > 0 ? String(n) : "");
+}
 
 export interface CardViewProps {
   id: ObjectId;
@@ -92,8 +98,101 @@ export function formatCounterType(type: string): string {
   return type;
 }
 
-export function formatCounterTooltip(type: string, count: number): string {
+/**
+ * Counter serde key (from `CounterType::as_str`, e.g. "P1P1", "stun", "charge")
+ * → mana-font `ms-counter-*` glyph class. Every value is verified present in
+ * `mana-font/css/mana.css` by the guardrail test; counter types with no shipped
+ * glyph are absent and render text-only.
+ */
+export const COUNTER_ICON_CLASS: Record<string, string> = {
+  P1P1: "ms-counter-plus",
+  M1M1: "ms-counter-minus",
+  loyalty: "ms-counter-loyalty",
+  lore: "ms-counter-lore",
+  stun: "ms-counter-stun",
+  shield: "ms-counter-shield",
+  time: "ms-counter-time",
+  charge: "ms-counter-charge",
+  gold: "ms-counter-gold",
+  ki: "ms-counter-ki",
+  rad: "ms-counter-rad",
+  verse: "ms-counter-verse",
+  void: "ms-counter-void",
+  flame: "ms-counter-flame",
+  flood: "ms-counter-flood",
+  fungus: "ms-counter-fungus",
+  muster: "ms-counter-muster",
+  doom: "ms-counter-doom",
+  echo: "ms-counter-echo",
+  finality: "ms-counter-finality",
+  brick: "ms-counter-brick",
+  mining: "ms-counter-mining",
+  paw: "ms-counter-paw",
+  pin: "ms-counter-pin",
+  scream: "ms-counter-scream",
+  skull: "ms-counter-skull",
+  slime: "ms-counter-slime",
+  vortex: "ms-counter-vortex",
+  goad: "ms-counter-goad",
+  damage: "ms-counter-damage",
+  deathtouch: "ms-counter-deathtouch",
+  devotion: "ms-counter-devotion",
+};
+
+/** Resolve a counter type's mana-font glyph class, or null when none ships. */
+export function counterIconClass(type: string): string | null {
+  return COUNTER_ICON_CLASS[type] ?? null;
+}
+
+type CounterTooltipTranslator = (
+  key: string,
+  options?: { count?: number; label?: string; description?: string },
+) => string;
+
+const COUNTER_DESCRIPTION_KEYS: Record<string, string> = {
+  P1P1: "counterTooltip.descriptions.p1p1",
+  M1M1: "counterTooltip.descriptions.m1m1",
+  loyalty: "counterTooltip.descriptions.loyalty",
+  lore: "counterTooltip.descriptions.lore",
+  stun: "counterTooltip.descriptions.stun",
+};
+
+export function formatCounterDescription(
+  type: string,
+  translate: CounterTooltipTranslator,
+): string {
   const label = formatCounterType(type);
+  const key = COUNTER_DESCRIPTION_KEYS[type];
+  return key
+    ? translate(key)
+    : translate("counterTooltip.descriptions.generic", { label });
+}
+
+export function formatCounterTooltip(
+  type: string,
+  count: number,
+  translate?: CounterTooltipTranslator,
+  isUnbounded?: boolean,
+): string {
+  const label = formatCounterType(type);
+  if (translate) {
+    // CR 732.2a / CR 701.34a: an unbounded counter renders `∞` on the badge, so its
+    // tooltip summary must say "unbounded" rather than interpolate the finite count.
+    if (isUnbounded) {
+      return translate("counterTooltip.summaryUnbounded", {
+        label,
+        description: formatCounterDescription(type, translate),
+      });
+    }
+    return translate("counterTooltip.summary", {
+      count,
+      label,
+      description: formatCounterDescription(type, translate),
+    });
+  }
+  if (isUnbounded) {
+    return `${label} counters: ∞`;
+  }
   return `${label} counter${count !== 1 ? "s" : ""}: ${count}`;
 }
 
@@ -112,6 +211,24 @@ export function formatTypeLine(cardTypes: CardType, keywords?: Keyword[]): strin
     return `${main} \u2014 ${cardTypes.subtypes.join(" ")}`;
   }
   return main;
+}
+
+/**
+ * True when `obj`'s stored `back_face` is a SEPARATELY PRINTED face the UI can
+ * present on its own — a CR 712 transform/modal/meld back face, or an
+ * Adventure/Omen/Prepare alternative spell.
+ *
+ * False for CR 710 Kamigawa flip cards. Their alternative half is printed
+ * upside down on the SAME physical face, so there is no second face to inspect
+ * (CardPreview renders it as a 180° rotation instead). The `back_face` slot is
+ * shared by all of these layouts, so `back_face != null` is NOT the predicate:
+ * using it gives all 21 flip cards a bogus DFC badge and an "inspect face 1"
+ * button pointing at a face that doesn't exist. The engine owns the
+ * discriminant — it ships `layout_kind` on the serialized back face (the same
+ * value `engine::game::transform::is_double_faced_permanent` keys on).
+ */
+export function hasOtherPrintedFace(obj: Pick<GameObject, "back_face">): boolean {
+  return obj.back_face != null && obj.back_face.layout_kind !== "Flip";
 }
 
 export function computePTDisplay(obj: GameObject): PTDisplay | null {

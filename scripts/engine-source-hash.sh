@@ -16,7 +16,10 @@
 #
 # The fingerprint covers exactly the inputs that determine parse output and
 # mirrors the cardgen-cache key (ci.yml): the engine source tree, the engine
-# crate manifest, and the lockfile (dep pins like nom affect parsing).
+# data dir (`crates/engine/data/**` — e.g. oracle-subtypes.json is `include_str!`d
+# into the parser, known-tokens.toml is embedded via build.rs → OUT_DIR), the
+# engine build script (`build.rs`), the engine crate manifest, and the lockfile
+# (dep pins like nom affect parsing).
 #
 # Implemented with `git ls-tree -r` rather than `hashFiles`/working-tree hashing
 # so it is computable for ANY commit straight from history — no checkout — which
@@ -35,8 +38,10 @@ sha="$1"
 # `-r` recurses into the src tree so every file's blob hash participates; the
 # blob hashes change iff content changes. Hash the listing to a stable digest.
 # Truncated to 16 hex chars to match the card_data_hash convention (ci.yml).
-git ls-tree -r "$sha" -- \
+git ls-tree --full-tree -r "$sha" -- \
   crates/engine/src \
+  crates/engine/data \
+  crates/engine/build.rs \
   crates/engine/Cargo.toml \
   Cargo.lock \
   | sha256sum \

@@ -58,6 +58,7 @@ fn damage_ability(source_id: ObjectId, controller: PlayerId, target: TargetRef) 
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![target],
         source_id,
@@ -77,6 +78,7 @@ fn setup_emissary_choosing_creature(db: &CardDatabase) -> (GameState, ObjectId, 
     // keyed to the entering permanent. Drive the real choice resolution path
     // — `ChooseOption` stores `ChosenAttribute::CardType(Creature)` on the
     // emissary via the production handler.
+    let source = crate::support::exact_named_choice_source(runner.state(), emissary);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
         player: P0,
         choice_type: ChoiceType::card_type(),
@@ -89,7 +91,8 @@ fn setup_emissary_choosing_creature(db: &CardDatabase) -> (GameState, ObjectId, 
             "Planeswalker".to_string(),
             "Sorcery".to_string(),
         ],
-        source_id: Some(emissary),
+        source: Some(source),
+        persist_player: None,
     };
     runner
         .act(GameAction::ChooseOption {

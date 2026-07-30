@@ -682,7 +682,7 @@ fn convert_rule(
         // CR 602.5 + CR 605.1a: "Activated abilities of [filter] can't be
         // activated" — Pithing Needle / Phyrexian Revoker / Sorcerous
         // Spyglass / Karn family. Maps onto engine
-        // `StaticMode::CantBeActivated { who, source_filter, exemption }`.
+        // `StaticMode::CantBeActivated { who, source_filter, exemption, kind }`.
         // The schema's `ActivatedAbilities` filter that scopes which
         // abilities are prohibited becomes the engine's `source_filter`
         // (filter on the source object whose abilities are blocked).
@@ -834,7 +834,8 @@ fn convert_rule(
         // CR 614.2 + CR 615.1: Damage replacement effects. Maps the event
         // shape to `damage_*_filter` / `combat_scope` slots and the action
         // (PreventThatDamage / PreventSomeOfThatDamage / CancelThatDamage)
-        // to `damage_modification` (Minus { u32::MAX } / Minus). Other actions
+        // to `damage_modification` (PreventionMinus { u32::MAX } / PreventionMinus).
+        // Other actions
         // strict-fail until further engine extensions.
         Rule::ReplaceWouldDealDamage(event, actions) => {
             let mut reps = replacement::convert_replace_would_deal_damage(event, actions)?;
@@ -1321,8 +1322,6 @@ pub(crate) fn build_ability_from_actions(
                 allow_repeat_modes,
                 constraints,
                 mode_costs: Vec::new(),
-                // Mechanical compile-keep-alive for the shared engine ModalChoice
-                // field add; mtgish does not (yet) author pawprint modals.
                 mode_pawprints: Vec::new(),
                 entwine_cost,
                 // CR 700.2a: mtgish modal blocks are controller-chosen.
@@ -1342,6 +1341,7 @@ pub(crate) fn build_ability_from_actions(
                 static_abilities: vec![],
                 duration: None,
                 target: None,
+                end_cost: None,
             };
             let mut ability =
                 AbilityDefinition::new(kind, parent_effect).with_modal(modal, mode_abilities);
@@ -1968,6 +1968,8 @@ fn activated_ability_effect_to_static(
             who: ProhibitionScope::AllPlayers,
             source_filter,
             exemption,
+            // CR 606.2: not kind-narrowed — blocks any activated ability.
+            kind: None,
         },
         other => {
             return Err(ConversionGap::UnknownVariant {
@@ -2736,7 +2738,7 @@ fn convert_settable_color_to_mods(
     c: &crate::schema::types::SettableColor,
 ) -> ConvResult<Vec<engine::types::ability::ContinuousModification>> {
     use crate::schema::types::SettableColor as S;
-    use engine::types::ability::ContinuousModification as M;
+    use engine::types::ability::{ColorChangeMode, ContinuousModification as M};
     Ok(match c {
         // CR 105.2: "is all colors" — set the object's color to all five.
         S::AllColors => vec![M::SetColor {
@@ -2754,7 +2756,9 @@ fn convert_settable_color_to_mods(
             vec![M::SetColor { colors }]
         }
         // CR 105.3 + CR 700.7: Chosen-color CDAs read from `chosen_attributes`.
-        S::TheChosenColor | S::TheChosenColors => vec![M::AddChosenColor],
+        S::TheChosenColor | S::TheChosenColors => vec![M::AddChosenColor {
+            mode: ColorChangeMode::Set,
+        }],
         // CR 700.7: "the mana color chosen this way" — engine has no
         // distinct primitive yet; surface as engine prerequisite.
         S::TheManaColorChosenThisWay => {

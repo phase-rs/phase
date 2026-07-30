@@ -117,21 +117,30 @@ fn rishkars_expertise_free_cast_completes_during_resolution() {
         "free spell must reach the stack during resolution"
     );
     assert!(
-        !runner.state().objects[&free_spell]
-            .casting_permissions
-            .iter()
-            .any(|p| matches!(
-                p,
-                CastingPermission::ExileWithAltCost {
-                    resolution_cleanup: None,
-                    ..
-                }
-            )),
-        "must not leave a lingering hand free-cast permission"
+        matches!(
+            runner.state().objects[&free_spell]
+                .casting_permissions
+                .as_slice(),
+            [CastingPermission::ExileWithAltCost {
+                resolution_cleanup: None,
+                mana_spend_permission: None,
+                graveyard_replacement: None,
+                enters_with_counter: None,
+                enters_with_modifications,
+                ..
+            }] if enters_with_modifications.is_empty()
+        ),
+        "the consumed free-cast permission must remain only as a neutral stable slot"
     );
 
     runner.advance_until_stack_empty();
 
+    assert!(
+        runner.state().objects[&free_spell]
+            .casting_permissions
+            .is_empty(),
+        "normal Stack exit cleanup must remove the neutral consumed slot"
+    );
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "game must return to actionable priority, got {:?}",

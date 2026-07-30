@@ -38,6 +38,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Endure,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -93,17 +94,21 @@ pub fn resolve(
     // `WaitingFor::ChooseOneOfBranch` and owns AI/multiplayer/frontend wiring.
     choose_one_of::prompt_next(
         state,
-        enduring_controller,
-        enduring_id,
-        vec![token_branch, counter_branch],
-        ability.targets.clone(),
-        ability.context.clone(),
-        vec![enduring_controller],
+        choose_one_of::PromptRequest {
+            controller: enduring_controller,
+            source_id: enduring_id,
+            branches: vec![token_branch, counter_branch],
+            parent_targets: ability.targets.clone(),
+            context: ability.context.clone(),
+            replacement_applied: ability.replacement_applied.clone(),
+            players: vec![enduring_controller],
+        },
     );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Endure,
         source_id: enduring_id,
+        subject: None,
     });
 
     Ok(())

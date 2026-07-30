@@ -1,51 +1,26 @@
 import { describe, expect, it } from "vitest";
 
-import type { AdditionalCost, GameAction, GameObject, Keyword } from "../../adapter/types.ts";
+import type { AdditionalCost, GameAction, GameObject, Keyword, ManaCost } from "../../adapter/types.ts";
+import { buildGameObject } from "../../test/factories/gameObjectFactory.ts";
 import {
   abilityChoiceLabel,
   abilityLabel,
   additionalCostChoices,
   formatAbilityCost,
   formatCost,
+  spellCostDisplay,
+  stripLoyaltyCostPrefix,
 } from "../costLabel.ts";
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
-  return {
+  return buildGameObject({
     id: 1,
     card_id: 100,
-    owner: 0,
-    controller: 0,
-    zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: "Test Card",
-    power: null,
-    toughness: null,
-    loyalty: null,
     card_types: { supertypes: [], core_types: [], subtypes: [] },
-    mana_cost: { type: "NoCost" },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
-    base_color: [],
-    timestamp: 1,
-    entered_battlefield_turn: null,
     back_face: null,
     ...overrides,
-  };
+  });
 }
 
 describe("abilityChoiceLabel per-variant formatting", () => {
@@ -122,7 +97,7 @@ describe("abilityChoiceLabel per-variant formatting", () => {
       description:
         "Return a Forest you control to its owner's hand: Untap target creature.",
       effect: { type: "Untap" },
-    } as unknown as GameObject["abilities"][number];
+    } satisfies GameObject["abilities"][number];
     expect(abilityLabel(ability)).toBe(
       "Return a Forest you control to its owner's hand",
     );
@@ -140,7 +115,7 @@ describe("abilityChoiceLabel per-variant formatting", () => {
             type: "Mana",
             produced: { type: "Fixed", colors: ["Green"] },
           },
-        } as unknown as GameObject["abilities"][number],
+        } satisfies GameObject["abilities"][number],
       ],
     });
     const action: GameAction = {
@@ -173,7 +148,7 @@ describe("abilityChoiceLabel per-variant formatting", () => {
               color_options: ["White", "Blue", "Black", "Red", "Green"],
             },
           },
-        } as unknown as GameObject["abilities"][number],
+        } satisfies GameObject["abilities"][number],
       ],
     });
     const action: GameAction = {
@@ -199,7 +174,7 @@ describe("abilityChoiceLabel per-variant formatting", () => {
               color_options: ["White", "Blue", "Black", "Red", "Green"],
             },
           },
-        } as unknown as GameObject["abilities"][number],
+        } satisfies GameObject["abilities"][number],
       ],
     });
     const action: GameAction = {
@@ -218,7 +193,7 @@ describe("abilityChoiceLabel per-variant formatting", () => {
           cost: { type: "Tap" },
           description: "{T}: Draw a card.",
           effect: { type: "Draw" },
-        } as unknown as GameObject["abilities"][number],
+        } satisfies GameObject["abilities"][number],
       ],
     });
     const action: GameAction = {
@@ -228,6 +203,182 @@ describe("abilityChoiceLabel per-variant formatting", () => {
     const result = abilityChoiceLabel(action, object);
     expect(result.label).toBe("{T}");
     expect(result.description).toBe("Draw a card.");
+  });
+
+  it("attaches the engine's activation cost as a mana option's description (CR 602.1a)", () => {
+    const object = makeObject({
+      name: "Relic of Legends",
+      abilities: [
+        {
+          cost: { type: "Tap" },
+          description: "{T}: Add one mana of any color.",
+          is_mana_ability: true,
+          effect: {
+            type: "Mana",
+            produced: {
+              type: "AnyOneColor",
+              count: { type: "Fixed", value: 1 },
+              color_options: ["White", "Blue", "Black", "Red", "Green"],
+            },
+          },
+        } satisfies GameObject["abilities"][number],
+      ],
+    });
+    const action: GameAction = { type: "ActivateAbility", data: { source_id: 1, ability_index: 0 } };
+    const result = abilityChoiceLabel(action, object);
+
+    expect(result.label).toBe("Add one mana of any color");
+    // CR 602.1a: everything before the colon, taken from the engine's own description.
+    expect(result.description).toBe("{T}");
+  });
+
+  it("does not attach a cost line to a loyalty ability that adds mana (CR 605.1a — Chandra, Torch of Defiance)", () => {
+    const object = makeObject({
+      name: "Chandra, Torch of Defiance",
+      abilities: [
+        {
+          cost: { type: "Loyalty", amount: 1 },
+          description: "+1: Add {R}{R}.",
+          // Pinned so a fixture that silently MISSES the mana branch cannot pass: the
+          // branch is what produces `label === "Add {R}{R}"`. A fixture falling to the
+          // tail would get stripCostPrefix's bare-loyalty arm => "Add {R}{R}." (trailing
+          // period) and the label assertion below would fail. That second assertion —
+          // not any other test — is this test's reach-guard.
+          effect: { type: "Mana", produced: { type: "Fixed", colors: ["Red", "Red"] } },
+        } satisfies GameObject["abilities"][number],
+      ],
+    });
+    const action: GameAction = { type: "ActivateAbility", data: { source_id: 1, ability_index: 0 } };
+    const result = abilityChoiceLabel(action, object);
+
+    expect(result.label).toBe("Add {R}{R}");          // reach-guard: proves the mana branch ran
+    expect(result.description).toBeUndefined();       // CR 605.1a gate: no cost line
+
+    // Mirrors pages/GamePage.tsx (`label: description ?? stripLoyaltyCostPrefix(label)`,
+    // currently :2918, inside the badge branch opened at :2912). Replicated here because
+    // mounting GamePage is prohibitively expensive; if GamePage's expression changes,
+    // update this replica with it.
+    expect(result.description ?? stripLoyaltyCostPrefix(result.label)).toBe("Add {R}{R}");
+  });
+
+  it("treats an absent is_mana_ability flag as not a mana ability", () => {
+    const object = makeObject({
+      name: "Unflagged Mana Source",
+      abilities: [
+        {
+          // CR 605.1a: the engine's verdict is the flag. Absent must read as "not a mana
+          // ability" (viewmodel/cardActionChoice.ts:29-32), never as "probably yes".
+          cost: { type: "Tap" },
+          description: "{T}: Add one mana of any color.",
+          effect: {
+            type: "Mana",
+            produced: {
+              type: "AnyOneColor",
+              count: { type: "Fixed", value: 1 },
+              color_options: ["White", "Blue", "Black", "Red", "Green"],
+            },
+          },
+        } satisfies GameObject["abilities"][number],
+      ],
+    });
+    const action: GameAction = { type: "ActivateAbility", data: { source_id: 1, ability_index: 0 } };
+    const result = abilityChoiceLabel(action, object);
+
+    expect(result.label).toBe("Add one mana of any color");  // reach-guard: the mana branch ran
+    expect(result.description).toBeUndefined();
+  });
+
+  it('attaches no cost line to a mana ability the engine gave no description (no synthesized "Activate")', () => {
+    const object = makeObject({
+      name: "Descriptionless Mana Source",
+      abilities: [
+        {
+          // `TapCreatures` has no `formatCost` arm, so without the `&& ability.description`
+          // conjunct `abilityLabel` would fall through to `formatCost`'s
+          // `default: "Activate"` (costLabel.ts:289-290) and that literal word would render
+          // as this option's subtitle. Measured: dropping the conjunct yields "Activate".
+          cost: {
+            type: "TapCreatures",
+            requirement: { type: "Count", count: 1 },
+            filter: { type: "Any" },
+          },
+          is_mana_ability: true,
+          effect: {
+            type: "Mana",
+            produced: {
+              type: "AnyOneColor",
+              count: { type: "Fixed", value: 1 },
+              color_options: ["White", "Blue", "Black", "Red", "Green"],
+            },
+          },
+        } satisfies GameObject["abilities"][number],
+      ],
+    });
+    const action: GameAction = { type: "ActivateAbility", data: { source_id: 1, ability_index: 0 } };
+    const result = abilityChoiceLabel(action, object);
+
+    expect(result.label).toBe("Add one mana of any color");  // reach-guard: the mana branch ran
+    expect(result.description).toBeUndefined();
+    expect(result.description).not.toBe("Activate");
+  });
+
+  // CR 201.5: `~` binds to the object that has the ability. The NON-mana tail of
+  // `abilityChoiceLabel` feeds the same ability-choice modal (GamePage.tsx:2899 →
+  // ChoiceModal) as the mana branch above, so both must substitute or the modal shows one
+  // substituted row next to a raw-tilde one. Both fixtures are verbatim engine descriptions
+  // from the reported Kilo board dump
+  // (`.kilo-dump/game-state-turn-1-2026-07-22T20-04-12-617Z.json`, objects 110 and 7).
+  // Census population for every count in this test: that dump's 293 `kind: "Activated"`
+  // abilities — 22 leak `~` into the cost text, 20 into the effect text. Widening to all 368
+  // abilities (i.e. adding the 75 `kind: "Spell"` rows) gives 29/27 instead, so the two
+  // number sets must not be mixed.
+  it("substitutes ~ on the non-mana activated-ability path, in both label and description (CR 201.5)", () => {
+    const action: GameAction = { type: "ActivateAbility", data: { source_id: 1, ability_index: 0 } };
+
+    // Leak site 1 — the COST text, which becomes the option's `label`.
+    const ghostQuarter = abilityChoiceLabel(
+      action,
+      makeObject({
+        name: "Ghost Quarter",
+        abilities: [
+          {
+            cost: {
+              type: "Composite",
+              costs: [{ type: "Tap" }, { type: "Sacrifice", count: 1 }],
+            },
+            description:
+              "{T}, Sacrifice ~: Destroy target land. Its controller may search their library for a basic land card, put it onto the battlefield, then shuffle.",
+            // Not `Mana`, so this fixture provably reaches the tail and not the branch at :415.
+            effect: { type: "Destroy" },
+          } satisfies GameObject["abilities"][number],
+        ],
+      }),
+    );
+    expect(ghostQuarter.label).toBe("{T}, Sacrifice Ghost Quarter");
+    expect(ghostQuarter.description).toBe(
+      "Destroy target land. Its controller may search their library for a basic land card, put it onto the battlefield, then shuffle.",
+    );
+
+    // Leak site 2 — the EFFECT text, which becomes the option's `description` after
+    // `stripCostPrefix`. Disjoint from site 1 within that same `kind: "Activated"`
+    // population: none of the 293 leaks into both. (All 7 overlaps in the wider 29/27 figures
+    // are `kind: "Spell"` rows whose descriptions carry no colon, so `abilityLabel` and
+    // `stripCostPrefix` both fall through to the whole string.)
+    const hawkeye = abilityChoiceLabel(
+      action,
+      makeObject({
+        name: "Hawkeye, Avenging Archer",
+        abilities: [
+          {
+            cost: { type: "Tap" },
+            description: "{T}: ~ deals 1 damage to any target.",
+            effect: { type: "DealDamage" },
+          } satisfies GameObject["abilities"][number],
+        ],
+      }),
+    );
+    expect(hawkeye.label).toBe("{T}");
+    expect(hawkeye.description).toBe("Hawkeye, Avenging Archer deals 1 damage to any target.");
   });
 });
 
@@ -300,5 +451,47 @@ describe("formatAbilityCost", () => {
         { type: "PayLife", amount: { type: "Fixed", value: 2 } },
       ],
     })).toBe("{1} or Pay 2 life");
+  });
+});
+
+describe("spellCostDisplay", () => {
+  const cost = (generic: number, shards: string[] = []): ManaCost => ({
+    type: "Cost",
+    generic,
+    shards,
+  });
+  const noCost: ManaCost = { type: "NoCost" };
+
+  it("shows the printed cost, not reduced, when the engine reports no override", () => {
+    const printed = cost(7, ["Blue", "Blue", "Blue"]);
+    const { displayCost, isReduced } = spellCostDisplay(undefined, printed);
+    expect(displayCost).toBe(printed);
+    expect(isReduced).toBe(false);
+  });
+
+  it("flags a smaller effective Cost as reduced", () => {
+    const { displayCost, isReduced } = spellCostDisplay(cost(3, ["Blue"]), cost(5, ["Blue"]));
+    expect(displayCost).toEqual(cost(3, ["Blue"]));
+    expect(isReduced).toBe(true);
+  });
+
+  // CR 118.9: Omniscience reports the effective cost as NoCost against a real
+  // printed cost — a reduction to {0}, so the pips must render (green {0}).
+  it("flags a NoCost effective cost against a real printed cost as reduced (Omniscience)", () => {
+    const { displayCost, isReduced } = spellCostDisplay(noCost, cost(7, ["Blue", "Blue", "Blue"]));
+    expect(displayCost).toEqual(noCost);
+    expect(isReduced).toBe(true);
+  });
+
+  // A naturally-free card (token, Ancestral Vision) has no printed cost and must
+  // never be flagged reduced — no {0} overlay.
+  it("does not flag a naturally-free card (no printed cost) as reduced", () => {
+    const { isReduced } = spellCostDisplay(noCost, noCost);
+    expect(isReduced).toBe(false);
+  });
+
+  it("does not flag an unchanged effective cost as reduced", () => {
+    const { isReduced } = spellCostDisplay(cost(5, ["Blue"]), cost(5, ["Blue"]));
+    expect(isReduced).toBe(false);
   });
 });

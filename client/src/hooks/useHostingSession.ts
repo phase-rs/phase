@@ -11,7 +11,12 @@ import { useMultiplayerStore } from "../stores/multiplayerStore";
 export function useHostingSession(): void {
   const pendingGameRoute = useMultiplayerStore((s) => s.pendingGameRoute);
   const clearPendingGameRoute = useMultiplayerStore((s) => s.clearPendingGameRoute);
+  const resumeServerHosting = useMultiplayerStore((s) => s.resumeServerHosting);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    resumeServerHosting();
+  }, [resumeServerHosting]);
 
   useEffect(() => {
     if (pendingGameRoute) {

@@ -35,6 +35,14 @@ const VARIANT_KEYS: Partial<Record<CastingVariant["type"], string>> = {
   Foretell: "variantForetell",
   Overload: "variantOverload",
   Bestow: "variantBestow",
+  Mutate: "variantMutate",
+  Awaken: "variantAwaken",
+  Cleave: "variantCleave",
+  Impending: "variantImpending",
+  MoreThanMeetsTheEye: "variantMoreThanMeetsTheEye",
+  Prototype: "variantPrototype",
+  FaceDown: "variantFaceDown",
+  Freerunning: "variantFreerunning",
   Fuse: "variantFuse",
 };
 

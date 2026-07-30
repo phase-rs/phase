@@ -81,6 +81,7 @@ pub fn resolve_become_prepared(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::BecomePrepared,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -110,6 +111,7 @@ pub fn resolve_become_unprepared(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::BecomeUnprepared,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -211,8 +213,14 @@ pub(crate) fn open_copy_target_selection(
 
 fn cleanup_failed_prepared_copy_cast(state: &mut GameState, copy_id: ObjectId) {
     // Defensive cleanup for any failed cast attempt after synthesizing the
-    // ephemeral copy object.
-    state.stack.retain(|entry| entry.id != copy_id);
+    // ephemeral copy object. The predicate filters on a unique id, so this
+    // removes at most ONE entry — routed through the shared stack-removal
+    // authority rather than expressed as a `retain`, which would leave both
+    // per-entry side tables stranded and the removal unjournaled.
+    if let Some(idx) = state.stack.iter().position(|entry| entry.id == copy_id) {
+        crate::game::stack::remove_stack_entry_at(state, idx)
+            .expect("position yielded a live stack index");
+    }
     state.objects.remove(&copy_id);
 }
 
@@ -251,6 +259,7 @@ fn synthesize_prepared_copy_object(
 
     let mut copy_obj = src_clone;
     copy_obj.id = copy_id;
+    // allow-raw-zone: prepared-copy birth in exile has no from-zone event (CR 722.3c).
     copy_obj.zone = Zone::Exile;
     copy_obj.controller = controller;
     copy_obj.owner = controller;
@@ -270,8 +279,10 @@ fn synthesize_prepared_copy_object(
             granted_to: Some(controller),
             resolution_cleanup: None,
             duration: None,
-            exile_instead_of_graveyard_on_resolve: false,
+            graveyard_replacement: None,
             enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
         });
     state.objects.insert(copy_id, copy_obj);
 
@@ -333,7 +344,9 @@ fn mark_prepare_copy_cancel_rollback(
 
     if matches!(
         waiting,
-        WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. }
+        WaitingFor::ManaPayment { .. }
+            | WaitingFor::ManaSourceSelection { .. }
+            | WaitingFor::PhyrexianPayment { .. }
     ) {
         if let Some(pending) = state.pending_cast.as_mut() {
             debug_assert_eq!(
@@ -593,6 +606,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             &mut events,
         );
 
@@ -745,7 +759,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -793,6 +807,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 amount: QuantityExpr::Fixed { value: 2 },
                 damage_source: None,
+                excess: None,
             },
             Vec::new(),
             copy_id,
@@ -804,7 +819,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(42),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -1011,8 +1026,10 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
                     duration: None,
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
+                    mana_spend_permission: None,
                 });
             source.back_face = Some(BackFaceForTest::prepare_with_cost(ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
@@ -1173,6 +1190,7 @@ mod tests {
                 power: None,
                 toughness: None,
                 loyalty: None,
+                printed_loyalty: None,
                 defense: None,
                 card_types,
                 mana_cost,

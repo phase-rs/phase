@@ -10,6 +10,8 @@ import { VitePWA } from "vite-plugin-pwa";
 import { compression } from "vite-plugin-compression2";
 import type { Plugin } from "vite";
 
+const OFFICIAL_MULTIPLAYER_SERVER_URL = "wss://lobby.phase-rs.dev/ws";
+
 // wasm-bindgen emits `import * as importN from "env"` for WASM host-environment
 // imports (LLVM intrinsics). These are provided at instantiation time by the JS
 // glue code and are never loaded as ES modules. Resolve them to an empty shim
@@ -24,6 +26,59 @@ function wasmEnvShim(): Plugin {
     },
     load(id) {
       if (id === VIRTUAL_ID) return "export default {};";
+    },
+  };
+}
+
+// wasm-bindgen's web glue defaults to `new URL("engine_wasm_bg.wasm",
+// import.meta.url)`. Vite recognizes that static URL and emits the WASM asset
+// even when every caller supplies an R2 URL explicitly. For external builds,
+// replace only that generated fallback with the build-time URL so Rollup has no
+// local engine WASM asset to emit. Without ENGINE_WASM_URL this plugin leaves
+// the generated glue untouched, preserving local/self-hosted behavior.
+function externalEngineWasm(): Plugin {
+  const engineGlue = path.resolve(__dirname, "src/wasm/engine_wasm.js");
+  const bundledWasmUrl = "new URL('engine_wasm_bg.wasm', import.meta.url)";
+  return {
+    name: "external-engine-wasm",
+    apply: "build",
+    transform(code, id) {
+      if (!process.env.ENGINE_WASM_URL || id !== engineGlue) return;
+      if (!code.includes(bundledWasmUrl)) {
+        this.error(
+          "engine_wasm.js no longer contains the expected wasm-bindgen fallback URL",
+        );
+      }
+      return {
+        code: code.replace(bundledWasmUrl, "__ENGINE_WASM_URL__"),
+        map: null,
+      };
+    },
+  };
+}
+
+// mana-font ships a legacy @font-face (eot/woff/ttf/svg) for BOTH the "Mana"
+// glyph family AND an unused "MPlantin" text family. Imported verbatim, Vite
+// emits every referenced url() — ~3.4 MB of fonts (a 1.8 MB SVG among them,
+// plus the whole unused MPlantin family) into the web dist AND the Tauri
+// bundle, when the only asset any `.ms-*` class needs is the 187 KB woff2 the
+// vendored CSS never references. Rewrite that one stylesheet at build time to a
+// single woff2-only @font-face for "Mana" and drop the rest, so exactly one
+// font file is emitted. Keeps the npm package as the source of truth for the
+// glyph classes (no vendored copy, updates on version bump). enforce:"pre" so
+// this runs before Vite's CSS plugin resolves url()s into emitted assets.
+function trimManaFont(): Plugin {
+  return {
+    name: "trim-mana-font",
+    enforce: "pre",
+    transform(code, id) {
+      if (!id.replace(/\\/g, "/").endsWith("mana-font/css/mana.css")) return;
+      const classes = code.replace(/@font-face\s*\{[^}]*\}/g, "");
+      const woff2Face =
+        '@font-face{font-family:"Mana";' +
+        'src:url("../fonts/mana.woff2") format("woff2");' +
+        "font-weight:normal;font-style:normal;}\n";
+      return { code: woff2Face + classes, map: null };
     },
   };
 }
@@ -78,9 +133,25 @@ function dataFileDefines(mode: string): Record<string, string> {
   const defines: Record<string, string> = {
     __APP_VERSION__: JSON.stringify(workspaceVersion()),
     __BUILD_HASH__: JSON.stringify(gitHash()),
+    // Preview deployment stamps this with the fingerprint of its signed native
+    // engine artifact. Local and release builds intentionally compile it as
+    // `undefined`, which keeps preview native routing on the WASM fallback.
+    __ENGINE_FINGERPRINT__: process.env.ENGINE_FINGERPRINT
+      ? JSON.stringify(process.env.ENGINE_FINGERPRINT)
+      : "undefined",
+    // Release/staging builds pin the engine binary to an immutable R2 object.
+    // Keep the local bundled WASM fallback when this is unset (dev, Tauri, and
+    // self-hosted builds).
+    __ENGINE_WASM_URL__: process.env.ENGINE_WASM_URL
+      ? JSON.stringify(process.env.ENGINE_WASM_URL)
+      : "undefined",
     __AUDIO_BASE_URL__: JSON.stringify(process.env.AUDIO_BASE_URL || ""),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
     __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
+    __RELEASE_SITE_URL__: JSON.stringify("https://phase-rs.dev"),
+    __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(
+      envVar("DEFAULT_MULTIPLAYER_SERVER_URL") || OFFICIAL_MULTIPLAYER_SERVER_URL,
+    ),
     // True only for tagged production releases (release.yml sets RELEASE_BUILD).
     // The staging deploy (deploy.yml) is also a production Vite build, so we
     // cannot key off import.meta.env.PROD — that would surface the "try the
@@ -93,6 +164,10 @@ function dataFileDefines(mode: string): Record<string, string> {
     // keeps self-hosted builds working with no Supabase account.
     __SUPABASE_URL__: JSON.stringify(envVar("SUPABASE_URL")),
     __SUPABASE_ANON_KEY__: JSON.stringify(envVar("SUPABASE_ANON_KEY")),
+    // First-party telemetry ingest endpoint (lobby-worker `POST /telemetry`).
+    // Empty when unset (local dev, self-hosted builds) → the telemetry module
+    // compiles to a permanent no-op and nothing is ever sent anywhere.
+    __TELEMETRY_URL__: JSON.stringify(process.env.TELEMETRY_URL || ""),
     __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || "/card-data.json"),
     // Per-locale content-i18n sidecar URL template ({lng} replaced at runtime).
     // The sidecars are listed in data-files.json, so on deploy they are uploaded
@@ -127,6 +202,8 @@ export default defineConfig(({ mode }) => ({
   },
   plugins: [
     wasmEnvShim(),
+    externalEngineWasm(),
+    trimManaFont(),
     react(),
     tailwindcss(),
     wasm(),
@@ -137,6 +214,14 @@ export default defineConfig(({ mode }) => ({
       includeAssets: ["**/*.mp3", "**/*.m4a"],
       workbox: {
         maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
+        // Workbox's default globPatterns (`**/*.{js,wasm,css,html}`) omit fonts,
+        // so the hashed self-hosted webfonts (@fontsource-variable/* and
+        // mana-font, all emitted as .woff2) are bundled but never precached —
+        // they'd 404 offline. Extend the default generically to cover every
+        // font family's woff2 (no per-font special case). The .wasm engine/draft
+        // bundles are still handled by their dedicated runtimeCaching rules
+        // below via globIgnores.
+        globPatterns: ["**/*.{js,wasm,css,html,woff2}"],
         // changelog{,-meta}.json are committed to public/ but stripped from the
         // Pages bundle on deploy (manifest-driven rm in deploy.yml/release.yml)
         // and served from R2. The precache manifest is generated BEFORE that
@@ -176,7 +261,12 @@ export default defineConfig(({ mode }) => ({
             },
           },
           {
-            urlPattern: /engine_wasm_bg-.*\.wasm$/,
+            // Workbox accepts cross-origin RegExpRoute matches only when they
+            // begin at index 0. The anchored R2 branch covers production and
+            // staging uploads; the existing unanchored branch preserves
+            // same-origin bundled-WASM behavior.
+            urlPattern:
+              /(?:^https:\/\/data\.phase-rs\.dev\/(?:staging\/)?wasm\/engine_wasm_bg-.*\.wasm$|engine_wasm_bg-.*\.wasm$)/,
             handler: "CacheFirst",
             options: {
               cacheName: "engine-wasm",
@@ -221,11 +311,66 @@ export default defineConfig(({ mode }) => ({
             },
           },
           {
-            urlPattern: /^https:\/\/pub-fc5b5c2c6e774356ae3e730bb0326394\.r2\.dev\/audio\//,
+            urlPattern: /^https:\/\/data\.phase-rs\.dev\/audio\//,
             handler: "CacheFirst",
             options: {
               cacheName: "audio-r2",
               expiration: { maxEntries: 50, maxAgeSeconds: 2592000 },
+            },
+          },
+          {
+            // Remaining data-manifest JSONs (Scryfall lookup maps, precon
+            // decks, draft pools, coverage, set metadata) — served from R2 in
+            // production, site-root in dev/Tauri; the pattern matches both.
+            // R2 serves `max-age=60, must-revalidate` with ETags, so the
+            // StaleWhileRevalidate background refresh is a 304 revalidation,
+            // not a re-download — the cached copy serves instantly and
+            // offline, mirroring the card-locale-sidecars reasoning. This keeps
+            // the image-URL lookup layer (scryfall-data.json) available offline.
+            urlPattern:
+              /\/(scryfall-data|scryfall-printings|scryfall-token-images|scryfall-sets|card-names|card-data-meta|set-list|decks|draft-pools|coverage-data|coverage-summary)\.json$/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "data-json",
+              expiration: { maxEntries: 12, purgeOnQuotaError: true },
+            },
+          },
+          {
+            // Same-origin deck feeds fetched by the home dashboard
+            // (see src/data/feedRegistry.ts). Mutable — regenerated
+            // periodically — so StaleWhileRevalidate.
+            urlPattern: /\/feeds\/[^/]+\.json$/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "deck-feeds",
+              expiration: { maxEntries: 16 },
+            },
+          },
+          // NOTE: Scryfall card imagery (cards/backs/svgs.scryfall.io) is
+          // intentionally NOT runtime-cached here. A CacheFirst rule forces the
+          // SW to re-fetch <img> requests in CORS mode (needed to avoid opaque-
+          // response quota padding), and that broke every mana pip and card
+          // back in production: edge-cached Scryfall variants (svgs/backs are
+          // served from the Cloudflare edge with `vary: Origin`) get handed to
+          // the SW's cors fetch without an `access-control-allow-origin` header,
+          // failing the CORS check. Plain no-cors <img> loading (opaque, no CORS
+          // check) is the long-standing, working behavior. Re-introducing an
+          // offline image cache requires first giving EVERY Scryfall <img> a
+          // consistent crossOrigin="anonymous" so page and SW never create
+          // colliding cache variants. See the #4822 (introduced) / #4855
+          // (credentials patch) incident before re-adding.
+          {
+            // Same-origin static imagery from public/ (battlefield art, nav
+            // icons, logos). Not in the precache manifest — the default glob
+            // only covers js/css/html — and unhashed, so StaleWhileRevalidate
+            // keeps them offline-available without pinning stale copies past
+            // a deploy.
+            urlPattern: ({ sameOrigin, request }) =>
+              sameOrigin && request.destination === "image",
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "static-images",
+              expiration: { maxEntries: 300, purgeOnQuotaError: true },
             },
           },
         ],
@@ -235,7 +380,7 @@ export default defineConfig(({ mode }) => ({
   ],
   define: dataFileDefines(mode),
   worker: {
-    plugins: () => [wasmEnvShim()],
+    plugins: () => [wasmEnvShim(), externalEngineWasm()],
   },
   // Vite's host-check rejects requests with a Host header outside its
   // known list — required to allow the Caddy proxy at local.phase-rs.dev

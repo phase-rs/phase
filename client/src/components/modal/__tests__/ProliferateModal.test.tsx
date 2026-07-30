@@ -5,6 +5,12 @@ import type { GameState, TargetRef } from "../../../adapter/types.ts";
 import { CardChoiceModal } from "../CardChoiceModal.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import {
+  buildCommanderFormatConfig,
+  buildGameState,
+  buildPlayer,
+} from "../../../test/factories/gameStateFactory.ts";
 
 const dispatchMock = vi.fn();
 
@@ -13,75 +19,37 @@ vi.mock("../../../hooks/useGameDispatch.ts", () => ({
 }));
 
 function makeObject(id: number, name: string) {
-  return {
+  return buildGameObject({
     id,
     card_id: 1,
-    owner: 0,
-    controller: 0,
-    zone: "Battlefield" as const,
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
     counters: { "+1/+1": 1 },
     name,
     power: 1,
     toughness: 1,
-    loyalty: null,
     card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
-    mana_cost: { type: "NoCost" as const },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
     base_power: 1,
     base_toughness: 1,
-    base_keywords: [],
-    base_color: [],
     timestamp: 1,
     entered_battlefield_turn: 1,
-  };
+  });
 }
 
 function makeState(eligible: TargetRef[]): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 40, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 40, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
-    priority_player: 0,
-    objects: {
-      42: makeObject(42, "Walking Ballista"),
-      43: makeObject(43, "Hangarback Walker"),
-    },
+  return buildGameState({
+    players: [buildPlayer({ id: 0, life: 40 }), buildPlayer({ id: 1, life: 40 })],
+    format_config: buildCommanderFormatConfig(),
+    objects: buildObjectMap(
+      makeObject(42, "Walking Ballista"),
+      makeObject(43, "Hangarback Walker"),
+    ),
     next_object_id: 100,
     battlefield: [42, 43],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
     waiting_for: {
       type: "ProliferateChoice",
       data: { player: 0, eligible },
     },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
     next_timestamp: 2,
-    eliminated_players: [],
-  } as unknown as GameState;
+  });
 }
 
 function setUp(eligible: TargetRef[]) {

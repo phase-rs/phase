@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   EngineAdapter,
+  EngineSnapshot,
   GameAction,
   GameEvent,
   GameState,
@@ -10,10 +11,13 @@ import type {
   SubmitResult,
   WaitingFor,
 } from "../../adapter/types";
+import { nextSnapshotSeq } from "../../adapter/types";
 import { dispatchAction } from "../../game/dispatch";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
+import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../test/factories/gameObjectFactory";
+import { buildGameState, buildPlayers } from "../../test/factories/gameStateFactory";
 
 const OB_NIXILIS_ID = 100;
 const PLAYER_ID = 0;
@@ -52,32 +56,28 @@ interface DeliveredAction {
 }
 
 function baseState(waitingFor: WaitingFor): GameState {
-  return {
+  const source = buildGameObjectWithCoreTypes(["Creature"], {
+    id: OB_NIXILIS_ID,
+    name: "Ob Nixilis, the Fallen",
+    zone: "Battlefield",
+  });
+  return buildGameState({
     turn_number: 3,
     active_player: PLAYER_ID,
     phase: "PreCombatMain",
-    players: [{ id: PLAYER_ID, life: 20, turns_taken: 1 }],
+    players: buildPlayers([{ id: PLAYER_ID, life: 20, turns_taken: 1 }]),
     priority_player: PLAYER_ID,
-    objects: {
-      [OB_NIXILIS_ID]: { id: OB_NIXILIS_ID, name: "Ob Nixilis, the Fallen" },
-    },
+    objects: buildObjectMap(source),
     next_object_id: 300,
     battlefield: [OB_NIXILIS_ID],
     stack: [],
     exile: [],
     rng_seed: 42,
-    combat: null,
     waiting_for: waitingFor,
-    has_pending_cast: false,
     lands_played_this_turn: 1,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
     turn_decision_controller: PLAYER_ID,
     phase_stops: {},
-  } as unknown as GameState;
+  });
 }
 
 function makeAdapter(
@@ -95,6 +95,11 @@ function makeAdapter(
     getLegalActions: vi.fn(async (): Promise<LegalActionsResult> => ({
       actions: [],
       autoPassRecommended: false,
+    })),
+    getSnapshot: vi.fn(async (): Promise<EngineSnapshot> => ({
+      state: baseState(nextWaitingFor),
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: nextSnapshotSeq(),
     })),
     restoreState: vi.fn(),
     getAiAction: vi.fn().mockReturnValue(null),

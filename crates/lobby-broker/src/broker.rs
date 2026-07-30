@@ -750,9 +750,7 @@ pub fn server_hello(
 }
 
 fn error(message: &str) -> Outbound {
-    Outbound::ToSelf(LobbyServerMessage::Error {
-        message: message.to_string(),
-    })
+    Outbound::ToSelf(LobbyServerMessage::error(message))
 }
 
 #[cfg(test)]

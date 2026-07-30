@@ -1,8 +1,10 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, GameState, WaitingFor } from "../../../adapter/types.ts";
+import type { GameObject, WaitingFor } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState, buildPendingCast } from "../../../test/factories/gameStateFactory.ts";
 import { SpliceOfferModal } from "../SpliceOfferModal.tsx";
 
 const dispatchMock = vi.fn();
@@ -12,51 +14,26 @@ vi.mock("../../../hooks/useGameDispatch.ts", () => ({
 }));
 
 function makeObject(id: number, name: string): GameObject {
-  return {
+  return buildGameObjectWithCoreTypes(["Instant"], {
     id,
     card_id: id,
-    owner: 0,
-    controller: 0,
     zone: "Hand",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name,
-    power: null,
-    toughness: null,
-    loyalty: null,
     card_types: { supertypes: [], core_types: ["Instant"], subtypes: ["Arcane"] },
     mana_cost: { type: "Cost", shards: ["Blue"], generic: 1 },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
     color: ["Blue"],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
     base_color: ["Blue"],
     timestamp: 1,
     entered_battlefield_turn: null,
-  };
+  });
 }
 
 function setWaitingFor(waitingFor: WaitingFor) {
-  const gameState = {
-    active_player: 0,
-    objects: {
-      42: makeObject(42, "Peer Through Depths"),
-    },
+  const gameState = buildGameState({
+    objects: buildObjectMap(makeObject(42, "Peer Through Depths")),
     priority_player: 0,
     waiting_for: waitingFor,
-  } as unknown as GameState;
+  });
 
   useGameStore.setState({
     gameState,
@@ -72,10 +49,7 @@ describe("SpliceOfferModal", () => {
       type: "SpliceOffer",
       data: {
         player: 0,
-        pending_cast: {} as Extract<
-          WaitingFor,
-          { type: "SpliceOffer" }
-        >["data"]["pending_cast"],
+        pending_cast: buildPendingCast(),
         eligible: [42],
       },
     });

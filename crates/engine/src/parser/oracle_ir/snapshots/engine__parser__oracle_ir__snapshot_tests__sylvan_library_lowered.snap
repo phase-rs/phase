@@ -1,0 +1,85 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 800
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Draw",
+          "count": {
+            "type": "Fixed",
+            "value": 2
+          },
+          "target": {
+            "type": "Controller"
+          }
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChooseDrawnThisTurnPayOrTopdeck",
+            "count": {
+              "type": "Fixed",
+              "value": 2
+            },
+            "life_payment": {
+              "type": "Fixed",
+              "value": 4
+            },
+            "player": {
+              "type": "Controller"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "condition": {
+            "type": "EffectOutcome",
+            "signal": "OptionalEffectPerformed"
+          },
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false,
+          "sub_link": "SequentialSibling"
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": true,
+        "forward_result": false
+      },
+      "valid_card": null,
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": "Draw",
+      "optional": true,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "At the beginning of your draw step, you may draw two additional cards. If you do, choose two cards in your hand drawn this turn. For each of those cards, pay 4 life or put the card on top of your library.",
+      "constraint": {
+        "type": "OnlyDuringYourTurn"
+      },
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

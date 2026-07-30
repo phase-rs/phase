@@ -21,6 +21,7 @@ use crate::types::zones::Zone;
 
 use super::game_object::{DisplaySource, MergeKind};
 use super::printed_cards;
+use super::sba::move_to_graveyard_via_pipeline;
 use super::zones;
 
 pub fn resolve_combine_host(
@@ -41,6 +42,7 @@ pub fn resolve_combine_host(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CombineHost,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -59,6 +61,7 @@ pub fn resolve_combine_host(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CombineHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -67,6 +70,7 @@ pub fn resolve_combine_host(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CombineHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -77,7 +81,8 @@ pub fn resolve_combine_host(
                 source: CombineSource::SpecificObject { id: augment_id },
                 host: Box::new(TargetFilter::ParentTarget),
             };
-            state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+            state
+                .park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
                 cards: hosts,
@@ -89,6 +94,7 @@ pub fn resolve_combine_host(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CombineHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -122,6 +128,7 @@ pub fn resolve_choose_augment_and_combine(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ChooseAugmentAndCombineWithHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -140,7 +147,8 @@ pub fn resolve_choose_augment_and_combine(
                 source: CombineSource::ParentTarget,
                 host: Box::new(frozen_host),
             };
-            state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+            state
+                .park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
                 cards: candidates,
@@ -152,6 +160,7 @@ pub fn resolve_choose_augment_and_combine(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ChooseAugmentAndCombineWithHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -162,23 +171,39 @@ pub(crate) fn check_standalone_augment_permanents(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
+    battlefield_snapshot: &[ObjectId],
 ) {
-    let standalone: Vec<ObjectId> = state
-        .battlefield
+    let standalone: Vec<ObjectId> = battlefield_snapshot
         .iter()
         .copied()
         .filter(|id| {
             state.objects.get(id).is_some_and(|obj| {
-                obj.keywords
-                    .iter()
-                    .any(|keyword| matches!(keyword, Keyword::Augment))
+                obj.zone == Zone::Battlefield
+                    && obj.is_phased_in()
+                    && obj
+                        .keywords
+                        .iter()
+                        .any(|keyword| matches!(keyword, Keyword::Augment))
                     && obj.merged_components.is_empty()
             })
         })
         .collect();
 
     for object_id in standalone {
-        zones::move_to_zone(state, object_id, Zone::Graveyard, events);
+        if !state
+            .objects
+            .get(&object_id)
+            .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.is_phased_in())
+        {
+            continue;
+        }
+        // CR 614.6: This SBA departure is a battlefield-to-
+        // graveyard zone change, so it must use the same replacement-aware
+        // authority as the other SBA moves. A parked CR 616 choice is resumed
+        // by the SBA fixpoint after the player chooses.
+        if move_to_graveyard_via_pipeline(state, object_id, events) {
+            return;
+        }
         *any_performed = true;
     }
 }
@@ -269,12 +294,15 @@ fn combine_card_with_host(
     events: &mut Vec<GameEvent>,
 ) {
     if let Some(zone) = state.objects.get(&augment_id).map(|obj| obj.zone) {
-        let owner = state.objects[&augment_id].owner;
-        zones::apply_zone_exit_cleanup(state, augment_id, zone, Zone::Battlefield);
-        zones::remove_from_zone(state, augment_id, zone, owner);
-    }
-    if let Some(augment) = state.objects.get_mut(&augment_id) {
-        augment.zone = Zone::Battlefield;
+        // CR 608.2h: no sever has run on this path, so the live attachment list is still
+        // intact — capture it here for the LKI, through the one shared authority.
+        let attachments = state
+            .objects
+            .get(&augment_id)
+            .map(|obj| zones::capture_attachment_snapshot(state, obj))
+            .unwrap_or_default();
+        zones::apply_zone_exit_cleanup(state, augment_id, zone, Zone::Battlefield, attachments);
+        zones::absorb_component(state, augment_id, Some(zone));
     }
 
     let Some((values, display_source, printed_ref, token_image_ref)) =
@@ -360,6 +388,8 @@ fn merged_copiable_values(
         power: Some(host_values.power.unwrap_or(0) + augment.base_power.unwrap_or(0)),
         toughness: Some(host_values.toughness.unwrap_or(0) + augment.base_toughness.unwrap_or(0)),
         loyalty: host_values.loyalty,
+        // CR 707.2: The merged object's copiable loyalty characteristic follows its host.
+        printed_loyalty: host_values.printed_loyalty,
         keywords,
         abilities: Arc::new(abilities),
         trigger_definitions: Arc::new(triggers),
@@ -436,7 +466,7 @@ fn merged_ability_sets(
     let replacements = augment
         .base_replacement_definitions
         .iter()
-        .filter(|definition| !printed_cards::is_runtime_control_gated_replacement(definition))
+        .filter(|definition| !printed_cards::is_runtime_non_copiable_replacement(definition))
         .cloned()
         .collect();
 

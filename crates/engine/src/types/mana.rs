@@ -2,14 +2,15 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::ability::{AbilityTag, Comparator};
+use super::ability::{AbilityTag, Comparator, TargetFilter, TriggerDefinitionOccurrenceRef};
 use super::events::GameEvent;
-use super::identifiers::ObjectId;
+use super::game_state::ProductionOverride;
+use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::keywords::{Keyword, KeywordKind};
 use super::player::PlayerId;
 use super::zones::Zone;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ManaColor {
     White,
     Blue,
@@ -43,7 +44,7 @@ impl FromStr for ManaColor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ManaType {
     White,
     Blue,
@@ -252,6 +253,11 @@ pub struct SpellMeta {
     /// color-count spend restrictions (`OnlyForSpellWithColorCount`). `None` at
     /// payment sites with no associated spell.
     pub color_count: Option<u32>,
+    /// CR 105.2: The spell's exact colors, consulted by color-specific spend
+    /// restrictions. This is distinct from `color_count`: a monocolored spell
+    /// must also have the particular required color to satisfy a rider such as
+    /// "monocolored spells of that color."
+    pub colors: Vec<ManaColor>,
     /// CR 107.3 + CR 202.3e: Whether the spell's printed mana cost contains an
     /// `{X}` symbol. Consulted by the "with {X} in their mana costs" disjunct of
     /// MV/X spend restrictions (`OnlyForSpellMatchingCostCriteria`). `false` at
@@ -278,6 +284,13 @@ pub struct SpellMeta {
     /// site. It is wired for forward compatibility — see
     /// [`ManaRestriction::OnlyForFaceDownSpell`] for the contract.
     pub is_face_down: bool,
+    /// CR 601.2g / CR 118.3: the spell carries a `CastingRestriction::CantSpendMana`
+    /// ("You can't spend mana to cast this spell" — Hogaak, Arisen Necropolis).
+    /// No mana may leave the pool, so the entire mana cost must be met by
+    /// alternative payments (convoke/delve). The pool-payment authority
+    /// (`game::casting::pay_mana_cost_from_pool_with_choices`) withholds all real
+    /// (non-convoke) pool units for the duration of the payment when this is set.
+    pub cant_spend_mana: bool,
 }
 
 /// CR 106.6: Context for a mana-payment decision. Distinguishes "paying for a
@@ -301,6 +314,11 @@ pub enum PaymentContext<'a> {
         source_types: &'a [String],
         source_subtypes: &'a [String],
         ability_tag: Option<AbilityTag>,
+        /// CR 106.6: An ability's own activation-cost rider can constrain the
+        /// actual mana type paid, independently of what a unit's spend
+        /// restriction allows. This is checked before unit restrictions so an
+        /// as-though payment permission cannot bypass it.
+        mana_color_constraint: ActivationManaColorConstraint,
     },
     /// Payment for a cost during spell or ability resolution. Current
     /// restriction variants name spell-casting or ability-activation use, so
@@ -317,41 +335,102 @@ pub enum PaymentContext<'a> {
     SpecialAction(SpecialAction),
 }
 
+impl PaymentContext<'_> {
+    /// CR 106.6: Whether a mana unit's actual type may be used in this payment
+    /// context before its own spend restrictions are considered. Activation
+    /// riders constrain the physical mana paid, so this gate applies equally to
+    /// unrestricted and restricted units.
+    pub fn permits_actual_mana_type(&self, mana_type: ManaType) -> bool {
+        match self {
+            Self::Activation {
+                mana_color_constraint,
+                ..
+            } => mana_color_constraint.permits(mana_type),
+            Self::Spell(_) | Self::Effect | Self::SpecialAction(_) => true,
+        }
+    }
+}
+
+/// CR 106.6: A color constraint imposed by the activated ability whose cost is
+/// being paid (for example, "Spend only mana of the chosen color to activate
+/// this ability"). This is an AND gate on the actual `ManaUnit::color`, not a
+/// conversion of the mana's type and not an as-though permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActivationManaColorConstraint {
+    /// The ability has no color-specific activation-payment rider.
+    #[default]
+    Unrestricted,
+    /// Every mana unit spent for this activation must have this actual color.
+    Only(ManaColor),
+    /// The rider refers to a source choice that is unavailable. Fail closed:
+    /// no mana unit may pay the activation cost.
+    Impossible,
+}
+
+impl ActivationManaColorConstraint {
+    /// CR 106.6: Whether this exact mana unit type may pay the activation
+    /// before the unit's own spend restrictions are considered.
+    pub fn permits(self, mana_type: ManaType) -> bool {
+        match self {
+            Self::Unrestricted => true,
+            Self::Only(color) => mana_type == ManaType::from(color),
+            Self::Impossible => false,
+        }
+    }
+}
+
 /// CR 116.2: A class of special action whose mana cost can be the subject of a
 /// CR 106.6 mana-spend restriction ("Spend this mana only to unlock doors").
 ///
 /// Only special actions that pay a mana cost *through the mana pool* with a
 /// restriction-aware payment context belong here. CR 116.2m / CR 709.5e door
-/// unlock is the first such action (its unlock cost routes through
-/// `pay_special_action_mana_cost`). CR 116.2b turn-face-up's morph/disguise cost
-/// is not yet paid through a restriction-aware pool payment in this engine
-/// (`game::morph::turn_face_up` flips the permanent without charging the cost),
-/// so a `TurnFaceUp`-restricted mana's runtime gate
-/// ([`ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp)`]) can
-/// never be satisfied yet — it is honest-deferred (conservatively
-/// under-permitting) rather than silently over-permitting the mana. The variant
-/// exists so the restriction stays representable as a typed value even though
-/// the `TurnFaceUp` leaf is dead today: a card whose only spend restriction is
-/// turn-face-up (Overgrown Zealot) is left unabsorbed at the `Effect::Mana`
-/// seam and intentionally surfaces an `Effect::Unimplemented` gap (honest
-/// coverage red) via `ManaSpendRestriction::has_payable_branch`. Once the
-/// turn-face-up morph cost is routed through
-/// `PaymentContext::SpecialAction(TurnFaceUp)` the gate becomes live with no
-/// type change.
+/// unlock is one such action (its unlock cost routes through
+/// `pay_special_action_mana_cost`). CR 116.2b turn-face-up is another: the
+/// `GameAction::TurnFaceUp` handler now derives the morph/disguise/manifest cost
+/// (`game::morph::turn_face_up_prepare`, CR 702.37e / CR 702.168d / CR 701.40b)
+/// and pays it through `PaymentContext::SpecialAction(TurnFaceUp)` before flipping
+/// the permanent, so a `TurnFaceUp`-restricted mana's runtime gate
+/// ([`ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp)`]) is live
+/// there and correctly rejected for every other context. A card whose spend
+/// restriction names only production-live branches (Overgrown Zealot; Creeping
+/// Peeper; and, since CR 708.4 face-down spell casting, Tin Street Gossip) is
+/// therefore absorbed at the `Effect::Mana` seam and supported via
+/// `ManaSpendRestriction::is_coverage_supported`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpecialAction {
+    /// CR 116.2g + CR 702.139a: Paying {3} to put a revealed companion from
+    /// outside the game into its owner's hand. This payment uses the mana pool,
+    /// so mana restricted to this exact special action is eligible while mana
+    /// restricted to casting, activating, or another special action is not.
+    CompanionToHand,
     /// CR 116.2m + CR 709.5e: Paying a locked Room half's unlock cost to give
     /// the permanent the appropriate unlocked designation.
     UnlockDoor,
-    /// CR 116.2b + CR 702.37e: Paying a face-down permanent's morph/disguise
-    /// cost to turn it face up. No payment site emits
-    /// `PaymentContext::SpecialAction(TurnFaceUp)` yet (turn-face-up is free in
-    /// this engine), so a mana restricted to this action is conservatively
-    /// unspendable rather than over-permitted — see the type-level note above.
+    /// CR 116.2k + CR 702.170a: Exiling a card from hand and paying its plot
+    /// cost to make it a plotted card. The plot ability is synthesized as a
+    /// hand-zone activated ability (`synthesize_plot`); this variant lets a
+    /// `StaticMode::ReduceActionCost { action: Plot, .. }` (Doc Aurlock) reduce
+    /// that plot cost without conflating plot with generic activated-ability
+    /// cost reducers.
+    Plot,
+    /// CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: Paying a face-down
+    /// permanent's morph/disguise cost (or a manifested creature card's mana cost)
+    /// to turn it face up. The `GameAction::TurnFaceUp` handler emits
+    /// `PaymentContext::SpecialAction(TurnFaceUp)` when charging that cost, so mana
+    /// restricted to this action is spendable there and rejected elsewhere — see
+    /// the type-level note above.
     TurnFaceUp,
     /// CR 901.9 / CR 116.2i: Paying the escalating generic cost to roll the
     /// planar die as a Planechase special action.
     RollPlanarDie,
+    /// CR 116.2c: Paying a continuous effect's printed termination cost to end
+    /// it ("You may pay {W} to end this effect" — the Licid cycle).
+    ///
+    /// The payment is neither a cast nor an activation, so mana restricted to
+    /// spells or to activated abilities MUST be rejected here — that rejection
+    /// is the correctness win this variant buys over charging the cost through
+    /// an unlabelled payment context.
+    EndContinuousEffect,
 }
 
 /// CR 106.6: The ability-activation half of a "spend only to cast [X] spell or
@@ -472,16 +551,6 @@ pub enum ManaRestriction {
     /// "Spend this mana only to cast a creature spell of the chosen type."
     /// The `String` is the chosen creature type (e.g., "Elf").
     OnlyForCreatureType(String),
-    /// CR 106.6 + CR 205.3m + CR 903.3: "a creature spell that shares a creature
-    /// type with your commander" — relational spend filter for Path of Ancestry.
-    /// This is a distinct *relational-to-commander* axis, not a fixed-subtype
-    /// parameterization of `OnlyForCreatureType`: the matching subtype set is
-    /// computed from live commander state per spend, so it cannot be evaluated
-    /// from `SpellMeta` alone. `allows_spell` returns `false` (no commander
-    /// context here); the real relational evaluation happens at the
-    /// `apply_mana_spell_grants` spend-check site, which has game-state access —
-    /// mirroring how `OnlyForXCosts` defers full detection to its call site.
-    SharesCreatureTypeWithCommander,
     /// CR 106.6: "Spend this mana only to cast creature spells or activate abilities of creatures."
     /// Allows spending for spells of `spell_type` (checked via `allows_spell`) OR for ability
     /// activations whose scope is described by `ability` (checked via `allows_activation`):
@@ -527,6 +596,10 @@ pub enum ManaRestriction {
     /// colors" (also "N or more / N or fewer"). `comparator` applies
     /// `spell_color_count <cmp> count`. Colorless spells have color_count 0.
     OnlyForSpellWithColorCount { comparator: Comparator, count: u32 },
+    /// CR 105.2 + CR 106.6: "Spend this mana only to cast spells of [color]."
+    /// Usually composed with `OnlyForSpellWithColorCount { EQ, 1 }` for the
+    /// stricter "monocolored spells of that color" reading.
+    OnlyForSpellColor(ManaColor),
     /// CR 106.6 + CR 400.7: "Spend this mana only to cast spells from your
     /// graveyard" / "from exile" ([`ZoneSpendPolarity::From`]) and "from anywhere
     /// other than your hand" ([`ZoneSpendPolarity::NotFrom`], Mm'menon, the Right
@@ -548,20 +621,16 @@ pub enum ManaRestriction {
     /// `obj.face_down = true` for a card that is nonetheless CAST FACE UP
     /// (CR 702.143c), so the gate correctly REJECTS those concealment casts.
     ///
-    /// The gate is also fail-closed today: no production path casts a face-down
-    /// spell *through spell payment* in this engine. CR 708.4 face-down play is
-    /// modeled by [`GameAction::PlayFaceDown`] → `game::morph::play_face_down`,
-    /// which moves the card hand→battlefield via the zone pipeline and charges no
-    /// mana (the `{3}` face-down cast cost, CR 702.37c, is not yet implemented).
-    /// So `SpellMeta.is_face_down` is never `true` at any `PaymentContext::Spell`
-    /// payment site, and this gate never over-permits — see
-    /// [`ManaRestriction::allows_spell`]. The restriction stays representable as a
-    /// typed value even though it is dead today: a card whose only spend
-    /// restriction is this is left unabsorbed at the `Effect::Mana` seam and
-    /// intentionally surfaces an `Effect::Unimplemented` gap (honest coverage red)
-    /// via `ManaSpendRestriction::has_payable_branch`. Once a real face-down
-    /// CAST routes its cost through `PaymentContext::Spell` with `is_face_down =
-    /// true` the gate becomes live with no type change.
+    /// The gate is now live: CR 708.4 morph/megamorph/disguise face-down spell
+    /// casting (`AlternativeCastKeyword::FaceDown` → `continue_cast_face_down`)
+    /// routes the `{3}` face-down cost (CR 702.37c) through `PaymentContext::Spell`
+    /// with `SpellMeta.is_face_down = true`, so this gate is satisfiable there and
+    /// correctly rejected for every other context — a normal face-up cast, and an
+    /// exile-concealment cast (foretell/hideaway) whose `obj.face_down = true` but
+    /// which is cast face up (CR 702.143c), both report `is_face_down = false` —
+    /// see [`ManaRestriction::allows_spell`]. A card whose spend restriction
+    /// includes this leaf is therefore absorbed at the `Effect::Mana` seam and
+    /// coverage-supported via `ManaSpendRestriction::is_coverage_supported`.
     OnlyForFaceDownSpell,
     /// CR 106.6: Disjunctive spend restriction — the mana may be spent on any
     /// payment that satisfies at least one inner restriction. Composition
@@ -577,10 +646,399 @@ pub enum ManaRestriction {
     /// Parameterized over the action class so one variant covers every
     /// restrictable special action (door unlock today; extensible).
     OnlyForSpecialAction(SpecialAction),
+    /// A source-dependent template could not resolve a required choice. This
+    /// remains attached to the produced mana rather than being dropped so the
+    /// resulting unit is unspendable instead of accidentally unrestricted.
+    Impossible,
     /// CR 702.51a: Internal marker for a convoke tap that substitutes for
     /// paying mana. The payment algorithm may consume it for the current spell,
     /// but cast-spent metrics and mana-added triggers must ignore it.
     ConvokePayment,
+}
+
+/// CR 605.3b: Semantic classification of an activatable mana source's
+/// irreversible consequences. This is part of a submitted mana-source
+/// selection because two otherwise-identical rows with different penalties
+/// are not the same activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ManaSourcePenalty {
+    None,
+    HasIrreversibleContinuation,
+    DealsDamageOnResolution { fixed_amount: Option<u16> },
+    PaysLifeOnActivation { fixed_amount: Option<u16> },
+    Sacrifices,
+}
+
+/// CR 106.1a: The output choice captured for a mana-source activation.
+///
+/// `Concrete` is the planner-selected output used by automatic payment. A
+/// manually selected flexible producer instead retains `DeferredColorChoice`,
+/// so the normal mana-choice interaction chooses its color at activation time
+/// rather than silently committing to an arbitrary planner row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ManaSourceOutput {
+    Concrete(ManaType),
+    DeferredColorChoice,
+}
+
+/// Exact identity of one triggered mana ability that augments a land's own
+/// production when that land is tapped for mana.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TapsForManaSelection {
+    pub source: ObjectIncarnationRef,
+    pub occurrence: TriggerDefinitionOccurrenceRef,
+    pub production_override: ProductionOverride,
+}
+
+/// Stable semantic selection for one currently activatable mana-source row.
+///
+/// The action carries every field that can change legality or resolution, but
+/// the reducer never trusts those fields directly: it enumerates current live
+/// options and requires one exact semantic match before activating that live
+/// option. `ObjectIncarnationRef` prevents a stale choice from rebinding to an
+/// object that left and re-entered the battlefield (CR 400.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManaSourceSelection {
+    pub source: ObjectIncarnationRef,
+    pub ability_index: Option<usize>,
+    pub mana_type: ManaType,
+    pub output: ManaSourceOutput,
+    pub atomic_combination: Option<Vec<ManaType>>,
+    pub restrictions: Vec<ManaRestriction>,
+    pub penalty: ManaSourcePenalty,
+    pub taps_for_mana: Vec<TapsForManaSelection>,
+}
+
+impl<'de> Deserialize<'de> for ManaSourceSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireSelection {
+            source: ObjectIncarnationRef,
+            ability_index: Option<usize>,
+            mana_type: ManaType,
+            #[serde(default)]
+            output: Option<ManaSourceOutput>,
+            atomic_combination: Option<Vec<ManaType>>,
+            restrictions: Vec<ManaRestriction>,
+            penalty: ManaSourcePenalty,
+            taps_for_mana: Vec<TapsForManaSelection>,
+        }
+
+        let wire = WireSelection::deserialize(deserializer)?;
+        Ok(Self {
+            source: wire.source,
+            ability_index: wire.ability_index,
+            mana_type: wire.mana_type,
+            // `TapLandForMana` actions saved before output provenance existed
+            // selected this exact row's `mana_type`; preserve that choice on
+            // replay instead of silently turning every old colored row colorless.
+            output: wire
+                .output
+                .unwrap_or(ManaSourceOutput::Concrete(wire.mana_type)),
+            atomic_combination: wire.atomic_combination,
+            restrictions: wire.restrictions,
+            penalty: wire.penalty,
+            taps_for_mana: wire.taps_for_mana,
+        })
+    }
+}
+
+impl ManaSourceSelection {
+    /// Stable total order for the action wire. The non-`Ord` semantic fields
+    /// are compared by explicit closed-enum comparators below; debug strings or
+    /// serialized bytes must never become ordering authority.
+    pub fn cmp_stable(&self, other: &Self) -> std::cmp::Ordering {
+        self.source
+            .cmp(&other.source)
+            .then_with(|| self.ability_index.cmp(&other.ability_index))
+            .then_with(|| self.mana_type.cmp(&other.mana_type))
+            .then_with(|| cmp_mana_source_output(self.output, other.output))
+            .then_with(|| self.atomic_combination.cmp(&other.atomic_combination))
+            .then_with(|| cmp_mana_restriction_slices(&self.restrictions, &other.restrictions))
+            .then_with(|| cmp_mana_source_penalty(self.penalty, other.penalty))
+            .then_with(|| cmp_taps_for_mana_slices(&self.taps_for_mana, &other.taps_for_mana))
+    }
+}
+
+fn cmp_mana_source_output(left: ManaSourceOutput, right: ManaSourceOutput) -> std::cmp::Ordering {
+    match (left, right) {
+        (ManaSourceOutput::Concrete(a), ManaSourceOutput::Concrete(b)) => a.cmp(&b),
+        (ManaSourceOutput::DeferredColorChoice, ManaSourceOutput::DeferredColorChoice) => {
+            std::cmp::Ordering::Equal
+        }
+        (ManaSourceOutput::Concrete(_), ManaSourceOutput::DeferredColorChoice) => {
+            std::cmp::Ordering::Less
+        }
+        (ManaSourceOutput::DeferredColorChoice, ManaSourceOutput::Concrete(_)) => {
+            std::cmp::Ordering::Greater
+        }
+    }
+}
+
+fn cmp_slice_by<T>(
+    left: &[T],
+    right: &[T],
+    cmp: impl Copy + Fn(&T, &T) -> std::cmp::Ordering,
+) -> std::cmp::Ordering {
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| cmp(a, b))
+        .find(|ordering| !ordering.is_eq())
+        .unwrap_or_else(|| left.len().cmp(&right.len()))
+}
+
+fn cmp_taps_for_mana_slices(
+    left: &[TapsForManaSelection],
+    right: &[TapsForManaSelection],
+) -> std::cmp::Ordering {
+    cmp_slice_by(left, right, |a, b| {
+        a.source
+            .cmp(&b.source)
+            .then_with(|| a.occurrence.cmp(&b.occurrence))
+            .then_with(|| cmp_production_override(&a.production_override, &b.production_override))
+    })
+}
+
+fn cmp_production_override(
+    left: &ProductionOverride,
+    right: &ProductionOverride,
+) -> std::cmp::Ordering {
+    use ProductionOverride::{Combination, SingleColor};
+    match (left, right) {
+        (SingleColor(a), SingleColor(b)) => a.cmp(b),
+        (Combination(a), Combination(b)) => a.cmp(b),
+        (SingleColor(_), Combination(_)) => std::cmp::Ordering::Less,
+        (Combination(_), SingleColor(_)) => std::cmp::Ordering::Greater,
+    }
+}
+
+fn cmp_mana_source_penalty(
+    left: ManaSourcePenalty,
+    right: ManaSourcePenalty,
+) -> std::cmp::Ordering {
+    fn rank(value: ManaSourcePenalty) -> u8 {
+        match value {
+            ManaSourcePenalty::None => 0,
+            ManaSourcePenalty::HasIrreversibleContinuation => 1,
+            ManaSourcePenalty::DealsDamageOnResolution { .. } => 2,
+            ManaSourcePenalty::PaysLifeOnActivation { .. } => 3,
+            ManaSourcePenalty::Sacrifices => 4,
+        }
+    }
+    rank(left)
+        .cmp(&rank(right))
+        .then_with(|| match (left, right) {
+            (
+                ManaSourcePenalty::DealsDamageOnResolution { fixed_amount: a },
+                ManaSourcePenalty::DealsDamageOnResolution { fixed_amount: b },
+            )
+            | (
+                ManaSourcePenalty::PaysLifeOnActivation { fixed_amount: a },
+                ManaSourcePenalty::PaysLifeOnActivation { fixed_amount: b },
+            ) => a.cmp(&b),
+            _ => std::cmp::Ordering::Equal,
+        })
+}
+
+fn cmp_mana_restriction_slices(
+    left: &[ManaRestriction],
+    right: &[ManaRestriction],
+) -> std::cmp::Ordering {
+    cmp_slice_by(left, right, cmp_mana_restriction)
+}
+
+#[allow(clippy::too_many_lines)]
+fn cmp_mana_restriction(left: &ManaRestriction, right: &ManaRestriction) -> std::cmp::Ordering {
+    fn rank(value: &ManaRestriction) -> u8 {
+        match value {
+            ManaRestriction::OnlyForSpell => 0,
+            ManaRestriction::OnlyForSpellType(_) => 1,
+            ManaRestriction::OnlyForCreatureType(_) => 2,
+            ManaRestriction::OnlyForTypeSpellsOrAbilities { .. } => 3,
+            ManaRestriction::OnlyForActivation => 4,
+            ManaRestriction::OnlyForTaggedActivation(_) => 5,
+            ManaRestriction::OnlyForXCosts => 6,
+            ManaRestriction::OnlyForSpellWithKeywordKind(_) => 7,
+            ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _) => 8,
+            ManaRestriction::OnlyForSpellWithManaValue { .. } => 9,
+            ManaRestriction::OnlyForSpellMatchingCostCriteria { .. } => 10,
+            ManaRestriction::OnlyForSpellWithColorCount { .. } => 11,
+            ManaRestriction::OnlyForSpellColor(_) => 12,
+            ManaRestriction::OnlyForSpellFromZone(_) => 13,
+            ManaRestriction::OnlyForFaceDownSpell => 14,
+            ManaRestriction::OnlyForAny(_) => 15,
+            ManaRestriction::OnlyForSpecialAction(_) => 16,
+            ManaRestriction::Impossible => 17,
+            ManaRestriction::ConvokePayment => 18,
+        }
+    }
+    rank(left).cmp(&rank(right)).then_with(|| match (left, right) {
+        (ManaRestriction::OnlyForSpellType(a), ManaRestriction::OnlyForSpellType(b))
+        | (
+            ManaRestriction::OnlyForCreatureType(a),
+            ManaRestriction::OnlyForCreatureType(b),
+        ) => a.cmp(b),
+        (
+            ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                spell_type: a_type,
+                ability: a_ability,
+            },
+            ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                spell_type: b_type,
+                ability: b_ability,
+            },
+        ) => a_type
+            .cmp(b_type)
+            .then_with(|| ability_activation_scope_rank(*a_ability).cmp(&ability_activation_scope_rank(*b_ability))),
+        (
+            ManaRestriction::OnlyForTaggedActivation(a),
+            ManaRestriction::OnlyForTaggedActivation(b),
+        ) => ability_tag_rank(*a).cmp(&ability_tag_rank(*b)),
+        (
+            ManaRestriction::OnlyForSpellWithKeywordKind(a),
+            ManaRestriction::OnlyForSpellWithKeywordKind(b),
+        ) => a.cmp(b),
+        (
+            ManaRestriction::OnlyForSpellWithKeywordKindFromZone(a_kind, a_zone),
+            ManaRestriction::OnlyForSpellWithKeywordKindFromZone(b_kind, b_zone),
+        ) => a_kind.cmp(b_kind).then_with(|| a_zone.cmp(b_zone)),
+        (
+            ManaRestriction::OnlyForSpellWithManaValue {
+                comparator: a_cmp,
+                value: a_value,
+            },
+            ManaRestriction::OnlyForSpellWithManaValue {
+                comparator: b_cmp,
+                value: b_value,
+            },
+        ) => comparator_rank(*a_cmp)
+            .cmp(&comparator_rank(*b_cmp))
+            .then_with(|| a_value.cmp(b_value)),
+        (
+            ManaRestriction::OnlyForSpellMatchingCostCriteria {
+                spell_type: a_type,
+                criteria: a_criteria,
+            },
+            ManaRestriction::OnlyForSpellMatchingCostCriteria {
+                spell_type: b_type,
+                criteria: b_criteria,
+            },
+        ) => a_type
+            .cmp(b_type)
+            .then_with(|| cmp_slice_by(a_criteria, b_criteria, cmp_spell_cost_criterion)),
+        (
+            ManaRestriction::OnlyForSpellWithColorCount {
+                comparator: a_cmp,
+                count: a_count,
+            },
+            ManaRestriction::OnlyForSpellWithColorCount {
+                comparator: b_cmp,
+                count: b_count,
+            },
+        ) => comparator_rank(*a_cmp)
+            .cmp(&comparator_rank(*b_cmp))
+            .then_with(|| a_count.cmp(b_count)),
+        (ManaRestriction::OnlyForSpellColor(a), ManaRestriction::OnlyForSpellColor(b)) => {
+            a.cmp(b)
+        }
+        (
+            ManaRestriction::OnlyForSpellFromZone(a),
+            ManaRestriction::OnlyForSpellFromZone(b),
+        ) => a.zone.cmp(&b.zone).then_with(|| {
+            zone_spend_polarity_rank(a.polarity).cmp(&zone_spend_polarity_rank(b.polarity))
+        }),
+        (ManaRestriction::OnlyForAny(a), ManaRestriction::OnlyForAny(b)) => {
+            cmp_mana_restriction_slices(a, b)
+        }
+        (
+            ManaRestriction::OnlyForSpecialAction(a),
+            ManaRestriction::OnlyForSpecialAction(b),
+        ) => special_action_rank(*a).cmp(&special_action_rank(*b)),
+        _ => std::cmp::Ordering::Equal,
+    })
+}
+
+fn cmp_spell_cost_criterion(
+    left: &SpellCostCriterion,
+    right: &SpellCostCriterion,
+) -> std::cmp::Ordering {
+    match (left, right) {
+        (
+            SpellCostCriterion::ManaValue {
+                comparator: a_cmp,
+                value: a_value,
+            },
+            SpellCostCriterion::ManaValue {
+                comparator: b_cmp,
+                value: b_value,
+            },
+        ) => comparator_rank(*a_cmp)
+            .cmp(&comparator_rank(*b_cmp))
+            .then_with(|| a_value.cmp(b_value)),
+        (SpellCostCriterion::HasXInCost, SpellCostCriterion::HasXInCost) => {
+            std::cmp::Ordering::Equal
+        }
+        (SpellCostCriterion::ManaValue { .. }, SpellCostCriterion::HasXInCost) => {
+            std::cmp::Ordering::Less
+        }
+        (SpellCostCriterion::HasXInCost, SpellCostCriterion::ManaValue { .. }) => {
+            std::cmp::Ordering::Greater
+        }
+    }
+}
+
+fn comparator_rank(value: Comparator) -> u8 {
+    match value {
+        Comparator::GT => 0,
+        Comparator::LT => 1,
+        Comparator::GE => 2,
+        Comparator::LE => 3,
+        Comparator::EQ => 4,
+        Comparator::NE => 5,
+    }
+}
+
+fn ability_activation_scope_rank(value: AbilityActivationScope) -> u8 {
+    match value {
+        AbilityActivationScope::OfSpellType => 0,
+        AbilityActivationScope::Any => 1,
+    }
+}
+
+fn ability_tag_rank(value: AbilityTag) -> u8 {
+    match value {
+        AbilityTag::Boast => 0,
+        AbilityTag::Evolve => 1,
+        AbilityTag::Exhaust => 2,
+        AbilityTag::Outlast => 3,
+        AbilityTag::Cycling => 4,
+        AbilityTag::Backup => 5,
+        AbilityTag::PowerUp => 6,
+        AbilityTag::Equip => 7,
+        AbilityTag::Augment => 8,
+    }
+}
+
+fn zone_spend_polarity_rank(value: ZoneSpendPolarity) -> u8 {
+    match value {
+        ZoneSpendPolarity::From => 0,
+        ZoneSpendPolarity::NotFrom => 1,
+    }
+}
+
+fn special_action_rank(value: SpecialAction) -> u8 {
+    match value {
+        SpecialAction::CompanionToHand => 0,
+        SpecialAction::UnlockDoor => 1,
+        SpecialAction::Plot => 2,
+        SpecialAction::TurnFaceUp => 3,
+        SpecialAction::RollPlanarDie => 4,
+        SpecialAction::EndContinuousEffect => 5,
+    }
 }
 
 impl ManaRestriction {
@@ -637,10 +1095,6 @@ impl ManaRestriction {
             // carries no commander context, so this restriction can never
             // independently authorize a spend here — it returns `false` and the
             // authoritative relational evaluation (comparing the spell's creature
-            // subtypes against the controller's commander's creature types) is done
-            // at the `apply_mana_spell_grants` call site, which has `&GameState`.
-            // Mirrors the deferral contract of `OnlyForXCosts`.
-            ManaRestriction::SharesCreatureTypeWithCommander => false,
             // CR 106.6: The spell-casting half of the OR — allows if the spell has the
             // required type, consulting both core card types (Creature, Instant, ...)
             // and subtypes (Elemental, Goblin, ...). Flamebraider's "Elemental" names
@@ -696,6 +1150,9 @@ impl ManaRestriction {
             ManaRestriction::OnlyForSpellWithColorCount { comparator, count } => meta
                 .color_count
                 .is_some_and(|cc| comparator.evaluate(cc as i32, *count as i32)),
+            ManaRestriction::OnlyForSpellColor(required_color) => {
+                meta.colors.contains(required_color)
+            }
             // CR 106.6 + CR 400.7: zone-gated spend. `From` requires the spell be
             // cast from the named zone; `NotFrom` requires it be cast from any
             // zone *except* the named one (e.g. "from anywhere other than your
@@ -728,6 +1185,7 @@ impl ManaRestriction {
             ManaRestriction::OnlyForAny(subs) => subs.iter().any(|r| r.allows_spell(meta)),
             // CR 116.2: Special-action-only mana never pays for a spell cast.
             ManaRestriction::OnlyForSpecialAction(_) => false,
+            ManaRestriction::Impossible => false,
             ManaRestriction::ConvokePayment => true,
         }
     }
@@ -747,17 +1205,18 @@ impl ManaRestriction {
             ManaRestriction::OnlyForSpell
             | ManaRestriction::OnlyForSpellType(_)
             | ManaRestriction::OnlyForCreatureType(_)
-            | ManaRestriction::SharesCreatureTypeWithCommander
             | ManaRestriction::OnlyForSpellWithKeywordKind(_)
             | ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _)
             | ManaRestriction::OnlyForSpellWithManaValue { .. }
             | ManaRestriction::OnlyForSpellMatchingCostCriteria { .. }
             | ManaRestriction::OnlyForSpellWithColorCount { .. }
+            | ManaRestriction::OnlyForSpellColor(_)
             | ManaRestriction::OnlyForSpellFromZone(_)
             // CR 708.4: Face-down-spell-only mana never pays for ability activation.
             | ManaRestriction::OnlyForFaceDownSpell
             // CR 116.2: Special-action-only mana never pays for ability activation.
-            | ManaRestriction::OnlyForSpecialAction(_) => false,
+            | ManaRestriction::OnlyForSpecialAction(_)
+            | ManaRestriction::Impossible => false,
             // CR 106.6: The ability-activation half of the OR. `OfSpellType`
             // restricts to abilities of permanents whose type matches the
             // restriction ("Elemental sources" includes creature type Elemental —
@@ -800,6 +1259,7 @@ impl ManaRestriction {
                 source_types,
                 source_subtypes,
                 ability_tag,
+                mana_color_constraint: _,
             } => self.allows_activation(source_types, source_subtypes, *ability_tag),
             PaymentContext::Effect => false,
             // CR 116.2: A special-action payment is permitted only by mana that
@@ -821,33 +1281,72 @@ impl ManaRestriction {
             ManaRestriction::OnlyForAny(subs) => {
                 subs.iter().any(|r| r.allows_special_action(action))
             }
-            _ => false,
+            ManaRestriction::OnlyForSpell
+            | ManaRestriction::OnlyForSpellType(_)
+            | ManaRestriction::OnlyForCreatureType(_)
+            | ManaRestriction::OnlyForTypeSpellsOrAbilities { .. }
+            | ManaRestriction::OnlyForActivation
+            | ManaRestriction::OnlyForTaggedActivation(_)
+            | ManaRestriction::OnlyForXCosts
+            | ManaRestriction::OnlyForSpellWithKeywordKind(_)
+            | ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _)
+            | ManaRestriction::OnlyForSpellWithManaValue { .. }
+            | ManaRestriction::OnlyForSpellMatchingCostCriteria { .. }
+            | ManaRestriction::OnlyForSpellWithColorCount { .. }
+            | ManaRestriction::OnlyForSpellColor(_)
+            | ManaRestriction::OnlyForSpellFromZone(_)
+            | ManaRestriction::OnlyForFaceDownSpell
+            | ManaRestriction::Impossible
+            | ManaRestriction::ConvokePayment => false,
         }
     }
 }
 
 /// CR 106.6: Additional effect that the mana confers upon the spell it is spent on.
 /// E.g., "that spell can't be countered" (Cavern of Souls, Delighted Halfling).
+fn default_mana_keyword_grant_duration() -> Box<crate::types::ability::Duration> {
+    Box::new(crate::types::ability::Duration::UntilEndOfTurn)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaSpellGrant {
     /// The spell cast with this mana can't be countered.
     CantBeCountered,
-    /// CR 106.6 + CR 702: If the spell this mana is spent on satisfies
-    /// `restriction`, grant it `keyword` until end of turn.
+    /// CR 106.6 + CR 702.10: If the spell this mana is spent on satisfies
+    /// `restriction`, grant it `keyword` for `duration` (subtype lands use
+    /// `UntilEndOfTurn`; Hall of the Bandit Lord uses `Permanent`).
     AddKeywordUntilEndOfTurn {
         keyword: Keyword,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         restriction: Option<ManaRestriction>,
+        #[serde(default = "default_mana_keyword_grant_duration")]
+        duration: Box<crate::types::ability::Duration>,
     },
     /// CR 106.6 + CR 603.3: "When you spend this mana to cast a [filter] spell,
     /// [effect]" — a reflexive trigger riding the produced mana (Lapis Orb of
-    /// Dragonkind, Scaled Nurturer, Gilanra). When the mana is spent on a spell
-    /// satisfying `restriction` (`None` = any spell), the controller's `ability`
-    /// is put on the stack as a triggered ability. The ability's source is the
-    /// permanent that produced the mana.
+    /// Dragonkind, Scaled Nurturer, Gilanra, Path of Ancestry, Primal Wellspring,
+    /// Pyromancer's Goggles). When the mana is spent on a spell matching `filter`,
+    /// the controller's `ability` is put on the stack as a triggered ability. The
+    /// ability's source is the permanent that produced the mana.
+    ///
+    /// `filter` is the CR 603.3 TRIGGER EVENT filter — "which spell makes this
+    /// fire" — and is deliberately a [`TargetFilter`], NOT a [`ManaRestriction`].
+    /// The two answer different questions and coincide only by accident.
+    /// `ManaRestriction` is CR 106.6 SPEND legality ("what may this mana pay
+    /// for"), and NOT ONE of these cards restricts its mana: Pyromancer's Goggles'
+    /// {R} may be spent on anything; it merely TRIGGERS when spent on a red instant
+    /// or sorcery. Typing this field as a spend restriction forced its filter
+    /// vocabulary to grow along the wrong axis — a color predicate would have had
+    /// to be bolted onto `ManaRestriction` purely to serve a trigger — which is the
+    /// cross-rule-section conflation the categorical-boundary rule forbids.
+    /// `TargetFilter` is the engine's existing "which object matches" vocabulary
+    /// (the same one `TriggerDefinition::valid_card` uses), so the whole
+    /// type × color × mana-value class is expressible with no new variant.
+    ///
+    /// Genuine CR 106.6 spend restrictions are unaffected — they live on the
+    /// separate [`ManaUnit::restrictions`] field. `TargetFilter::Any` = any spell.
     TriggerOnSpend {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        restriction: Option<ManaRestriction>,
+        filter: TargetFilter,
         ability: Box<crate::types::ability::AbilityDefinition>,
     },
 }
@@ -899,7 +1398,7 @@ pub mod snow_compat {
 /// player can direct (pin) which specific unit pays a pending cost. The sentinel
 /// `ManaPipId(0)` marks an unstamped unit (convoke markers, detached preview
 /// pools) and never matches a real pin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ManaPipId(pub u64);
 
 #[derive(Debug, Clone, Eq, Serialize, Deserialize)]
@@ -993,7 +1492,7 @@ impl ManaUnit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ManaCostShard {
     // Basic colored
     White,
@@ -1050,6 +1549,56 @@ pub enum ManaCostShard {
 }
 
 impl ManaCostShard {
+    /// Canonical printed symbol for this mana-cost component.
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::White => "W",
+            Self::Blue => "U",
+            Self::Black => "B",
+            Self::Red => "R",
+            Self::Green => "G",
+            Self::Colorless => "C",
+            Self::Snow => "S",
+            Self::X => "X",
+            Self::TwoOrMoreColorSource => "Z",
+            Self::WhiteBlue => "W/U",
+            Self::WhiteBlack => "W/B",
+            Self::BlueBlack => "U/B",
+            Self::BlueRed => "U/R",
+            Self::BlackRed => "B/R",
+            Self::BlackGreen => "B/G",
+            Self::RedWhite => "R/W",
+            Self::RedGreen => "R/G",
+            Self::GreenWhite => "G/W",
+            Self::GreenBlue => "G/U",
+            Self::TwoWhite => "2/W",
+            Self::TwoBlue => "2/U",
+            Self::TwoBlack => "2/B",
+            Self::TwoRed => "2/R",
+            Self::TwoGreen => "2/G",
+            Self::PhyrexianWhite => "W/P",
+            Self::PhyrexianBlue => "U/P",
+            Self::PhyrexianBlack => "B/P",
+            Self::PhyrexianRed => "R/P",
+            Self::PhyrexianGreen => "G/P",
+            Self::PhyrexianWhiteBlue => "W/U/P",
+            Self::PhyrexianWhiteBlack => "W/B/P",
+            Self::PhyrexianBlueBlack => "U/B/P",
+            Self::PhyrexianBlueRed => "U/R/P",
+            Self::PhyrexianBlackRed => "B/R/P",
+            Self::PhyrexianBlackGreen => "B/G/P",
+            Self::PhyrexianRedWhite => "R/W/P",
+            Self::PhyrexianRedGreen => "R/G/P",
+            Self::PhyrexianGreenWhite => "G/W/P",
+            Self::PhyrexianGreenBlue => "G/U/P",
+            Self::ColorlessWhite => "C/W",
+            Self::ColorlessBlue => "C/U",
+            Self::ColorlessBlack => "C/B",
+            Self::ColorlessRed => "C/R",
+            Self::ColorlessGreen => "C/G",
+        }
+    }
+
     /// Returns true if this shard contributes to devotion for the given color.
     /// CR 700.5: Each mana symbol that is or contains the color counts.
     /// Hybrid symbols count toward each of their colors. A single hybrid symbol
@@ -1227,7 +1776,7 @@ impl FromStr for ManaCostShard {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ManaCost {
     NoCost,
@@ -1240,6 +1789,18 @@ pub enum ManaCost {
     /// The card's own mana value (CR 202.3), as generic mana only — used for
     /// "encore {X}, where X is its mana value" (Sliver Gravemother class).
     SelfManaValue,
+    /// The card's own mana cost reduced by `reduction` generic mana — used for
+    /// granted alt-cost keywords whose cost is "its mana cost reduced by {N}"
+    /// (Dream Devourer foretell = MV−2, Aminatou miracle = MV−4).
+    ///
+    /// INVARIANT: this is a pre-resolution placeholder like `SelfManaCost` /
+    /// `SelfManaValue`; it MUST be concretized by `resolve_keyword_mana_cost`
+    /// (game/keywords.rs) into a concrete `Cost` before any arithmetic path
+    /// (`plus` / `scaled` / `concretize_x`) — it never reaches them unresolved.
+    /// CR 601.2f: reduction floors at {0} and only the generic component is reduced.
+    SelfManaCostReduced {
+        reduction: u32,
+    },
 }
 
 impl ManaCost {
@@ -1256,7 +1817,22 @@ impl ManaCost {
         match self {
             ManaCost::NoCost => true,
             ManaCost::Cost { shards, generic } => shards.is_empty() && *generic == 0,
-            ManaCost::SelfManaCost | ManaCost::SelfManaValue => false,
+            ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => false,
+        }
+    }
+
+    /// CR 601.2f: reduce ONLY the generic component, saturating at 0; colored/
+    /// hybrid/X pips (shards) untouched. An alternative cost's mana component
+    /// can't be reduced below {0}.
+    pub fn reduced_by_generic(&self, reduction: u32) -> ManaCost {
+        match self {
+            ManaCost::Cost { shards, generic } => ManaCost::Cost {
+                shards: shards.clone(),
+                generic: generic.saturating_sub(reduction),
+            },
+            other => other.clone(),
         }
     }
 
@@ -1273,11 +1849,34 @@ impl ManaCost {
     /// CR 202.3f: For hybrid symbols, use the largest component.
     pub fn mana_value(&self) -> u32 {
         match self {
-            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => 0,
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => 0,
             ManaCost::Cost { shards, generic } => {
                 let shard_total: u32 = shards.iter().map(|s| s.mana_value_contribution()).sum();
                 shard_total + generic
             }
+        }
+    }
+
+    /// CR 702.143 (foretell-cost reduction) / CR 118.7: return this cost with its
+    /// generic component reduced by `reduction`'s mana value (floored at 0),
+    /// colored pips preserved. "Its foretell cost is equal to its mana cost
+    /// reduced by {2}" applied to `{4}{U}{U}` yields `{2}{U}{U}`; `{U}` yields
+    /// `{U}`; `{1}` reduced by `{2}` yields `{0}`. `NoCost` / `SelfManaCost` /
+    /// `SelfManaValue` return `self` unchanged defensively — a recipient's printed
+    /// cost is always a concrete `Cost`.
+    pub fn reduced_generic_by(&self, reduction: &ManaCost) -> ManaCost {
+        match self {
+            ManaCost::Cost { shards, generic } => ManaCost::Cost {
+                shards: shards.clone(),
+                generic: generic.saturating_sub(reduction.mana_value()),
+            },
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => self.clone(),
         }
     }
 
@@ -1290,17 +1889,62 @@ impl ManaCost {
     /// Gutsy Explorer).
     pub fn has_x(&self) -> bool {
         match self {
-            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => false,
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => false,
             ManaCost::Cost { shards, .. } => shards.iter().any(|s| matches!(s, ManaCostShard::X)),
+        }
+    }
+
+    /// CR 107.4 + CR 202.1: Count colored mana symbols in this mana cost.
+    /// `Some(c)` counts symbols contributing to color `c` (hybrid /
+    /// monocolored-hybrid / Phyrexian symbols included via
+    /// `ManaCostShard::contributes_to`). `None` counts each colored shard once
+    /// regardless of color — CR 107.4a/107.4e/107.4f: a hybrid or Phyrexian
+    /// symbol is a single colored mana symbol even though it is all of its
+    /// component colors, so `{G/W}{G/W}` counts as 2 (not 4). Generic, X,
+    /// colorless, and snow shards are not colored and never count.
+    /// `NoCost`/`SelfManaCost`/`SelfManaValue` have no per-shard cost → 0.
+    ///
+    /// Single counting authority shared by `QuantityRef::ManaSymbolsInManaCost`
+    /// (game/quantity.rs) and `FilterProp::ManaSymbolCount` (game/filter.rs).
+    pub fn count_colored_pips(&self, color: Option<ManaColor>) -> i32 {
+        match self {
+            ManaCost::Cost { shards, .. } => {
+                let count = shards
+                    .iter()
+                    .filter(|shard| match color {
+                        Some(c) => shard.contributes_to(c),
+                        None => ManaColor::ALL.iter().any(|c| shard.contributes_to(*c)),
+                    })
+                    .count();
+                i32::try_from(count).unwrap_or(i32::MAX)
+            }
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => 0,
         }
     }
 
     /// CR 202.3e: X in a mana cost equals the announced value only while the
     /// object is on the stack; in every other zone, X contributes 0.
+    ///
+    /// CR 202.3e is scoped to "an object **with an {X} in its mana cost**", so the
+    /// substitution is gated on [`ManaCost::has_x`]. An object's X (`cost_x_paid`,
+    /// the CR 107.3i single-value-per-object channel) is not always a *mana* X: a
+    /// spell whose X is defined by its own text rather than by an `{X}` symbol
+    /// (Monstrous Onslaught `{4}{R}` — "where X is the greatest power among
+    /// creatures you control as you cast this spell") carries an announced X with
+    /// nothing in its cost to substitute it into. Adding it here would report that
+    /// spell's mana value as 5+X on the stack and corrupt every mana-value-keyed
+    /// interaction with it (Spell Pierce, Mana Leak, "spells with mana value 3 or
+    /// less").
     pub fn mana_value_with_x(&self, zone: Zone, cost_x_paid: Option<u32>) -> u32 {
         self.mana_value()
             + match zone {
-                Zone::Stack => cost_x_paid.unwrap_or(0),
+                Zone::Stack if self.has_x() => cost_x_paid.unwrap_or(0),
                 _ => 0,
             }
     }
@@ -1493,28 +2137,33 @@ impl ManaPool {
         self.mana.clear();
     }
 
-    /// CR 500.5 + CR 614.6 + CR 703.4q: Drop only expiry-bound units whose
-    /// explicit rule fires on this transition. Runs FIRST during per-player
-    /// drain in `drain_pending_phase_transition_progress`, before the
-    /// CR 703.4q "empty unspent mana" event is constructed for the
-    /// replacement pipeline. Preserves H2 invariant (commit `e92fd3e19`):
-    /// expiry-bound mana leaves the pool through its own expiry rule, not
-    /// through the step-end empty event — handlers cannot intercept it.
+    /// CR 500.5 + CR 703.4q: End-of-combat retention expires before constructing
+    /// the ordinary "empty unspent mana" event. CR 500.5 orders these operations:
+    /// effects lasting until this boundary expire first, then unspent mana empties.
+    /// Clearing the reached marker makes the still-unspent unit eligible for the
+    /// normal empty-pool pipeline, where another active retention or transformation
+    /// effect may still apply.
     ///
-    /// - `EndOfTurn`: drops at cleanup only.
-    /// - `EndOfCombat`: drops when leaving combat (i.e., `in_combat` false).
-    /// - `None`: untouched — passed through to the replacement pipeline as
-    ///   a `UnitDecision { disposition: Drop }`, where step-end mana
-    ///   handlers (Upwelling, Horizon Stone, Kruphix, …) may flip the
-    ///   disposition to `Keep` (CR 614.6) or `Recolor(_)` (CR 614.1a). The
-    ///   actual emptying / recoloring of `None`-expiry units happens later
-    ///   in `apply_empty_mana_pool_decisions` after the pipeline resolves.
-    pub fn clear_expiring_at_step_end(&mut self, in_combat: bool, entering_cleanup: bool) {
-        self.mana.retain(|u| match u.expiry {
-            Some(ManaExpiry::EndOfTurn) => !entering_cleanup,
-            Some(ManaExpiry::EndOfCombat) => in_combat,
-            None => true,
-        });
+    /// - `EndOfCombat`: marker clears when leaving combat (CR 500.5a).
+    /// - `EndOfTurn`: marker remains until the cleanup action (CR 514.2).
+    /// - `None`: already eligible for the ordinary empty-pool event.
+    pub fn clear_expired_end_of_combat_retention_markers(&mut self, in_combat: bool) {
+        for unit in &mut self.mana {
+            if matches!(unit.expiry, Some(ManaExpiry::EndOfCombat)) && !in_combat {
+                unit.expiry = None;
+            }
+        }
+    }
+
+    /// CR 514.2: “Until end of turn” effects end during the cleanup action.
+    /// Clearing only the marker leaves the unit for the next ordinary
+    /// CR 500.5 / CR 703.4q empty-pool boundary.
+    pub fn clear_expired_end_of_turn_retention_markers(&mut self) {
+        for unit in &mut self.mana {
+            if matches!(unit.expiry, Some(ManaExpiry::EndOfTurn)) {
+                unit.expiry = None;
+            }
+        }
     }
 
     /// Remove all mana units produced by the given source.
@@ -1569,16 +2218,15 @@ impl ManaPool {
     /// never spent.
     pub fn spend_for(&mut self, color: ManaType, ctx: &PaymentContext<'_>) -> Option<ManaUnit> {
         // First pass: prefer unrestricted mana of this color
-        if let Some(pos) = self
-            .mana
-            .iter()
-            .position(|m| m.color == color && m.restrictions.is_empty())
-        {
+        if let Some(pos) = self.mana.iter().position(|m| {
+            m.color == color && ctx.permits_actual_mana_type(m.color) && m.restrictions.is_empty()
+        }) {
             return Some(self.mana.swap_remove(pos));
         }
         // Second pass: restricted mana that allows this payment context
         if let Some(pos) = self.mana.iter().position(|m| {
             m.color == color
+                && ctx.permits_actual_mana_type(m.color)
                 && !m.restrictions.is_empty()
                 && m.restrictions.iter().all(|r| r.allows(ctx))
         }) {
@@ -1610,26 +2258,39 @@ pub fn apply_empty_mana_pool_decisions(
     player_id: PlayerId,
     units: &[UnitDecision],
     events: &mut Vec<GameEvent>,
-) {
+) -> u32 {
     let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) else {
-        return;
+        return 0;
     };
     // Descending pool_index order preserves index validity across removes.
     let mut sorted: Vec<&UnitDecision> = units.iter().collect();
     sorted.sort_by_key(|d| std::cmp::Reverse(d.pool_index));
     let mut changed = false;
+    let mut removed_count = 0_u32;
+    let mut seen_indices = std::collections::HashSet::new();
     for decision in sorted {
+        // The action wire is hostile input. A duplicate index or a stale
+        // color/index pair must not rebound to a different mana unit after a
+        // prior descending removal.
+        if !seen_indices.insert(decision.pool_index)
+            || player
+                .mana_pool
+                .mana
+                .get(decision.pool_index)
+                .is_none_or(|unit| unit.color != decision.color)
+        {
+            continue;
+        }
         match decision.disposition {
             UnitDisposition::Drop => {
-                if decision.pool_index < player.mana_pool.mana.len() {
-                    let removed = player.mana_pool.mana.remove(decision.pool_index);
-                    changed = true;
-                    events.push(GameEvent::ManaPoolEmptied {
-                        player_id,
-                        source_id: removed.source_id,
-                        color: removed.color,
-                    });
-                }
+                let removed = player.mana_pool.mana.remove(decision.pool_index);
+                removed_count += 1;
+                changed = true;
+                events.push(GameEvent::ManaPoolEmptied {
+                    player_id,
+                    source_id: removed.source_id,
+                    color: removed.color,
+                });
             }
             UnitDisposition::Keep => {}
             UnitDisposition::Recolor(to) => {
@@ -1649,11 +2310,50 @@ pub fn apply_empty_mana_pool_decisions(
     if changed {
         state.layers_dirty.mark_full();
     }
+    removed_count
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 702.143: `reduced_generic_by` reduces only the generic component,
+    /// preserving colored pips and flooring at 0.
+    #[test]
+    fn reduced_generic_by_reduces_generic_and_preserves_pips() {
+        // {4}{U}{U} - {2} = {2}{U}{U}
+        let base = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue; 2],
+            generic: 4,
+        };
+        let reduced = base.reduced_generic_by(&ManaCost::generic(2));
+        assert_eq!(
+            reduced,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue; 2],
+                generic: 2,
+            }
+        );
+
+        // {U} - {2} = {U} (no generic to reduce)
+        let mono = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        assert_eq!(mono.reduced_generic_by(&ManaCost::generic(2)), mono);
+
+        // {1} - {2} = {0} (floored)
+        assert_eq!(
+            ManaCost::generic(1).reduced_generic_by(&ManaCost::generic(2)),
+            ManaCost::generic(0)
+        );
+
+        // Non-Cost variants return self unchanged.
+        assert_eq!(
+            ManaCost::NoCost.reduced_generic_by(&ManaCost::generic(2)),
+            ManaCost::NoCost
+        );
+    }
 
     fn make_unit(color: ManaType) -> ManaUnit {
         ManaUnit::new(color, ObjectId(1), false, Vec::new())
@@ -1665,6 +2365,47 @@ mod tests {
         restrictions: Vec<ManaRestriction>,
     ) -> ManaUnit {
         ManaUnit::new(color, source, false, restrictions)
+    }
+
+    #[test]
+    fn empty_mana_pool_decisions_count_only_valid_unique_drops() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        state.players[0].mana_pool.add(make_unit(ManaType::Black));
+        state.players[0].mana_pool.add(make_unit(ManaType::Red));
+        let decisions = vec![
+            UnitDecision {
+                pool_index: 1,
+                color: ManaType::Red,
+                disposition: UnitDisposition::Drop,
+            },
+            // Hostile duplicate: must not rebound after the first removal.
+            UnitDecision {
+                pool_index: 1,
+                color: ManaType::Red,
+                disposition: UnitDisposition::Drop,
+            },
+            // Hostile stale color/index pair: must not remove the black unit.
+            UnitDecision {
+                pool_index: 0,
+                color: ManaType::Blue,
+                disposition: UnitDisposition::Drop,
+            },
+        ];
+        let mut events = Vec::new();
+
+        let removed =
+            apply_empty_mana_pool_decisions(&mut state, PlayerId(0), &decisions, &mut events);
+
+        assert_eq!(removed, 1);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 1);
+        assert_eq!(state.players[0].mana_pool.mana[0].color, ManaType::Black);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::ManaPoolEmptied { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1759,13 +2500,12 @@ mod tests {
         assert_eq!(pool.total(), 0);
     }
 
-    // CR 500.5 + CR 703.4q: `clear_expiring_at_step_end` is the leading
-    // half of step-end mana resolution — it drops only expiry-bound units
-    // whose own rule fires on this transition. Handler-driven retention /
-    // transformation behavior is exercised end-to-end via the replacement
-    // pipeline in `game::turns` runtime tests, not here.
+    // CR 500.5 + CR 703.4q: retention durations end before the ordinary
+    // empty-pool event. The helper clears only the reached marker; pool
+    // removal and any still-active retention / transformation effects are
+    // exercised end-to-end through `game::turns`.
     #[test]
-    fn mana_pool_clear_expiring_drops_end_of_turn_only_at_cleanup() {
+    fn mana_pool_clears_end_of_turn_marker_only_at_cleanup() {
         let mut pool = ManaPool::default();
         let mut retained = make_unit(ManaType::Green);
         retained.expiry = Some(ManaExpiry::EndOfTurn);
@@ -1774,18 +2514,21 @@ mod tests {
 
         // Non-cleanup transition: EndOfTurn unit survives; non-expiry unit
         // is left in place (the pipeline drives Drop disposition elsewhere).
-        pool.clear_expiring_at_step_end(false, false);
+        pool.clear_expired_end_of_combat_retention_markers(false);
         assert_eq!(pool.count_color(ManaType::Green), 1);
         assert_eq!(pool.count_color(ManaType::Red), 1);
+        assert_eq!(pool.mana[0].expiry, Some(ManaExpiry::EndOfTurn));
 
-        // Cleanup transition: EndOfTurn unit drops; non-expiry unit remains.
-        pool.clear_expiring_at_step_end(false, true);
-        assert_eq!(pool.count_color(ManaType::Green), 0);
+        // Cleanup transition: the duration ends, but the still-unspent unit
+        // remains for the ordinary empty-pool pipeline.
+        pool.clear_expired_end_of_turn_retention_markers();
+        assert_eq!(pool.count_color(ManaType::Green), 1);
         assert_eq!(pool.count_color(ManaType::Red), 1);
+        assert_eq!(pool.mana[0].expiry, None);
     }
 
     #[test]
-    fn mana_pool_clear_expiring_drops_end_of_combat_when_leaving_combat() {
+    fn mana_pool_clears_end_of_combat_marker_when_leaving_combat() {
         let mut pool = ManaPool::default();
         let mut combat_mana = make_unit(ManaType::Red);
         combat_mana.expiry = Some(ManaExpiry::EndOfCombat);
@@ -1793,12 +2536,15 @@ mod tests {
 
         // In-combat transition (e.g., DeclareAttackers → DeclareBlockers):
         // EndOfCombat unit survives.
-        pool.clear_expiring_at_step_end(true, false);
+        pool.clear_expired_end_of_combat_retention_markers(true);
         assert_eq!(pool.count_color(ManaType::Red), 1);
+        assert_eq!(pool.mana[0].expiry, Some(ManaExpiry::EndOfCombat));
 
-        // Leaving combat (EndCombat → PostCombatMain): EndOfCombat unit drops.
-        pool.clear_expiring_at_step_end(false, false);
-        assert_eq!(pool.total(), 0);
+        // Leaving combat ends the retention duration; ordinary empty-pool
+        // processing decides the unit's final disposition.
+        pool.clear_expired_end_of_combat_retention_markers(false);
+        assert_eq!(pool.total(), 1);
+        assert_eq!(pool.mana[0].expiry, None);
     }
 
     #[test]
@@ -1846,8 +2592,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let instant_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -1856,8 +2604,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let legendary_spell = SpellMeta {
             types: vec!["Legendary".to_string(), "Creature".to_string()],
@@ -1866,8 +2616,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         assert!(restriction.allows_spell(&creature_spell));
         assert!(!restriction.allows_spell(&instant_spell));
@@ -1892,8 +2644,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let omen_spell = SpellMeta {
             types: vec!["Enchantment".to_string(), "Omen".to_string()],
@@ -1902,8 +2656,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let goblin_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -1912,8 +2668,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         // Matches one branch each.
         assert!(restriction.allows_spell(&dragon_spell));
@@ -1960,8 +2718,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let turtle_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -1970,8 +2730,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -1980,8 +2742,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         assert!(restriction.allows_spell(&ninja_creature));
         assert!(!restriction.allows_spell(&turtle_creature));
@@ -1998,8 +2762,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let source_types = vec!["Artifact".to_string()];
         let source_subtypes = Vec::new();
@@ -2009,6 +2775,7 @@ mod tests {
             source_types: &source_types,
             source_subtypes: &source_subtypes,
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
     }
@@ -2023,8 +2790,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2033,8 +2802,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let elf_instant = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -2043,37 +2814,24 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         assert!(restriction.allows_spell(&elf_creature));
         assert!(!restriction.allows_spell(&goblin_creature));
         assert!(!restriction.allows_spell(&elf_instant));
     }
 
-    #[test]
-    fn shares_creature_type_with_commander_defers_to_call_site() {
-        // CR 106.6 + CR 903.3: The relational commander-subtype filter carries no
-        // commander context in `SpellMeta`, so `allows_spell`/`allows_activation`
-        // must return `false` for every payment context. The authoritative
-        // relational evaluation happens at the `apply_mana_spell_grants` spend
-        // site (game-state aware). This documents the deferral contract.
-        let restriction = ManaRestriction::SharesCreatureTypeWithCommander;
-        let elf_creature = SpellMeta {
-            types: vec!["Creature".to_string()],
-            subtypes: vec!["Elf".to_string()],
-            keyword_kinds: vec![],
-            cast_from_zone: None,
-            mana_value: None,
-            color_count: None,
-            has_x_in_cost: false,
-            is_face_down: false,
-        };
-        assert!(!restriction.allows_spell(&elf_creature));
-        let source_types = vec!["Creature".to_string()];
-        let source_subtypes = vec!["Elf".to_string()];
-        assert!(!restriction.allows_activation(&source_types, &source_subtypes, None));
-    }
+    // NOTE: `shares_creature_type_with_commander_defers_to_call_site` was DELETED with
+    // the `ManaRestriction::SharesCreatureTypeWithCommander` variant it documented. That
+    // variant was never a CR 106.6 spend restriction — Path of Ancestry's mana may be
+    // spent on anything — so it carried a permanently-`false` `allows_spell`, and the
+    // test existed only to pin that hole. The predicate now lives where it belongs, as
+    // `FilterProp::SharesCreatureTypeWithCommander`, and its behavior is pinned by the
+    // RUNTIME test `mana_spend_trigger_shares_creature_type_with_commander`
+    // (game/casting_tests.rs), which is the only layer that can prove it.
 
     #[test]
     fn spend_for_prefers_unrestricted_mana() {
@@ -2093,8 +2851,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let spent = pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&spell))
@@ -2120,8 +2880,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         assert!(pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&elf_spell))
@@ -2181,8 +2943,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         assert!(pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&goblin_spell))
@@ -2206,8 +2970,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let tribal_elemental_instant = SpellMeta {
             types: vec!["Tribal".to_string(), "Instant".to_string()],
@@ -2216,8 +2982,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2226,8 +2994,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let plain_instant = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -2236,8 +3006,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         assert!(restriction.allows_spell(&elemental_creature));
         assert!(restriction.allows_spell(&tribal_elemental_instant));
@@ -2260,8 +3032,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let colored_eldrazi = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2270,8 +3044,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let colorless_construct = SpellMeta {
             types: vec!["Artifact".to_string(), "Colorless".to_string()],
@@ -2280,8 +3056,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         assert!(restriction.allows_spell(&colorless_eldrazi));
         assert!(!restriction.allows_spell(&colored_eldrazi));
@@ -2334,8 +3112,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let colored_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2344,8 +3124,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         // Spell half: still gated to the named type.
         assert!(restriction.allows_spell(&colorless_spell));
@@ -2383,8 +3165,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let artifact_creature_spell = SpellMeta {
             types: vec!["Artifact".to_string(), "Creature".to_string()],
@@ -2393,8 +3177,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let instant_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -2403,8 +3189,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let creature_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2413,8 +3201,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         // Permitted: any artifact spell (incl. artifact creatures).
         assert!(restriction.allows(&PaymentContext::Spell(&artifact_spell)));
@@ -2428,11 +3218,13 @@ mod tests {
             source_types: &["Creature".to_string()],
             source_subtypes: &["Human".to_string()],
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(restriction.allows(&PaymentContext::Activation {
             source_types: &["Land".to_string()],
             source_subtypes: &[],
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
     }
 
@@ -2449,8 +3241,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let creature_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2459,8 +3253,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let artifact_types = vec!["Artifact".to_string()];
         let creature_types = vec!["Creature".to_string()];
@@ -2472,11 +3268,13 @@ mod tests {
             source_types: &artifact_types,
             source_subtypes: &no_subtypes,
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(!restriction.allows(&PaymentContext::Activation {
             source_types: &creature_types,
             source_subtypes: &no_subtypes,
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
     }
@@ -2492,11 +3290,13 @@ mod tests {
             // is the is_face_down flag, not the (cleared) type list.
             types: vec!["Creature".to_string()],
             is_face_down: true,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         let face_up_spell = SpellMeta {
             types: vec!["Creature".to_string()],
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         // LEGAL: spending the mana on a face-down cast.
@@ -2508,6 +3308,7 @@ mod tests {
             source_types: &["Creature".to_string()],
             source_subtypes: &[],
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
         assert!(!restriction.allows(&PaymentContext::SpecialAction(SpecialAction::UnlockDoor)));
@@ -2528,6 +3329,7 @@ mod tests {
         let spell = SpellMeta {
             types: vec!["Creature".to_string()],
             is_face_down: true,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         assert!(!restriction.allows(&PaymentContext::Spell(&spell)));
@@ -2535,6 +3337,7 @@ mod tests {
             source_types: &["Creature".to_string()],
             source_subtypes: &[],
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
     }
@@ -2567,6 +3370,73 @@ mod tests {
         assert!(!restriction.allows(&PaymentContext::Spell(&creature)));
     }
 
+    #[test]
+    fn source_chosen_color_mana_restriction_uses_live_spell_colors() {
+        let red_only = ManaRestriction::OnlyForSpellColor(ManaColor::Red);
+        let red = SpellMeta {
+            colors: vec![ManaColor::Red],
+            ..SpellMeta::default()
+        };
+        let blue = SpellMeta {
+            colors: vec![ManaColor::Blue],
+            ..SpellMeta::default()
+        };
+        let multicolor = SpellMeta {
+            colors: vec![ManaColor::Red, ManaColor::Blue],
+            ..SpellMeta::default()
+        };
+        let colorless = SpellMeta::default();
+        assert!(red_only.allows(&PaymentContext::Spell(&red)));
+        assert!(red_only.allows(&PaymentContext::Spell(&multicolor)));
+        assert!(!red_only.allows(&PaymentContext::Spell(&blue)));
+        assert!(!red_only.allows(&PaymentContext::Spell(&colorless)));
+        assert!(!ManaRestriction::Impossible.allows(&PaymentContext::Spell(&red)));
+    }
+
+    #[test]
+    fn activation_color_constraint_rejects_wrong_actual_mana_color() {
+        assert!(ActivationManaColorConstraint::Only(ManaColor::Red).permits(ManaType::Red));
+        assert!(!ActivationManaColorConstraint::Only(ManaColor::Red).permits(ManaType::Blue));
+        assert!(!ActivationManaColorConstraint::Only(ManaColor::Red).permits(ManaType::Colorless));
+        assert!(!ActivationManaColorConstraint::Impossible.permits(ManaType::Red));
+    }
+
+    #[test]
+    fn spend_for_enforces_activation_color_constraint_for_both_passes() {
+        let source_types = vec!["Artifact".to_string()];
+        let source_subtypes = Vec::new();
+        let context = PaymentContext::Activation {
+            source_types: &source_types,
+            source_subtypes: &source_subtypes,
+            ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Only(ManaColor::Red),
+        };
+        let mut pool = ManaPool {
+            mana: vec![
+                // First pass would take this unrestricted blue unit without
+                // checking the activation's actual-color rider.
+                make_unit(ManaType::Blue),
+                // Second pass must reject it too, even though its restriction
+                // otherwise permits any activation.
+                make_restricted_unit(
+                    ManaType::Blue,
+                    ObjectId(2),
+                    vec![ManaRestriction::OnlyForActivation],
+                ),
+                make_unit(ManaType::Red),
+            ],
+        };
+
+        assert!(pool.spend_for(ManaType::Blue, &context).is_none());
+        assert_eq!(pool.total(), 3);
+        assert_eq!(
+            pool.spend_for(ManaType::Red, &context)
+                .expect("matching actual mana color should remain spendable")
+                .color,
+            ManaType::Red
+        );
+    }
+
     // CR 106.6 + CR 601.2g: "Spend this mana only to cast instant and sorcery
     // spells" (Tablet of Discovery, issue #1975) names a union of two distinct
     // spell types. Per the Melek, Izzet Paragon example (CR 601.3e), an "instant
@@ -2587,8 +3457,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let sorcery = SpellMeta {
             types: vec!["Sorcery".to_string()],
@@ -2597,8 +3469,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2607,8 +3481,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         // Manamorphose is an instant — the {R}{R} restricted mana must pay for it.
         assert!(restriction.allows_spell(&instant));
@@ -2649,8 +3525,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let normal_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -2659,8 +3537,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         assert!(restriction.allows_spell(&flashback_spell));
         assert!(!restriction.allows_spell(&normal_spell));
@@ -2677,15 +3557,19 @@ mod tests {
         let mv_six = SpellMeta {
             mana_value: Some(6),
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         let mv_four = SpellMeta {
             mana_value: Some(4),
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         let no_mv = SpellMeta::default();
@@ -2706,15 +3590,19 @@ mod tests {
         let mv_two = SpellMeta {
             mana_value: Some(2),
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         let mv_four = SpellMeta {
             mana_value: Some(4),
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&mv_two));
@@ -2736,8 +3624,10 @@ mod tests {
         let mv_four = SpellMeta {
             mana_value: Some(4),
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -2748,8 +3638,10 @@ mod tests {
         let mv_five = SpellMeta {
             mana_value: Some(5),
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -2782,14 +3674,18 @@ mod tests {
         };
         let three_colors = SpellMeta {
             color_count: Some(3),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         let two_colors = SpellMeta {
             color_count: Some(2),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&three_colors));
@@ -2811,14 +3707,18 @@ mod tests {
         };
         let colorless = SpellMeta {
             color_count: Some(0),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         let one_color = SpellMeta {
             color_count: Some(1),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&colorless));
@@ -2839,14 +3739,18 @@ mod tests {
         };
         let three_colors = SpellMeta {
             color_count: Some(3),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         let one_color = SpellMeta {
             color_count: Some(1),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         assert!(two_or_more.allows_spell(&three_colors));
@@ -2869,8 +3773,10 @@ mod tests {
 
         let one_color = SpellMeta {
             color_count: Some(1),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -2880,8 +3786,10 @@ mod tests {
 
         let two_colors = SpellMeta {
             color_count: Some(2),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -3045,14 +3953,28 @@ mod tests {
     }
 
     #[test]
-    fn mana_value_with_x_no_x_shard_adds_x_paid() {
-        // On the stack, cost_x_paid is the announced X value even when the cost
-        // expression has no literal {X} shard.
+    fn mana_value_with_x_no_x_shard_ignores_x_paid() {
+        // CR 202.3e is conditioned on the object HAVING an {X} in its mana cost:
+        // "When calculating the mana value of an object with an {X} in its mana
+        // cost, X is treated as ... the number chosen for it while the object is
+        // on the stack." A cost with no {X} shard has nothing to substitute, so
+        // an object's X (`cost_x_paid`, CR 107.3i) must NOT leak into its mana
+        // value.
+        //
+        // CORRECTED PIN. This previously asserted 8 and its comment asserted the
+        // buggy premise as if it were the rule ("cost_x_paid is the announced X
+        // value even when the cost expression has no literal {X} shard"). It is
+        // not: {1}{R}{U} has mana value 3, full stop. Left uncorrected, any spell
+        // whose X is defined by card text rather than by an {X} in its cost
+        // (Monstrous Onslaught {4}{R} — "where X is the greatest power among
+        // creatures you control as you cast this spell") would read as mana value
+        // 5+X on the stack, breaking every mana-value-keyed interaction with it
+        // (Spell Pierce, Mana Leak, "spells with mana value 3 or less").
         let cost = ManaCost::Cost {
             shards: vec![ManaCostShard::Red, ManaCostShard::Blue],
             generic: 1,
         };
-        assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(5)), 8); // 1R+1U+1 generic = 3, +5 = 8
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(5)), 3);
         assert_eq!(cost.mana_value_with_x(Zone::Stack, None), 3);
         assert_eq!(cost.mana_value_with_x(Zone::Graveyard, Some(5)), 3);
     }
@@ -3146,8 +4068,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         assert!(restriction.allows_spell(&equipment_spell));
         // Non-Equipment artifact spell: REJECTED.
@@ -3158,8 +4082,10 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         assert!(!restriction.allows_spell(&artifact_spell));
     }

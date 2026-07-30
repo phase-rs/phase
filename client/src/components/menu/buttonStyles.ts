@@ -2,18 +2,18 @@ export type MenuButtonTone = "neutral" | "emerald" | "amber" | "blue" | "red" | 
 export type MenuButtonSize = "icon" | "xs" | "chrome" | "sm" | "md" | "lg";
 
 const BASE =
-  "border border-solid font-medium backdrop-blur-sm transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 inline-flex items-center justify-center";
+  "border border-solid font-medium transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 inline-flex items-center justify-center";
 
 const TONES: Record<MenuButtonTone, string> = {
-  neutral: "border-white/12 bg-black/18 text-white/78 hover:border-white/20 hover:bg-white/8 hover:text-white",
-  emerald: "border-emerald-300/18 bg-emerald-400/10 text-emerald-100 hover:border-emerald-300/26 hover:bg-emerald-400/14",
-  amber: "border-amber-300/18 bg-amber-400/10 text-amber-100 hover:border-amber-300/26 hover:bg-amber-400/14",
-  blue: "border-blue-300/18 bg-blue-400/10 text-blue-100 hover:border-blue-300/26 hover:bg-blue-400/14",
-  red: "border-red-300/18 bg-red-400/10 text-red-100 hover:border-red-300/26 hover:bg-red-400/14",
-  indigo: "border-indigo-300/18 bg-indigo-400/10 text-indigo-100 hover:border-indigo-300/26 hover:bg-indigo-400/14",
-  slate: "border-slate-300/16 bg-slate-300/8 text-slate-100 hover:border-slate-300/24 hover:bg-slate-300/12",
-  cyan: "border-cyan-300/18 bg-cyan-400/10 text-cyan-100 hover:border-cyan-300/26 hover:bg-cyan-400/14",
-  purple: "border-purple-300/18 bg-purple-400/10 text-purple-100 hover:border-purple-300/26 hover:bg-purple-400/14",
+  neutral: "border-white/12 bg-slate-950/80 text-white/78 hover:border-white/20 hover:bg-slate-900 hover:text-white",
+  emerald: "border-emerald-300/20 bg-emerald-950/56 text-emerald-100 hover:border-emerald-300/30 hover:bg-emerald-900/64",
+  amber: "border-amber-300/20 bg-amber-950/56 text-amber-100 hover:border-amber-300/30 hover:bg-amber-900/64",
+  blue: "border-blue-300/20 bg-blue-950/56 text-blue-100 hover:border-blue-300/30 hover:bg-blue-900/64",
+  red: "border-red-300/20 bg-red-950/56 text-red-100 hover:border-red-300/30 hover:bg-red-900/64",
+  indigo: "border-indigo-300/20 bg-indigo-950/56 text-indigo-100 hover:border-indigo-300/30 hover:bg-indigo-900/64",
+  slate: "border-slate-300/16 bg-slate-900/78 text-slate-100 hover:border-slate-300/24 hover:bg-slate-800/82",
+  cyan: "border-cyan-300/20 bg-cyan-950/56 text-cyan-100 hover:border-cyan-300/30 hover:bg-cyan-900/64",
+  purple: "border-purple-300/20 bg-purple-950/56 text-purple-100 hover:border-purple-300/30 hover:bg-purple-900/64",
 };
 
 // Ghost = tertiary action: no border/fill at rest, tone-tinted text, faint hover wash.
@@ -32,15 +32,15 @@ const GHOST_TONES: Record<MenuButtonTone, string> = {
 };
 
 const SIZES: Record<MenuButtonSize, string> = {
-  icon: "min-h-8 h-8 w-8 p-0 rounded-[10px] text-base",
-  xs: "min-h-8 px-2.5 py-1 rounded-lg text-xs",
+  icon: "min-h-8 h-8 w-8 p-0 rounded-[8px] text-base",
+  xs: "min-h-8 px-2.5 py-1 rounded-[7px] text-xs",
   // Chrome cluster (FullscreenButton/VolumeControl/AccountControl peers):
   // a true 36×36 square — `min-h-9 h-9 min-w-9` together prevent any caller's
   // `h-*` override from being defeated by an upstream `min-h-*` baseline.
-  chrome: "min-h-9 h-9 min-w-9 px-1.5 py-0 rounded-[12px] text-sm",
-  sm: "min-h-11 px-4 py-2 rounded-xl text-sm",
-  md: "min-h-11 px-6 py-3 rounded-[18px] text-base",
-  lg: "min-h-11 px-10 py-4 rounded-[22px] text-lg",
+  chrome: "min-h-9 h-9 min-w-9 px-1.5 py-0 rounded-[8px] text-sm",
+  sm: "min-h-11 px-4 py-2 rounded-[9px] text-sm",
+  md: "min-h-11 px-6 py-3 rounded-[10px] text-base",
+  lg: "min-h-11 px-10 py-4 rounded-[12px] text-lg",
 };
 
 const DISABLED = "border-white/8 bg-white/5 text-white/30 cursor-not-allowed";

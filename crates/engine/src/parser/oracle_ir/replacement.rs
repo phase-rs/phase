@@ -26,3 +26,18 @@ pub(crate) struct ReplacementIr {
     /// by replacement sub-parsers internally.
     pub(crate) execute_ir: Option<EffectChainIr>,
 }
+
+impl ReplacementIr {
+    /// Wrap a recognizer-produced replacement in the common replacement lowering path.
+    ///
+    /// Some whole-line recognizers already construct the typed replacement definition
+    /// they need. They still emit this IR node so source-order document lowering
+    /// owns the final replacement post-processing.
+    pub(crate) fn from_definition(source_text: &str, definition: ReplacementDefinition) -> Self {
+        Self {
+            definition,
+            source_text: source_text.to_string(),
+            execute_ir: None,
+        }
+    }
+}

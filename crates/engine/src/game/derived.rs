@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::casting;
 use crate::game::combat::has_summoning_sickness;
 use crate::game::coverage::unimplemented_mechanics;
 use crate::game::devotion::count_devotion;
@@ -7,9 +8,9 @@ use crate::game::functioning_abilities::game_active_statics;
 use crate::game::mana_abilities;
 use crate::game::mana_sources::display_land_mana_pips;
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
-use crate::types::ability::StaticCondition;
+use crate::types::ability::{AbilityBlockEntry, AbilityKind, StaticCondition};
 use crate::types::card_type::CoreType;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::statics::{ProhibitionScope, StaticMode};
@@ -183,6 +184,50 @@ pub fn derive_display_state(state: &mut GameState) {
         }
     }
 
+    // CR 602.5: per-ability activation-block read-out (display only — no
+    // enforcement authority). Iterates `activated_ability_definitions` — the
+    // single authority for the ability index space (printed `0..printed_len` +
+    // runtime-granted at `printed_len + offset`; the same `usize` candidates.rs
+    // emits as `ActivateAbility.ability_index`). The unconditional per-object
+    // assign clears stale entries when a prohibiting source leaves the
+    // battlefield. Note: PhaseChanged is a dirty no-op (public_state.rs), which
+    // is acceptable because the parser emits only turn-axis `CantActivateDuring`
+    // conditions today.
+    if dirty.all_objects_dirty || dirty.battlefield_display_dirty {
+        let object_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+        for obj_id in object_ids {
+            let Some(controller) = state.objects.get(&obj_id).map(|o| o.controller) else {
+                continue;
+            };
+            let mut entries = Vec::new();
+            for (ability_index, def) in casting::activated_ability_definitions(state, obj_id) {
+                // CR 603.2a: only activated abilities are subject to activation
+                // prohibitions — triggered abilities are unaffected.
+                if !matches!(def.kind, AbilityKind::Activated) {
+                    continue;
+                }
+                // CR 702.170b + CR 116.2k: Plot is a special action, zone-gated
+                // off-battlefield today; guard kept for exact parity with the
+                // enforcement gates (which skip the activation-prohibition checks
+                // for plot).
+                if casting::is_plot_special_action(&def) {
+                    continue;
+                }
+                if let Some(reason) =
+                    casting::activation_prohibition_reason(state, controller, obj_id, &def)
+                {
+                    entries.push(AbilityBlockEntry {
+                        ability_index,
+                        reason,
+                    });
+                }
+            }
+            if let Some(obj) = state.objects.get_mut(&obj_id) {
+                obj.blocked_abilities = entries;
+            }
+        }
+    }
+
     // (Dynamic land frame pips are computed together with `has_mana_ability` in
     // the single battlefield-wide mana-availability sweep above, gated on
     // `mana_display_dirty`, so the clear↔repopulate of `available_mana_pips`
@@ -241,7 +286,12 @@ pub fn derive_display_state(state: &mut GameState) {
 
     // Derive has_pending_cast so the frontend can read it directly
     // without maintaining a parallel list of casting-flow WaitingFor states.
-    state.has_pending_cast = state.waiting_for.has_pending_cast();
+    state.has_pending_cast = state.waiting_for.has_pending_cast()
+        || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
+            && state.pending_cast.is_some());
+    state.allows_cancel_cast = state.waiting_for.allows_cancel_cast()
+        || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
+            && state.pending_cast.is_some());
 
     // Invariant: the two storage sites for "am I mid-cast" must agree. If
     // `waiting_for` says we're mid-cast, `GameState::pending_cast` must be
@@ -262,95 +312,96 @@ pub fn derive_display_state(state: &mut GameState) {
     // `revealed_cards` across action boundaries — `apply_action` clears
     // momentary reveals at the start of each action, so re-sync here on every
     // derive pass before the state is exported to clients.
-    sync_continuous_library_top_reveals(state);
-    sync_continuous_hand_reveals(state);
+    sync_continuous_reveals(state);
 }
 
-/// CR 400.2: Repopulate `revealed_cards` for every active `RevealTopOfLibrary`
-/// static after action-boundary clears.
-fn sync_continuous_library_top_reveals(state: &mut GameState) {
-    let mut reveal_all_players = false;
-    let mut reveal_controllers = HashSet::<PlayerId>::new();
+/// CR 400.2 / CR 701.20a: Repopulate `revealed_cards` for every active
+/// continuous reveal static after action-boundary clears (`apply_action` wipes
+/// momentary reveals at the start of each action). One pass over
+/// `game_active_statics` dispatches BOTH the `RevealTopOfLibrary` ("play with
+/// the top card of your library revealed" — Future Sight, Magus of the Future)
+/// and `RevealHand` ("play with hands revealed") statics, so callers get the
+/// authoritative reveal set without scanning the statics twice.
+///
+/// Public because the AI determinizer (`phase-ai/determinize.rs`) calls it on
+/// its simulation clone to pin statically-revealed cards before resampling —
+/// the reveal rule is an engine visibility concern (CR 400.2) and stays owned
+/// here rather than being recomputed AI-side.
+pub fn sync_continuous_reveals(state: &mut GameState) {
+    let mut reveal_top_all = false;
+    let mut reveal_top_controllers = HashSet::<PlayerId>::new();
+    let mut reveal_hand_all = false;
+    let mut reveal_hand_controllers = HashSet::<PlayerId>::new();
+    let mut reveal_hand_opponents_of = HashSet::<PlayerId>::new();
 
     for (source, def) in game_active_statics(state) {
-        let StaticMode::RevealTopOfLibrary { all_players } = def.mode else {
-            continue;
-        };
-        if all_players {
-            reveal_all_players = true;
-        } else {
-            reveal_controllers.insert(source.controller);
+        match &def.mode {
+            StaticMode::RevealTopOfLibrary { all_players } => {
+                if *all_players {
+                    reveal_top_all = true;
+                } else {
+                    reveal_top_controllers.insert(source.controller);
+                }
+            }
+            StaticMode::RevealHand { who } => match who {
+                ProhibitionScope::AllPlayers => reveal_hand_all = true,
+                ProhibitionScope::Controller => {
+                    reveal_hand_controllers.insert(source.controller);
+                }
+                ProhibitionScope::Opponents => {
+                    reveal_hand_opponents_of.insert(source.controller);
+                }
+                ProhibitionScope::EnchantedCreatureController => {}
+            },
+            _ => {}
         }
     }
 
-    if !reveal_all_players && reveal_controllers.is_empty() {
-        return;
+    // Library-top reveals (collect owned Vec first so the immutable player read
+    // completes before the mutable `revealed_cards` write).
+    if reveal_top_all || !reveal_top_controllers.is_empty() {
+        let tops: Vec<ObjectId> = if reveal_top_all {
+            state
+                .players
+                .iter()
+                .filter_map(|player| player.library.front().copied())
+                .collect()
+        } else {
+            reveal_top_controllers
+                .into_iter()
+                .filter_map(|controller| {
+                    state
+                        .players
+                        .iter()
+                        .find(|player| player.id == controller)
+                        .and_then(|player| player.library.front().copied())
+                })
+                .collect()
+        };
+        for top in tops {
+            state.revealed_cards.insert(top);
+        }
     }
 
-    let tops: Vec<ObjectId> = if reveal_all_players {
-        state
+    // Hand reveals.
+    if reveal_hand_all
+        || !reveal_hand_controllers.is_empty()
+        || !reveal_hand_opponents_of.is_empty()
+    {
+        let hand_cards: Vec<ObjectId> = state
             .players
             .iter()
-            .filter_map(|player| player.library.front().copied())
-            .collect()
-    } else {
-        reveal_controllers
-            .into_iter()
-            .filter_map(|controller| {
-                state
-                    .players
-                    .iter()
-                    .find(|player| player.id == controller)
-                    .and_then(|player| player.library.front().copied())
+            .filter(|player| {
+                reveal_hand_all
+                    || reveal_hand_controllers.contains(&player.id)
+                    || reveal_hand_opponents_of
+                        .iter()
+                        .any(|controller| player.id != *controller)
             })
-            .collect()
-    };
-
-    for top in tops {
-        state.revealed_cards.insert(top);
+            .flat_map(|player| player.hand.iter().copied())
+            .collect();
+        state.revealed_cards.extend(hand_cards);
     }
-}
-
-/// CR 400.2 + CR 701.20a: Continuous "play with [a] hand revealed" statics
-/// keep affected players' hands public after action-boundary reveal clears.
-fn sync_continuous_hand_reveals(state: &mut GameState) {
-    let mut reveal_all_players = false;
-    let mut reveal_controllers = HashSet::<PlayerId>::new();
-    let mut reveal_opponents_of = HashSet::<PlayerId>::new();
-
-    for (source, def) in game_active_statics(state) {
-        let StaticMode::RevealHand { who } = &def.mode else {
-            continue;
-        };
-        match who {
-            ProhibitionScope::AllPlayers => reveal_all_players = true,
-            ProhibitionScope::Controller => {
-                reveal_controllers.insert(source.controller);
-            }
-            ProhibitionScope::Opponents => {
-                reveal_opponents_of.insert(source.controller);
-            }
-            ProhibitionScope::EnchantedCreatureController => {}
-        }
-    }
-
-    if !reveal_all_players && reveal_controllers.is_empty() && reveal_opponents_of.is_empty() {
-        return;
-    }
-
-    let hand_cards = state
-        .players
-        .iter()
-        .filter(|player| {
-            reveal_all_players
-                || reveal_controllers.contains(&player.id)
-                || reveal_opponents_of
-                    .iter()
-                    .any(|controller| player.id != *controller)
-        })
-        .flat_map(|player| player.hand.iter().copied());
-
-    state.revealed_cards.extend(hand_cards);
 }
 
 /// Commander damage received by `victim`, grouped by the commander's

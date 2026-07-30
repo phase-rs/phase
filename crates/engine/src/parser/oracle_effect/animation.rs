@@ -637,7 +637,12 @@ fn try_parse_type_sequence_with_suffix(input: &str) -> Option<Vec<AnimationTypeT
 /// variant. Returns `None` if the marker is absent. Uses `take_until` to
 /// locate the marker, then [`parse_in_addition_other_types_marker`] to consume
 /// and recognize the variant.
-fn split_in_addition_tail(input: &str) -> Option<(&str, &str)> {
+///
+/// `pub(crate)` so `try_parse_become_choice` (`oracle_effect/subject.rs`) can
+/// share this exact split rather than reimplementing it: the "of your choice"
+/// forms (Navigator's Compass) carry the same trailing marker as the fixed-type
+/// forms (Possessed Goat) this was built for.
+pub(crate) fn split_in_addition_tail(input: &str) -> Option<(&str, &str)> {
     type VE<'a> = OracleError<'a>;
     let (_, prefix) =
         nom::bytes::complete::take_until::<_, _, VE<'_>>(" in addition to ")(input).ok()?;
@@ -677,7 +682,11 @@ fn parse_in_addition_other_types_marker(input: &str) -> OracleResult<'_, &str> {
 /// lifetime elision binds the parser's borrow to the `input` parameter;
 /// inlining the combinator over a local `String` tripped E0597 on the
 /// temporary parser's drop.
-fn locate_in_addition_other_types_marker(input: &str) -> OracleResult<'_, &str> {
+///
+/// `pub(crate)` so the replacement handler (`parse_as_enters_becomes`) and the
+/// classifier recognizer (`parse_as_enters_becomes_in_addition`) share the same
+/// CR 205.1b/105.3 marker class instead of reimplementing bespoke literal tags.
+pub(crate) fn locate_in_addition_other_types_marker(input: &str) -> OracleResult<'_, &str> {
     preceded(
         take_until("in addition to "),
         parse_in_addition_other_types_marker,

@@ -25,6 +25,12 @@ function canonicalPayload(b: PhaseBackup): string {
     preferences: b.preferences,
     decks: sortedDecks,
     deckMetadata: b.deckMetadata,
+    // `deckFolders` is a persisted payload field (`buildBackup` always writes
+    // it; `applyBackup` restores it). Omitting it from the digest made a
+    // folder reorganization hash-equal to the old state, so the reconciler
+    // suppressed the "conflict" and the change never propagated. `?? null`
+    // keeps pre-folders backups (which omit the field) digest-stable.
+    deckFolders: b.deckFolders ?? null,
     activeDeck: b.activeDeck,
     feedSubscriptions: b.feedSubscriptions,
     feedDeckOrigins: b.feedDeckOrigins,
@@ -82,6 +88,7 @@ export function summarizeBackupDiff(
     feedsChanged: local.feedSubscriptions !== remote.feedSubscriptions,
     otherChanged:
       local.deckMetadata !== remote.deckMetadata ||
+      (local.deckFolders ?? null) !== (remote.deckFolders ?? null) ||
       local.activeDeck !== remote.activeDeck ||
       local.feedDeckOrigins !== remote.feedDeckOrigins,
   };

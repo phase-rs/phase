@@ -15,9 +15,10 @@ import type { DraftPlayerView, PairingView, PodPolicy, PoolInput, SeatPublicView
 import type { MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
-import type { DraftMatchLaunch, DraftPauseReason } from "../network/draftProtocol";
+import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
 import { loadDraftHostSession } from "../services/draftPersistence";
+import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -75,6 +76,7 @@ export type DraftPodHostEvent =
   | { type: "bo3SideboardPromptSent"; matchId: string }
   | { type: "bo3BothSideboardsSubmitted"; matchId: string }
   | { type: "bo3GameStarted"; matchId: string; gameNumber: number }
+  | { type: "bo3AuthorizedCommand"; command: DraftIntergameCommand; acknowledgement: DraftIntergameCommandAck }
   | { type: "error"; message: string };
 
 type DraftPodHostEventListener = (event: DraftPodHostEvent) => void;
@@ -380,6 +382,9 @@ export class DraftPodHostAdapter {
           firstPlayerSeat: event.firstPlayerSeat,
         });
         break;
+      case "bo3AuthorizedCommand":
+        this.emit({ type: "bo3AuthorizedCommand", command: event.command, acknowledgement: event.acknowledgement });
+        break;
     }
   }
 
@@ -422,6 +427,11 @@ export class DraftPodHostAdapter {
     await this.host.overrideMatchResult(matchId, winnerSeat);
   }
 
+  async submitMatchSettlement(settlement: DraftMatchSettlement): Promise<void> {
+    if (!this.host) throw new Error("Host not initialized");
+    await this.host.submitHostMatchSettlement(settlement);
+  }
+
   async replaceSeatWithBot(seat: number): Promise<void> {
     if (!this.host) throw new Error("Host not initialized");
     await this.host.replaceSeatWithBot(seat);
@@ -441,19 +451,9 @@ export class DraftPodHostAdapter {
     this.host.handleMatchBetweenGames(matchId, gameNumber, score, loserSeat, seatA, seatB);
   }
 
-  handleSideboardSubmit(
-    seat: number,
-    matchId: string,
-    mainDeck: string[],
-    sideboard: Array<{ name: string; count: number }>,
-  ): void {
+  submitAuthorized(seat: number, command: DraftIntergameCommand): void {
     if (!this.host) throw new Error("Host not initialized");
-    this.host.handleSideboardSubmit(seat, matchId, mainDeck, sideboard);
-  }
-
-  handlePlayDrawChosen(seat: number, matchId: string, playFirst: boolean): void {
-    if (!this.host) throw new Error("Host not initialized");
-    this.host.handlePlayDrawChosen(seat, matchId, playFirst);
+    this.host.submitAuthorized(seat, command);
   }
 
   // ── Host controls ──────────────────────────────────────────────────

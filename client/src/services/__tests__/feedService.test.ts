@@ -445,3 +445,24 @@ describe("getFeedDecksByFeed", () => {
     );
   });
 });
+
+describe("validateFeed — a deck entry count must be a positive integer", () => {
+  const feedWithMainCount = (count: unknown) => ({
+    ...VALID_FEED,
+    decks: [
+      { ...VALID_FEED.decks[0], main: [{ count, name: "Lightning Bolt" }] },
+      VALID_FEED.decks[1],
+    ],
+  });
+
+  it("accepts a positive integer count", () => {
+    expect(validateFeed(feedWithMainCount(3))).not.toBeNull();
+  });
+
+  it.each([0, -1, 2.5, NaN])(
+    "rejects a non-positive / fractional / NaN count from untrusted feed JSON: %s",
+    (count) => {
+      expect(validateFeed(feedWithMainCount(count))).toBeNull();
+    },
+  );
+});

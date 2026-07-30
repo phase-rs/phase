@@ -59,6 +59,28 @@ pub fn run_combat_with_blocker_divisions(
         })
         .expect("DeclareAttackers should succeed");
 
+    // CR 603.3b: same-controller attack triggers (e.g. Stonehoof Chieftain with
+    // many attackers) may surface an ordering prompt before priority.
+    while matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+        let n = if let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for {
+            triggers.len()
+        } else {
+            0
+        };
+        runner
+            .act(GameAction::OrderTriggers {
+                order: (0..n).collect(),
+            })
+            .expect("OrderTriggers should succeed");
+    }
+
+    // CR 508.2 + CR 603.3b: attack triggers (Stonehoof Chieftain #5335) must
+    // resolve before declare blockers — a single priority pass is not enough
+    // when many identical per-attacker triggers stacked.
+    if !runner.state().stack.is_empty() {
+        runner.advance_until_stack_empty();
+    }
+
     // CR 508.2: Active player gets priority after attackers — pass through it.
     if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
         runner.pass_both_players();

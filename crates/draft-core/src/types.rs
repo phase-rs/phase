@@ -81,9 +81,11 @@ impl DraftKind {
         match self {
             DraftKind::Quick | DraftKind::Premier => MatchConfig {
                 match_type: MatchType::Bo1,
+                ..MatchConfig::default()
             },
             DraftKind::Traditional => MatchConfig {
                 match_type: MatchType::Bo3,
+                ..MatchConfig::default()
             },
         }
     }

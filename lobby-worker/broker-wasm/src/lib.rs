@@ -87,9 +87,7 @@ fn to_dtos(outs: Vec<Outbound>) -> Vec<OutboundDto> {
 /// `Broker::handle`, so this boundary crate is the only place that can answer
 /// them.
 fn reject_reply(message: &str) -> Vec<Outbound> {
-    vec![Outbound::ToSelf(LobbyServerMessage::Error {
-        message: message.to_string(),
-    })]
+    vec![Outbound::ToSelf(LobbyServerMessage::error(message))]
 }
 
 /// Whether a client frame can mutate the shared `LobbyManager` (and therefore
@@ -167,6 +165,13 @@ impl WasmBroker {
     /// (alarms keep a DO awake).
     pub fn is_empty(&self) -> bool {
         self.inner.lobby().is_empty()
+    }
+
+    /// Number of currently registered lobby entries (games waiting for players).
+    /// Read-only, so the shell need not re-snapshot after calling — this is the
+    /// live "active games" gauge surfaced by the `/stats` endpoint.
+    pub fn active_games(&self) -> usize {
+        self.inner.lobby().len()
     }
 
     /// Handle one raw client frame (the exact JSON the client sent over the

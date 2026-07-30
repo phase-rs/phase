@@ -2,13 +2,14 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::space1;
-use nom::combinator::{eof, opt, peek, value};
+use nom::combinator::{all_consuming, eof, opt, peek, value};
 use nom::sequence::terminated;
 use nom::Parser;
 
 use crate::types::ability::{
-    CounterMoveSelection, CounterTransferMode, DoublePTMode, DoubleTarget, Effect, MultiTargetSpec,
-    ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
+    ChosenCounterCountCondition, Comparator, CounterMoveSelection, CounterTransferMode,
+    DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, ObjectScope, QuantityExpr, QuantityRef,
+    TargetFilter,
 };
 use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::mana::ManaColor;
@@ -17,7 +18,8 @@ use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_type_phrase, parse_type_phrase_with_ctx,
+    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase,
+    parse_type_phrase_with_ctx, TargetSyntax,
 };
 use super::super::oracle_util::{parse_count_expr, parse_number};
 use super::lower::parse_for_each_multiplier_prefix;
@@ -59,6 +61,63 @@ fn is_it_pronoun(text: &str) -> bool {
             .parse(i)
         })
         .is_some()
+}
+
+/// CR 608.2c + CR 111.10 + CR 122.1: a same-chain counter anaphor placed AFTER a
+/// token-creating clause binds to that just-created token
+/// (`TargetFilter::LastCreated`) — the anaphor's most-recent object referent —
+/// rather than the ability source (`SelfRef`) or an unbound parent target.
+/// Recognizes three anaphor forms: the object-pronoun class (`it`/`them`/…, via
+/// [`is_it_pronoun`]), the demonstratives `that creature`/`that token`/`that
+/// permanent`, and the definite back-references `the token`/`the permanent`.
+/// `the creature` is deliberately EXCLUDED: it legitimately binds a chosen
+/// target slot (Longstalk Brawl's "the creature you control" →
+/// `ParentTargetSlot`) and is genuinely ambiguous.
+///
+/// Returns `Some(LastCreated)` only when the chain's most-recent referent is a
+/// created token (`ctx.token_created_in_chain`) AND, for the demonstrative /
+/// definite forms, no non-self trigger subject re-anchors the reference — Pip-Boy
+/// 3000's "Whenever equipped creature attacks … put a +1/+1 counter on that
+/// creature" keeps its `resolve_that_creature_in_trigger` triggering-source
+/// binding. That subject gate is intentionally SKIPPED for the object-pronoun
+/// form so this helper reproduces the legacy ungated bare-"it" binding exactly,
+/// making the it-branch refactor provably behavior-preserving. `None` ⇒ the
+/// caller applies its own default (source / parent / typed target).
+pub(super) fn counter_anaphor_created_token_binding(
+    anaphor_lower: &str,
+    ctx: &ParseContext,
+) -> Option<TargetFilter> {
+    let it_pronoun = is_it_pronoun(anaphor_lower);
+    let demonstrative = nom_on_lower(anaphor_lower, anaphor_lower, |i| {
+        value(
+            (),
+            alt((
+                tag("that creature"),
+                tag("that token"),
+                tag("that permanent"),
+                tag("the token"),
+                tag("the permanent"),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some();
+    if !it_pronoun && !demonstrative {
+        return None;
+    }
+    // A demonstrative/definite anaphor under a non-self, non-`Any` trigger subject
+    // refers to that triggering object, not the created token — the subject gate
+    // preserves that legacy binding. The bare object pronoun has no such
+    // re-anchor, so its gate is only the token flag.
+    let subject_allows_token = matches!(
+        ctx.subject,
+        None | Some(TargetFilter::SelfRef) | Some(TargetFilter::Any)
+    );
+    if ctx.token_created_in_chain && (it_pronoun || subject_allows_token) {
+        Some(TargetFilter::LastCreated)
+    } else {
+        None
+    }
 }
 
 fn starts_with_deferred_dynamic_counter_placement(input: &str) -> bool {
@@ -194,7 +253,18 @@ fn resolve_counter_placement_target<'a>(
         return (TargetFilter::SelfRef, parsed_remainder, None);
     }
     if is_it_pronoun(on_rest) {
-        return (resolve_it_pronoun(ctx), parsed_remainder, None);
+        // CR 608.2c: a bare "it" after a token-creating clause earlier in the
+        // same effect chain binds to that just-created token — the anaphor's
+        // most-recent object referent — not the ability source. Esper Terra:
+        // "Create a token ... It gains haste. If it's a Saga, put up to three
+        // lore counters on it." `ctx.token_created_in_chain` is seeded by the
+        // chunk loop ONLY when the chain's most-recent prior referent is a
+        // Token/CopyTokenOf/Populate creator; explicit "~"/name sources return
+        // above at the SelfRef guard and never reach here, and non-token
+        // self-triggers leave the flag false, so both keep `SelfRef`.
+        let it_target = counter_anaphor_created_token_binding(on_rest, ctx)
+            .unwrap_or_else(|| resolve_it_pronoun(ctx));
+        return (it_target, parsed_remainder, None);
     }
     // CR 608.2k + CR 301.5a: "that creature" in a trigger whose subject is a
     // non-self filter (e.g. Pip-Boy 3000's "Whenever equipped creature
@@ -209,6 +279,17 @@ fn resolve_counter_placement_target<'a>(
         // ASCII-equal-length guard above keeps byte offsets aligned.
         let offset = text.len() - rem.len();
         return (TargetFilter::TriggeringSource, &text[offset..], None);
+    }
+    // CR 608.2c + CR 111.10: a same-chain demonstrative/definite anaphor
+    // ("that creature"/"that token"/"that permanent"/"the token"/"the permanent")
+    // placed after a token-creating clause binds to the just-created token, not
+    // the unbound parent target. Otterball Antics ("... put a +1/+1 counter on
+    // that creature"), Retrieve the Esper ("... put two +1/+1 counters on that
+    // token"), Grist ("... put a deathtouch counter on the token"). Reached only
+    // after the non-self "that creature" trigger re-anchor above returns None, so
+    // Pip-Boy 3000's triggering-source binding is preserved.
+    if let Some(bound) = counter_anaphor_created_token_binding(on_rest, ctx) {
+        return (bound, parsed_remainder, None);
     }
     // CR 115.1d: "up to N" (and "each of up to N") modifies the target count,
     // not the counter count. Strip it and emit a MultiTargetSpec.
@@ -307,6 +388,67 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
     Some(after_sep)
 }
 
+/// CR 608.2c + CR 122.1 + CR 122.6: "[a[n]] [additional] counter of that kind
+/// on <recipient> [if it doesn't have a counter of that kind on it]" →
+/// `Effect::PutChosenCounter`. Anaphoric recipients bind to `ParentTarget` (The
+/// Caves of Androzani); declared typed recipients use the shared target parser
+/// (Aven Courier). A source-self recipient remains unsupported because its
+/// producer may be a random counter-kind choice that is not yet bound to
+/// resolution state (Crystalline Giant). The optional suffix becomes an
+/// explicit EQ-zero predicate over each resolved target's count of the chosen
+/// kind. Combinator-based and fully consuming; `input` has already had the
+/// leading "put " stripped.
+pub(super) fn try_parse_put_chosen_counter(input: &str) -> Option<Effect> {
+    let (recipient_text, _) = (
+        opt(alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))),
+        opt(tag("additional ")),
+        tag("counter of that kind on "),
+    )
+        .parse(input.trim())
+        .ok()?;
+
+    let (target, remainder) = if let Ok((remainder, _)) = alt((
+        tag::<_, _, OracleError<'_>>("that permanent"),
+        tag("that creature"),
+        tag("it"),
+    ))
+    .parse(recipient_text)
+    {
+        (TargetFilter::ParentTarget, remainder)
+    } else {
+        let (target, remainder) = parse_target(recipient_text);
+        if matches!(target, TargetFilter::Any | TargetFilter::SelfRef) {
+            return None;
+        }
+        (target, remainder)
+    };
+
+    let target_condition = |i| -> OracleResult<'_, ChosenCounterCountCondition> {
+        let (i, _) = tag("if ").parse(i)?;
+        let (i, _) = alt((tag("it doesn't have "), tag("it does not have "))).parse(i)?;
+        let (i, _) = alt((tag("a counter"), tag("one or more counters"))).parse(i)?;
+        let (i, _) = tag(" of that kind on it").parse(i)?;
+        Ok((
+            i,
+            ChosenCounterCountCondition {
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        ))
+    };
+    let mut suffix = all_consuming((
+        opt(target_condition),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ));
+    let (_, (target_condition, _)) = suffix.parse(remainder.trim_start()).ok()?;
+
+    Some(Effect::PutChosenCounter {
+        target,
+        count: QuantityExpr::Fixed { value: 1 },
+        target_condition,
+    })
+}
+
 pub(super) fn try_parse_put_counter<'a>(
     lower: &str,
     text: &'a str,
@@ -316,6 +458,20 @@ pub(super) fn try_parse_put_counter<'a>(
     // Use parse_count_expr to handle Variable("X") for kicker-X patterns.
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let after_put = after_put.trim();
+
+    // CR 608.2d + CR 122.1: "put up to N <type> counters" — the controller may
+    // place fewer than N (down to zero). Strip the leading "up to " marker here
+    // and wrap the parsed count in `QuantityExpr::up_to` at build time so the AST
+    // records the "may pick fewer" grammar. Mirrors the Draw/Discard/PutSticker
+    // up-to convention. Only the COUNT-side "up to" (leading, before the counter
+    // type) is caught here; the TARGET-side "on up to N target(s)" is a distinct
+    // MultiTargetSpec path in `resolve_counter_placement_target`, so the two never
+    // shadow each other.
+    let (after_put, count_is_up_to) =
+        match nom_on_lower(after_put, after_put, |i| value((), tag("up to ")).parse(i)) {
+            Some(((), rest)) => (rest.trim_start(), true),
+            None => (after_put, false),
+        };
 
     // CR 122.1 + CR 208.3: Detect the dynamic-quantity phrasing
     // "a number of {type} counters equal to {qty}" (Gruff Triplets:
@@ -463,7 +619,14 @@ pub(super) fn try_parse_put_counter<'a>(
     Some((
         Effect::PutCounter {
             counter_type,
-            count: count_expr,
+            // CR 608.2d: wrap the final count in `UpTo` when the clause said
+            // "up to N" (stripped above). `count_expr` is never itself an `UpTo`
+            // here, so the non-nesting `up_to` debug_assert holds.
+            count: if count_is_up_to {
+                QuantityExpr::up_to(count_expr)
+            } else {
+                count_expr
+            },
             target,
         },
         remainder,
@@ -515,9 +678,32 @@ fn parse_counter_equal_to(
     // table. Isolate the phrase up to the first clause boundary so trailing
     // ", then …" clauses stay in the remainder.
     let (after_equal, _) = tag("equal to ").parse(input)?;
-    let (_, phrase) =
+    let (rest, phrase_raw) =
         take_till::<_, _, OracleError<'_>>(|c| c == ',' || c == '.').parse(after_equal)?;
-    let phrase = phrase.trim_end();
+
+    // CR 122.1 + CR 603.4 + CR 603.10a: bare anaphoric "the difference" — the
+    // count is the difference established by the enclosing trigger's
+    // intervening-if comparison ("if it had power greater than ~'s power, put a
+    // number of +1/+1 counters on ~ equal to the difference" — Drizzt
+    // Do'Urden). The two operands live on the hoisted trigger condition, not in
+    // this clause, so emit the deferred placeholder that the trigger-level
+    // difference binding in `lower_trigger_ir` (oracle_trigger.rs) resolves
+    // against the `QuantityComparison` operands. Distinct from the
+    // `parse_cda_quantity` "the difference between A and B" form below, which
+    // carries its own operands. Match on the fully-trimmed phrase (both ends) so
+    // stray leading whitespace ("equal to  the difference") still binds, and
+    // return `take_till`'s own remainder to preserve any trailing ", …" clause.
+    if all_consuming(tag::<_, _, OracleError<'_>>("the difference"))
+        .parse(phrase_raw.trim())
+        .is_ok()
+    {
+        return Ok((
+            rest,
+            crate::parser::oracle_effect::difference_anaphor_placeholder(),
+        ));
+    }
+
+    let phrase = phrase_raw.trim_end();
     if let Some(expr) = crate::parser::oracle_quantity::parse_cda_quantity(phrase) {
         return Ok((&after_equal[phrase.len()..], expr));
     }
@@ -698,19 +884,29 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     // amount is the info the rider reads from the prevented event at resolution.
     // Resolves to `EventContextAmount`, matching the `PutCounter` "that many"
     // path used by the Vigor / Phyrexian Hydra cohort.
-    let (count, rest) = if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
-        value((), alt((tag("that many "), tag("that much ")))).parse(i)
-    }) {
-        (
-            QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            },
-            rest.trim_start(),
-        )
+    let (count, rest) = if let Ok((rest, qty)) = nom_quantity::parse_that_much_or_many(after_remove)
+    {
+        (QuantityExpr::Ref { qty }, rest.trim_start())
     } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
         value((), tag("all ")).parse(i)
     }) {
         (QuantityExpr::Fixed { value: -1 }, rest.trim_start())
+    } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
+        value((), tag("any number of ")).parse(i)
+    }) {
+        // CR 107.1c + CR 608.2d: "remove any number of counters" is a
+        // resolution-time player choice (any per-type subset, 0..=available,
+        // incl. zero). Encode it as `UpTo` over the "remove all" sentinel so the
+        // runtime resolver discriminates on the peel FLAG (`count.is_up_to()`),
+        // not the scalar: the interactive path derives the legal domain from the
+        // board rather than resolving the inner `Fixed{-1}` numerically. If the
+        // resolver ever fails to peel, the safe-degrade is the existing
+        // "remove all" branch (`Fixed{-1}` clamps to the board — legal, just
+        // non-interactive). Rhys, the Evermore / Tetravus.
+        (
+            QuantityExpr::up_to(QuantityExpr::Fixed { value: -1 }),
+            rest.trim_start(),
+        )
     } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
         value((), tag("up to ")).parse(i)
     }) {
@@ -744,6 +940,23 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
         value((), tag("from ")).parse(i)
     })?;
     let target_text = target_text.trim();
+
+    // CR 608.2d: "remove any number of counters from among <objects>" distributes
+    // the removal, at resolution, among any number of UNTARGETED permanents — a
+    // MULTI-SOURCE choice. The single-source interactive path (Rhys, Tetravus)
+    // cannot model "from among", so leave such cards Unimplemented (out of scope)
+    // rather than silently collapsing them to a single-source removal (Galloping
+    // Lizrog, Eventide's Shadow). Scoped to the `UpTo` ("any number") branch so
+    // non-interactive removals are untouched.
+    if count.is_up_to()
+        && nom_on_lower(target_text, target_text, |i| {
+            value((), tag("among ")).parse(i)
+        })
+        .is_some()
+    {
+        return None;
+    }
+
     let target = resolve_remove_counter_from_target(target_text, ctx);
 
     Some(Effect::RemoveCounter {
@@ -801,22 +1014,57 @@ fn resolve_remove_counter_from_target(text: &str, ctx: &mut ParseContext) -> Tar
     resolve_counter_target(text, ctx)
 }
 
-/// Resolve a counter target from text: self-ref, pronoun, or parse_target.
-/// Shared by put/remove/multiply counter parsers.
-fn resolve_counter_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+/// Classification of a counter target phrase, distinguishing forms the runtime
+/// can resolve (`Supported`) from a non-targeted descriptor scope
+/// (`NonTargetedDescriptor`) that a targeted-only effect cannot enumerate.
+///
+/// Both arms carry a `TargetFilter`: `resolve_counter_target` unwraps them
+/// uniformly (put/remove/multiply counters resolve identically either way),
+/// while the counter-doubling arm of `try_parse_double_effect` consults the
+/// discriminant to gate the non-targeted mass form to an honest `Unimplemented`
+/// (CR 701.10e — see there).
+enum CounterTargetKind {
+    Supported(TargetFilter),
+    NonTargetedDescriptor(TargetFilter),
+}
+
+/// Classify a counter target from text: self-ref, pronoun, trigger anaphor, or a
+/// parsed target phrase. The anaphor guards run FIRST and in this exact order
+/// (order is load-bearing: `it`/`that creature` resolve against the parse
+/// context before any descriptor fallback), each yielding a single-object
+/// `Supported` filter. A parsed phrase is `Supported` only when it used the
+/// "target" keyword (CR 115.1 `TargetKeyword`); a bare descriptor scope is
+/// `NonTargetedDescriptor`.
+///
+/// The fallback parses with a fresh `ParseContext` so it stays byte-for-byte
+/// equivalent to the prior `parse_target(text)` call — the shared `ctx` is read
+/// only by the anaphor guards, exactly as before.
+fn classify_counter_target(text: &str, ctx: &mut ParseContext) -> CounterTargetKind {
     if is_self_ref(text) {
-        TargetFilter::SelfRef
+        CounterTargetKind::Supported(TargetFilter::SelfRef)
     } else if is_it_pronoun(text) {
         // CR 608.2k: Bare pronoun — context-dependent
-        resolve_it_pronoun(ctx)
+        CounterTargetKind::Supported(resolve_it_pronoun(ctx))
     } else if resolve_that_creature_in_trigger(text, ctx).is_some() {
         // CR 608.2k + CR 301.5a: Trigger-context "that creature" → triggering source.
-        TargetFilter::TriggeringSource
+        CounterTargetKind::Supported(TargetFilter::TriggeringSource)
     } else {
-        let (t, _rem) = parse_target(text);
+        let (t, _rem, syntax) = parse_target_with_syntax(text, &mut ParseContext::default());
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
-        t
+        match syntax {
+            TargetSyntax::TargetKeyword => CounterTargetKind::Supported(t),
+            TargetSyntax::Descriptor => CounterTargetKind::NonTargetedDescriptor(t),
+        }
+    }
+}
+
+/// Resolve a counter target from text: self-ref, pronoun, or parsed target.
+/// Shared by put/remove/multiply counter parsers, which resolve identically for
+/// both target classes — so the `CounterTargetKind` discriminant is unwrapped.
+fn resolve_counter_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+    match classify_counter_target(text, ctx) {
+        CounterTargetKind::Supported(t) | CounterTargetKind::NonTargetedDescriptor(t) => t,
     }
 }
 
@@ -1056,15 +1304,30 @@ pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &mut ParseContext) ->
 /// CR 701.10: Dispatch "double the ..." to counter-doubling, life-doubling,
 /// mana-doubling, or P/T-doubling.
 pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
-    // CR 701.10e: "double the number of each kind of counter on ..." → all counter types
+    // CR 701.10e: "double the number of each kind of counter on ..." → all counter
+    // kinds. The doubled amount is intrinsic to the resolver ("give as many of
+    // those counters as already present"), never a `QuantityExpr` carrier — the
+    // same reasoning as the `MultiplyCounter` escape hatch in swallow_check.
+    //
+    // `Effect::Double` is targeted-only (there is no battlefield-enumeration tier
+    // in `targeting::resolved_targets`), so a NON-targeted descriptor target such
+    // as "each creature you control" would double nothing at runtime. Gate that
+    // mass form to an honest `Unimplemented` until the DoubleCountersAll mass
+    // runtime exists; the targeted form resolves normally.
     if let Some(((), rest)) = nom_on_lower(lower, lower, |i| {
         value((), tag("double the number of each kind of counter on ")).parse(i)
     }) {
-        let target = resolve_counter_target(rest, ctx);
-        return Some(Effect::Double {
-            target_kind: DoubleTarget::Counters { counter_type: None },
-            target,
-        });
+        return match classify_counter_target(rest, ctx) {
+            CounterTargetKind::Supported(target) => Some(Effect::Double {
+                target_kind: DoubleTarget::Counters { counter_type: None },
+                target,
+            }),
+            // Fragment is the full lowercased clause (diagnostics-only); the
+            // parser receives no original-case copy at this dispatch depth.
+            CounterTargetKind::NonTargetedDescriptor(_) => {
+                Some(Effect::unimplemented("double_counters_nontargeted", lower))
+            }
+        };
     }
 
     // Counter doubling: "double the number of ..."
@@ -1285,10 +1548,217 @@ fn parse_mana_color_from_text(text: &str) -> Option<ManaColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TypedFilter;
+    use crate::types::ability::TargetChoiceTiming;
+    use crate::types::{ControllerRef, FilterProp, TypedFilter};
 
     fn default_ctx() -> ParseContext {
         ParseContext::default()
+    }
+
+    /// CR 608.2c + CR 122.1: Aven Courier's destination and chosen-counter
+    /// absence predicate lower together into the existing placement effect.
+    #[test]
+    fn put_chosen_counter_parses_typed_target_and_absence_predicate() {
+        let effect = try_parse_put_chosen_counter(
+            "a counter of that kind on target permanent you control if it doesn't have a counter of that kind on it.",
+        )
+        .expect("Aven Courier put clause must parse");
+        let Effect::PutChosenCounter {
+            target: TargetFilter::Typed(filter),
+            count,
+            target_condition: Some(condition),
+        } = effect
+        else {
+            panic!("expected conditional PutChosenCounter, got {effect:?}");
+        };
+        assert_eq!(
+            filter.type_filters,
+            vec![crate::types::ability::TypeFilter::Permanent]
+        );
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(condition.comparator, Comparator::EQ);
+        assert_eq!(condition.rhs, QuantityExpr::Fixed { value: 0 });
+    }
+
+    /// CR 608.2c + CR 122.6: The Caves of Androzani's anaphoric,
+    /// condition-free sibling keeps its ParentTarget binding and legacy shape.
+    #[test]
+    fn put_chosen_counter_preserves_anaphoric_condition_free_form() {
+        let effect =
+            try_parse_put_chosen_counter("an additional counter of that kind on that permanent.")
+                .expect("Caves put clause must parse");
+        assert!(matches!(
+            effect,
+            Effect::PutChosenCounter {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                target_condition: None,
+            }
+        ));
+    }
+
+    /// Crystalline Giant's random counter-kind producer is not represented by
+    /// `ChoiceType::CounterKind`, so its source-self consumer must stay outside
+    /// the supported `PutChosenCounter` grammar until that binding exists.
+    #[test]
+    fn put_chosen_counter_rejects_unbound_source_self_consumer() {
+        assert!(
+            try_parse_put_chosen_counter("a counter of that kind on ~.").is_none(),
+            "an unbound random counter kind must remain a strict parser gap"
+        );
+    }
+
+    /// CR 115.1d + CR 608.2c + CR 608.2d: Full-card reach guard for Aven
+    /// Courier. The source-domain choice is made at resolution, while the
+    /// destination is the sole stack-timed target in the following clause.
+    #[test]
+    fn aven_courier_full_card_separates_stack_target_from_resolution_choice() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::triggers::TriggerMode;
+
+        const ORACLE: &str = "Flying\nWhenever this creature attacks, choose a counter on a permanent you control. Put a counter of that kind on target permanent you control if it doesn't have a counter of that kind on it.";
+        let parsed = parse_oracle_text(
+            ORACLE,
+            "Aven Courier",
+            &["Flying".to_string()],
+            &["Creature".to_string()],
+            &["Bird".to_string(), "Advisor".to_string()],
+        );
+        assert!(
+            parsed.parse_warnings.iter().all(|warning| !matches!(
+                warning,
+                crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                    detector,
+                    ..
+                } if detector == "Condition_If"
+            )),
+            "the typed target_condition must discharge the Condition_If audit: {:?}",
+            parsed.parse_warnings
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == TriggerMode::Attacks)
+            .expect("Aven must have an attack trigger");
+        let choose = trigger
+            .execute
+            .as_ref()
+            .expect("attack trigger has an effect");
+        assert_eq!(
+            choose.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "the untargeted counter-kind choice is made during resolution"
+        );
+        assert!(matches!(
+            choose.effect.as_ref(),
+            Effect::ChooseCounterKind {
+                target: TargetFilter::Typed(filter),
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Permanent]
+                && filter.controller == Some(ControllerRef::You)
+        ));
+
+        let put = choose
+            .sub_ability
+            .as_ref()
+            .expect("the destination placement follows the choice");
+        assert_eq!(
+            put.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "the printed target is declared when the trigger goes on the stack"
+        );
+        assert!(matches!(
+            put.effect.as_ref(),
+            Effect::PutChosenCounter {
+                target: TargetFilter::Typed(filter),
+                target_condition: Some(ChosenCounterCountCondition {
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                }),
+                ..
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Permanent]
+                && filter.controller == Some(ControllerRef::You)
+        ));
+    }
+
+    /// CR 207.2c + CR 608.2c + CR 608.2d + CR 122.1: Contractual Safeguard's
+    /// Addendum effect remains conditional, while its following counter-kind
+    /// choice is an untargeted resolution-time choice over creatures the
+    /// controller controls. The final instruction applies that chosen kind to
+    /// each other creature in the same domain.
+    #[test]
+    fn contractual_safeguard_full_card_preserves_addendum_and_counter_choice_chain() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::AbilityCondition;
+        use crate::types::phase::Phase;
+
+        const ORACLE: &str = "Addendum — If you cast this spell during your main phase, put a shield counter on a creature you control. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)\nChoose a kind of counter on a creature you control. Put a counter of that kind on each other creature you control.";
+        let parsed = parse_oracle_text(
+            ORACLE,
+            "Contractual Safeguard",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert_eq!(
+            parsed.abilities.len(),
+            1,
+            "the three instructions form one sequential spell ability"
+        );
+
+        let shield = &parsed.abilities[0];
+        assert_eq!(
+            shield.condition,
+            Some(AbilityCondition::CastDuringPhase {
+                phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            }),
+            "Addendum still gates the shield-counter instruction"
+        );
+        assert!(matches!(
+            shield.effect.as_ref(),
+            Effect::PutCounter {
+                counter_type: CounterType::Shield,
+                target: TargetFilter::Typed(filter),
+                ..
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Creature]
+                && filter.controller == Some(ControllerRef::You)
+        ));
+
+        let choose = shield
+            .sub_ability
+            .as_ref()
+            .expect("the counter-kind choice follows the Addendum instruction");
+        assert_eq!(
+            choose.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "the choice uses no printed target and is made during resolution"
+        );
+        assert!(matches!(
+            choose.effect.as_ref(),
+            Effect::ChooseCounterKind {
+                target: TargetFilter::Typed(filter),
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Creature]
+                && filter.controller == Some(ControllerRef::You)
+        ));
+
+        let put = choose
+            .sub_ability
+            .as_ref()
+            .expect("placing the chosen counter follows the choice");
+        assert!(matches!(
+            put.effect.as_ref(),
+            Effect::PutChosenCounter {
+                target: TargetFilter::Typed(filter),
+                target_condition: None,
+                ..
+            } if filter.type_filters == vec![crate::types::ability::TypeFilter::Creature]
+                && filter.controller == Some(ControllerRef::You)
+                && filter.properties.contains(&FilterProp::Another)
+        ));
+        assert!(
+            put.sub_ability.is_none(),
+            "the card has no further instruction after the mass placement"
+        );
     }
 
     #[test]
@@ -1303,6 +1773,116 @@ mod tests {
                 target: TargetFilter::ParentTargetController,
             })
         ));
+    }
+
+    /// §5 honest-red gate (CR 701.10e): `Effect::Double` is targeted-only, so a
+    /// NON-targeted descriptor population ("... on each creature you control")
+    /// has no runtime path and must lower to an honest `Effect::Unimplemented`;
+    /// the targeted form ("... on target creature") still lowers to
+    /// `Effect::Double`.
+    #[test]
+    fn double_each_kind_counter_gates_nontargeted_mass_form_to_unimplemented() {
+        let mass = try_parse_double_effect(
+            "double the number of each kind of counter on each creature you control",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(mass, Some(Effect::Unimplemented { .. })),
+            "non-targeted mass form must be honest-red Unimplemented, got {mass:?}"
+        );
+
+        // The §5 gate keys on `Descriptor` ALONE (no plurality sub-condition), so a
+        // SINGULAR non-targeted descriptor must gate identically to the plural mass
+        // form — `Effect::Double` is targeted-only and would double nothing at
+        // runtime for either. Pins against a future plurality branch
+        // (`if plural { NonTargetedDescriptor } else { Supported }`) that would
+        // silently re-support the singular form as a non-functional `Effect::Double`.
+        let singular = try_parse_double_effect(
+            "double the number of each kind of counter on a creature you control",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(singular, Some(Effect::Unimplemented { .. })),
+            "singular non-targeted descriptor form must gate identically to the mass \
+             form (honest-red Unimplemented), got {singular:?}"
+        );
+
+        let targeted = try_parse_double_effect(
+            "double the number of each kind of counter on target creature",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(
+                targeted,
+                Some(Effect::Double {
+                    target_kind: DoubleTarget::Counters { counter_type: None },
+                    ..
+                })
+            ),
+            "targeted form must still resolve to Effect::Double, got {targeted:?}"
+        );
+    }
+
+    /// §5 F2 ordering (CR 608.2k): the anaphor guards run BEFORE the descriptor
+    /// fallback, so "... on it" inside a trigger whose subject is a non-self
+    /// creature filter resolves to the triggering object (`TriggeringSource`) as
+    /// a Supported single-object target — NOT an honest-red Unimplemented.
+    #[test]
+    fn double_each_kind_counter_on_it_binds_triggering_source_in_trigger_context() {
+        let mut ctx = default_ctx();
+        ctx.subject = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let text = "double the number of each kind of counter on it";
+        let effect =
+            try_parse_double_effect(text, &mut ctx).expect("parse double-counter on-it anaphor");
+        assert!(
+            matches!(
+                effect,
+                Effect::Double {
+                    target_kind: DoubleTarget::Counters { counter_type: None },
+                    target: TargetFilter::TriggeringSource,
+                }
+            ),
+            "on-it anaphor in trigger context must bind TriggeringSource, got {effect:?}"
+        );
+    }
+
+    /// §5 real-card (CR 701.10e): Ultimate Spider-Man's back-face "Whenever you
+    /// attack, double the number of each kind of counter on each Spider and
+    /// legendary creature you control" is a NON-targeted descriptor population.
+    /// The YouAttack trigger's effect must be the honest-red Unimplemented from
+    /// the mass gate, not a silently non-functional `Effect::Double`.
+    #[test]
+    fn ultimate_spider_man_mass_double_counter_trigger_is_honest_unimplemented() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let parsed = parse_oracle_text(
+            "First strike, haste\n\
+             Camouflage — {2}: Put a +1/+1 counter on Ultimate Spider-Man. He gains hexproof and becomes colorless until end of turn.\n\
+             Whenever you attack, double the number of each kind of counter on each Spider and legendary creature you control.",
+            "Ultimate Spider-Man",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &[],
+        );
+
+        let has_mass_double_unimplemented = parsed.triggers.iter().any(|t| {
+            t.execute.as_ref().is_some_and(|ability| {
+                matches!(
+                    &*ability.effect,
+                    // allow-noncombinator: test assertion on emitted Unimplemented category name
+                    Effect::Unimplemented { name, .. } if name == "double_counters_nontargeted"
+                )
+            })
+        });
+        assert!(
+            has_mass_double_unimplemented,
+            "USM's YouAttack mass counter-double must be an honest Unimplemented; triggers: {:?}",
+            parsed
+                .triggers
+                .iter()
+                .map(|t| t.execute.as_ref().map(|a| &a.effect))
+                .collect::<Vec<_>>()
+        );
     }
 
     /// CR 701.10a: "double target creature's power and toughness" → factor 2.
@@ -2445,6 +3025,244 @@ mod tests {
             QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount
             }
+        );
+    }
+
+    // ---- Gap-A ("up to N" counter count) + §B2 (token anaphor bind) ----
+
+    const ESPER_CHAPTER: &str = "Create a token that's a copy of target nonlegendary enchantment you control. It gains haste. If it's a Saga, put up to three lore counters on it. Sacrifice it at the beginning of your next end step.";
+
+    fn collect_defs<'a>(
+        def: &'a crate::types::ability::AbilityDefinition,
+        out: &mut Vec<&'a crate::types::ability::AbilityDefinition>,
+    ) {
+        out.push(def);
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect_defs(sub, out);
+        }
+        if let Some(els) = def.else_ability.as_deref() {
+            collect_defs(els, out);
+        }
+        for m in &def.mode_abilities {
+            collect_defs(m, out);
+        }
+    }
+
+    fn find_put_counter(
+        def: &crate::types::ability::AbilityDefinition,
+    ) -> Option<(Effect, Option<crate::types::ability::AbilityCondition>)> {
+        let mut all = Vec::new();
+        collect_defs(def, &mut all);
+        all.into_iter()
+            .find(|d| matches!(*d.effect, Effect::PutCounter { .. }))
+            .map(|d| ((*d.effect).clone(), d.condition.clone()))
+    }
+
+    fn chain_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
+        let mut all = Vec::new();
+        collect_defs(def, &mut all);
+        all.iter()
+            .any(|d| matches!(*d.effect, Effect::Unimplemented { .. }))
+    }
+
+    /// Gap-A CR 608.2d: "put up to three lore counters on <self>" wraps the parsed
+    /// count in `UpTo{Fixed(3)}` (not a bare `Fixed(3)`); explicit self-reference
+    /// keeps `SelfRef`. Reverting the up-to strip returns `None` (Unimplemented).
+    #[test]
+    fn put_up_to_three_lore_counters_wraps_up_to_fixed() {
+        let text = "put up to three lore counters on this creature";
+        let (effect, _, _) = try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(counter_type, CounterType::Lore);
+        assert_eq!(
+            count,
+            QuantityExpr::UpTo {
+                max: Box::new(QuantityExpr::Fixed { value: 3 })
+            },
+            "up-to must wrap Fixed(3), not drop the marker"
+        );
+        assert_eq!(
+            target,
+            TargetFilter::SelfRef,
+            "explicit self-ref stays SelfRef"
+        );
+    }
+
+    /// Gap-A building-block: "up to X" wraps a `Variable("X")` count (the
+    /// Clockwork class), proving the wrap is count-kind-agnostic, not hardcoded.
+    #[test]
+    fn put_up_to_x_counters_wraps_variable() {
+        let text = "put up to X +1/+1 counters on this creature";
+        let (effect, _, _) = try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter { count, .. } = effect else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::UpTo {
+                max: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                })
+            }
+        );
+    }
+
+    /// Gap-A NEG (count-side vs target-side "up to"): the leading count strip must
+    /// NOT steal the TARGET-side "on up to N target(s)". Count stays `Fixed(1)`; a
+    /// `MultiTargetSpec` carries the target-side "up to".
+    #[test]
+    fn count_side_up_to_strip_does_not_steal_target_side() {
+        let text = "put a +1/+1 counter on up to three target creatures";
+        let (effect, _, multi) =
+            try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter { count, .. } = effect else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: 1 },
+            "count-side up-to must not be stolen by the target-side up-to"
+        );
+        assert!(
+            multi.is_some(),
+            "target-side up-to preserved as MultiTargetSpec"
+        );
+    }
+
+    /// §B2 unit: the bare "it" counter branch binds by `token_created_in_chain`.
+    /// Flag false (no token creator — the 1,215-card self-trigger class) → SelfRef;
+    /// flag true (a token creator is the chain's most-recent referent) →
+    /// LastCreated. Directly exercises the `resolve_counter_placement_target`
+    /// it-pronoun branch both ways.
+    #[test]
+    fn put_on_it_binds_by_token_created_in_chain_flag() {
+        let text = "put a +1/+1 counter on it";
+
+        let (no_token, _, _) =
+            try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter { target, .. } = no_token else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::SelfRef,
+            "no token in chain → bare it stays SelfRef"
+        );
+
+        let mut ctx = default_ctx();
+        ctx.token_created_in_chain = true;
+        let (with_token, _, _) = try_parse_put_counter(text, text, &mut ctx).expect("parse");
+        let Effect::PutCounter { target, .. } = with_token else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::LastCreated,
+            "token in chain → bare it binds the created token"
+        );
+    }
+
+    /// Gap-A + §B2 integration: the real Esper Terra chapter chain parses with zero
+    /// `Unimplemented`, its PutCounter count is `UpTo{Fixed(3)}`, its target is the
+    /// created token (`LastCreated`, NOT `SelfRef`), and it carries the is-a-Saga
+    /// gate. Reverting the §B2 chunk-loop bind → `SelfRef`; reverting the Gap-A
+    /// strip → the whole "put" clause is `Unimplemented`.
+    #[test]
+    fn esper_chapter_put_counter_up_to_binds_last_created() {
+        let def = super::super::parse_effect_chain(
+            ESPER_CHAPTER,
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert!(
+            !chain_has_unimplemented(&def),
+            "chapter must parse with zero Unimplemented (reach-guard)"
+        );
+        let (effect, condition) = find_put_counter(&def).expect("chapter contains a PutCounter");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(counter_type, CounterType::Lore);
+        assert_eq!(
+            count,
+            QuantityExpr::UpTo {
+                max: Box::new(QuantityExpr::Fixed { value: 3 })
+            },
+            "count must be UpTo{{Fixed(3)}}, not a bare Fixed(3)"
+        );
+        assert_eq!(
+            target,
+            TargetFilter::LastCreated,
+            "§B2: 'on it' after CopyTokenOf binds the created token, not SelfRef"
+        );
+        assert!(
+            condition.is_some(),
+            "the put node keeps its is-a-Saga condition gate"
+        );
+    }
+
+    /// §B2 guard companion (POSITIVE — original clobber behavior preserved): a
+    /// counter "it" that follows a TYPED target with NO token creator (Turtle Van:
+    /// "Put a +1/+1 counter on target creature, then double the number of +1/+1
+    /// counters on it") STILL binds the parent target (`ParentTarget`). The
+    /// `mod.rs:14753` `LastCreated` guard fires only when the parse bound
+    /// `LastCreated` (a token creator was present), so this non-token anaphor is
+    /// untouched — it must NOT become `LastCreated` or `SelfRef`. Brackets the
+    /// guard's revert-to-red (which proves the NEW token behavior).
+    #[test]
+    fn multiply_counter_on_it_after_typed_target_no_token_stays_parent_target() {
+        let def = super::super::parse_effect_chain(
+            "Put a +1/+1 counter on target creature, then double the number of +1/+1 counters on it.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let mut all = Vec::new();
+        collect_defs(&def, &mut all);
+        let mc_target = all
+            .iter()
+            .find_map(|d| match &*d.effect {
+                Effect::MultiplyCounter { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("chain contains a MultiplyCounter");
+        assert_eq!(
+            mc_target,
+            TargetFilter::ParentTarget,
+            "non-token typed-target counter anaphor must stay ParentTarget (guard untouched)"
+        );
+    }
+
+    /// §B2 NEG (over-rewrite safety, the 9 genuine-source cards — e.g. construct a
+    /// cosmic cube / edgar markov's coffin): an explicit self-reference after a
+    /// token creator STAYS `SelfRef` (it takes the explicit-target path, never the
+    /// it-pronoun branch). Revert-to-red = a post-token structure-only gate would
+    /// flip this to `LastCreated`.
+    #[test]
+    fn explicit_self_ref_after_token_creator_stays_self_ref() {
+        let def = super::super::parse_effect_chain(
+            "Create a 1/1 white Soldier creature token. Put a +1/+1 counter on this creature.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let (effect, _) = find_put_counter(&def).expect("PutCounter present");
+        let Effect::PutCounter { target, .. } = effect else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::SelfRef,
+            "explicit 'this creature' after a token creator must stay SelfRef"
         );
     }
 }

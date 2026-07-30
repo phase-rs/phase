@@ -33,6 +33,9 @@ import type {
   CardSizePreference,
   CommandZoneDisplay,
   LogDefaultState,
+  MultiplayerBoardLayout,
+  SpellPaymentMode,
+  ZoneCollapseMode,
 } from "../../stores/preferencesStore.ts";
 import type { SupportedLng } from "../../i18n/resources.ts";
 import { LanguageFlag } from "../ui/LanguageFlag.tsx";
@@ -42,6 +45,7 @@ import { ConfirmDialog } from "../ui/ConfirmDialog.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { MenuSelect } from "../ui/MenuSelect";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
+import { isTauri } from "../../services/platform.ts";
 import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
 
@@ -67,9 +71,12 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
 const COMMAND_ZONE_DISPLAYS: CommandZoneDisplay[] = ["auto", "inline", "compact"];
+const ZONE_COLLAPSE_MODES: ZoneCollapseMode[] = ["auto", "on", "off"];
 const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
+const SPELL_PAYMENT_MODES: SpellPaymentMode[] = ["auto", "autoExceptSacrificialMana", "manual"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
+const MULTIPLAYER_BOARD_LAYOUTS: MultiplayerBoardLayout[] = ["focused", "split"];
 
 /** Format a speed value as a user-facing label. The slider goes 0→max where
  *  max = instant (skip animations). `0` = slowest, `1` = normal. The endpoint
@@ -153,16 +160,24 @@ export function PreferencesModal({
   const setLanguage = usePreferencesStore((s) => s.setLanguage);
   const cardSize = usePreferencesStore((s) => s.cardSize);
   const commandZoneDisplay = usePreferencesStore((s) => s.commandZoneDisplay);
+  const collapseLands = usePreferencesStore((s) => s.collapseLands);
+  const collapseSupport = usePreferencesStore((s) => s.collapseSupport);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
+  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
+  const priorityPassingMode = usePreferencesStore((s) => s.priorityPassingMode);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
   const pacingMultipliers = usePreferencesStore((s) => s.pacingMultipliers);
   const setCardSize = usePreferencesStore((s) => s.setCardSize);
   const setCommandZoneDisplay = usePreferencesStore((s) => s.setCommandZoneDisplay);
+  const setCollapseLands = usePreferencesStore((s) => s.setCollapseLands);
+  const setCollapseSupport = usePreferencesStore((s) => s.setCollapseSupport);
   const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
+  const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
   const setSpellPaymentMode = usePreferencesStore((s) => s.setSpellPaymentMode);
+  const setPriorityPassingMode = usePreferencesStore((s) => s.setPriorityPassingMode);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
   const customBackgroundUrl = usePreferencesStore((s) => s.customBackgroundUrl);
   const setCustomBackgroundUrl = usePreferencesStore((s) => s.setCustomBackgroundUrl);
@@ -179,6 +194,8 @@ export function PreferencesModal({
   const setSfxVolume = usePreferencesStore((s) => s.setSfxVolume);
   const setMusicVolume = usePreferencesStore((s) => s.setMusicVolume);
   const setAnimationSpeedMultiplier = usePreferencesStore((s) => s.setAnimationSpeedMultiplier);
+  const nativeEngineEnabled = usePreferencesStore((s) => s.nativeEngineEnabled);
+  const setNativeEngineEnabled = usePreferencesStore((s) => s.setNativeEngineEnabled);
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
   const setShowKeywordStrip = usePreferencesStore((s) => s.setShowKeywordStrip);
   const battlefieldPeekOnHover = usePreferencesStore((s) => s.battlefieldPeekOnHover) ?? true;
@@ -187,6 +204,8 @@ export function PreferencesModal({
   const setCardPreviewMode = usePreferencesStore((s) => s.setCardPreviewMode);
   const cardPreviewHoverDelayMs = usePreferencesStore((s) => s.cardPreviewHoverDelayMs) ?? 0;
   const setCardPreviewHoverDelayMs = usePreferencesStore((s) => s.setCardPreviewHoverDelayMs);
+  const showCardPreviewFooter = usePreferencesStore((s) => s.showCardPreviewFooter) ?? true;
+  const setShowCardPreviewFooter = usePreferencesStore((s) => s.setShowCardPreviewFooter);
   const artChain = usePreferencesStore((s) => s.artChain);
   const addArtChainEntry = usePreferencesStore((s) => s.addArtChainEntry);
   const removeArtChainEntry = usePreferencesStore((s) => s.removeArtChainEntry);
@@ -353,12 +372,51 @@ export function PreferencesModal({
                     />
                   </SettingGroup>
 
+                  <SettingGroup label={t("gameplay.autoPass")}>
+                    <label className="flex min-h-11 items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={priorityPassingMode === "SkipLowUseWindows"}
+                        onChange={(event) => {
+                          setPriorityPassingMode(
+                            event.target.checked ? "SkipLowUseWindows" : "Standard",
+                          );
+                        }}
+                        className="mt-1 accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("gameplay.skipLowUsePriorityWindows")}
+                        <span className="mt-0.5 block text-xs leading-relaxed text-slate-400">
+                          {t("gameplay.skipLowUsePriorityWindowsDescription")}
+                        </span>
+                      </span>
+                    </label>
+                  </SettingGroup>
+
                   <SettingGroup label={t("gameplay.commandZone")}>
                     <SegmentedControl
                       options={COMMAND_ZONE_DISPLAYS}
                       value={commandZoneDisplay}
                       onChange={setCommandZoneDisplay}
                       renderLabel={(opt) => t(`gameplay.commandZoneOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.collapseLands")}>
+                    <SegmentedControl
+                      options={ZONE_COLLAPSE_MODES}
+                      value={collapseLands}
+                      onChange={setCollapseLands}
+                      renderLabel={(opt) => t(`gameplay.collapseZoneOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.collapseSupport")}>
+                    <SegmentedControl
+                      options={ZONE_COLLAPSE_MODES}
+                      value={collapseSupport}
+                      onChange={setCollapseSupport}
+                      renderLabel={(opt) => t(`gameplay.collapseZoneOptions.${opt}`)}
                     />
                   </SettingGroup>
 
@@ -372,16 +430,30 @@ export function PreferencesModal({
                   </SettingGroup>
 
                   <SettingGroup label={t("gameplay.spellPayment")}>
-                    <label className="flex min-h-11 items-center gap-2">
+                    <SegmentedControl
+                      options={SPELL_PAYMENT_MODES}
+                      value={spellPaymentMode}
+                      onChange={setSpellPaymentMode}
+                      renderLabel={(option) => t(`gameplay.spellPaymentOptions.${option}`)}
+                    />
+                  </SettingGroup>
+
+                  {isTauri() && (
+                    <label className="mt-1 flex min-h-11 items-start gap-2">
                       <input
                         type="checkbox"
-                        checked={spellPaymentMode === "manual"}
-                        onChange={(e) => setSpellPaymentMode(e.target.checked ? "manual" : "auto")}
-                        className="accent-cyan-500"
+                        checked={nativeEngineEnabled}
+                        onChange={(e) => setNativeEngineEnabled(e.target.checked)}
+                        className="mt-1 accent-cyan-500"
                       />
-                      <span className="text-sm text-slate-200">{t("gameplay.manualManaPayment")}</span>
+                      <span className="text-sm text-slate-200">
+                        {t("gameplay.nativeEngine")}
+                        <span className="mt-0.5 block text-xs text-slate-400">
+                          {t("gameplay.nativeEngineDescription")}
+                        </span>
+                      </span>
                     </label>
-                  </SettingGroup>
+                  )}
 
                   <div
                     ref={boardBackgroundRef}
@@ -451,6 +523,15 @@ export function PreferencesModal({
                     </label>
                   </SettingGroup>
 
+                  <SettingGroup label={t("visual.multiplayerBoardLayout")}>
+                    <SegmentedControl
+                      options={MULTIPLAYER_BOARD_LAYOUTS}
+                      value={multiplayerBoardLayout}
+                      onChange={setMultiplayerBoardLayout}
+                      renderLabel={(opt) => t(`visual.multiplayerBoardLayoutOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
                   <SettingGroup label={t("visual.cardPreview")}>
                     <SegmentedControl
                       options={CARD_PREVIEW_MODES}
@@ -490,6 +571,23 @@ export function PreferencesModal({
                       </p>
                     </SettingGroup>
                   )}
+
+                  <SettingGroup label={t("visual.cardPreviewFooter")}>
+                    <label className="flex min-h-11 items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={showCardPreviewFooter}
+                        onChange={(e) => setShowCardPreviewFooter(e.target.checked)}
+                        className="accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("visual.showCardPreviewFooter")}
+                      </span>
+                    </label>
+                    <p className="mt-1.5 text-xs text-slate-400">
+                      {t("visual.cardPreviewFooterHint")}
+                    </p>
+                  </SettingGroup>
 
                   <SettingGroup label={t("visual.cardArtPreferences")}>
                     <ArtChainEditor
@@ -624,7 +722,7 @@ export function PreferencesModal({
                           type="button"
                           onClick={handleImportTheme}
                           disabled={themeImportStatus === "loading" || !themeImportUrl.trim()}
-                          className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-slate-100 hover:bg-sky-600/50 disabled:opacity-50"
+                          className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-white hover:bg-sky-600/50 disabled:opacity-50"
                         >
                           {themeImportStatus === "loading" ? t("audioTheme.loading") : t("audioTheme.import")}
                         </button>
@@ -948,6 +1046,8 @@ function CloudSyncSection() {
 
 function DataSection() {
   const { t } = useTranslation("settings");
+  const telemetryEnabled = usePreferencesStore((s) => s.telemetryEnabled);
+  const setTelemetryEnabled = usePreferencesStore((s) => s.setTelemetryEnabled);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1049,6 +1149,18 @@ function DataSection() {
       />
       {status && <p className="text-xs text-emerald-400">{status}</p>}
       {error && <p className="text-xs text-rose-400">{error}</p>}
+      <label className="mt-1 flex min-h-11 items-start gap-2">
+        <input
+          type="checkbox"
+          checked={telemetryEnabled}
+          onChange={(e) => setTelemetryEnabled(e.target.checked)}
+          className="mt-1 accent-cyan-500"
+        />
+        <span className="text-sm text-slate-200">
+          {t("data.telemetry")}
+          <span className="mt-0.5 block text-xs text-slate-400">{t("data.telemetryDescription")}</span>
+        </span>
+      </label>
     </SettingsSection>
   );
 }
@@ -1124,7 +1236,7 @@ function MultiplierSlider({
           onChange={(e) => onChange(Number(e.target.value))}
           onDoubleClick={() => onChange(defaultValue)}
           aria-label={label}
-          className="flex-1 accent-cyan-500"
+          className="h-2 flex-1 cursor-pointer rounded-full bg-slate-700 accent-cyan-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200 focus-visible:outline-offset-2 focus-visible:ring-2 focus-visible:ring-cyan-400/70"
         />
         <button
           type="button"
@@ -1424,7 +1536,7 @@ function ArtChainEditor({
             type="button"
             onClick={handleAddSet}
             disabled={!resolveSetCode(setInput)}
-            className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-slate-100 hover:bg-sky-600/50 disabled:opacity-50"
+            className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-white hover:bg-sky-600/50 disabled:opacity-50"
           >
             {t("artChain.addSet")}
           </button>

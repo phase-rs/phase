@@ -23,8 +23,16 @@ export class AiWorkerPool {
   private scoringLock: Promise<void> = Promise.resolve();
 
   constructor(workerCount: number) {
-    for (let i = 0; i < workerCount; i++) {
-      this.workers.push(new EngineWorkerClient());
+    try {
+      for (let i = 0; i < workerCount; i++) {
+        this.workers.push(new EngineWorkerClient());
+      }
+    } catch (error) {
+      // Construction is transactional: if a later worker fails to spawn,
+      // dispose every worker that was already created before propagating the
+      // failure to the adapter's single-worker fallback path.
+      this.dispose();
+      throw error;
     }
   }
 

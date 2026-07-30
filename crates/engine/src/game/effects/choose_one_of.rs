@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::players;
 use crate::types::ability::{
@@ -7,6 +9,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingChooseOneOf, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::AppliedReplacementKey;
 
 /// CR 701.55a-b + CR 608.2d: Prompt the instructed player to choose one
 /// branch at resolution. The branch itself is not pre-validated for
@@ -25,6 +28,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseOneOf,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -40,30 +44,45 @@ pub fn resolve(
     }
     prompt_next(
         state,
-        ability.controller,
-        ability.source_id,
-        branches,
-        ability.targets.clone(),
-        ability.context.clone(),
-        players,
+        PromptRequest {
+            controller: ability.controller,
+            source_id: ability.source_id,
+            branches,
+            parent_targets: ability.targets.clone(),
+            context: ability.context.clone(),
+            replacement_applied: ability.replacement_applied.clone(),
+            players,
+        },
     );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseOneOf,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
 
-pub(crate) fn prompt_next(
-    state: &mut GameState,
-    controller: PlayerId,
-    source_id: ObjectId,
-    branches: Vec<AbilityDefinition>,
-    parent_targets: Vec<TargetRef>,
-    context: crate::types::ability::SpellContext,
-    mut players: Vec<PlayerId>,
-) {
+pub(crate) struct PromptRequest {
+    pub controller: PlayerId,
+    pub source_id: ObjectId,
+    pub branches: Vec<AbilityDefinition>,
+    pub parent_targets: Vec<TargetRef>,
+    pub context: crate::types::ability::SpellContext,
+    pub replacement_applied: HashSet<AppliedReplacementKey>,
+    pub players: Vec<PlayerId>,
+}
+
+pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
+    let PromptRequest {
+        controller,
+        source_id,
+        branches,
+        parent_targets,
+        context,
+        replacement_applied,
+        mut players,
+    } = request;
     let Some(player) = players.first().copied() else {
         return;
     };
@@ -77,6 +96,7 @@ pub(crate) fn prompt_next(
         branch_descriptions,
         parent_targets,
         context,
+        replacement_applied,
         remaining_players: players,
     };
     // `priority_player` routing to the chooser is owned by the centralized
@@ -86,20 +106,28 @@ pub(crate) fn prompt_next(
 }
 
 pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>) {
-    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || state.active_choose_one_of().is_none()
+    {
         return;
     }
-    let Some(pending) = state.pending_choose_one_of.take() else {
+    let Some(pending) = state
+        .take_active_choose_one_of()
+        .expect("choose-one-of resume may consume only its active frame")
+    else {
         return;
     };
     prompt_next(
         state,
-        pending.controller,
-        pending.source_id,
-        pending.branches,
-        pending.parent_targets,
-        pending.context,
-        pending.remaining_players,
+        PromptRequest {
+            controller: pending.controller,
+            source_id: pending.source_id,
+            branches: pending.branches,
+            parent_targets: pending.parent_targets,
+            context: pending.context,
+            replacement_applied: pending.replacement_applied,
+            players: pending.remaining_players,
+        },
     );
 }
 
@@ -110,6 +138,7 @@ pub(crate) struct BranchSelection {
     pub branches: Vec<AbilityDefinition>,
     pub parent_targets: Vec<TargetRef>,
     pub context: crate::types::ability::SpellContext,
+    pub replacement_applied: HashSet<AppliedReplacementKey>,
     pub remaining_players: Vec<PlayerId>,
     pub index: usize,
 }
@@ -126,6 +155,7 @@ pub(crate) fn resolve_branch(
         branches,
         parent_targets,
         context,
+        replacement_applied,
         remaining_players,
         index,
     } = selection;
@@ -135,18 +165,22 @@ pub(crate) fn resolve_branch(
         )));
     };
 
-    state.pending_choose_one_of = (!remaining_players.is_empty()).then(|| PendingChooseOneOf {
-        controller,
-        source_id,
-        branches: branches.clone(),
-        parent_targets: parent_targets.clone(),
-        context: context.clone(),
-        remaining_players,
-    });
+    if !remaining_players.is_empty() {
+        state.push_choose_one_of(PendingChooseOneOf {
+            controller,
+            source_id,
+            branches: branches.clone(),
+            parent_targets: parent_targets.clone(),
+            context: context.clone(),
+            replacement_applied: replacement_applied.clone(),
+            remaining_players,
+        });
+    }
 
     let mut resolved = build_resolved_from_def(branch, source_id, controller);
     resolved.context = context;
     resolved.targets = parent_targets;
+    resolved.set_replacement_applied_recursive(replacement_applied);
     resolved.set_scoped_player_recursive(player);
     if !resolved
         .targets
@@ -158,6 +192,15 @@ pub(crate) fn resolve_branch(
 
     super::resolve_ability_chain(state, &resolved, events, 1)?;
     resume_pending(state, events);
+    // NOTE: the token-choice applied seed is intentionally NOT cleared here.
+    // A branch may stash a token-bearing sub-ability into `pending_continuation`
+    // (effects/mod.rs) that drains only later, from the ChooseBranch handler at
+    // `engine_resolution_choices.rs` via `drain_pending_continuation`. Clearing
+    // here — just because `waiting_for` is momentarily back at Priority — would
+    // wipe the seed before that stashed token sub-ability proposes, re-prompting
+    // the originating token-choice replacement (issue #4886, review #3). The
+    // seed is cleared at true full-drain in `drain_pending_continuation`
+    // (Priority + no ability-continuation or repeat-for frame).
     Ok(())
 }
 
@@ -319,13 +362,18 @@ fn branch_descriptions(branches: &[AbilityDefinition]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine::apply_as_current;
+    use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, Comparator, PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr,
-        QuantityRef, TargetFilter,
+        AbilityKind, CardSelectionMode, Chooser, Comparator, PlayerFilter, PlayerRelation,
+        PlayerScope, PtValue, QuantityExpr, QuantityRef, TargetFilter, ZoneOwner,
     };
+    use crate::types::actions::GameAction;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::WaitingFor;
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::resolution::FrameKind;
+    use crate::types::zones::Zone;
     use crate::types::PlayerId;
 
     #[test]
@@ -361,6 +409,117 @@ mod tests {
             state.waiting_for,
             WaitingFor::ChooseOneOfBranch { .. }
         ));
+    }
+
+    #[test]
+    fn multi_chooser_branch_pause_drains_before_next_chooser() {
+        // CR 701.55d + CR 608.2c: after player 1 chooses a branch that pauses,
+        // its continuation must finish before player 2 faces the same choice.
+        // The outer `ChooseOneOf` frame is the continuation's immediate parent;
+        // reversing those frames would resume player 2 prematurely.
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Villainous Source".to_string(),
+            Zone::Battlefield,
+        );
+        let choice = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Choice Card".to_string(),
+            Zone::Graveyard,
+        );
+
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Graveyard,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: false,
+                constraint: None,
+                selection: CardSelectionMode::Chosen,
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        ));
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Opponent,
+                branches: vec![branch],
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        super::resolve(&mut state, &ability, &mut events).expect("first opponent is prompted");
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("first opponent chooses the pausing branch");
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(crate::types::resolution::ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![FrameKind::ChooseOneOf, FrameKind::AbilityContinuation],
+            "the first branch continuation must remain above the queued second chooser"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseFromZoneChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![choice],
+            },
+        )
+        .expect("resolving the pause must drain its branch continuation");
+        assert_eq!(state.players[0].life, 21);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                player: PlayerId(2),
+                remaining_players: ref rest,
+                ..
+            } if rest.is_empty()
+        ));
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("second opponent chooses the branch after the first branch drained");
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![choice],
+            },
+        )
+        .expect("second branch pause resolves");
+        assert_eq!(state.players[0].life, 22);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolution_stack.is_empty());
     }
 
     #[test]
@@ -408,6 +567,52 @@ mod tests {
             labels,
             vec!["Create a Food token", "Create a Treasure token"]
         );
+    }
+
+    #[test]
+    fn explicit_branch_descriptions_reach_waiting_for_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let colorless = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .description("Colorless".to_string());
+        let white = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .description("White".to_string());
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![colorless, white],
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ChooseOneOfBranch {
+                branch_descriptions,
+                ..
+            } => {
+                assert_eq!(
+                    branch_descriptions,
+                    &vec!["Colorless".to_string(), "White".to_string()]
+                );
+            }
+            other => panic!("expected ChooseOneOfBranch, got {other:?}"),
+        }
     }
 
     #[test]

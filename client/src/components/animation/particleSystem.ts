@@ -257,7 +257,13 @@ export class ParticleSystem {
       const effect = this.effects[i];
       const elapsed = now - effect.startTime;
       if (elapsed < 0) continue;
-      const t = Math.min(Math.max(elapsed / effect.duration, 0), 1);
+      // A zero (or non-positive) duration makes `elapsed / duration` NaN at
+      // elapsed 0; NaN >= 1 is false, so the effect is never completed/removed —
+      // it leaks and keeps the rAF loop alive forever. Treat it as instantly done.
+      const t =
+        effect.duration > 0
+          ? Math.min(Math.max(elapsed / effect.duration, 0), 1)
+          : 1;
       effect.update(t, this);
       if (t >= 1) {
         effect.onComplete?.(this);
@@ -304,7 +310,11 @@ export class ParticleSystem {
       if (effect.draw) {
         const elapsed = _now - effect.startTime;
         if (elapsed < 0) continue;
-        const t = Math.min(Math.max(elapsed / effect.duration, 0), 1);
+        // Guard a zero/non-positive duration (NaN progress) — see updateEffects.
+        const t =
+          effect.duration > 0
+            ? Math.min(Math.max(elapsed / effect.duration, 0), 1)
+            : 1;
         effect.draw(t, ctx);
       }
     }

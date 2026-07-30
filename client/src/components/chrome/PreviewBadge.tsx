@@ -1,7 +1,9 @@
 import { useId } from "react";
 import { useTranslation } from "react-i18next";
 
+import { rememberChannelPreference } from "../../services/channelPreference";
 import { openExternal } from "../../services/openExternal";
+import { isBundledTauriOrigin, isTauri } from "../../services/platform";
 import { GameplayTooltip } from "../ui/GameplayTooltip";
 
 function BoltIcon() {
@@ -13,12 +15,14 @@ function BoltIcon() {
 }
 
 /**
- * Release-only "Try Preview" badge that points players at the bleeding-edge
- * preview deploy (deploy.yml → preview.phase-rs.dev). It sits top-right, just
- * below the shell's ChromeControls cluster (Volume/Account/Language/Settings —
- * `h-9` buttons at `top:1rem`, so their bottom edge is ~52px; this clears it
- * with an ~8px gap). Hidden in dev and on the preview deploy itself — see
- * `__IS_RELEASE_BUILD__` in vite.config.ts.
+ * Release builds expose the "Try Preview" badge for the bleeding-edge preview
+ * deploy (deploy.yml → preview.phase-rs.dev). A first-party remote Tauri shell
+ * on preview instead exposes the matching return-to-release badge. It sits
+ * top-right, just below the shell's ChromeControls cluster (Volume/Account/
+ * Language/Settings — `h-9` buttons at `top:1rem`, so their bottom edge is
+ * ~52px; this clears it with an ~8px gap). The preview badge remains hidden in
+ * dev and ordinary preview web builds — see `__IS_RELEASE_BUILD__` in
+ * vite.config.ts.
  *
  * Mounted by the main menu (MenuPage) so release users discover the preview
  * site from the landing screen.
@@ -26,19 +30,60 @@ function BoltIcon() {
 export function PreviewBadge() {
   const { t } = useTranslation("menu");
   const tooltipId = useId();
+  const isRemoteTauriShell = isTauri() && !isBundledTauriOrigin();
+  const isPreviewRemoteShell =
+    isRemoteTauriShell && window.location.origin === new URL(__PREVIEW_SITE_URL__).origin;
 
-  if (!__IS_RELEASE_BUILD__) return null;
+  if (isPreviewRemoteShell) {
+    return (
+      <div className="fixed right-3 top-[calc(env(safe-area-inset-top)+3.75rem)] z-30 flex max-w-[calc(100vw-1.5rem)] justify-end sm:right-4">
+        <a
+          href={__RELEASE_SITE_URL__}
+          target={isRemoteTauriShell ? undefined : "_blank"}
+          rel={isRemoteTauriShell ? undefined : "noopener noreferrer"}
+          onClick={(e) => {
+            e.preventDefault();
+            rememberChannelPreference("release");
+            window.location.assign(__RELEASE_SITE_URL__);
+          }}
+          aria-describedby={tooltipId}
+          className="group relative flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-200 shadow-[0_0_16px_-2px_rgba(245,158,11,0.45)] backdrop-blur-sm transition-all hover:border-amber-300/70 hover:bg-amber-500/20 hover:text-amber-100 hover:shadow-[0_0_22px_0_rgba(245,158,11,0.65)] sm:gap-1.5 sm:px-3.5 sm:py-1.5 sm:text-xs"
+        >
+          <span
+            aria-hidden
+            className="pointer-events-none absolute inset-0 -z-10 animate-ping rounded-full bg-amber-400/20 [animation-duration:2.4s]"
+          />
+          <span className="transition-transform group-hover:-translate-x-0.5">&larr;</span>
+          <BoltIcon />
+          <span>{t("home.preview.backCta")}</span>
+          <GameplayTooltip id={tooltipId} className="top-full bottom-auto! mt-2 mb-0!">
+            {t("home.preview.backTooltip")}
+          </GameplayTooltip>
+        </a>
+      </div>
+    );
+  }
+
+  // A remote desktop shell must always be able to switch back to preview,
+  // including when it is testing a locally-built release page without the
+  // production release flag stamped into the bundle.
+  if (!__IS_RELEASE_BUILD__ && !isRemoteTauriShell) return null;
 
   return (
     <div className="fixed right-3 top-[calc(env(safe-area-inset-top)+3.75rem)] z-30 flex max-w-[calc(100vw-1.5rem)] justify-end sm:right-4">
       <a
         href={__PREVIEW_SITE_URL__}
-        target="_blank"
-        rel="noopener noreferrer"
-        // Route through openExternal so the desktop (Tauri) build opens the
-        // system browser deterministically; href/target remain the web path and
-        // the graceful fallback for middle-click / right-click-copy.
+        target={isRemoteTauriShell ? undefined : "_blank"}
+        rel={isRemoteTauriShell ? undefined : "noopener noreferrer"}
+        // The remote Tauri shell keeps first-party navigation in the webview;
+        // web builds retain the existing external-tab behavior.
         onClick={(e) => {
+          if (isRemoteTauriShell) {
+            e.preventDefault();
+            rememberChannelPreference("preview");
+            window.location.assign(__PREVIEW_SITE_URL__);
+            return;
+          }
           e.preventDefault();
           openExternal(__PREVIEW_SITE_URL__);
         }}

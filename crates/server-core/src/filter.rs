@@ -1,4 +1,6 @@
+use engine::game::filter_events_for_viewer;
 use engine::game::filter_state_for_viewer;
+use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
@@ -6,6 +8,15 @@ use engine::types::player::PlayerId;
 /// Hides ALL opponents' hand contents and ALL players' library contents.
 pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState {
     filter_state_for_viewer(state, viewer)
+}
+
+/// Returns viewer-safe game events for wire broadcast (library draws, etc.).
+pub fn filter_events_for_player(
+    events: &[GameEvent],
+    state: &GameState,
+    viewer: PlayerId,
+) -> Vec<GameEvent> {
+    filter_events_for_viewer(events, state, viewer)
 }
 
 #[cfg(test)]
@@ -20,9 +31,10 @@ mod tests {
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;
-    use engine::types::game_state::WaitingFor;
-    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::game_state::{ActiveLibrarySearch, WaitingFor};
+    use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use engine::types::mana::ManaCost;
+    use engine::types::resolution::PendingProliferateActions;
     use engine::types::zones::Zone;
     use proptest::prelude::*;
 
@@ -43,6 +55,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )]);
 
@@ -80,6 +93,24 @@ mod tests {
         );
 
         state
+    }
+
+    #[test]
+    fn server_snapshot_omits_internal_resolution_frames() {
+        let mut state = GameState::new_two_player(42);
+        state.push_proliferate_frame(PendingProliferateActions {
+            actor: PlayerId(0),
+            source_id: ObjectId(9_505),
+            remaining: 1,
+        });
+
+        let filtered = filter_state_for_player(&state, PlayerId(1));
+
+        assert!(filtered.resolution_stack.is_empty());
+        assert!(
+            !state.resolution_stack.is_empty(),
+            "server filtering must not mutate its authoritative session state"
+        );
     }
 
     #[test]
@@ -343,9 +374,13 @@ mod tests {
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             is_cost_payment: false,
             library_position: None,
+            enters_modified_if: None,
+            duration: None,
         };
 
         let filtered = filter_state_for_player(&state, PlayerId(1));
@@ -411,13 +446,16 @@ mod tests {
 
     /// Build a minimal `PendingTriggerContext` whose private fields are all
     /// populated, so a viewer-side redaction can be verified by checking that
-    /// each field is cleared/`None`.
+    /// each private field is cleared/`None` while public scheduling metadata is
+    /// preserved.
     fn make_pending_ctx_with_private_payload(
         controller: PlayerId,
         source_id: ObjectId,
         description: &str,
     ) -> engine::game::triggers::PendingTriggerContext {
-        use engine::game::triggers::{PendingTrigger, PendingTriggerContext};
+        use engine::game::triggers::{
+            PendingTrigger, PendingTriggerContext, PendingTriggerDispatchOrigin,
+        };
         use engine::types::ability::{ModalChoice, PlayerFilter, ResolvedAbility};
         use engine::types::events::GameEvent;
 
@@ -450,7 +488,7 @@ mod tests {
             source_id,
             controller,
             condition: None,
-            ability,
+            ability: Box::new(ability),
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,
@@ -472,6 +510,7 @@ mod tests {
         PendingTriggerContext {
             pending,
             trigger_events: vec![event],
+            dispatch_origin: PendingTriggerDispatchOrigin::Normal,
         }
     }
 
@@ -542,6 +581,10 @@ mod tests {
         assert_eq!(opp_ctx.pending.source_id, source_id);
         assert_eq!(opp_ctx.pending.controller, controller);
         assert_eq!(opp_ctx.pending.timestamp, 0);
+        assert_eq!(
+            opp_ctx.dispatch_origin,
+            engine::game::triggers::PendingTriggerDispatchOrigin::Normal
+        );
         // Private payload redacted.
         assert!(opp_ctx.pending.trigger_event.is_none());
         assert!(opp_ctx.pending.modal.is_none());
@@ -610,6 +653,10 @@ mod tests {
         assert_eq!(p0_opp.triggers.len(), 1);
         let p0_opp_ctx = &p0_opp.triggers[0];
         assert_eq!(p0_opp_ctx.pending.source_id, ObjectId(202));
+        assert_eq!(
+            p0_opp_ctx.dispatch_origin,
+            engine::game::triggers::PendingTriggerDispatchOrigin::Normal
+        );
         assert!(p0_opp_ctx.pending.trigger_event.is_none());
         assert!(p0_opp_ctx.pending.modal.is_none());
         assert!(p0_opp_ctx.pending.description.is_none());
@@ -627,6 +674,10 @@ mod tests {
         assert_eq!(p1_opp.controller, PlayerId(0));
         let p1_opp_ctx = &p1_opp.triggers[0];
         assert_eq!(p1_opp_ctx.pending.source_id, ObjectId(101));
+        assert_eq!(
+            p1_opp_ctx.dispatch_origin,
+            engine::game::triggers::PendingTriggerDispatchOrigin::Normal
+        );
         assert!(p1_opp_ctx.pending.trigger_event.is_none());
         assert!(p1_opp_ctx.pending.modal.is_none());
         assert!(p1_opp_ctx.pending.description.is_none());
@@ -662,7 +713,7 @@ mod tests {
         );
 
         let mut state = GameState::new_two_player(42);
-        state.pending_trigger = Some(ctx.pending.clone());
+        state.pending_trigger = Some(Box::new(ctx.pending.clone()));
         state.pending_trigger_event_batch = vec![GameEvent::GameStarted];
 
         // Controller view: payload intact, batch intact.
@@ -729,6 +780,10 @@ mod tests {
         let p0_opp = &p0_view.deferred_triggers[1];
         assert_eq!(p0_opp.pending.source_id, ObjectId(402));
         assert_eq!(p0_opp.pending.controller, PlayerId(1));
+        assert_eq!(
+            p0_opp.dispatch_origin,
+            engine::game::triggers::PendingTriggerDispatchOrigin::Normal
+        );
         assert!(p0_opp.pending.trigger_event.is_none());
         assert!(p0_opp.pending.modal.is_none());
         assert!(p0_opp.pending.description.is_none());
@@ -748,6 +803,54 @@ mod tests {
             p1_own.pending.description.as_deref(),
             Some("p1 deferred description")
         );
+    }
+
+    #[test]
+    fn wrapper_preserves_only_viewer_entitled_search_records_and_events() {
+        let mut state = setup_state();
+        let p0_library = state.players[0].library[0];
+        let p1_library = state.players[1].library[0];
+        for (searcher, owner, object_id, audience) in [
+            (PlayerId(0), PlayerId(0), p0_library, vec![PlayerId(0)]),
+            (PlayerId(1), PlayerId(1), p1_library, vec![PlayerId(1)]),
+        ] {
+            let identity = ObjectIncarnationRef::from_object(&state.objects[&object_id]);
+            state.active_library_searches.insert(
+                ActiveLibrarySearch::try_new(
+                    searcher,
+                    owner,
+                    Some(owner),
+                    audience,
+                    vec![(owner, Zone::Library, identity)],
+                )
+                .unwrap(),
+            );
+        }
+        let events = vec![
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                cards: Vec::new(),
+                audience: vec![PlayerId(0)],
+            },
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(1),
+                cards: Vec::new(),
+                audience: vec![PlayerId(1)],
+            },
+        ];
+
+        let filtered = filter_state_for_player(&state, PlayerId(0));
+        assert!(filtered.active_library_searches.get(&PlayerId(0)).is_some());
+        assert!(filtered.active_library_searches.get(&PlayerId(1)).is_none());
+        let filtered_events = filter_events_for_player(&events, &state, PlayerId(0));
+        assert_eq!(filtered_events.len(), 1);
+        assert!(matches!(
+            filtered_events[0],
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                ..
+            }
+        ));
     }
 
     proptest! {

@@ -11,12 +11,16 @@ const mockWorkers = Array.from({ length: 2 }, () => ({
 }));
 
 let workerIndex = 0;
+let workerConstructorErrorAt: number | null = null;
 
 vi.mock("../engine-worker-client", () => ({
   EngineWorkerClient: vi.fn().mockImplementation(function () {
-    const worker = mockWorkers[workerIndex];
+    const currentWorkerIndex = workerIndex;
     workerIndex += 1;
-    return worker;
+    if (currentWorkerIndex === workerConstructorErrorAt) {
+      throw new Error("worker construction failed");
+    }
+    return mockWorkers[currentWorkerIndex];
   }),
 }));
 
@@ -24,6 +28,16 @@ describe("AiWorkerPool", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     workerIndex = 0;
+    workerConstructorErrorAt = null;
+  });
+
+  it("disposes earlier workers when a later worker fails to construct", () => {
+    workerConstructorErrorAt = 1;
+
+    expect(() => new AiWorkerPool(2)).toThrow("worker construction failed");
+
+    expect(mockWorkers[0].dispose).toHaveBeenCalledOnce();
+    expect(mockWorkers[1].dispose).not.toHaveBeenCalled();
   });
 
   it("merges worker scores without reintroducing missing actions", async () => {

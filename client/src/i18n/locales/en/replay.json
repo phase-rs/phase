@@ -1,0 +1,26 @@
+{
+  "viewer": {
+    "title": "Replay Viewer",
+    "eyebrow": "Watch a recorded game",
+    "chooseFile": "Choose Replay File",
+    "loading": "Loading replay…",
+    "errorGeneric": "Couldn't load that replay file.",
+    "backToMenu": "Back to Menu"
+  },
+  "controls": {
+    "play": "Play",
+    "pause": "Pause",
+    "stepBack": "Step back",
+    "stepForward": "Step forward",
+    "actionOf": "Action {{current}} / {{total}}",
+    "speed": "Speed",
+    "speedValue": "{{value}}x",
+    "seekError": "Couldn't reconstruct this point in the replay: {{message}}"
+  },
+  "export": {
+    "button": "Export Replay",
+    "success": "Replay saved as {{filename}}",
+    "noRecording": "No replay recording is available for this game.",
+    "error": "Couldn't export the replay."
+  }
+}

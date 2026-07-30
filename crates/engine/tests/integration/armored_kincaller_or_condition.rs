@@ -16,7 +16,7 @@
 //!
 //! This drives the real cast -> stack -> ETB trigger -> `OptionalEffectChoice`
 //! -> decline pipeline through `resolve()` (the resolution driver declines
-//! optional "you may" effects by default — CR 609.3).
+//! optional "you may" effects by default — CR 608.2d).
 //!
 //! CR references (verified against docs/MagicCompRules.txt):
 //!   - CR 603.3: once an ability triggers, its controller puts it on the stack.
@@ -60,7 +60,7 @@ fn declined_reveal_still_gains_life_when_controlling_another_dinosaur() {
     // Cast the 0-cost creature; the ETB trigger's `RevealHand` head targets the
     // controller ("your hand") — declare P0 for that slot — and the optional
     // "you may reveal" prompt is DECLINED by the resolution driver's default
-    // policy (CR 609.3).
+    // policy (CR 608.2d).
     let outcome = runner.cast(kincaller).target_player(P0).resolve();
 
     // Declining the reveal must still gain 3 life — the `Or` condition's

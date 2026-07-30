@@ -73,6 +73,18 @@ pub fn handle_priority_pass_with_limit(
                     .is_some_and(|c| !c.regular_damage_done);
             if combat_damage_incomplete {
                 turns::auto_advance(state, events)
+            } else if state.phase == crate::types::phase::Phase::Cleanup {
+                // CR 514.3a: Triggered abilities that triggered during the
+                // cleanup step (e.g. Stolen Uniform's "when you lose control
+                // of that Equipment this turn") have resolved and the stack is
+                // empty — "another cleanup step begins", repeating the
+                // CR 514.1/514.2 turn-based actions, rather than advancing to
+                // the next turn. Re-enter `auto_advance`, whose Cleanup arm
+                // re-runs `execute_cleanup`; once no further trigger fires it
+                // returns `None` and advances normally (the until-EOT control
+                // TCE is already pruned, so no new loss event re-fires — the
+                // one-shot trigger is gone, guaranteeing termination).
+                turns::auto_advance(state, events)
             } else {
                 // CR 117.4: Empty stack — advance to next phase.
                 turns::advance_phase(state, events);
@@ -135,9 +147,13 @@ pub fn handle_priority_pass_with_limit(
 /// bookkeeping team-level, ordered by each team's representative.
 fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
     let canonical_current = super::topology::priority_pass_representative(state, current);
+    // CR 101.4 + CR 117.3d: `participants` is APNAP order, which already honors
+    // `turn_direction`, so the main walk below inherits the reversal. The two
+    // fallbacks (passer not in `participants`, or all have passed) resolve "the
+    // next player in turn order" (CR 117.3d) and so must also honor direction.
     let participants = super::topology::priority_pass_participants(state);
     let Some(current_idx) = participants.iter().position(|&id| id == canonical_current) else {
-        return players::next_player(state, canonical_current);
+        return players::next_player_in_turn_order(state, canonical_current);
     };
     for offset in 1..=participants.len() {
         let idx = (current_idx + offset) % participants.len();
@@ -146,7 +162,7 @@ fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
             return candidate;
         }
     }
-    players::next_player(state, canonical_current)
+    players::next_player_in_turn_order(state, canonical_current)
 }
 
 /// CR 117.4: Clear consecutive priority pass bookkeeping without changing who holds priority.

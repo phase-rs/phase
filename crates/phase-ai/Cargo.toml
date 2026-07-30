@@ -5,10 +5,11 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
-engine = { path = "../engine" }
+engine = { path = "../engine", package = "phase-engine" }
 serde = { workspace = true }
 serde_json = "1"
 rand = "0.9"
+rand_chacha = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 web-time = "1"
@@ -16,6 +17,9 @@ rayon = { version = "1", optional = true }
 
 [features]
 tune = ["rayon"]
+# Scenario-backed benchmark binaries are opt-in: build them with
+# `cargo check -p phase-ai --features scenario-benches --bin combat-priority-bench --bin attack-scaling-bench`.
+scenario-benches = ["engine/test-support"]
 
 [[bin]]
 name = "ai-duel"
@@ -30,7 +34,6 @@ test = false
 [[bin]]
 name = "ai-commander"
 path = "src/bin/ai_commander.rs"
-test = false
 
 [[bin]]
 name = "ai-bench-state"
@@ -43,8 +46,31 @@ path = "src/bin/ai_gate.rs"
 test = false
 
 [[bin]]
+name = "ai-perf-gate"
+path = "src/bin/ai_perf_gate.rs"
+test = false
+
+[[bin]]
 name = "legal-actions-bench"
 path = "src/bin/legal_actions_bench.rs"
 test = false
 
+[[bin]]
+name = "combat-priority-bench"
+path = "src/bin/combat_priority_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
+[[bin]]
+name = "attack-scaling-bench"
+path = "src/bin/attack_scaling_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
 [dev-dependencies]
+# cfg(test) modules place objects with the raw zone API (sealed in production builds).
+engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }
+# `DeckArchetype::iter()` in the mana-development floor test — exhaustiveness comes
+# from the enum, not a hand-written array, so a sixth archetype cannot escape the
+# floor guarantee. Test-only: the derive is `cfg_attr(test, ..)`-gated.
+strum = { version = "0.27", features = ["derive"] }

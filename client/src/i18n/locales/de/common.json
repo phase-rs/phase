@@ -15,6 +15,24 @@
     "enter": "Vollbild starten",
     "exit": "Vollbild beenden"
   },
+  "nativeEngineProgress": {
+    "title": "Nativer Engine wird aktualisiert",
+    "resolving": "Passender lokaler Server wird gesucht…",
+    "downloadingBinary": "Aktualisierter Server wird heruntergeladen…",
+    "verifying": "Server wird überprüft…",
+    "downloadingData": "Spieldaten werden heruntergeladen…",
+    "spawning": "Lokaler Server wird gestartet…",
+    "ready": "Native Engine bereit",
+    "failed": "Native Engine konnte nicht vorbereitet werden"
+  },
+  "engineBadge": {
+    "native": "Native Engine",
+    "nativeTooltip": "Dieses Spiel läuft mit der nativen Engine der Desktop-App.",
+    "inBrowser": "Browser-Engine",
+    "inBrowserTooltip": "Native Engine nicht verfügbar — dieses Spiel läuft im Browser.",
+    "versionMismatchTooltip": "Versionskonflikt der nativen Engine — dieses Spiel läuft im Browser.",
+    "notAttemptedTooltip": "Dieses Spiel läuft im Browser — die native Engine wurde dafür nicht verwendet."
+  },
   "buildBadge": {
     "downloading": "wird heruntergeladen… {{progress}}%",
     "checking": "wird geprüft…",
@@ -22,18 +40,40 @@
     "updatePending": "Aktualisierung nach dem Spiel ausstehend",
     "cards": "Karten {{age}} ({{commit}})",
     "cardDataTitle": "Kartendaten erzeugt am {{date}} aus {{commit}}",
+    "desktopAppVersion": "Desktop-App v{{version}}",
     "checkForUpdates": "Nach Updates suchen",
     "updaterDebugInfo": "Updater-Debug-Informationen",
     "updaterIssue": "Updater-Problem: {{error}}",
     "updateIssue": "Update-Problem",
     "updated": "aktualisiert"
   },
+  "comboDetector": {
+    "label": "Combo-Detektor",
+    "title": "Unendliche Schleifen erkennen: Pflichtschleifen automatisch beenden und ∞-Ressourcen anzeigen (standardmäßig aus)",
+    "on": "An",
+    "off": "Aus",
+    "interactive": "Interaktiv"
+  },
   "gameMenu": {
+    "sections": {
+      "view": "Ansicht",
+      "tools": "Werkzeuge",
+      "game": "Spiel"
+    },
+    "reportCard": "Karte melden",
     "menu": "Spielmenü",
     "sandboxTools": "Sandbox-Werkzeuge",
     "sandboxToolsTitle": "Sandbox-Werkzeuge — beliebigen Spielzustand einrichten (`)",
+    "openSandboxTools": "Sandbox-Werkzeuge öffnen",
+    "clickModeButton": "Klickmodus-Schaltfläche",
+    "shown": "Sichtbar",
+    "hidden": "Ausgeblendet",
     "resume": "Fortsetzen",
     "settings": "Einstellungen",
+    "boardLayoutSplit": "Geteilt",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Zur geteilten Tischansicht wechseln",
+    "switchToLegacyView": "Zur fokussierten Legacy-Ansicht wechseln",
     "helpShortcuts": "Hilfe & Tastenkürzel",
     "showAiHand": "KI-Hand anzeigen",
     "hideAiHand": "KI-Hand verbergen",
@@ -95,6 +135,7 @@
     "recoveryDescription": "Wenn sich eine Karte fehlerhaft verhält, exportiere zuerst den Zustand. Das erweiterte Debug-Panel steht zur Verfügung, wenn du das Spiel inspizieren oder anpassen musst.",
     "copyState": "Zustand kopieren",
     "exportState": "Zustand exportieren",
+    "exportReplay": "Wiederholung exportieren",
     "openAdvancedDebug": "Erweitertes Debug öffnen",
     "sections": {
       "Flow": "Ablauf",
@@ -105,7 +146,10 @@
       "copied": "Spielzustand in die Zwischenablage kopiert.",
       "copyFailed": "Spielzustand konnte nicht kopiert werden.",
       "exported": "{{filename}} exportiert.",
-      "exportFailed": "Spielzustand konnte nicht exportiert werden."
+      "exportFailed": "Spielzustand konnte nicht exportiert werden.",
+      "replayExported": "Wiederholung gespeichert als {{filename}}.",
+      "replayExportUnavailable": "Für diese Partie ist keine Wiederholungsaufzeichnung verfügbar.",
+      "replayExportFailed": "Die Wiederholung konnte nicht exportiert werden."
     },
     "prompt": {
       "starting": "Das Spiel startet oder stellt den Zustand wieder her.",
@@ -196,6 +240,12 @@
       "message": "Richte mit den <tools>Sandbox-Werkzeugen</tools> einen beliebigen Spielzustand ein — füge Karten und Spielsteine hinzu, ändere Leben und Marken, kopiere bleibende Karten oder springe zwischen Phasen. Öffne sie jederzeit mit der Taste <key>`</key>.",
       "dismiss": "Schließen",
       "open": "Sandbox-Werkzeuge öffnen"
+    },
+    "reportCardNudge": {
+      "message": "Wird eine Karte falsch dargestellt oder gespielt? Tippe oben links auf die <flag>Melden-Flagge</flag>, um sie zu melden, damit wir sie beheben können.",
+      "dismiss": "Schließen",
+      "open": "Karte melden",
+      "debugPrompt": "Wird eine Karte falsch dargestellt oder gespielt? Melde sie, damit wir sie beheben können."
     }
   },
   "splash": {
@@ -215,12 +265,29 @@
     "youPlayFirst": "Du beginnst",
     "playerPlaysFirst": "{{name}} beginnt",
     "heads": "Kopf",
-    "tails": "Zahl"
+    "tails": "Zahl",
+    "coinFlip": "Münzwurf",
+    "wonCoinFlip": "{{name}} hat den Münzwurf gewonnen",
+    "lostCoinFlip": "{{name}} hat den Münzwurf verloren",
+    "turnOrder": "Zugreihenfolge",
+    "turnOrderItem": "Zug {{turn}}: {{name}}",
+    "youTakeTurn": "Du bist in Zug {{turn}} dran"
   },
   "chrome": {
     "back": "Zurück",
     "settings": "Einstellungen",
     "languageSettings": "Sprache ({{lang}}) — Einstellungen öffnen",
     "languageTitle": "Sprache: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Etwas ist schiefgelaufen",
+    "body": "Die App ist auf einen unerwarteten Fehler gestoßen und kann auf diesem Bildschirm nicht fortfahren. Ein Neuladen behebt das meist.",
+    "reload": "Neu laden"
+  },
+  "actionError": {
+    "title": "{{action}} fehlgeschlagen",
+    "skipTarget": "Ziel überspringen",
+    "genericAction": "Aktion",
+    "unknownEngineError": "Unbekannter Engine-Fehler"
   }
 }
