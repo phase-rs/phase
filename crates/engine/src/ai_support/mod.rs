@@ -4,6 +4,7 @@ mod context;
 mod copy;
 pub mod filter;
 mod payment_continuation;
+mod targeted_exchange;
 
 use std::collections::{HashMap, HashSet};
 
@@ -54,6 +55,7 @@ pub use payment_continuation::{
     PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationUnsupported,
     PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
 };
+pub use targeted_exchange::{targeted_exchange_verdict, TargetedExchangeVerdict};
 
 /// Filter `candidate_actions` down to the actions that are actually legal now.
 ///

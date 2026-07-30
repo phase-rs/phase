@@ -835,6 +835,7 @@ mod screaming_nemesis_life_lock;
 mod season_points_budget_modal;
 mod seasoned_dungeoneer_initiative_room_trigger;
 mod selenia_vigilance_grant;
+mod self_destruct_target_power;
 mod sensei_golden_tail_5950;
 mod sentinel_sliver_vigilance_grant;
 mod serras_emissary_chosen_card_type_protection;
