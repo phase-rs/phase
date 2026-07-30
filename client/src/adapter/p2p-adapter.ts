@@ -1771,6 +1771,7 @@ export class P2PHostAdapter implements EngineAdapter {
     const { waiting_for: waitingFor } = snapshot.state;
     if (waitingFor.type !== "GameOver" || this.terminalResult) return;
     const winner = waitingFor.data.winner;
+    const display = { winner, reason };
     const createResult = async (
       recipient: PlayerId,
       terminalState: GameState,
@@ -1781,10 +1782,7 @@ export class P2PHostAdapter implements EngineAdapter {
       revision,
       terminalId: crypto.randomUUID(),
       finalStateCommitment: await p2pFinalStateCommitment(terminalState),
-      display: {
-        winner,
-        reason,
-      },
+      display,
     });
     const result = await createResult(0, snapshot.state);
     if (!(await commitP2PTerminalResult(result))) {
@@ -1801,6 +1799,28 @@ export class P2PHostAdapter implements EngineAdapter {
       await this.send(session, { type: "terminal_result", result: recipientResult });
     }));
     this.emit({ type: "terminalResult", result });
+  }
+
+  /**
+   * A terminal statement is recipient-bound because its commitment covers the
+   * recipient's filtered final state. Reconnects therefore need a newly
+   * committed statement rather than replaying the host's retained result.
+   */
+  private async terminalResultForRecipient(
+    recipient: PlayerId,
+    terminalState: GameState,
+  ): Promise<P2PTerminalResult> {
+    const terminal = this.terminalResult;
+    if (terminal === null) throw new Error("No terminal result to deliver");
+    return {
+      key: this.sessionKey,
+      lease: this.authority,
+      recipient,
+      revision: this.authoritativeRevision,
+      terminalId: crypto.randomUUID(),
+      finalStateCommitment: await p2pFinalStateCommitment(terminalState),
+      display: terminal.display,
+    };
   }
 
   /**
@@ -2215,6 +2235,14 @@ export class P2PHostAdapter implements EngineAdapter {
       return;
     }
 
+    if (this.gameRunState === "terminal") {
+      this.disconnectedSeats.set(pid, {
+        disconnectedAt: Date.now(),
+        timer: null,
+      });
+      return;
+    }
+
     // Mid-game disconnect: hold the seat open indefinitely. We do NOT
     // auto-concede a dropped player — no grace timer is armed. The game stays
     // `paused-disconnect`, which auto-resumes the moment the player reconnects
@@ -2293,28 +2321,29 @@ export class P2PHostAdapter implements EngineAdapter {
 
     // Send fresh state to the reconnecting guest.
     void (async () => {
+      let state: GameState;
+      let legalResult: LegalActionsResult;
       if (this.nativeBridge) {
         const snapshot = this.nativeBridge.viewerSnapshot(pid as PlayerId);
-        void this.send(session, {
-          type: "reconnect_ack",
-          wireProtocolVersion: WIRE_PROTOCOL_VERSION,
-          assignedPlayerId: pid as PlayerId,
-          revision: this.authoritativeRevision,
-          state: snapshot.state,
-          playerNames: this.playerNamesForSeats(),
-          ...legalActionsToWire(snapshot.legalResult),
-        });
+        state = snapshot.state;
+        legalResult = snapshot.legalResult;
       } else {
         const snapshot = await this.wasm.getViewerSnapshot(pid as PlayerId);
-        void this.send(session, {
-          type: "reconnect_ack",
-          wireProtocolVersion: WIRE_PROTOCOL_VERSION,
-          assignedPlayerId: pid as PlayerId,
-          revision: this.authoritativeRevision,
-          state: snapshot.state,
-          playerNames: this.playerNamesForSeats(),
-          ...legalActionsToWire(snapshot),
-        });
+        state = snapshot.state;
+        legalResult = snapshot;
+      }
+      await this.send(session, {
+        type: "reconnect_ack",
+        wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+        assignedPlayerId: pid as PlayerId,
+        revision: this.authoritativeRevision,
+        state,
+        playerNames: this.playerNamesForSeats(),
+        ...legalActionsToWire(legalResult),
+      });
+      if (this.terminalResult !== null) {
+        const result = await this.terminalResultForRecipient(pid as PlayerId, state);
+        await this.send(session, { type: "terminal_result", result });
       }
     })();
 

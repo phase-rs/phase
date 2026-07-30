@@ -1682,6 +1682,64 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
     adapter.dispose();
   });
+
+  it("redelivers a recipient-bound terminal result after a guest reconnects", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "game_setup",
+    );
+    const terminalState = {
+      players: [],
+      objects: { 7: { name: "Hidden Card" } },
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    } as unknown as GameState;
+    mockGetViewerSnapshot.mockResolvedValue({
+      state: terminalState,
+      actions: [],
+      autoPassRecommended: false,
+    });
+    await (adapter as unknown as {
+      commitTerminalIfComplete: (snapshot: unknown, revision: number) => Promise<void>;
+    }).commitTerminalIfComplete({
+      state: terminalState,
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 42,
+    }, 42);
+
+    guest.simulateClose();
+    const reconnect = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+    const messages = await reconnect.getSentMessages();
+    const ackIndex = messages.findIndex((message) =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: string }).type === "reconnect_ack");
+    const terminal = messages.find(
+      (message): message is { type: "terminal_result"; result: { recipient: number; finalStateCommitment: string } } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "terminal_result",
+    );
+    expect(ackIndex).toBeGreaterThanOrEqual(0);
+    expect(messages.indexOf(terminal!)).toBeGreaterThan(ackIndex);
+    expect(terminal?.result.recipient).toBe(1);
+    expect(terminal?.result.finalStateCommitment).toBe(
+      await p2pFinalStateCommitment(terminalState),
+    );
+    adapter.dispose();
+  });
 });
 
 describe("P2PHostAdapter — bound draft match concession", () => {
