@@ -25758,3 +25758,163 @@ fn thieving_skydiver_dependent_continuation_is_never_replicated_or_branch() {
         "reach guard: Thieving Skydiver must build a multi-node chain (GainControl + Attach continuation), got {node_count}",
     );
 }
+
+// ---------------------------------------------------------------------------
+// CR 608.2c + CR 608.2d (issue #6477 review follow-up): the "they may" subject
+// arm in `subject.rs` is a class fix, not a Wandering-Archaic special case —
+// every card whose Oracle text puts the "may" modal on the bare pronoun
+// "they" (rather than the explicit "that player"/"the player" forms already
+// handled) previously fell through `parse_subject_application` with NO match
+// (only the exact string "they", with no trailing "may", was accepted). The
+// caller's `unwrap_or` fallback then silently substituted
+// `SubjectApplication { affected: TargetFilter::Any, is_optional: false, .. }`
+// — an unbound target AND a mandatory (non-"may") ability, both wrong. These
+// four tests lock in the corrected behavior for every other printed card
+// found to share the pattern (via a before/after parse diff), so the fix's
+// wider blast radius is intentional and covered, not an unexplained
+// side effect.
+// ---------------------------------------------------------------------------
+
+/// Mishra's Command mode 1: "Choose target player. They may discard up to X
+/// cards." Before the fix: `Discard { target: Any, .. }`, non-optional —
+/// unbound to the just-chosen player and mandatory despite "may". After: the
+/// discard binds to `ParentTarget` (the chosen player) and is optional.
+#[test]
+fn mishras_command_they_may_discard_binds_to_chosen_player_and_is_optional() {
+    let parsed = parse_oracle_text(
+        "Choose two \u{2014}\n\u{2022} Choose target player. They may discard up to X cards. Then they draw a card for each card discarded this way.\n\u{2022} This spell deals X damage to target creature.\n\u{2022} This spell deals X damage to target planeswalker.\n\u{2022} Target creature gets +X/+0 and gains haste until end of turn.",
+        "Mishra's Command",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let mode1 = parsed
+        .abilities
+        .first()
+        .expect("Mishra's Command must parse mode 1 as the first ability");
+    assert!(
+        matches!(*mode1.effect, Effect::TargetOnly { .. }),
+        "mode 1's head is the target-player slot, got {:?}",
+        mode1.effect
+    );
+    let discard = mode1
+        .sub_ability
+        .as_ref()
+        .expect("the discard must remain chained to the chosen target");
+    match &*discard.effect {
+        Effect::Discard { target, .. } => {
+            assert_eq!(
+                target,
+                &TargetFilter::ParentTarget,
+                "\"they\" discard must bind to the just-chosen target player, not float unbound"
+            );
+        }
+        other => panic!("expected Discard, got {other:?}"),
+    }
+    assert!(
+        discard.optional,
+        "\"they may discard\" must be optional, not mandatory"
+    );
+}
+
+/// Undercity Plunder: "Target opponent discards a card. Then they may
+/// discard an additional card. If they don't, conjure ..." Before the fix:
+/// the second Discard's target was `Any` (unbound) and non-optional, so the
+/// "if they don't" branch's condition was unreachable in practice.
+#[test]
+fn undercity_plunder_they_may_discard_additional_binds_to_parent_target() {
+    let parsed = parse_oracle_text(
+        "Target opponent discards a card. Then they may discard an additional card. If they don't, conjure a duplicate of a random card from their library into your hand. It perpetually gains \"You may spend mana as though it were mana of any color to cast this spell.\"",
+        "Undercity Plunder",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let head = parsed
+        .abilities
+        .first()
+        .expect("Undercity Plunder must parse the initial discard");
+    let second_discard = head
+        .sub_ability
+        .as_ref()
+        .expect("\"they may discard an additional card\" must remain chained");
+    match &*second_discard.effect {
+        Effect::Discard { target, .. } => {
+            assert_eq!(
+                target,
+                &TargetFilter::ParentTarget,
+                "the additional discard must bind to the same targeted opponent"
+            );
+        }
+        other => panic!("expected Discard, got {other:?}"),
+    }
+    assert!(
+        second_discard.optional,
+        "\"they may discard an additional card\" must be optional"
+    );
+    let conjure_gate = second_discard
+        .sub_ability
+        .as_ref()
+        .expect("the \"if they don't\" conjure branch must remain chained");
+    assert_eq!(
+        conjure_gate.condition,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed())
+        }),
+        "the conjure branch is gated on declining the additional discard"
+    );
+}
+
+/// Tarnation: "Whenever a player commits a crime, they may draw a card."
+/// Before the fix: `Draw { target: Any, .. }`, non-optional — the draw had no
+/// player bound to it at all.
+#[test]
+fn tarnation_they_may_draw_binds_to_triggering_player() {
+    let def = parse_trigger_line(
+        "Whenever a player commits a crime, they may draw a card. (Targeting opponents, anything they control, and/or cards in their graveyards is a crime.)",
+        "Tarnation",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    match &*execute.effect {
+        Effect::Draw { target, .. } => {
+            assert_eq!(
+                target,
+                &TargetFilter::TriggeringPlayer,
+                "\"they\" draws for the player who committed the crime"
+            );
+        }
+        other => panic!("expected Draw, got {other:?}"),
+    }
+    assert!(execute.optional, "\"they may draw\" must be optional");
+}
+
+/// Smart Ass: "... If defending player has no cards with the chosen name in
+/// their hand, they may reveal their hand. If they don't reveal their hand,
+/// this creature can't be blocked this turn." Before the fix:
+/// `RevealHand { target: Any, .. }`, non-optional.
+#[test]
+fn smart_ass_they_may_reveal_hand_is_optional_and_bound() {
+    let def = parse_trigger_line(
+        "Whenever this creature attacks, choose a card name. If defending player has no cards with the chosen name in their hand, they may reveal their hand. If they don't reveal their hand, this creature can't be blocked this turn.",
+        "Smart Ass",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let reveal = execute
+        .sub_ability
+        .as_ref()
+        .expect("the reveal-hand clause must remain chained to the naming choice");
+    match &*reveal.effect {
+        Effect::RevealHand { target, .. } => {
+            assert_ne!(
+                target,
+                &TargetFilter::Any,
+                "\"they\" reveal must bind to a real player referent, not float unbound"
+            );
+        }
+        other => panic!("expected RevealHand, got {other:?}"),
+    }
+    assert!(
+        reveal.optional,
+        "\"they may reveal their hand\" must be optional"
+    );
+}

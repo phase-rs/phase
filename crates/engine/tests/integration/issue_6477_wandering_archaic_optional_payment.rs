@@ -117,10 +117,16 @@ fn drive_to_payment_prompt(runner: &mut GameRunner) {
     }
 }
 
-/// After the pay/decline decision (and, on decline+accept, the follow-up copy
-/// decision), drain everything to an idle, empty stack. Any further
-/// `OptionalEffectChoice` encountered (e.g. a re-offered copy retarget) is
-/// declined so resolution settles deterministically.
+/// Drain to an idle, empty stack after every decision this test cares about
+/// has already been made explicitly by the caller (the {2} payment, and —
+/// on decline — the follow-up copy choice). A further `OptionalEffectChoice`
+/// here is UNEXPECTED and fails loudly rather than being silently declined:
+/// a regression that offers the copy even after the opponent paid (or offers
+/// it twice) must not be swallowed into the same "2 damage" outcome a
+/// correctly-suppressed copy produces — that would make the paid-path test
+/// pass whether or not the copy was actually suppressed, defeating its whole
+/// point. `CopyRetarget` is the one legitimate additional prompt (issued only
+/// once a copy has already been created), so it alone is handled here.
 fn drive_to_idle(runner: &mut GameRunner) {
     for _ in 0..100 {
         match &runner.state().waiting_for {
@@ -130,9 +136,11 @@ fn drive_to_idle(runner: &mut GameRunner) {
                     .expect("keep the copy's original target");
             }
             WaitingFor::OptionalEffectChoice { .. } => {
-                runner
-                    .act(GameAction::DecideOptionalEffect { accept: false })
-                    .expect("decline any further optional effect");
+                panic!(
+                    "unexpected optional-effect prompt during drive_to_idle: {:?} — \
+                     every decision this test exercises must already be settled by now",
+                    runner.state().waiting_for
+                );
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
             WaitingFor::Priority { .. } => {
@@ -149,9 +157,9 @@ fn drive_to_idle(runner: &mut GameRunner) {
     }
 }
 
-/// CR 608.2d: the opponent declines the {2} payment, so the "if they don't"
-/// branch offers Wandering Archaic's controller the copy. Accepting must put
-/// a second Shock on the stack under the controller's control, dealing a
+/// The opponent declines the {2} payment, so the "if they don't" branch
+/// offers Wandering Archaic's controller the copy. Accepting must put a
+/// second Shock on the stack under the controller's control, dealing a
 /// second 2 damage to the target (4 total) once both the original and the
 /// copy have resolved.
 #[test]
@@ -161,8 +169,13 @@ fn wandering_archaic_declined_payment_lets_controller_copy_spell() {
     cast_shock(&mut runner, shock, target);
     drive_to_payment_prompt(&mut runner);
 
-    // CR 608.2d: the payment decision belongs to the casting opponent (P1),
-    // not Wandering Archaic's controller (P0) — the defect this regresses.
+    // The payment choice must be offered to the casting opponent (P1), not
+    // Wandering Archaic's controller (P0) — the defect this regresses. "They"
+    // in "they may pay" anaphors to the opponent named by the trigger
+    // condition (the parser fact asserted directly by
+    // `wandering_archaic_they_pay_as_triggering_player`); CR 608.2d only
+    // governs that an effect's offered choice is announced by the player
+    // applying the effect, not who that player is.
     match runner.state().waiting_for.clone() {
         WaitingFor::OptionalEffectChoice { player, .. } => {
             assert_eq!(
@@ -239,8 +252,11 @@ fn wandering_archaic_declined_payment_lets_controller_copy_spell() {
     );
 }
 
-/// CR 608.2d: the opponent paying the {2} tax must suppress the copy
-/// entirely — only the original Shock resolves.
+/// The opponent paying the {2} tax must suppress the copy entirely — only
+/// the original Shock resolves. `drive_to_idle` panics on any further
+/// `OptionalEffectChoice`, so a regression that still offers the copy after
+/// payment fails here instead of coincidentally landing on the same "2
+/// damage" outcome a correctly-suppressed copy produces.
 #[test]
 fn wandering_archaic_paid_payment_suppresses_copy() {
     let (mut runner, shock, target) = build_scenario();
