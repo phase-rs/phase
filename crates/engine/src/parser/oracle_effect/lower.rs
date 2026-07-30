@@ -6511,6 +6511,15 @@ pub(super) fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDe
     (target, dest)
 }
 
+type ReturnDestinationPattern = (
+    &'static str,
+    Zone,
+    bool,
+    Option<ControlClausePossessor>,
+    bool,
+    bool,
+);
+
 pub(super) fn strip_return_destination_ext_with_remainder(
     text: &str,
 ) -> (&str, Option<ReturnDestination>, &str) {
@@ -6528,7 +6537,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
     // `parse_leading_control_clause` pass below, which picks up the third-person
     // forms the table never enumerated.
     // Ordered longest-first; compound patterns must precede their shorter substrings.
-    let patterns: &[(&str, Zone, bool, Option<ControlClausePossessor>, bool, bool)] = &[
+    let patterns: &[ReturnDestinationPattern] = &[
         // Tapped + transformed + owner's control (compound, longest)
         (
             " to the battlefield tapped and transformed under its owner's control",
