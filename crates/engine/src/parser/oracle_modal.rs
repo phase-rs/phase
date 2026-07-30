@@ -3107,6 +3107,7 @@ mod tests {
         for (name, oracle, expected_lines, expected_mode_count) in cases {
             let types = vec!["Instant".to_string()];
             let mut ir = parse_oracle_ir(oracle, name, &[], &types, &[]);
+            let span_source = oracle.replacen(name, "~", 1);
 
             assert_eq!(
                 ir.items.len(),
@@ -3130,7 +3131,7 @@ mod tests {
                     Some(expected_fragment),
                     "{name}: slot must retain its verbatim printed source"
                 );
-                let expected_start_byte = oracle
+                let expected_start_byte = span_source
                     .lines()
                     .take(*expected_line)
                     .map(|line| line.len() + 1)
