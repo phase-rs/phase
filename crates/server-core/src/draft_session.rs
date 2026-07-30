@@ -679,6 +679,18 @@ pub fn generate_draft_code() -> String {
         .collect()
 }
 
+/// Shared draft-code contract for lobby WS drafts and HTTP P2P backups.
+///
+/// Exactly six ASCII uppercase letters or digits — the same shape
+/// [`generate_draft_code`] produces. Rejects legacy client shapes such as
+/// `draft-xxxxxxxx`.
+pub fn is_valid_draft_code(code: &str) -> bool {
+    code.len() == 6
+        && code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
 /// Returns the appropriate reconnect grace period for the given draft phase.
 ///
 /// Longer than the 10s game reconnect because tournaments span hours.
@@ -1080,10 +1092,16 @@ mod tests {
     #[test]
     fn draft_code_is_uppercase_alphanumeric() {
         let code = generate_draft_code();
-        assert_eq!(code.len(), 6);
-        assert!(code
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+        assert!(is_valid_draft_code(&code));
+    }
+
+    #[test]
+    fn is_valid_draft_code_rejects_legacy_p2p_shape() {
+        assert!(is_valid_draft_code("BACK01"));
+        assert!(!is_valid_draft_code("draft-abcdef12"));
+        assert!(!is_valid_draft_code("abc123"));
+        assert!(!is_valid_draft_code("BACK0"));
+        assert!(!is_valid_draft_code("BACK011"));
     }
 
     #[test]

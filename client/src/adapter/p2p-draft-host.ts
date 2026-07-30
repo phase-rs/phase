@@ -123,6 +123,25 @@ function hashStringToSeed(value: string): number {
   return hash >>> 0;
 }
 
+/** Alphabet shared with `server_core::generate_draft_code` / `is_valid_draft_code`. */
+const DRAFT_CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+/**
+ * Generate a 6-character uppercase alphanumeric draft code matching the
+ * phase-server `/p2p-draft-backup` validator.
+ */
+export function generateP2pDraftCode(
+  randomValues: (size: number) => Uint8Array = (size) =>
+    crypto.getRandomValues(new Uint8Array(size)),
+): string {
+  const values = randomValues(6);
+  let code = "";
+  for (let i = 0; i < 6; i++) {
+    code += DRAFT_CODE_ALPHABET[values[i]! % DRAFT_CODE_ALPHABET.length]!;
+  }
+  return code;
+}
+
 function sideboardFromPool(
   session: ExportedDraftSession,
   seat: number,
@@ -464,7 +483,9 @@ export class P2PDraftHost {
 
     const seed = Math.floor(Math.random() * 0xffffffff);
     this.draftSeed = seed;
-    const draftCode = `draft-${seed.toString(16).padStart(8, "0")}`;
+    // Must match server_core::is_valid_draft_code (6 uppercase alnum).
+    // The legacy `draft-xxxxxxxx` shape is rejected by phase-server with 400.
+    const draftCode = generateP2pDraftCode();
     const seats: MultiplayerSeatDescriptor[] = [];
     for (let i = 0; i < this.podSize; i++) {
       const displayName = this.seatNames.get(i);
@@ -508,6 +529,9 @@ export class P2PDraftHost {
       }
     }
 
+    // Force the first persisted state to upload immediately so the host
+    // claims the backup row before the normal N-picks interval.
+    this.picksSinceLastBackup = P2PDraftHost.BACKUP_INTERVAL_PICKS;
     this.persistSession();
     const freshHostView = await this.adapter.getViewForSeat(0);
     this.emit({ type: "draftStarted", view: freshHostView });
@@ -1396,12 +1420,12 @@ export class P2PDraftHost {
 
   /**
    * Upload a backup snapshot to the phase-server (best-effort, D-08).
-   * Failures are silently logged — P2P works without server backup.
+   * Failures are logged — P2P works without server backup.
    */
   private async uploadBackupSnapshot(snapshot: PersistedDraftHostSession): Promise<void> {
     if (!this.backupEndpoint || !this.draftCode) return;
     try {
-      await fetch(`${this.backupEndpoint}/p2p-draft-backup`, {
+      const response = await fetch(`${this.backupEndpoint}/p2p-draft-backup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1410,6 +1434,11 @@ export class P2PDraftHost {
           snapshot_json: JSON.stringify(snapshot),
         }),
       });
+      if (!response.ok) {
+        console.warn(
+          `[P2PDraftHost] server backup upload failed: HTTP ${response.status}`,
+        );
+      }
     } catch (err) {
       console.warn("[P2PDraftHost] server backup upload failed:", err);
     }
@@ -1422,10 +1451,15 @@ export class P2PDraftHost {
     if (!this.backupEndpoint || !this.draftCode) return;
     try {
       const params = new URLSearchParams({ host_peer_id: this.hostPeer.id });
-      await fetch(
+      const response = await fetch(
         `${this.backupEndpoint}/p2p-draft-backup/${this.draftCode}?${params}`,
         { method: "DELETE" },
       );
+      if (!response.ok) {
+        console.warn(
+          `[P2PDraftHost] server backup cleanup failed: HTTP ${response.status}`,
+        );
+      }
     } catch {
       // Best-effort cleanup
     }

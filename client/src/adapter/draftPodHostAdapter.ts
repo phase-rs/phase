@@ -14,6 +14,7 @@ import { DraftAdapter } from "./draft-adapter";
 import type { DraftPlayerView, PairingView, PodPolicy, PoolInput, SeatPublicView, TournamentFormat } from "./draft-adapter";
 import type { MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
+import { resolveP2pBackupEndpoint } from "../config/multiplayerServer";
 import { hostRoom, type HostResult } from "../network/connection";
 import type { DraftMatchLaunch, DraftPauseReason } from "../network/draftProtocol";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
@@ -207,7 +208,9 @@ export class DraftPodHostAdapter {
         await new DraftAdapter().loadCardDatabase(await resp.text());
       }
 
-      // 4. Create P2PDraftHost
+      // 4. Create P2PDraftHost. Wire the phase-server HTTP origin so
+      //    best-effort `/p2p-draft-backup` uploads actually run in production
+      //    (omitting backupEndpoint left the upload gate permanently closed).
       const host = new P2PDraftHost(
         hostResult.peer,
         hostResult.onGuestConnected,
@@ -220,6 +223,7 @@ export class DraftPodHostAdapter {
         undefined, // default grace period
         config.persistenceId,
         hostResult.roomCode,
+        resolveP2pBackupEndpoint() ?? undefined,
       );
 
       // 4. Wire host events

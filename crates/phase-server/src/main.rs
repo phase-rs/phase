@@ -8288,6 +8288,32 @@ mod p2p_backup_delete_tests {
         StatusCode::from_u16(status_code).expect("status code")
     }
 
+    async fn post_json(base_url: &str, path: &str, body: &str) -> StatusCode {
+        let url = Url::parse(&format!("{base_url}{path}")).expect("url");
+        let host = url.host_str().expect("host");
+        let port = url.port().expect("port");
+        let mut stream = tokio::net::TcpStream::connect((host, port))
+            .await
+            .expect("connect");
+        let mut request = format!("POST {path} HTTP/1.1\r\n");
+        request.push_str(&format!("Host: {host}\r\n"));
+        request.push_str("Content-Type: application/json\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        request.push_str("Connection: close\r\n\r\n");
+        request.push_str(body);
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut buf = [0u8; 1024];
+        let n = stream.read(&mut buf).await.expect("read");
+        let response = std::str::from_utf8(&buf[..n]).expect("utf8");
+        let status_code = response
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<u16>().ok())
+            .expect("status line");
+        StatusCode::from_u16(status_code).expect("status code")
+    }
+
     fn seed_backup(app_state: &AppState) {
         app_state
             .game_db
@@ -8416,6 +8442,72 @@ mod p2p_backup_delete_tests {
             game_db.load_p2p_backup(DRAFT_CODE).expect("load").is_none(),
             "backup must be removed after authorized DELETE"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn post_rejects_legacy_draft_xxxxxxxx_code() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        let (base_url, server) = spawn_p2p_backup_http_test(app_state).await;
+
+        let body = format!(
+            r#"{{"draft_code":"draft-abcdef12","host_peer_id":"{HOST_PEER}","snapshot_json":{}}}"#,
+            serde_json::to_string(SNAPSHOT).expect("json")
+        );
+        assert_eq!(
+            post_json(&base_url, "/p2p-draft-backup", &body).await,
+            StatusCode::BAD_REQUEST,
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn post_get_delete_round_trip_with_client_shaped_snapshot() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        let game_db = Arc::clone(&app_state.game_db);
+        let (base_url, server) = spawn_p2p_backup_http_test(app_state).await;
+
+        // Client-shaped host session (secrets must be redacted on store).
+        let snapshot = r#"{"status":"Drafting","seatTokens":{"0":"secret-token"},"kickedTokens":["kicked"]}"#;
+        let body = format!(
+            r#"{{"draft_code":"{DRAFT_CODE}","host_peer_id":"{HOST_PEER}","snapshot_json":{}}}"#,
+            serde_json::to_string(snapshot).expect("json")
+        );
+        assert_eq!(
+            post_json(&base_url, "/p2p-draft-backup", &body).await,
+            StatusCode::OK,
+        );
+        let stored = game_db
+            .load_p2p_backup(DRAFT_CODE)
+            .expect("load")
+            .expect("row created");
+        assert_eq!(stored.0, HOST_PEER);
+        assert!(
+            !stored.1.contains("secret-token"),
+            "stored snapshot must redact seatTokens"
+        );
+
+        assert_eq!(
+            request_status(
+                &base_url,
+                "GET",
+                &format!("/p2p-draft-backup/{DRAFT_CODE}?host_peer_id={HOST_PEER}"),
+            )
+            .await,
+            StatusCode::OK,
+        );
+        assert_eq!(
+            request_status(
+                &base_url,
+                "DELETE",
+                &format!("/p2p-draft-backup/{DRAFT_CODE}?host_peer_id={HOST_PEER}"),
+            )
+            .await,
+            StatusCode::OK,
+        );
+        assert!(game_db.load_p2p_backup(DRAFT_CODE).expect("load").is_none());
         server.abort();
     }
 }

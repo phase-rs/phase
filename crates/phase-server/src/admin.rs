@@ -7,19 +7,11 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use server_core::{
-    guard_p2p_backup, guard_p2p_backup_overwrite, redact_p2p_backup_snapshot_secrets,
-    validate_p2p_backup_host_peer_id,
+    guard_p2p_backup, guard_p2p_backup_overwrite, is_valid_draft_code,
+    redact_p2p_backup_snapshot_secrets, validate_p2p_backup_host_peer_id,
 };
 
 use crate::AppState;
-
-/// Validate draft code format: exactly 6 alphanumeric uppercase chars.
-fn is_valid_draft_code(code: &str) -> bool {
-    code.len() == 6
-        && code
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-}
 
 /// GET /admin/drafts — List all active draft sessions with summary info.
 pub async fn admin_list_drafts(State(app_state): State<AppState>) -> Json<Value> {
