@@ -13,9 +13,28 @@
 //! opponent as the card's owner (CR 108.3 @ :564). The parser therefore binds
 //! the anaphor to `ControllerRef::ParentTargetOwner`.
 //!
-//! BEFORE THE FIX the parser dropped the clause entirely
-//! (`enters_under: None`), so the reanimated permanent entered under the
-//! CASTER's control — Jailbreak read as a strictly-better Reanimate.
+//! SCOPE OF THIS TEST — read before trusting it as a regression guard.
+//!
+//! This test does NOT discriminate the fix at the runtime layer, and that was
+//! measured, not assumed: with `enters_under` stripped from the fixture entry
+//! (i.e. the pre-fix AST) this test still passes. On a graveyard → battlefield
+//! move the engine already resolves the new object's controller to its OWNER,
+//! and for Jailbreak the owner IS the player the clause names, so the correct
+//! binding and the unfixed default coincide. Staging the graveyard card with a
+//! divergent controller does not separate them either — the zone move
+//! reassigns it.
+//!
+//! What this test therefore is: a runtime REACH + NON-REGRESSION guard. It
+//! proves the bound `ControllerRef::ParentTargetOwner` resolves cleanly through
+//! `resolve_enters_under_player` (rather than raising `InvalidParam`, which is
+//! exactly what a wrong binding such as `Opponent` or `TargetPlayer` would do
+//! here), and that the card still resolves end-to-end.
+//!
+//! The DISCRIMINATING test for this change is the parser-level assertion in
+//! `oracle_effect/tests.rs::jailbreak_enters_under_their_control_binds_to_the_owner`,
+//! which asserts `enters_under == Some(ParentTargetOwner)` and fails with the
+//! fix reverted (the clause is dropped and the field is `None`). The
+//! fixture-integrity guard below is also revert-sensitive.
 //!
 //! HOSTILE FIXTURE: a THREE-player game where the victim is owned by P1 and P2
 //! also holds a graveyard permanent. A two-player game cannot discriminate
@@ -35,8 +54,8 @@ use crate::support::shared_card_db as load_db;
 
 /// CR 110.2a: Jailbreak's returned permanent enters under its OWNER's control.
 ///
-/// REVERT-FAILING ASSERTION: `objects[&victim].controller == P1`. With the fix
-/// reverted the clause is dropped and the permanent enters under P0's control.
+/// NOT revert-failing at the runtime layer — see the module docstring. This is
+/// the reach + non-regression half; the discriminating half is the parser test.
 #[test]
 fn jailbreak_returns_the_permanent_under_its_owners_control() {
     let Some(db) = load_db() else {
@@ -68,6 +87,24 @@ fn jailbreak_returns_the_permanent_under_its_owners_control() {
     let mut runner = scenario.build();
     rehydrate_game_from_card_db(runner.state_mut(), db);
 
+    // FIXTURE-INTEGRITY GUARD. `Effect::ChangeZone.enters_under` is
+    // `skip_serializing_if = "Option::is_none"`, so a fixture entry captured
+    // from a PRE-FIX `card-data.json` deserializes as `enters_under: None` —
+    // i.e. the unfixed AST — and every assertion below would then be measuring
+    // the old behaviour while appearing to pass. Fail loudly instead.
+    {
+        let face = db
+            .get_face_by_name("Jailbreak")
+            .expect("Jailbreak present in the integration fixture");
+        let dump = format!("{face:?}");
+        assert!(
+            dump.contains("ParentTargetOwner"),
+            "stale fixture: Jailbreak's parsed ability must carry \
+             enters_under: Some(ParentTargetOwner); regenerate \
+             crates/engine/tests/fixtures/integration_cards.json"
+        );
+    }
+
     let outcome = runner
         .cast(jailbreak)
         .target_object(victim)
@@ -95,11 +132,13 @@ fn jailbreak_returns_the_permanent_under_its_owners_control() {
         "fixture invariant: the victim must be OWNED by P1"
     );
 
-    // THE REVERT-FAILING ASSERTION (CR 110.2a).
+    // CR 110.2a resolution guard (see the module docstring for why this is a
+    // reach guard and not a revert-failing discriminator).
     assert_eq!(
         state.objects[&victim].controller, P1,
-        "CR 110.2a: \"under their control\" puts the card under its OWNER's \
-         control (P1), not the caster's (P0) and not the third seat's (P2)"
+        "CR 110.2a: the bound ParentTargetOwner must RESOLVE (not raise \
+         InvalidParam) and yield the card's owner P1 — not the caster P0, \
+         not the third seat P2"
     );
 }
 
