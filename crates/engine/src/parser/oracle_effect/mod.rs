@@ -30515,7 +30515,21 @@ pub(crate) fn parse_effect_chain_ir(
         }
         .or_else(|| ctx.actor.clone());
         let if_you_do_anchor = if_you_do_object_anchor(builder.clauses(), &condition);
-        let chunk_subject = if condition.as_ref().is_some_and(condition_refs_source_object) {
+        // CR 608.2k: A source-scoped counter gate rebinds a bare "it" in the gated
+        // body to the ability's own source ONLY when that source is the pronoun's
+        // real antecedent — i.e. the ability's cost/trigger named it and no earlier
+        // clause introduced a chosen target. When a prior clause DID choose a typed
+        // target ("Target creature gets +2/+2 …"), the gated body's "it" anaphors to
+        // that target, not the source — Revelation of Power ("… If it has a counter
+        // on it, it also gains flying and lifelink") mis-scopes its bare "it" to
+        // CountersOn{Source}, and binding it to the source would drop the grant onto
+        // the Instant. `chain_has_prior_typed_referent` is false for the depletion
+        // lands / counter riders (whose prior clause is "Add mana" or "put a counter
+        // on ~", not a typed target), so every intended heal is unaffected.
+        let binds_source_counter_pronoun =
+            condition.as_ref().is_some_and(condition_refs_source_object)
+                && !chain_has_prior_typed_referent(builder.clauses(), false);
+        let chunk_subject = if binds_source_counter_pronoun {
             Some(TargetFilter::SelfRef)
         } else {
             if_you_do_anchor.clone().or_else(|| ctx.subject.clone())
@@ -31307,7 +31321,11 @@ pub(crate) fn parse_effect_chain_ir(
         // which is scoped to exactly the reported bug class.
         if condition.is_some()
             && !is_distributed_chunk
-            && !condition.as_ref().is_some_and(condition_refs_source_object)
+            // CR 608.2k: only a GENUINE source-counter gate (no prior chosen
+            // target — see `binds_source_counter_pronoun`) keeps the SelfRef
+            // binding; a mis-scoped bare "it" over a prior typed target
+            // (Revelation of Power) still rewrites to the parent target here.
+            && !binds_source_counter_pronoun
             && !builder.is_empty()
             && has_anaphoric_reference(&text_lower)
             && !matches!(if_you_do_anchor, Some(TargetFilter::SelfRef))
