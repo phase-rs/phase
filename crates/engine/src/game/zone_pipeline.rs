@@ -4066,7 +4066,7 @@ mod layers_incremental_flush_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        FilterProp, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ContinuousModification, FilterProp, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::LayersDirty;
@@ -4389,7 +4389,36 @@ mod layers_incremental_flush_tests {
                 )),
             );
         }
-        reset_clean(&mut state);
+
+        // Round-3 fix (maintainer, PR #6777): prime with a REAL layer flush so
+        // the fixture carries exactly the index state production would — not a
+        // hand-reset that leaves `static_source_index` unbuilt. For this board
+        // shape the rebuild leaves the index PRECISELY empty:
+        // `StaticSourceIndex::rebuild_from_state` keys on generators only
+        // (static_source_index.rs), the lone battlefield object carries no
+        // static, and the graveyard watcher sits outside both indexed buckets.
+        // At the post-entry check the index is then stale-EMPTY, not
+        // legitimately empty: the watcher has arrived and IS a generator, but
+        // nothing rebuilds the index mid-move, so `use_fallback` in
+        // `for_each_static_effect_source` fires and the direct scan sees the
+        // newcomer. That is exactly the production shape of "the first
+        // generator enters a generator-free board" — reached in any real game
+        // — so the `Full` mark pinned here is live behavior, not a recovery
+        // path for hand-built state. The populated-bucket shape, where the
+        // after arm provably cannot see the newcomer, is pinned by
+        // `populated_index_entry_defers_zone_reading_static_to_flush_escalation`.
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Clean),
+            "priming flush must leave the dirty lattice clean, got {:?}",
+            state.layers_dirty
+        );
+        assert!(
+            state.static_source_index.battlefield_sources.is_empty()
+                && state.static_source_index.command_sources.is_empty(),
+            "fixture premise: a generator-free board rebuilds to a precisely empty index"
+        );
 
         // Precondition for discrimination: with the watcher still in the
         // Graveyard, no battlefield/command object reads zone membership, so
@@ -4416,6 +4445,124 @@ mod layers_incremental_flush_tests {
             matches!(state.layers_dirty, LayersDirty::Full),
             "an entering object that itself carries a zone-membership-reading static must force a full re-evaluation via static_dependency_after (the before check is provably false here), got {:?}",
             state.layers_dirty
+        );
+    }
+
+    /// Round-3 companion (maintainer, PR #6777): the POPULATED-index shape.
+    /// With an unrelated generator on the battlefield the indexed buckets are
+    /// non-empty, and the mid-mutation dependency checks read a stale-by-design
+    /// index (rebuilt only at the top of a flush pass — see the "Authority"
+    /// note in static_source_index.rs): the just-entered watcher is not yet a
+    /// bucket member, so BOTH the before and after arms are false and
+    /// `move_object` proposes the cheap `EnteredObjects` mark. Safety for this
+    /// shape is delivered at flush time, not at the mutation site:
+    /// `prepare_incremental_flush` escalates to a full pass (arm (1) of
+    /// `entered_object_blocks_incremental` fires first on the entering
+    /// object's live continuous effect; the recipient-sourced active-effect
+    /// check just after the index rebuild is a redundant backstop). This
+    /// test pins that handoff end-to-end — cheap mark at the seam, escalation
+    /// plus full evaluation at the flush — so neither half of the contract can
+    /// silently regress.
+    #[test]
+    fn populated_index_entry_defers_zone_reading_static_to_flush_escalation() {
+        let mut state = GameState::new_two_player(42);
+        let generator = create_object(
+            &mut state,
+            CardId(80046),
+            PlayerId(0),
+            "Benign Generator".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&generator).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            // Plain typed filter: no InZone/InAnyZone prop, so per
+            // `target_filter_reads_zone` it reads membership of NEITHER
+            // transition zone — it exists only to populate the index bucket.
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default().with_type(TypeFilter::Creature),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+            );
+        }
+        let source = create_object(
+            &mut state,
+            CardId(80047),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let entering_watcher = create_object(
+            &mut state,
+            CardId(80048),
+            PlayerId(0),
+            "Entering Graveyard Watcher".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&entering_watcher).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            // A real modification (not just a zone-reading affected filter) so
+            // the entered object sources a live continuous effect once on the
+            // battlefield — the exact condition `entered_object_blocks_incremental`
+            // arm (1) escalates on.
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard],
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+            );
+        }
+
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert_eq!(
+            state.static_source_index.battlefield_sources.len(),
+            1,
+            "fixture premise: exactly the benign generator is indexed after the priming flush"
+        );
+        assert!(
+            !crate::game::layers::static_layer_dependency_for_zone_transition(
+                &state,
+                Zone::Graveyard,
+                Zone::Battlefield
+            ),
+            "fixture invalid: the generator must not read either transition zone"
+        );
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entering_watcher, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&entering_watcher].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::EnteredObjects(_)),
+            "with populated (stale-by-design) buckets the mutation-site arms cannot see the entering object's own static; the cheap mark is the designed outcome here, got {:?}",
+            state.layers_dirty
+        );
+
+        crate::game::perf_counters::reset();
+        crate::game::layers::flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            counters.layers_escalated, 1,
+            "flush must escalate: the entered object sources a live continuous effect"
+        );
+        assert_eq!(
+            counters.layers_full_eval, 1,
+            "the escalation must land in a full evaluation"
         );
     }
 }
