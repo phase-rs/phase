@@ -133,7 +133,7 @@ pub(crate) struct ParseContext {
     /// clause state cannot leak across trigger lines.
     pub pending_trigger_subject_clause: Option<TargetFilter>,
     /// CR 608.2k: Source zone of the current ability's `AbilityCost::Exile`
-    /// component, if any. Set by `parse_activated_ability_definition` after the
+    /// component, if any. Set by `parse_activated_ability_ir` after the
     /// cost is parsed and before the effect text is parsed, then restored after
     /// the ability. Consumed by `parse_cost_paid_object_reference` to
     /// disambiguate "the exiled card" — a cost-paid-object reference
@@ -298,8 +298,13 @@ impl ParseContext {
 
     /// Push a diagnostic (replaces oracle_warnings::push_diagnostic).
     pub fn push_diagnostic(&mut self, d: OracleDiagnostic) {
-        if matches!(d, OracleDiagnostic::TargetFallback { .. })
-            && self.diagnostics.iter().any(|existing| existing == &d)
+        // Both variants can be pushed from a combinator that a speculative `alt`
+        // re-enters on a discarded alternative, so an identical entry is noise
+        // rather than signal.
+        if matches!(
+            d,
+            OracleDiagnostic::TargetFallback { .. } | OracleDiagnostic::IgnoredRemainder { .. }
+        ) && self.diagnostics.iter().any(|existing| existing == &d)
         {
             return;
         }

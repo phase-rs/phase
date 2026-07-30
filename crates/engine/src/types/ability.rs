@@ -525,6 +525,28 @@ pub enum NumberDistinctness {
     DistinctFromSourceHistory,
 }
 
+/// CR 608.2c: whether a "choose a player"/"choose an opponent" instruction
+/// must exclude players already chosen earlier in the SAME resolution, or is
+/// an independent pick that may repeat an earlier choice. Parse-detected;
+/// static; serialized only when non-default so existing `Player`/`Opponent`
+/// card-data stays byte-stable. Mirrors `NumberDistinctness`'s axis on the
+/// sibling `NumberRange` choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PlayerChoiceDistinctness {
+    /// The default: repeated "Choose an opponent."/"Choose a player."
+    /// instructions in one resolution are independent picks — the same
+    /// player may be chosen more than once. Confirmed by the "Offering" cycle
+    /// ruling (Benevolent/Infernal/Intellectual/Sylvan Offering): "You may
+    /// choose the same opponent for each of the effects, or you may choose
+    /// different opponents."
+    #[default]
+    Independent,
+    /// Ordinal-cued instructions ("choose a second player", "choose a third
+    /// player" — Gluntch, the Bestower) require each successive choice to
+    /// exclude every player already chosen earlier in this resolution.
+    DistinctFromPriorChoices,
+}
+
 /// What kind of named choice the player must make at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChoiceType {
@@ -590,11 +612,22 @@ pub enum ChoiceType {
     /// the qualifying opponents (CR 608.2d handles ties) — rather than fanning
     /// the effect out to every tied opponent. Boxed to avoid inflating the
     /// `ChoiceType` enum with the recursive `PlayerFilter` payload.
+    ///
+    /// `distinctness` (CR 608.2c) governs whether this pick must exclude
+    /// players already chosen by an earlier `Opponent`/`Player` choice in the
+    /// same resolution. Defaults to `Independent` — see
+    /// [`PlayerChoiceDistinctness`].
     Opponent {
         restriction: Option<Box<PlayerFilter>>,
+        distinctness: PlayerChoiceDistinctness,
     },
-    /// "Choose a player" — selects any player in the game.
-    Player,
+    /// "Choose a player" — selects any player in the game. `distinctness`
+    /// (CR 608.2c) governs whether this pick must exclude players already
+    /// chosen by an earlier `Opponent`/`Player` choice in the same
+    /// resolution — see [`PlayerChoiceDistinctness`].
+    Player {
+        distinctness: PlayerChoiceDistinctness,
+    },
     /// "Choose two colors" — selects two distinct mana colors.
     TwoColors,
     /// "Choose a word" — names any English word (Un-set and silver-border cards).
@@ -700,6 +733,39 @@ impl ChoiceType {
 
     pub fn card_type_excluding(excluded: Vec<CoreType>) -> Self {
         Self::CardType { excluded }
+    }
+
+    /// Unrestricted "choose an opponent" (CR 102.3), independent of any other
+    /// choice in the resolution (the "Offering" cycle default).
+    pub fn opponent() -> Self {
+        Self::Opponent {
+            restriction: None,
+            distinctness: PlayerChoiceDistinctness::Independent,
+        }
+    }
+
+    /// "Choose an opponent [with the most life ...]" (CR 608.2d).
+    pub fn opponent_with_restriction(restriction: PlayerFilter) -> Self {
+        Self::Opponent {
+            restriction: Some(Box::new(restriction)),
+            distinctness: PlayerChoiceDistinctness::Independent,
+        }
+    }
+
+    /// "Choose a player" (CR 102.1), independent of any other choice in the
+    /// resolution.
+    pub fn player() -> Self {
+        Self::Player {
+            distinctness: PlayerChoiceDistinctness::Independent,
+        }
+    }
+
+    /// Ordinal-cued "choose a second/third player" (Gluntch, the Bestower):
+    /// must exclude players already chosen earlier in this resolution.
+    pub fn player_distinct_from_prior() -> Self {
+        Self::Player {
+            distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices,
+        }
     }
 
     pub fn land_or_nonland_card_predicate_options() -> Vec<CardPredicateChoice> {
@@ -840,19 +906,47 @@ impl Serialize for ChoiceType {
                 variant.serialize_field("options", options)?;
                 variant.end()
             }
-            // Serialize the unrestricted form as the legacy unit variant
-            // "Opponent" so existing card-data JSON stays byte-stable; only emit
-            // the struct form when a restriction is present.
-            Self::Opponent { restriction } => match restriction {
-                None => serializer.serialize_unit_variant("ChoiceType", 9, "Opponent"),
-                Some(restriction) => {
-                    let mut variant =
-                        serializer.serialize_struct_variant("ChoiceType", 9, "Opponent", 1)?;
+            // Serialize the unrestricted, default-distinctness form as the
+            // legacy unit variant "Opponent" so existing card-data JSON stays
+            // byte-stable; only emit the struct form when a restriction
+            // and/or a non-default `distinctness` is present.
+            Self::Opponent {
+                restriction,
+                distinctness,
+            } => {
+                let non_default_distinctness =
+                    *distinctness != PlayerChoiceDistinctness::Independent;
+                if restriction.is_none() && !non_default_distinctness {
+                    serializer.serialize_unit_variant("ChoiceType", 9, "Opponent")
+                } else {
+                    let field_count = 1 + non_default_distinctness as usize;
+                    let mut variant = serializer.serialize_struct_variant(
+                        "ChoiceType",
+                        9,
+                        "Opponent",
+                        field_count,
+                    )?;
                     variant.serialize_field("restriction", restriction)?;
+                    if non_default_distinctness {
+                        variant.serialize_field("distinctness", distinctness)?;
+                    }
                     variant.end()
                 }
-            },
-            Self::Player => serializer.serialize_unit_variant("ChoiceType", 10, "Player"),
+            }
+            // Serialize the default-distinctness form as the legacy unit
+            // variant "Player" so existing card-data JSON stays byte-stable;
+            // only emit the struct form when `distinctness` is non-default
+            // (Gluntch, the Bestower's ordinal-cued picks).
+            Self::Player { distinctness } => {
+                if *distinctness == PlayerChoiceDistinctness::Independent {
+                    serializer.serialize_unit_variant("ChoiceType", 10, "Player")
+                } else {
+                    let mut variant =
+                        serializer.serialize_struct_variant("ChoiceType", 10, "Player", 1)?;
+                    variant.serialize_field("distinctness", distinctness)?;
+                    variant.end()
+                }
+            }
             Self::TwoColors => serializer.serialize_unit_variant("ChoiceType", 11, "TwoColors"),
             Self::Word => serializer.serialize_unit_variant("ChoiceType", 12, "Word"),
             Self::Artist => serializer.serialize_unit_variant("ChoiceType", 13, "Artist"),
@@ -929,6 +1023,12 @@ impl<'de> Deserialize<'de> for ChoiceType {
             Opponent {
                 #[serde(default)]
                 restriction: Option<Box<PlayerFilter>>,
+                #[serde(default)]
+                distinctness: PlayerChoiceDistinctness,
+            },
+            Player {
+                #[serde(default)]
+                distinctness: PlayerChoiceDistinctness,
             },
             Keyword {
                 options: Vec<Keyword>,
@@ -955,8 +1055,8 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 "CardType" => Ok(Self::card_type()),
                 "CardName" => Ok(Self::CardName),
                 "LandType" => Ok(Self::LandType),
-                "Opponent" => Ok(Self::Opponent { restriction: None }),
-                "Player" => Ok(Self::Player),
+                "Opponent" => Ok(Self::opponent()),
+                "Player" => Ok(Self::player()),
                 "TwoColors" => Ok(Self::TwoColors),
                 "Word" => Ok(Self::Word),
                 "Artist" => Ok(Self::Artist),
@@ -996,7 +1096,14 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 ChoiceTypeData::CardPredicateGuess { options } => {
                     Ok(Self::CardPredicateGuess { options })
                 }
-                ChoiceTypeData::Opponent { restriction } => Ok(Self::Opponent { restriction }),
+                ChoiceTypeData::Opponent {
+                    restriction,
+                    distinctness,
+                } => Ok(Self::Opponent {
+                    restriction,
+                    distinctness,
+                }),
+                ChoiceTypeData::Player { distinctness } => Ok(Self::Player { distinctness }),
                 ChoiceTypeData::Keyword { options, count } => Ok(Self::Keyword { options, count }),
                 ChoiceTypeData::CounterKind { options } => Ok(Self::CounterKind { options }),
             },
@@ -1379,7 +1486,7 @@ impl ChosenAttribute {
                 distinctness: NumberDistinctness::Repeatable,
             },
             // Player covers both Player and Opponent choice types
-            Self::Player(_) => ChoiceType::Player,
+            Self::Player(_) => ChoiceType::player(),
             Self::TwoColors(_) => ChoiceType::TwoColors,
             // CR 702.104: Tribute outcome uses a dedicated prompt type rather than
             // a NamedChoice (two fixed labels: Paid / Declined). Classify under the
@@ -1514,7 +1621,7 @@ impl ChoiceValue {
             }
             ChoiceType::LandType => Some(Self::LandType(value.to_string())),
             // CR 800.4a: Parse player ID from string.
-            ChoiceType::Opponent { .. } | ChoiceType::Player => value
+            ChoiceType::Opponent { .. } | ChoiceType::Player { .. } => value
                 .parse::<u8>()
                 .ok()
                 .map(|id| Self::Player(PlayerId(id))),
@@ -5294,9 +5401,12 @@ pub enum ObjectScope {
     Target,
     /// CR 613.4c + CR 115.10: The object currently receiving an effect.
     /// In layer evaluation this is the per-object recipient. Outside layers,
-    /// it resolves to the first object target when present, then to the source.
+    /// it resolves to the first object target when present, then to the
+    /// entering object of an ETB-scoped replacement, then to the source.
     /// Used for recipient-relative "its colors" boosts such as Blessing of
-    /// the Nephilim and Civic Saber.
+    /// the Nephilim and Civic Saber, and for "its mana value"/"its power"
+    /// quantities inside "that creature enters with ... counters" replacement
+    /// effects (Runadi, Behemoth Caller).
     Recipient,
     /// CR 603.2: The object referenced by the current trigger event.
     EventSource,
@@ -16868,7 +16978,7 @@ pub struct ModalChoice {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<ModalSelectionConstraint>,
     /// Per-mode additional mana costs (Spree). Empty for standard modal spells.
-    /// CR 702.172b: Chosen mode costs are additional costs, not part of the base mana cost.
+    /// CR 702.172a: Chosen mode costs are additional costs, not part of the base mana cost.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_costs: Vec<ManaCost>,
     /// CR 700.2i: Per-mode pawprint weight for points-budget modals ("up to N {P}
@@ -20882,6 +20992,112 @@ pub enum ProtectionDoesNotRemove {
     ControlledAttachmentsAlreadyAttached,
 }
 
+/// CR 601.2f: whose spells a cost modifier applies to, read off
+/// `StaticDefinition.affected`.
+///
+/// The stored form is a `TargetFilter` whose `TypedFilter.controller` carries
+/// the scope, so every consumer would otherwise re-destructure it. Naming the
+/// three outcomes keeps the decision in one place and lets a caller that has no
+/// `PlayerId` (deck-time analysis) ask the same question as one that does
+/// (the casting pipeline).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostModifierCasterScope {
+    /// "Spells you cast" — applies only when the caster controls the source.
+    You,
+    /// "Spells your opponents cast" — applies only when the caster does not.
+    Opponent,
+    /// Unscoped — applies to every caster.
+    Any,
+}
+
+/// CR 601.2f: read the caster scope off a cost modifier's `affected` filter.
+pub fn cost_modifier_caster_scope(affected: Option<&TargetFilter>) -> CostModifierCasterScope {
+    match affected {
+        Some(TargetFilter::Typed(typed)) => match typed.controller {
+            Some(ControllerRef::You) => CostModifierCasterScope::You,
+            Some(ControllerRef::Opponent) => CostModifierCasterScope::Opponent,
+            _ => CostModifierCasterScope::Any,
+        },
+        _ => CostModifierCasterScope::Any,
+    }
+}
+
+/// CR 601.2f: the structural facts of a BOARD-WIDE cost modifier — one that a
+/// permanent applies to other spells, as opposed to a `SelfRef` "this spell
+/// costs {N} less" self-reduction (CR 113.6), which the casting pipeline
+/// resolves through a different path entirely.
+///
+/// This is the single structural authority for "is this static a cost modifier,
+/// and what are its terms". It deliberately answers only the questions that need
+/// NO game state, so that deck-time analysis and the live casting pipeline share
+/// one definition of eligibility instead of maintaining parallel copies that
+/// drift. State-dependent gates — the functioning zone, the `condition`, the
+/// `dynamic_count` multiplier, and the spell filter itself — stay with the
+/// caller that has the state to evaluate them.
+#[derive(Debug, Clone, Copy)]
+pub struct BoardWideCostModifier<'a> {
+    pub mode: crate::types::statics::CostModifyMode,
+    pub amount: &'a crate::types::mana::ManaCost,
+    pub spell_filter: Option<&'a TargetFilter>,
+    pub dynamic_count: Option<&'a QuantityRef>,
+    pub caster_scope: CostModifierCasterScope,
+    /// The gate a live caller must still evaluate before applying this modifier
+    /// (CR 601.2f "as long as" / "during your turn" clauses). `None` is
+    /// unconditional.
+    pub condition: Option<&'a StaticCondition>,
+}
+
+impl StaticDefinition {
+    /// CR 601.2f: view this static as a board-wide cost modifier, or `None` when
+    /// it is not one.
+    ///
+    /// Rejects `Minimum` (a CR 601.2f last-step floor, not a per-spell
+    /// adjustment) and `SelfRef` self-cost reductions (CR 113.6).
+    pub fn board_wide_cost_modifier(&self) -> Option<BoardWideCostModifier<'_>> {
+        let StaticMode::ModifyCost {
+            mode,
+            amount,
+            spell_filter,
+            dynamic_count,
+        } = &self.mode
+        else {
+            return None;
+        };
+        if matches!(mode, crate::types::statics::CostModifyMode::Minimum) {
+            return None;
+        }
+        if matches!(self.affected, Some(TargetFilter::SelfRef)) {
+            return None;
+        }
+        Some(BoardWideCostModifier {
+            mode: *mode,
+            amount,
+            spell_filter: spell_filter.as_ref(),
+            dynamic_count: dynamic_count.as_ref(),
+            caster_scope: cost_modifier_caster_scope(self.affected.as_ref()),
+            condition: self.condition.as_ref(),
+        })
+    }
+}
+
+impl CostModifierCasterScope {
+    /// CR 601.2f: does this scope admit `caster`, given who controls the source?
+    pub fn admits(self, caster: PlayerId, source_controller: PlayerId) -> bool {
+        match self {
+            CostModifierCasterScope::You => caster == source_controller,
+            CostModifierCasterScope::Opponent => caster != source_controller,
+            CostModifierCasterScope::Any => true,
+        }
+    }
+
+    /// CR 601.2f: does this scope admit the source's own controller? The
+    /// `PlayerId`-free question deck analysis asks — "would this discount the
+    /// spells of the player who controls it?"
+    pub fn admits_own_controller(self) -> bool {
+        !matches!(self, CostModifierCasterScope::Opponent)
+    }
+}
+
 impl StaticDefinition {
     pub fn new(mode: StaticMode) -> Self {
         Self {
@@ -24114,14 +24330,14 @@ mod tests {
         // unrestricted form; it must round-trip to `restriction: None`.
         let choice_type: ChoiceType = serde_json::from_str("\"Opponent\"").unwrap();
 
-        assert_eq!(choice_type, ChoiceType::Opponent { restriction: None });
+        assert_eq!(choice_type, ChoiceType::opponent());
     }
 
     #[test]
     fn choice_type_opponent_unrestricted_serializes_as_legacy_unit() {
         // The hand-rolled Serialize must keep emitting the bare string for the
         // unrestricted form so existing card-data.json stays byte-stable.
-        let json = serde_json::to_string(&ChoiceType::Opponent { restriction: None }).unwrap();
+        let json = serde_json::to_string(&ChoiceType::opponent()).unwrap();
 
         assert_eq!(json, "\"Opponent\"");
     }
@@ -24182,22 +24398,20 @@ mod tests {
         // The Master, Gallifrey's End: "choose an opponent with the most life".
         // The hand-rolled Serialize/Deserialize for the restricted struct form
         // must be symmetric or card-data.json load corrupts silently.
-        let original = ChoiceType::Opponent {
-            restriction: Some(Box::new(PlayerFilter::PlayerAttribute {
-                relation: PlayerRelation::Opponent,
-                attr: Box::new(QuantityRef::LifeTotal {
-                    player: PlayerScope::ScopedPlayer,
-                }),
-                comparator: Comparator::GE,
-                value: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal {
-                        player: PlayerScope::Opponent {
-                            aggregate: AggregateFunction::Max,
-                        },
+        let original = ChoiceType::opponent_with_restriction(PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: Box::new(QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::GE,
+            value: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Max,
                     },
-                }),
-            })),
-        };
+                },
+            }),
+        });
 
         let json = serde_json::to_string(&original).unwrap();
         // Restricted form must use the externally-tagged struct variant so it is
@@ -24205,6 +24419,34 @@ mod tests {
         assert!(
             json.starts_with(r#"{"Opponent":"#),
             "restricted form should serialize as a struct variant, got: {json}"
+        );
+
+        let round_tripped: ChoiceType = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, original);
+    }
+
+    #[test]
+    fn choice_type_player_unrestricted_serializes_as_legacy_unit() {
+        // The hand-rolled Serialize must keep emitting the bare "Player" string
+        // for the default-distinctness form so existing card-data.json (Strax,
+        // Sontaran Nurse) stays byte-stable.
+        let json = serde_json::to_string(&ChoiceType::player()).unwrap();
+        assert_eq!(json, "\"Player\"");
+
+        let round_tripped: ChoiceType = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, ChoiceType::player());
+    }
+
+    #[test]
+    fn choice_type_player_distinct_from_prior_serde_round_trips() {
+        // Gluntch, the Bestower's ordinal-cued "choose a second/third player"
+        // must serialize to the struct form carrying the non-default
+        // `distinctness`, and round-trip back losslessly.
+        let original = ChoiceType::player_distinct_from_prior();
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(
+            json.starts_with(r#"{"Player":"#),
+            "non-default distinctness should serialize as a struct variant, got: {json}"
         );
 
         let round_tripped: ChoiceType = serde_json::from_str(&json).unwrap();

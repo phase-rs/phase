@@ -117,6 +117,33 @@ impl EffectChainIr {
     }
 }
 
+impl AbilityIr {
+    /// CR 706.3b: Whether the raw body contains an unassigned die roll that can
+    /// own an immediately following results table. This collection gate scans
+    /// source-ordered direct clauses and their pre-lowered sequential
+    /// sub-ability chains. The P4/P9 roll producers emit ordinary clauses;
+    /// duplicating full `ClauseDisposition` assembly here would create a second
+    /// reachability authority. Post-assembly attachment remains authoritative.
+    pub(crate) fn has_result_table_roll_die(&self) -> bool {
+        self.body.clauses.iter().any(|clause| {
+            matches!(&clause.parsed.effect, crate::types::ability::Effect::RollDie { results, .. } if results.is_empty())
+                || clause
+                    .parsed
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(ability_definition_has_result_table_roll_die)
+        })
+    }
+}
+
+fn ability_definition_has_result_table_roll_die(def: &AbilityDefinition) -> bool {
+    matches!(def.effect.as_ref(), crate::types::ability::Effect::RollDie { results, .. } if results.is_empty())
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_definition_has_result_table_roll_die)
+}
+
 /// Root-level `AbilityDefinition` metadata that no `ClauseIr` can express.
 ///
 /// The shell is the typed replacement for the `AbilityDefinition` escape hatch:
@@ -229,7 +256,7 @@ pub(crate) struct AbilityShellIr {
     /// this field by *reading the lowered def*
     /// (`activation_zone_from_self_cost` / `activation_zone_from_self_effect`),
     /// which a shell stamped before lowering cannot express. That is one of the
-    /// reasons `parse_activated_ability_definition` is scoped to its own unit
+    /// reasons `parse_activated_ability_ir` is scoped to its own unit
     /// rather than to T8 — this field is here for the recognizers that know
     /// their zone from the printed keyword (Channel, Forecast), not for that one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -337,7 +364,7 @@ fn is_zero(v: &u32) -> bool {
 ///
 /// # Why an ordered `Vec` and not a set of booleans
 ///
-/// Both stages are folds that rewrite the `sub_ability` chain *and* write a root
+/// These stages are folds that rewrite the `sub_ability` chain *and* write a root
 /// field, so their position relative to the field stamps is behavior-load-bearing
 /// — a plain field bag cannot express "run these two, in this order, after the
 /// stamps":
@@ -353,10 +380,14 @@ fn is_zero(v: &u32) -> bool {
 ///
 /// Variants are named for the transform, not for a call site, so the list stays
 /// a description of *what runs* rather than of *who asked*.
-// Both variants are constructed by the T8-A2 recognizers (Channel, Boast,
-// Exhaust, Forecast), each of which lists them in this order.
+// The extraction variants are constructed by the T8-A2 recognizers (Channel,
+// Boast, Exhaust, Forecast), each of which lists them in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum ShellStage {
+    /// CR 106.6: normalize an activated mana ability's `instead` alternative
+    /// into the additional-mana delta used by the existing mana authority.
+    /// Runs `oracle::normalize_activated_mana_instead_delta`.
+    NormalizeActivatedManaInstead,
     /// CR 601.2f: fold a trailing self-referential "this ability costs {X} less
     /// to activate" node out of the `sub_ability` chain into `cost_reduction`.
     /// Runs `oracle::extract_cost_reduction_from_chain`.
@@ -366,6 +397,15 @@ pub(crate) enum ShellStage {
     /// `oracle::extract_mana_spend_trigger_from_chain`, which is a no-op unless
     /// the lowered root effect is already `Effect::Mana`.
     ExtractManaSpendTrigger,
+}
+
+/// CR 706.3a: one row of a die-roll results table — a possible-result range and
+/// the effect associated with it ("N1–N2" or "N+").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DieResultBranchIr {
+    pub(crate) min: u8,
+    pub(crate) max: u8,
+    pub(crate) effect: Box<AbilityIr>,
 }
 
 /// An effect chain plus the root-level metadata applied around it.
@@ -390,6 +430,50 @@ pub(crate) struct AbilityIr {
     pub(crate) source_text: String,
     pub(crate) body: EffectChainIr,
     pub(crate) shell: AbilityShellIr,
+    /// Result-table rows supplied by a whole-body die-roll recognizer.
+    ///
+    /// Empty is the default for every ordinary ability IR and is a lowering no-op.
+    pub(crate) die_results: Vec<DieResultBranchIr>,
+    /// Ordered root transforms applied after whole-ability lowering.
+    ///
+    /// This is intentionally separate from [`AbilityShellIr`]. The shell carries
+    /// the activation envelope; these transforms compose post-chain resolution
+    /// metadata whose order depends on the root that chain assembly selected.
+    /// An empty list is a lowering no-op.
+    pub(crate) root_transforms: Vec<AbilityRootTransform>,
+}
+
+/// A root-level transform applied only after an [`AbilityIr`] has been fully
+/// lowered.
+///
+/// CR 608.2c: chain assembly may change which parsed clause becomes the root,
+/// so a whole-ability condition cannot be assigned to the first clause. These
+/// transforms operate on the finalized root in their stored order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum AbilityRootTransform {
+    /// CR 601.2b: stamp the announced-X floor from this printed ability.
+    SetMinXValue(u32),
+    /// Preserve the complete printed source text for this multi-line ability.
+    SetDescription(String),
+    /// CR 614.6 + CR 614.15: replace an unbindable self-replacement's final
+    /// lowered root with the explicit honest-failure floor.
+    InsteadOverrideResidual {
+        fragment: String,
+        condition_policy: ResidualConditionPolicy,
+    },
+    /// CR 608.2c: prepend a condition (ability word) before the chain-derived
+    /// root condition.
+    PrependCondition(AbilityCondition),
+    /// CR 608.2c: append a condition extracted from a line-level `instead`.
+    AppendCondition(AbilityCondition),
+}
+
+/// Whether an honest unbindable override floor retains the condition the legacy
+/// parser had already lowered, or clears it for a partial replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum ResidualConditionPolicy {
+    Preserve,
+    Clear,
 }
 
 /// CR 608.2c + CR 601.2c: Subject of a "does the same / does so" effect-replication
@@ -595,8 +679,10 @@ pub(crate) enum ReplaceMeaningKind {
     /// CR 608.2c: pop the prior def; wrap this alternative def with the prior as its
     /// `else_ability` (dig-instead alternative).
     DigAlt(Box<AbilityDefinition>),
-    /// CR 614.1a + CR 608.2c: multi-clause base + "instead" override via Cow-swap;
-    /// tail clauses stashed in the override's `else_ability`.
+    /// CR 614.1a + CR 608.2c: within one effect chain, a clause replaces a prior
+    /// clause's definition via Cow-swap; tail clauses are stashed in the
+    /// override's `else_ability`. This remains distinct from the cross-document-
+    /// item `DocumentRelationIr::SelfReplacementOverride` relation.
     Instead(Box<AbilityDefinition>),
     /// CR 608.2c: build this clause's def from `parsed` + condition, attach as the
     /// prior def's `sub_ability` (keyword-instead override).

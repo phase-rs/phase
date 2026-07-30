@@ -100,18 +100,18 @@ use crate::types::ability::{
     ChoiceType, ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard,
     ConjureSource, ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope,
     CopyRetargetPermission, CopyScale, DamageModification, DamageSource, DelayedTriggerCondition,
-    DelayedTriggerLifetime, DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope,
-    FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
+    DelayedTriggerLifetime, DieResultBranch, DoubleTarget, Duration, Effect, EffectOutcomeSignal,
+    EffectScope, FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
     KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, MultiTargetSpec,
     NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerpetualModification,
-    PlayPermissionInvalidation, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
-    PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
-    RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition, SkipScope,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, UntilCondition, ZoneOwner,
+    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
+    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, RestrictionExpiry,
+    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -155,9 +155,9 @@ use self::subject::{
 use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{
-    AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
-    EffectChainIr, OtherwiseKind, PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind,
-    ReplicateKind, ShellStage,
+    AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr,
+    ClauseIrBuilder, DieResultBranchIr, EffectChainIr, OtherwiseKind, PlayerScopeRewrite,
+    PriorModifier, ReplaceMeaningKind, ReplicateKind, ResidualConditionPolicy, ShellStage,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -529,7 +529,7 @@ fn finalize_committed_guess_choice_types(
             _ => unreachable!("matched above"),
         };
         *ability.effect = Effect::Choose {
-            choice_type: ChoiceType::Opponent { restriction: None },
+            choice_type: ChoiceType::opponent(),
             persist: false,
             selection: TargetSelectionMode::Chosen,
         };
@@ -7144,8 +7144,15 @@ fn parse_for_each_object_copy_parts(
 /// `ChosenPlayer` so a *following* sentence ("They put counters on a creature
 /// they control") binds its "they"/"that player" anaphora to this choice.
 ///
-/// The ordinal word ("second"/"third") is a parse-time consistency hint only —
-/// the engine index is derived from chain position, not the ordinal.
+/// The ordinal word ("second"/"third") doubles as the CR 608.2c distinctness
+/// signal: its presence marks this pick
+/// `PlayerChoiceDistinctness::DistinctFromPriorChoices` (Gluntch, the
+/// Bestower — each successive choice must exclude players already chosen
+/// earlier in this resolution); its absence keeps the default `Independent`,
+/// under which a bare repeated "choose a player"/"choose an opponent" may
+/// repeat an earlier choice (confirmed by the "Offering" cycle ruling —
+/// Benevolent/Infernal/Intellectual/Sylvan Offering — issue #6381). Either
+/// way, the engine index is derived from chain position, not the ordinal.
 /// CR 102.3 + CR 608.2d: Recognize the "with the most life [among
 /// your opponents]" qualifier on a "choose an opponent" instruction and lower it
 /// to the equivalent `PlayerFilter::PlayerAttribute` restriction: each candidate
@@ -7208,14 +7215,22 @@ fn try_parse_choose_player_to_verb(
     // and silently dropped opponent-form choose clauses.
     let player_arm = |i| {
         let (i, _) = tag::<_, _, OracleError<'_>>(" ").parse(i)?;
-        let i = super::oracle_util::parse_ordinal(i)
-            .map(|(_, rest)| rest)
-            .unwrap_or(i);
+        let (i, ordinal_present) = match super::oracle_util::parse_ordinal(i) {
+            Some((_, rest)) => (rest, true),
+            None => (i, false),
+        };
         let (i, _) = tag::<_, _, OracleError<'_>>("player").parse(i)?;
-        Ok::<_, nom::Err<OracleError<'_>>>((i, ChoiceType::Player))
+        // CR 608.2c: the ordinal ("second"/"third") is the distinctness signal
+        // — see the doc comment above.
+        let distinctness = if ordinal_present {
+            PlayerChoiceDistinctness::DistinctFromPriorChoices
+        } else {
+            PlayerChoiceDistinctness::Independent
+        };
+        Ok::<_, nom::Err<OracleError<'_>>>((i, ChoiceType::Player { distinctness }))
     };
     let opponent_arm = value(
-        ChoiceType::Opponent { restriction: None },
+        ChoiceType::opponent(),
         tag::<_, _, OracleError<'_>>("n opponent"),
     );
     let (after_player, mut choice_type) =
@@ -7226,7 +7241,7 @@ fn try_parse_choose_player_to_verb(
     // restriction to the `Opponent` choice so it stays a single pick (CR 608.2d
     // resolves ties) rather than fanning out. Consume the qualifier so it is not
     // left dangling on the verb tail.
-    let after_player = if let ChoiceType::Opponent { restriction } = &mut choice_type {
+    let after_player = if let ChoiceType::Opponent { restriction, .. } = &mut choice_type {
         match parse_opponent_most_life_restriction(after_player) {
             Ok((rest, filter)) => {
                 *restriction = Some(Box::new(filter));
@@ -7342,7 +7357,7 @@ fn try_parse_an_opponent_to_verb(
     }
 
     let mut clause = parsed_clause(Effect::Choose {
-        choice_type: ChoiceType::Opponent { restriction: None },
+        choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::Chosen,
     });
@@ -7388,7 +7403,7 @@ fn try_parse_opponent_guesses_chosen_library_kind(
     });
 
     let mut choose_opponent = parsed_clause(Effect::Choose {
-        choice_type: ChoiceType::Opponent { restriction: None },
+        choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::Chosen,
     });
@@ -14525,13 +14540,25 @@ fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContex
             unless_filter,
             filter,
         },
+        // CR 119.3 + CR 608.2c (issue #6381): "target player gains N life for
+        // each X" (issue #1508) needs an actual CR 601.2c target declaration
+        // (`is_targeted`); "that player gains N life for each X" is instead a
+        // resolution-scoped anaphor to a player chosen by an earlier "Choose an
+        // opponent."/"Choose a player." instruction (the "Offering" cycle:
+        // Benevolent/Infernal/Intellectual/Sylvan Offering) and never sets
+        // `application.target`. Accept either so both recipient-binding shapes
+        // rebind away from the no-subject `Controller` default.
         Effect::GainLife {
             amount,
             player: TargetFilter::Controller,
-        } if is_targeted && target_filter_can_target_player(&target) => Effect::GainLife {
-            amount,
-            player: target,
-        },
+        } if target_filter_can_target_player(&target)
+            && (is_targeted || is_chosen_player_anaphor(&target)) =>
+        {
+            Effect::GainLife {
+                amount,
+                player: target,
+            }
+        }
         // CR 115.1a/c + CR 701.17a + CR 608.2c: "Target opponent/player sacrifices
         // a [typed] permanent ... for each X" (Urborg Justice, Din of the Fireherd,
         // Rakdos Riteknife). The for-each interception strips the dynamic count
@@ -17837,6 +17864,30 @@ fn try_parse_compound_subject_each(
     let (consumed_prefix, first_filter, second_filter) =
         parse_compound_subject_prefix(lower.as_str())?;
 
+    // CR 109.4 + CR 608.2c (issue #6381): "that player" in "you and that
+    // player each ..." is ambiguous prose with two distinct antecedents. The
+    // grammar's `ScopedPlayer` default is correct for a per-voter/per-opponent
+    // fan-out body (Master of Ceremonies-style vote bodies), but when a
+    // PRECEDING "Choose an opponent."/"Choose a player." instruction in the
+    // same resolution bound `ctx.relative_player_scope` to a
+    // `ControllerRef::ChosenPlayer { index }` (the "Offering" cycle:
+    // Benevolent/Infernal/Intellectual/Sylvan Offering), "that player" refers
+    // to THAT chosen player instead — rebind to match, mirroring
+    // `rebind_opponent_player_recipient_to_chosen`'s player-only `TargetFilter::Typed`
+    // encoding. Without this, the second recipient silently defaults to
+    // `scoped_player_or_controller`'s controller fallback (unset outside a
+    // fan-out), so every token/effect meant for "that player" was created for
+    // the caster instead.
+    let second_filter = match (&second_filter, ctx.relative_player_scope.clone()) {
+        (TargetFilter::ScopedPlayer, Some(ControllerRef::ChosenPlayer { index })) => {
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::ChosenPlayer { index }),
+                ..Default::default()
+            })
+        }
+        _ => second_filter,
+    };
+
     // Slice the original-case body text using the consumed offset.
     let body_text = text[consumed_prefix..].trim();
     if body_text.is_empty() {
@@ -20474,6 +20525,24 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 608.2c: true when `filter` is the resolution-scoped "that player"/"that
+/// opponent" anaphor to a player chosen earlier in the same resolution by a
+/// `Choose(Player)`/`Choose(Opponent)` instruction, encoded as the player-only
+/// `TargetFilter::Typed` carrying `ControllerRef::ChosenPlayer { index }`
+/// (mirrors `retarget_effect_to_chosen_player`'s encoding). Distinct from a
+/// CR 601.2c cast-time target declaration ("target player"), which sets
+/// `SubjectApplication.target` instead.
+fn is_chosen_player_anaphor(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::ChosenPlayer { .. }),
+            type_filters,
+            ..
+        }) if type_filters.is_empty()
+    )
+}
+
 fn wrap_target_subject_damage(
     mut clause: ParsedEffectClause,
     subject: &SubjectPhraseAst,
@@ -20715,6 +20784,27 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // CR 500.8: "target player gets an additional combat phase" — inject subject target
         Effect::AdditionalPhase { target, .. } if *target == TargetFilter::Controller => {
             *target = subject_filter;
+        }
+        // CR 119.3 (issue #6381): "that player gains N life" / "target player
+        // gains N life" — the imperative path defaults `player` to the
+        // no-subject `Controller` (the "you gain life" reading); inject the
+        // parsed subject when the sentence actually names a different,
+        // genuinely player-denoting recipient. Without this arm, EVERY
+        // "[non-you subject] gains N life" clause silently credited the
+        // ability's controller instead (the "Offering" cycle's "that player
+        // gains 2 life for each creature they control" — Benevolent/Infernal/
+        // Intellectual/Sylvan Offering). Gated on `target_filter_can_target_player`
+        // (mirrors the `thread_for_each_subject` GainLife arm) so an
+        // unresolved compound subject ("you and that player each gain that
+        // much life" — Angel of Destiny, where the "each"-bodied split
+        // doesn't cover `GainLife` and falls back to a non-player `Any`
+        // subject) leaves the safer `Controller` default alone instead of
+        // rebinding to a nonsensical recipient.
+        Effect::GainLife { player, .. }
+            if *player == TargetFilter::Controller
+                && target_filter_can_target_player(&subject_filter) =>
+        {
+            *player = subject_filter;
         }
         // CR 400.7: "shuffle [subject]'s graveyard into their library" — inject
         // subject target for zone-wide changes and shuffles.
@@ -23325,7 +23415,7 @@ fn opponent_guess_clause(guesser: ControllerRef, subject: GuessSubject) -> Parse
     // so the chosen player is threaded to the dependent guess as a
     // same-resolution `ChosenPlayer`.
     let mut clause = parsed_clause(Effect::Choose {
-        choice_type: ChoiceType::Opponent { restriction: None },
+        choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::Chosen,
     });
@@ -23549,9 +23639,9 @@ pub(crate) fn parse_named_choice_object(rest: &str) -> Option<ChoiceType> {
         Some(ChoiceType::LandType)
     } else if tag::<_, _, E>("an opponent").parse(rest).is_ok() {
         // CR 800.4a: Choose an opponent from among players in the game.
-        Some(ChoiceType::Opponent { restriction: None })
+        Some(ChoiceType::opponent())
     } else if tag::<_, _, E>("a player").parse(rest).is_ok() {
-        Some(ChoiceType::Player)
+        Some(ChoiceType::player())
     } else if tag::<_, _, E>("two colors").parse(rest).is_ok() {
         Some(ChoiceType::TwoColors)
     } else if tag::<_, _, E>("a word").parse(rest).is_ok() {
@@ -24369,6 +24459,40 @@ pub(crate) fn mass_population_filter_mut(effect: &mut Effect) -> Option<&mut Tar
 /// authority rather than re-listing variants.
 fn clause_ir_mass_population(clause: &ClauseIr) -> Option<TargetFilter> {
     mass_population_filter(&clause.parsed.effect).cloned()
+}
+
+/// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): If this clause is a
+/// `GenericEffect` Continuous-mode static grant over a BROADCAST population (a
+/// keyword/P-T/ability "gain(s)"/"have"/"has" grant, not a chosen-target
+/// application), return the population filter it establishes. Feeds
+/// `ParseContext::chain_prior_mass_population` alongside
+/// `clause_ir_mass_population` so a later same-chain "those permanents"/
+/// "those creatures" anaphor binds to the SAME population the grant locked
+/// onto. Mutational Advantage's official ruling: "The set of permanents
+/// affected by Mutational Advantage is determined at the time Mutational
+/// Advantage resolves." Mirrors `is_mass_coerce_static`'s governing-filter
+/// selection but is not restricted to the MustAttack/MustAttackPlayer
+/// coercion statics that function targets — any Continuous static grant over
+/// a broadcast population qualifies. Only a single static definition is
+/// accepted: a `GenericEffect` carrying two or more static defs has no single
+/// population to name without risking a wrong-antecedent guess.
+fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilter> {
+    let Effect::GenericEffect {
+        static_abilities,
+        target: None,
+        ..
+    } = &clause.parsed.effect
+    else {
+        return None;
+    };
+    let [static_def] = static_abilities.as_slice() else {
+        return None;
+    };
+    if static_def.mode != StaticMode::Continuous {
+        return None;
+    }
+    let filter = static_def.affected.as_ref()?;
+    is_broadcast_population_filter(filter).then(|| filter.clone())
 }
 
 /// CR 400.1/400.2 + CR 601.2a: Map a possessive-hand player reference (as
@@ -26858,7 +26982,8 @@ pub(crate) enum ChainLoweringMode {
 ///
 /// # The order is pinned and behavior-load-bearing
 ///
-/// **chain → finalize → anchor → `sub_link` → envelope stamps → stages.**
+/// **chain → die results → finalize → anchor → `sub_link` → envelope stamps →
+/// stages → root transforms.**
 ///
 /// It is not an aesthetic choice: it reproduces what the whole-body recognizers
 /// in `oracle.rs` do by hand. Every one of them stamps its root fields *after*
@@ -26866,8 +26991,17 @@ pub(crate) enum ChainLoweringMode {
 /// runs the `extract_*` folds last. Reordering — in particular running a stage
 /// before the stamps — changes output, because both stages write root fields
 /// that a stamp may also write. Do not reorder for elegance.
+///
+/// CR 706.3b: the die-result table is part of the *same* ability as the roll, so
+/// it is attached before `finalize_effect_chain` rather than after — finalize and
+/// the anchor then see the complete effect, exactly as they would for an ability
+/// whose table was printed inline. Attaching it later would hand those two a
+/// `RollDie` with an empty results vector and then mutate the result behind them.
+/// The step is a no-op on an empty `die_results`, which is what keeps every
+/// non-die producer byte-identical.
 pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     let mut def = lower_effect_chain_ir(&ir.body);
+    attach_die_result_branches_before_finalization(&mut def, &ir.die_results);
     finalize_effect_chain(&mut def);
     apply_owner_library_reveal_anchor_from_text(&mut def, &ir.source_text);
     // CR 608.2c: a root the chain cannot describe (it has no previous boundary).
@@ -26877,6 +27011,9 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     apply_ability_shell_envelope(&mut def, &ir.shell);
     for stage in &ir.shell.stages {
         match stage {
+            ShellStage::NormalizeActivatedManaInstead => {
+                crate::parser::oracle::normalize_activated_mana_instead_delta(&mut def);
+            }
             ShellStage::ExtractCostReduction => {
                 crate::parser::oracle::extract_cost_reduction_from_chain(&mut def);
             }
@@ -26885,7 +27022,101 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
             }
         }
     }
+    apply_ability_root_transforms(&mut def, &ir.root_transforms);
     def
+}
+
+/// Apply ordered whole-ability transforms after every chain and shell stage.
+///
+/// CR 608.2c: this is the only point where the final root is known, so the
+/// condition order is preserved without assuming any particular clause becomes
+/// that root during assembly.
+fn apply_ability_root_transforms(def: &mut AbilityDefinition, transforms: &[AbilityRootTransform]) {
+    for transform in transforms {
+        match transform {
+            AbilityRootTransform::SetMinXValue(min_x_value) => {
+                def.min_x_value = *min_x_value;
+            }
+            AbilityRootTransform::SetDescription(description) => {
+                def.description = Some(description.clone());
+            }
+            AbilityRootTransform::InsteadOverrideResidual {
+                fragment,
+                condition_policy,
+            } => {
+                *def.effect = Effect::unimplemented("instead_override", fragment);
+                def.sub_ability = None;
+                def.else_ability = None;
+                match condition_policy {
+                    ResidualConditionPolicy::Preserve => {}
+                    ResidualConditionPolicy::Clear => def.condition = None,
+                }
+            }
+            AbilityRootTransform::PrependCondition(condition) => {
+                def.condition = match def.condition.take() {
+                    Some(chain) => Some(crate::parser::oracle::merge_ability_condition(
+                        Some(condition.clone()),
+                        chain,
+                    )),
+                    None => Some(condition.clone()),
+                };
+            }
+            AbilityRootTransform::AppendCondition(condition) => {
+                def.condition = Some(crate::parser::oracle::merge_ability_condition(
+                    def.condition.take(),
+                    condition.clone(),
+                ));
+            }
+        }
+    }
+}
+
+/// CR 706.3b: Attach typed die-result branches before finalization so every
+/// caller lowers each branch through the same `lower_ability_ir` authority.
+pub(crate) fn attach_die_result_branches_before_finalization(
+    def: &mut AbilityDefinition,
+    die_results: &[DieResultBranchIr],
+) {
+    attach_die_result_branches_to_roll_before_finalization(
+        def,
+        die_results,
+        super::oracle_special::find_result_table_roll_die,
+    );
+}
+
+/// CR 706.3b: Trigger result tables retain their established terminal-roll
+/// ownership. Trigger IR only captures tables for terminal rolls.
+pub(crate) fn attach_terminal_die_result_branches_before_finalization(
+    def: &mut AbilityDefinition,
+    die_results: &[DieResultBranchIr],
+) {
+    attach_die_result_branches_to_roll_before_finalization(
+        def,
+        die_results,
+        super::oracle_special::find_terminal_roll_die,
+    );
+}
+
+/// CR 706.3b: Lower typed result branches through the single ability-IR
+/// authority before assigning them to their selected roll instruction.
+fn attach_die_result_branches_to_roll_before_finalization(
+    def: &mut AbilityDefinition,
+    die_results: &[DieResultBranchIr],
+    find_roll_die: for<'a> fn(&'a mut AbilityDefinition) -> Option<&'a mut Effect>,
+) {
+    if die_results.is_empty() {
+        return;
+    }
+    if let Some(Effect::RollDie { results, .. }) = find_roll_die(def) {
+        *results = die_results
+            .iter()
+            .map(|DieResultBranchIr { min, max, effect }| DieResultBranch {
+                min: *min,
+                max: *max,
+                effect: Box::new(lower_ability_ir(effect)),
+            })
+            .collect();
+    }
 }
 
 /// Apply the CR 602.1 activation envelope onto an already-lowered root.
@@ -26972,6 +27203,8 @@ pub(crate) fn parse_ability_ir(
             source_text: text.to_string(),
             body,
             shell: AbilityShellIr::default(),
+            die_results: vec![],
+            root_transforms: vec![],
         };
     }
     if let Some(body) = parse_for_each_attacker_copy_blocker_ir(text, kind, ctx) {
@@ -26979,6 +27212,8 @@ pub(crate) fn parse_ability_ir(
             source_text: text.to_string(),
             body,
             shell: AbilityShellIr::default(),
+            die_results: vec![],
+            root_transforms: vec![],
         };
     }
     if let ChainLoweringMode::WithContext = mode {
@@ -26987,6 +27222,8 @@ pub(crate) fn parse_ability_ir(
                 source_text: text.to_string(),
                 body,
                 shell: AbilityShellIr::default(),
+                die_results: vec![],
+                root_transforms: vec![],
             };
         }
     }
@@ -27000,12 +27237,16 @@ pub(crate) fn parse_ability_ir(
                 sub_link: Some(SubAbilityLink::SequentialSibling),
                 ..AbilityShellIr::default()
             },
+            die_results: vec![],
+            root_transforms: vec![],
         };
     }
     AbilityIr {
         source_text: text.to_string(),
         body: parse_effect_chain_ir(text, kind, ctx),
         shell: AbilityShellIr::default(),
+        die_results: vec![],
+        root_transforms: vec![],
     }
 }
 
@@ -28904,10 +29145,11 @@ pub(crate) fn parse_effect_chain_ir(
                 prev_clause.map(|c| AbilityDefinition::new(kind, c.parsed.effect.clone()));
             let inherited_where_x_expression =
                 prev_clause.and_then(|c| c.where_x_expression.clone());
-            if let Some(alt_def) =
+            if let Some(alt_ir) =
                 try_parse_dig_instead_alternative(normalized_text, prev_temp.as_ref(), kind, ctx)
             {
                 if !builder.is_empty() {
+                    let alt_def = lower_ability_ir(&alt_ir);
                     // Store the alt_def's effect as `parsed.effect` so followup continuation
                     // matching (e.g., PutRest for "put the rest on the bottom") can see that
                     // the effective last clause is a Dig. In the old code, `defs.last()` was
@@ -29842,11 +30084,14 @@ pub(crate) fn parse_effect_chain_ir(
             // than reaching past it to the trigger's own subject (Ardbert,
             // Warrior of Darkness). Mass effects choose nothing, so
             // `parent_target_available` / `ParentTarget` cannot carry this.
-            chain_prior_mass_population: builder
-                .clauses()
-                .iter()
-                .rev()
-                .find_map(clause_ir_mass_population),
+            // CR 611.2c + CR 615.11 (issue #6682): also matches a preceding
+            // Continuous-mode keyword/P-T grant clause (Mutational Advantage,
+            // Blinding Fog), so a later "those permanents"/"those creatures"
+            // prevent-recipient anaphor binds to the SAME locked-in
+            // population instead of falling back to `Any`.
+            chain_prior_mass_population: builder.clauses().iter().rev().find_map(|d| {
+                clause_ir_mass_population(d).or_else(|| clause_ir_continuous_grant_population(d))
+            }),
             // CR 608.2c: bind a bare "it" in this chunk's counter/anaphor to the
             // token created by an earlier clause when that token is the chain's
             // most-recent object referent (Esper Terra's "put up to three lore
@@ -30235,7 +30480,7 @@ pub(crate) fn parse_effect_chain_ir(
         if matches!(
             clause.effect,
             Effect::Choose {
-                choice_type: ChoiceType::Player | ChoiceType::Opponent { .. },
+                choice_type: ChoiceType::Player { .. } | ChoiceType::Opponent { .. },
                 ..
             }
         ) {

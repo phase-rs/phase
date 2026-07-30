@@ -109,6 +109,7 @@ const viewerInteraction = {
   canSubmit: true,
   autoPassRecommended: false,
   opportunities: [],
+  attachmentFans: {},
   availability: { type: "inputRequired" },
 } as LegalActionsResult["viewerInteraction"];
 

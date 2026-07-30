@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1572
 expression: "&ir"
 ---
 {
@@ -23,75 +22,168 @@ expression: "&ir"
         "fragment": "Whenever another creature or planeswalker you control enters, mill two cards."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "ChangesZone",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Mill",
-              "count": {
-                "type": "Fixed",
-                "value": 2
+        "Trigger": {
+          "Parsed": {
+            "condition": "ChangesZone",
+            "partial_def": {
+              "mode": "ChangesZone",
+              "execute": null,
+              "valid_card": {
+                "type": "Or",
+                "filters": [
+                  {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Creature"
+                    ],
+                    "controller": "You",
+                    "properties": [
+                      {
+                        "type": "Another"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Planeswalker"
+                    ],
+                    "controller": "You",
+                    "properties": [
+                      {
+                        "type": "Another"
+                      }
+                    ]
+                  }
+                ]
               },
-              "target": {
-                "type": "Controller"
-              },
-              "destination": "Graveyard"
+              "origin": null,
+              "destination": "Battlefield",
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "Or",
-            "filters": [
-              {
-                "type": "Typed",
-                "type_filters": [
-                  "Creature"
-                ],
-                "controller": "You",
-                "properties": [
+            "body": {
+              "EffectChain": {
+                "clauses": [
                   {
-                    "type": "Another"
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 14,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "mill two cards"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Mill",
+                        "count": {
+                          "type": "Fixed",
+                          "value": 2
+                        },
+                        "target": {
+                          "type": "Controller"
+                        },
+                        "destination": "Graveyard"
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
+              }
+            },
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "Or",
+                "filters": [
+                  {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Creature"
+                    ],
+                    "controller": "You",
+                    "properties": [
+                      {
+                        "type": "Another"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Planeswalker"
+                    ],
+                    "controller": "You",
+                    "properties": [
+                      {
+                        "type": "Another"
+                      }
+                    ]
                   }
                 ]
               },
-              {
-                "type": "Typed",
-                "type_filters": [
-                  "Planeswalker"
-                ],
-                "controller": "You",
-                "properties": [
-                  {
-                    "type": "Another"
-                  }
-                ]
-              }
-            ]
-          },
-          "origin": null,
-          "destination": "Battlefield",
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "Whenever another creature or planeswalker you control enters, mill two cards.",
-          "constraint": null,
-          "condition": null,
-          "batched": false
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "mill two cards.",
+              "relative_player_scope": null
+            },
+            "source_text": "Whenever another creature or planeswalker you control enters, mill two cards.",
+            "die_results": []
+          }
         }
       }
     },
@@ -302,7 +394,9 @@ expression: "&ir"
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
-          }
+          },
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

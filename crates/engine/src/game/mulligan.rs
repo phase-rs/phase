@@ -20,7 +20,7 @@ const STARTING_HAND_SIZE: usize = 7;
 /// hand would be zero cards. In a standard game that means at most 7 mulligans
 /// (7→6→5→4→3→2→1→0; the 8th would be 0). CR 103.5c adds that in free-first
 /// formats the first mulligan is uncounted, so the cap shifts up by one to 8
-/// — the player may still be brought all the way down to a 1-card opening
+/// — the player may still be brought all the way down to a 0-card opening
 /// hand after exhausting their bottoms allowance.
 const MAX_MULLIGANS: u8 = 7;
 

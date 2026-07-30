@@ -62,28 +62,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine"
-version = "0.40.0"
-dependencies = [
- "im",
- "indexmap",
- "nom",
- "petgraph",
- "rand",
- "rand_chacha",
- "rustc-hash",
- "serde",
- "serde_json",
- "sha2",
- "smallvec",
- "strum",
- "thiserror",
- "toml",
- "tracing",
- "web-time",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -208,9 +186,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "lobby-broker"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
- "engine",
+ "phase-engine",
  "serde",
  "serde_json",
  "tracing",
@@ -257,6 +235,28 @@ checksum = "b4c5cc86750666a3ed20bdaf5ca2a0344f9c67674cae0515bec2da16fbaa47db"
 dependencies = [
  "fixedbitset",
  "indexmap",
+]
+
+[[package]]
+name = "phase-engine"
+version = "0.41.0"
+dependencies = [
+ "im",
+ "indexmap",
+ "nom",
+ "petgraph",
+ "rand",
+ "rand_chacha",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallvec",
+ "strum",
+ "thiserror",
+ "toml",
+ "tracing",
+ "web-time",
 ]
 
 [[package]]

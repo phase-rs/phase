@@ -342,7 +342,6 @@ export const PermanentCard = memo(function PermanentCard({
     incomingAttackerCounts,
     manaTappableObjectIds,
     selectableManaCostCreatureIds,
-    selectableSacrificeObjectIds,
     undoableTapObjectIds,
     validAttackerIds,
     validTargetObjectIds,
@@ -464,12 +463,22 @@ export const PermanentCard = memo(function PermanentCard({
   const controllerIdentity = useGameStore(
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
+  const viewerInteraction = useGameStore((s) => s.viewerInteraction);
+  const interactionAttachmentFan = useMemo(
+    () =>
+      viewerInteraction?.attachmentFans[objectId] ?? null,
+    [objectId, viewerInteraction],
+  );
 
-  const openAttachmentFan = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation();
+  const showAttachmentFan = useCallback(() => {
     dismissPreview();
     setAttachmentFanHost(objectId);
   }, [dismissPreview, objectId, setAttachmentFanHost]);
+
+  const openAttachmentFan = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    showAttachmentFan();
+  }, [showAttachmentFan]);
 
   if (!obj) return null;
 
@@ -486,31 +495,10 @@ export const PermanentCard = memo(function PermanentCard({
 
   const ptDisplay = computePTDisplay(obj);
   const isSelected = selectedObjectId === objectId;
-  // CR 301.5 / CR 303.4: An attached Equipment/Aura is an independent permanent
-  // that can be a valid target, an activation source (re-equip), or a board
-  // choice in its own right. Collapsed behind its host it is unreachable —
-  // clicks land on the host instead, so a "put a counter on target nonland
-  // permanent you control" trigger lands on the creature rather than the chosen
-  // Equipment, and an attached Equipment can't be re-activated to move it. Open
-  // a host's attachments whenever any of them is actionable in the current
-  // waiting state so each is independently clickable without requiring a hover.
-  const attachmentsActionable =
-    obj.attachments.length > 0
-    && obj.attachments.some(
-      (id) =>
-        validTargetObjectIds.has(id)
-        || activatableObjectIds.has(id)
-        || manaTappableObjectIds.has(id)
-        || boardChoiceObjectIds.has(id)
-        || selectableSacrificeObjectIds.has(id)
-        || selectableManaCostCreatureIds.has(id)
-        // An attachment tapped for mana that can still be untapped (undo) is
-        // itself actionable — keep it expanded so the undo affordance stays
-        // clickable. `undoableTapObjectIds` is already gated upstream
-        // (GameBoard `undoLegal`) to the states whose engine match arms accept
-        // the untap, so no extra state check is needed here.
-        || undoableTapObjectIds.has(id),
-    );
+  // The viewer-scoped engine projection owns both the direct-attachment
+  // relationship and whether one is actionable for this interaction. The
+  // board must not rediscover either fact from the raw snapshot.
+  const attachmentsActionable = interactionAttachmentFan !== null;
   const attachmentsLifted =
     obj.attachments.length > 0
     && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree);
@@ -685,6 +673,12 @@ export const PermanentCard = memo(function PermanentCard({
       });
     } else if (isValidTarget) {
       dispatchAction({ type: "ChooseTarget", data: { target: { Object: objectId } } });
+    } else if (attachmentsActionable) {
+      // The host is not a legal choice, but one of its attachments is. Open
+      // the full-card chooser rather than requiring a precise click on an
+      // overlapping attachment peek. The fan derives every selectable card
+      // from the engine's current legal-target set.
+      showAttachmentFan();
     } else if (isActivatable) {
       const o = useGameStore.getState().gameState?.objects[objectId];
       // Read the engine-provided action list for this permanent — the mapping

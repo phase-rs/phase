@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 550
 expression: "&ir"
 ---
 {
@@ -217,7 +216,9 @@ expression: "&ir"
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
-          }
+          },
+          "die_results": [],
+          "root_transforms": []
         }
       }
     },
@@ -402,7 +403,9 @@ expression: "&ir"
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
-          }
+          },
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

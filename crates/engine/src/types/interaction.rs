@@ -6,6 +6,8 @@
 //! wire graph. All display text is supplied by consumers from the semantic codes
 //! below; the engine never places localized UI prose in this contract.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 pub const MAX_INTERACTION_LIST_LEN: usize = 10_000;
@@ -29,6 +31,9 @@ opaque_string_id!(InteractionId);
 opaque_string_id!(InteractionChoiceId);
 opaque_string_id!(InteractionActionId);
 opaque_string_id!(PreviewRequestId);
+// Viewer-safe object reference. Only the engine maps this opaque interaction
+// value back to an in-game object.
+opaque_string_id!(InteractionObjectReference);
 
 /// Persistence slot semantics. Simultaneous pregame decisions deliberately
 /// retain one capability per semantic owner instead of sharing one global ID.
@@ -1080,6 +1085,33 @@ pub struct InteractionOpportunity {
     pub progress: InteractionProgress,
 }
 
+/// A direct, engine-authored interaction submission for one attachment.
+///
+/// The UI must echo this opaque response rather than deriving an action or a
+/// response envelope from the opportunity schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionAttachmentFanChild {
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub object_id: u64,
+    pub submission: InteractionSubmission,
+}
+
+/// Viewer-scoped attachment affordance for a single interaction opportunity.
+/// It is derived from the filtered projection, not by consumers scanning game
+/// state that may carry authority-only relationship information.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionAttachmentFan {
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub host_id: u64,
+    pub children: Vec<InteractionAttachmentFanChild>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
 #[serde(
@@ -1112,6 +1144,12 @@ pub struct ViewerInteraction {
     pub can_submit: bool,
     pub auto_pass_recommended: bool,
     pub opportunities: Vec<InteractionOpportunity>,
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "interaction-bindings",
+        ts(type = "Record<number, InteractionAttachmentFan>")
+    )]
+    pub attachment_fans: BTreeMap<u64, InteractionAttachmentFan>,
     pub availability: InteractionAvailability,
 }
 

@@ -5583,6 +5583,11 @@ pub struct PendingCast {
     /// through a cost-payment continuation without conflating it with cost legs.
     #[serde(default, skip_serializing_if = "ActivationTargetSelection::is_pending")]
     pub activation_target_selection: ActivationTargetSelection,
+    /// CR 601.2h + CR 602.2b: An activation cannot be cancelled once any
+    /// component of its cost has been paid, because that payment is not a
+    /// rollback-able announcement choice.
+    #[serde(default)]
+    pub activation_cost_committed: bool,
     /// CR 118.9 + CR 601.2b: When this cast is offered a once-per-turn
     /// `CastWithAlternativeCost` grant (As Foretold), the granting permanent's id.
     /// Carried across the `OptionalCostChoice` round-trip so the accept handler can
@@ -5590,6 +5595,16 @@ pub struct PendingCast {
     /// `Unlimited` grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_cost_grant_source: Option<ObjectId>,
+    /// CR 602.2a-b + CR 603.2: Trigger consequences from a target-bearing
+    /// activation are collected while its targets and costs are announced, but
+    /// become globally visible only when the ability reaches the stack.
+    ///
+    /// The carrier is durable across interactive cost prompts and is redacted
+    /// from every per-viewer state projection; its journal is engine-private
+    /// implementation state, not public pending-cast information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) activation_trigger_collection:
+        Option<Box<crate::game::triggers::PendingActivationTriggerCollection>>,
 }
 
 fn default_origin_zone() -> Zone {
@@ -5914,6 +5929,14 @@ pub enum PendingCostMoveResume {
         pending: Box<PendingManaAbility>,
         cursor: ManaAbilityCostCursor,
     },
+    /// CR 602.2b + CR 701.17a + CR 616.1: An activation's deterministic mill
+    /// cost paused while a replacement choice settles. Resume the serialized
+    /// activation suffix only after the mill event has reached a terminal
+    /// replacement outcome.
+    ActivationMillPayment {
+        player: PlayerId,
+        pending: Box<PendingCast>,
+    },
     /// CR 606.4 + CR 614.1a + CR 616.1: A loyalty activation paused on a
     /// counter-cost replacement-ordering choice (e.g. Doubling Season vs an
     /// opponent's Vorinclex halving the loyalty counters). The counter is
@@ -5983,13 +6006,82 @@ impl PendingCast {
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
+            activation_trigger_collection: None,
         }
     }
 
     pub fn with_payment_mode(mut self, payment_mode: CastPaymentMode) -> Self {
         self.payment_mode = payment_mode;
         self
+    }
+
+    /// Starts the trigger transaction for an announced, target-bearing
+    /// activated ability.
+    ///
+    /// CR 602.2a-b + CR 603.2: Target declaration can make triggers fire
+    /// before costs are paid, while the activated ability does not exist on
+    /// the physical stack until the announcement completes.
+    pub(crate) fn begin_activation_trigger_collection(&mut self) {
+        if self.activation_trigger_collection.is_none() {
+            let ability_index = self
+                .activation_ability_index
+                .expect("target-bearing activation session requires an ability index");
+            self.activation_trigger_collection = Some(Box::new(
+                crate::game::triggers::PendingActivationTriggerCollection::for_prepared_activated_ability(
+                    self.object_id,
+                    self.ability.controller,
+                    ability_index,
+                    &self.ability,
+                ),
+            ));
+        }
+    }
+
+    /// CR 601.2h + CR 602.2b: Marks an announced activation as having paid an
+    /// irreversible cost component, so it can no longer be cancelled.
+    pub(crate) fn mark_activation_cost_committed(&mut self) {
+        if self.activation_ability_index.is_some() {
+            self.activation_cost_committed = true;
+        }
+    }
+}
+
+impl GameState {
+    /// Temporarily removes the activation-local trigger transaction from the
+    /// pending cast that currently owns it.
+    ///
+    /// `ManaPayment` stores its `PendingCast` in `GameState::pending_cast`;
+    /// every other interactive casting prompt embeds it in `WaitingFor`.
+    /// Keeping that routing distinction here prevents individual cost handlers
+    /// from choosing the wrong continuation carrier.
+    pub(crate) fn take_pending_activation_trigger_collection(
+        &mut self,
+    ) -> Option<Box<crate::game::triggers::PendingActivationTriggerCollection>> {
+        if let Some(pending) = self.pending_cast.as_mut() {
+            return pending.activation_trigger_collection.take();
+        }
+        self.waiting_for
+            .pending_cast_mut()?
+            .activation_trigger_collection
+            .take()
+    }
+
+    /// Restores the transaction removed by
+    /// [`Self::take_pending_activation_trigger_collection`] to the same active
+    /// casting continuation.
+    pub(crate) fn restore_pending_activation_trigger_collection(
+        &mut self,
+        collection: Box<crate::game::triggers::PendingActivationTriggerCollection>,
+    ) {
+        if let Some(pending) = self.pending_cast.as_mut() {
+            pending.activation_trigger_collection = Some(collection);
+            return;
+        }
+        if let Some(pending) = self.waiting_for.pending_cast_mut() {
+            pending.activation_trigger_collection = Some(collection);
+        }
     }
 }
 
@@ -6457,14 +6549,16 @@ impl PublicStateDirty {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum TargetSelectionConstraint {
+    /// CR 601.2c + CR 115.3: every chosen player target must be a different
+    /// player. Attached by the modal path ("each mode must target a different
+    /// player"), where distinctness spans the ability's modes rather than one
+    /// instance of the word "target".
     DifferentTargetPlayers,
     /// CR 115.1 + CR 601.2c: Object targets must be controlled by different players.
     DifferentObjectControllers,
     /// CR 115.1 + CR 601.2c + CR 400.1: Object targets must come from the same
     /// player-owned zone of the given kind, e.g. "from a single graveyard".
-    SameZoneOwner {
-        zone: Zone,
-    },
+    SameZoneOwner { zone: Zone },
     /// CR 202.3 + CR 601.2c: the chosen target set's combined mana value must
     /// satisfy `comparator` against `value`. `value` is a `QuantityExpr` (not
     /// `i32` like `SearchSelectionConstraint::TotalManaValue`) because the bound
@@ -9598,16 +9692,26 @@ pub enum DistributionUnit {
 /// resource (energy, life, generic mana, counters); `LoopCollapse` is the one
 /// non-payment member — its N is the finite count an accepted CR 732.2a
 /// object-growth loop collapses into, deducting nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PayableResource {
     /// CR 107.14: Pay any amount of `{E}` — removes N energy counters from the player.
     Energy,
-    /// CR 107.3 + CR 118.1: Pay a chosen X as generic mana while resolving an effect.
-    ManaGeneric {
-        #[serde(default = "default_one")]
-        per_x: u32,
-    },
+    /// CR 107.3f + CR 118.1 + CR 118.12: Pay a chosen X as part of a
+    /// resolution-time mana cost. `base_cost` is the UNCONCRETIZED cost
+    /// (still carrying `ManaCostShard::X` plus any colored/generic pips
+    /// alongside it, e.g. `{X}{W}{U}{B}`); the submit handler concretizes X
+    /// into it (`ManaCost::concretize_x`) and pays the resulting cost through
+    /// the standard mana-payment authority, so colored requirements are
+    /// enforced exactly like any other mana cost — never dropped in favor of
+    /// a generic-only payment (Elenda and Azor, #6410).
+    ///
+    /// `base_cost` intentionally carries NO `#[serde(default)]`: a serialized
+    /// prompt missing this field must fail deserialization rather than
+    /// silently resolve to `ManaCost::zero()`, which would concretize to a
+    /// free payment (drops the fixed pips AND the X basis) instead of
+    /// visibly rejecting the incompatible/corrupt save.
+    ManaGeneric { base_cost: ManaCost },
     /// CR 107.1c + CR 122.1: Choose how many counters to remove.
     Counters,
     /// CR 119.4: Pay any amount of life — N is deducted as life loss via
@@ -9707,10 +9811,6 @@ impl LoopCollapseAxis {
             | ResourceAxis::Poison(_) => None,
         }
     }
-}
-
-fn default_one() -> u32 {
-    1
 }
 
 /// CR 115.7: Scope of retargeting — single target, all targets, or forced.
@@ -21236,7 +21336,9 @@ mod tests {
                 assist_state: AssistState::NotOffered,
                 activation_residual: ActivationResidual::None,
                 activation_target_selection: ActivationTargetSelection::Pending,
+                activation_cost_committed: false,
                 alt_cost_grant_source: None,
+                activation_trigger_collection: None,
             })
         }
 
@@ -21645,7 +21747,9 @@ mod tests {
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
+            activation_trigger_collection: None,
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),
@@ -21884,6 +21988,31 @@ mod tests {
                     source: CompanionChoiceSource::Sideboard { index: 2 },
                 }],
             }
+        );
+    }
+
+    /// #6410 review follow-up: `PayableResource::ManaGeneric::base_cost`
+    /// deliberately carries NO `#[serde(default)]`. A prior revision of this
+    /// fix defaulted the missing field to `ManaCost::zero()`, which would
+    /// have concretized a legacy/incomplete serialized prompt into a FREE
+    /// payment (drops both the fixed colored pips and the X basis) instead
+    /// of failing closed. A serialized prompt missing `base_cost` — whether
+    /// from the pre-fix `per_x`-only wire shape or any other truncation —
+    /// must be REJECTED at the deserialization boundary, never silently
+    /// downgraded to a zero-cost payment.
+    #[test]
+    fn pay_amount_choice_mana_generic_missing_base_cost_is_rejected() {
+        let empty_data = r#"{"type":"ManaGeneric","data":{}}"#;
+        assert!(
+            serde_json::from_str::<PayableResource>(empty_data).is_err(),
+            "a ManaGeneric prompt with no base_cost must fail to deserialize, \
+             not silently default to a zero-cost payment"
+        );
+
+        let legacy_per_x_shape = r#"{"type":"ManaGeneric","data":{"per_x":1}}"#;
+        assert!(
+            serde_json::from_str::<PayableResource>(legacy_per_x_shape).is_err(),
+            "the pre-fix per_x-only wire shape has no base_cost and must be rejected too"
         );
     }
 

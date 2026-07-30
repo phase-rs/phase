@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1548
 expression: "&ir"
 ---
 {
@@ -23,49 +22,108 @@ expression: "&ir"
         "fragment": "{4}{B}, {T}: Target player discards two cards. Activate only as a sorcery."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Discard",
-            "count": {
-              "type": "Fixed",
-              "value": 2
-            },
-            "target": {
-              "type": "Player"
-            }
-          },
-          "cost": {
-            "type": "Composite",
-            "costs": [
+        "Spell": {
+          "source_text": "Target player discards two cards",
+          "body": {
+            "clauses": [
               {
-                "type": "Mana",
-                "cost": {
-                  "type": "Cost",
-                  "shards": [
-                    "Black"
-                  ],
-                  "generic": 4
-                }
-              },
-              {
-                "type": "Tap"
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 32,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Target player discards two cards"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Discard",
+                    "count": {
+                      "type": "Fixed",
+                      "value": 2
+                    },
+                    "target": {
+                      "type": "Player"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Composite",
+              "costs": [
+                {
+                  "type": "Mana",
+                  "cost": {
+                    "type": "Cost",
+                    "shards": [
+                      "Black"
+                    ],
+                    "generic": 4
+                  }
+                },
+                {
+                  "type": "Tap"
+                }
+              ]
+            },
+            "activation_restrictions": [
+              {
+                "type": "AsSorcery"
+              }
+            ],
+            "description": "{4}{B}, {T}: Target player discards two cards. Activate only as a sorcery.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
             ]
           },
-          "sub_ability": null,
-          "duration": null,
-          "description": "{4}{B}, {T}: Target player discards two cards. Activate only as a sorcery.",
-          "target_prompt": null,
-          "activation_restrictions": [
-            {
-              "type": "AsSorcery"
-            }
-          ],
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": [],
+          "root_transforms": []
         }
       }
     },
@@ -194,7 +252,9 @@ expression: "&ir"
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]
-          }
+          },
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

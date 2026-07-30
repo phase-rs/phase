@@ -20,8 +20,8 @@ import { buildGameState, buildPriorityWaitingFor, buildStackEntry } from "../../
  * CR 701.15b — so `totalFailures` reached `MAX_TOTAL_FAILURES` (6) and the
  * controller halted via `notifyEngineLost` + `stop()`: the softlock.
  *
- * The fix makes the fallback fetch a guaranteed-legal action from the engine
- * via `adapter.getLegalActions()`. This test reproduces the 3-failure path and
+ * The fix makes non-Priority escape use the engine-owned `getAiFallbackAction`
+ * seam (WASM `fallback_action`). This test reproduces the 3-failure path and
  * asserts the fallback now recovers instead of halting.
  */
 
@@ -193,8 +193,9 @@ describe("aiController stuck-fallback (issue #484)", () => {
     vi.useRealTimers();
   });
 
-  it("recovers via getLegalActions instead of halting on a goaded-creature softlock", async () => {
+  it("recovers via getAiFallbackAction instead of halting on a goaded-creature softlock", async () => {
     const getAiAction = vi.fn(async () => ILLEGAL_DECLARE);
+    const getAiFallbackAction = vi.fn(async () => LEGAL_DECLARE);
     const getLegalActions = vi.fn(
       async (): Promise<LegalActionsResult> => ({
         actions: [LEGAL_DECLARE],
@@ -206,11 +207,11 @@ describe("aiController stuck-fallback (issue #484)", () => {
     storeState = {
       gameState: state,
       waitingFor: state.waiting_for,
-      adapter: { getAiAction, getLegalActions },
+      adapter: { getAiAction, getAiFallbackAction, getLegalActions },
     };
 
     // The engine rejects every illegal DeclareAttackers; it accepts the
-    // goad-compliant one from getLegalActions.
+    // goad-compliant escape from getAiFallbackAction.
     dispatchAction.mockImplementation(async (action: GameAction) => {
       const isLegal =
         action.type === "DeclareAttackers" &&
@@ -235,8 +236,9 @@ describe("aiController stuck-fallback (issue #484)", () => {
       await flushMicrotasks();
     }
 
-    // The fallback dispatched the engine-legal action from getLegalActions...
-    expect(getLegalActions).toHaveBeenCalled();
+    // The fallback dispatched the engine-owned escape action...
+    expect(getAiFallbackAction).toHaveBeenCalled();
+    expect(getLegalActions).not.toHaveBeenCalled();
     const dispatchedLegal = dispatchAction.mock.calls.some(
       ([action]) =>
         action.type === "DeclareAttackers" &&
@@ -251,66 +253,100 @@ describe("aiController stuck-fallback (issue #484)", () => {
     controller.dispose();
   });
 
-  it("falls through to PassPriority when getLegalActions yields only PassPriority", async () => {
-    const getAiAction = vi.fn(async () => ILLEGAL_DECLARE);
-    // Degenerate engine response: no DeclareAttackers entry.
-    const getLegalActions = vi.fn(
-      async (): Promise<LegalActionsResult> => ({
-        actions: [{ type: "PassPriority" } as GameAction],
-        autoPassRecommended: false,
-      }),
-    );
-
-    const state = declareAttackersState();
+  it("halts on the first empty NamedChoice escape instead of fabricating PassPriority", async () => {
+    const getAiAction = vi.fn(async () => null);
+    const getAiFallbackAction = vi.fn(async () => null);
+    const waitingFor: WaitingFor = {
+      type: "NamedChoice",
+      data: {
+        player: 1,
+        choice_type: "CardName",
+        options: [],
+        source: gollumNamedChoiceSource(300),
+      },
+    };
+    const state = buildGameState({
+      waiting_for: waitingFor,
+      priority_player: 1,
+      active_player: 1,
+    });
     storeState = {
       gameState: state,
       waitingFor: state.waiting_for,
-      adapter: { getAiAction, getLegalActions },
+      adapter: { getAiAction, getAiFallbackAction, getLegalActions: vi.fn() },
     };
-
-    // Only PassPriority is accepted in this degenerate scenario.
-    dispatchAction.mockImplementation(async (action: GameAction) => {
-      if (action.type === "PassPriority") return undefined;
-      throw new Error("illegal");
-    });
+    dispatchAction.mockResolvedValue(undefined);
 
     const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
     controller.start();
 
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 6; i++) {
       await vi.advanceTimersByTimeAsync(1000);
       await flushMicrotasks();
     }
 
-    const dispatchedPass = dispatchAction.mock.calls.some(
-      ([action]) => action.type === "PassPriority",
-    );
-    expect(dispatchedPass).toBe(true);
-    // `undefined` is never dispatched.
-    expect(dispatchAction.mock.calls.every(([action]) => action != null)).toBe(true);
+    expect(getAiFallbackAction).toHaveBeenCalledOnce();
+    expect(dispatchAction).not.toHaveBeenCalled();
+    expect(notifyEngineLost).toHaveBeenCalledWith("ai-controller-stuck:NamedChoice");
+    // Internal stop() deactivates scheduling — no retry storm after the halt.
+    expect(getAiAction).toHaveBeenCalledOnce();
 
     controller.dispose();
   });
 
-  it("uses the first legal action for CastOffer fallback instead of matching the WaitingFor type", async () => {
+  it("halts when non-Priority escape has no adapter instead of fabricating PassPriority", async () => {
+    const waitingFor: WaitingFor = {
+      type: "NamedChoice",
+      data: {
+        player: 1,
+        choice_type: "CardName",
+        options: [],
+        source: gollumNamedChoiceSource(300),
+      },
+    };
+    const state = buildGameState({
+      waiting_for: waitingFor,
+      priority_player: 1,
+      active_player: 1,
+    });
+    // Without an adapter, getAiAction resolves null and escape returns null
+    // for non-Priority — halt instead of fabricating PassPriority (#6393).
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: null,
+    };
+    dispatchAction.mockRejectedValue(new Error("no adapter"));
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+
+    for (let i = 0; i < 6; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushMicrotasks();
+    }
+
+    expect(dispatchAction).not.toHaveBeenCalled();
+    expect(notifyEngineLost).toHaveBeenCalledWith("ai-controller-stuck:NamedChoice");
+    expect(notifyEngineLost).toHaveBeenCalledOnce();
+
+    controller.dispose();
+  });
+
+  it("uses the engine-owned escape action for CastOffer fallback", async () => {
     const illegalAction = { type: "PassPriority" } as GameAction;
     const legalCastOfferAction = {
       type: "CascadeChoice",
       data: { choice: { type: "Decline" } },
     } as unknown as GameAction;
     const getAiAction = vi.fn(async () => illegalAction);
-    const getLegalActions = vi.fn(
-      async (): Promise<LegalActionsResult> => ({
-        actions: [legalCastOfferAction],
-        autoPassRecommended: false,
-      }),
-    );
+    const getAiFallbackAction = vi.fn(async () => legalCastOfferAction);
 
     const state = castOfferState();
     storeState = {
       gameState: state,
       waitingFor: state.waiting_for,
-      adapter: { getAiAction, getLegalActions },
+      adapter: { getAiAction, getAiFallbackAction, getLegalActions: vi.fn() },
     };
 
     dispatchAction.mockImplementation(async (action: GameAction) => {
@@ -326,7 +362,7 @@ describe("aiController stuck-fallback (issue #484)", () => {
       await flushMicrotasks();
     }
 
-    expect(getLegalActions).toHaveBeenCalled();
+    expect(getAiFallbackAction).toHaveBeenCalled();
     expect(dispatchAction.mock.calls).toContainEqual([legalCastOfferAction, 1]);
     expect(notifyEngineLost).not.toHaveBeenCalled();
 

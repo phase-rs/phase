@@ -22,119 +22,394 @@ expression: "&ir"
         "fragment": "Infusion — Look at the top four cards of your library. You may reveal a creature or land card from among them and put it into your hand. If you gained life this turn, you may instead reveal two creature and/or land cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Dig",
-            "player": {
-              "type": "Controller"
-            },
-            "count": {
-              "type": "Fixed",
-              "value": 4
-            },
-            "destination": "Hand",
-            "keep_count": 2,
-            "up_to": false,
-            "filter": {
-              "type": "Or",
-              "filters": [
-                {
-                  "type": "Typed",
-                  "type_filters": [
-                    "Creature"
-                  ],
-                  "controller": null,
-                  "properties": []
-                },
-                {
-                  "type": "Typed",
-                  "type_filters": [
-                    "Land"
-                  ],
-                  "controller": null,
-                  "properties": []
-                }
-              ]
-            },
-            "rest_destination": "Library",
-            "reveal": false,
-            "enter_tapped": false
-          },
-          "cost": null,
-          "sub_ability": null,
-          "else_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Dig",
-              "player": {
-                "type": "Controller"
-              },
-              "count": {
-                "type": "Fixed",
-                "value": 4
-              },
-              "destination": "Hand",
-              "keep_count": 1,
-              "up_to": true,
-              "filter": {
-                "type": "Or",
-                "filters": [
-                  {
-                    "type": "Typed",
-                    "type_filters": [
-                      "Creature"
-                    ],
-                    "controller": null,
-                    "properties": []
+        "Spell": {
+          "source_text": "Look at the top four cards of your library. You may reveal a creature or land card from among them and put it into your hand. If you gained life this turn, you may instead reveal two creature and/or land cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
                   },
-                  {
-                    "type": "Typed",
-                    "type_filters": [
-                      "Land"
-                    ],
-                    "controller": null,
-                    "properties": []
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 42,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Look at the top four cards of your library"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
                   }
-                ]
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Dig",
+                    "player": {
+                      "type": "Controller"
+                    },
+                    "count": {
+                      "type": "Fixed",
+                      "value": 4
+                    },
+                    "destination": null,
+                    "keep_count": null,
+                    "up_to": false,
+                    "filter": {
+                      "type": "Any"
+                    },
+                    "rest_destination": null,
+                    "reveal": false,
+                    "enter_tapped": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               },
-              "rest_destination": "Library",
-              "reveal": true,
-              "enter_tapped": false
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "duration": null,
-          "description": "Infusion — Look at the top four cards of your library. You may reveal a creature or land card from among them and put it into your hand. If you gained life this turn, you may instead reveal two creature and/or land cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
-          "target_prompt": null,
-          "condition": {
-            "type": "QuantityCheck",
-            "lhs": {
-              "type": "Ref",
-              "qty": {
-                "type": "LifeGainedThisTurn",
-                "player": {
-                  "type": "Controller"
-                }
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 44,
+                    "end_byte": 124,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "You may reveal a creature or land card from among them and put it into your hand"
+                },
+                "disposition": {
+                  "Continue": {
+                    "continuation": {
+                      "DigFromAmong": {
+                        "quantity": {
+                          "Up": {
+                            "type": "Fixed",
+                            "value": 1
+                          }
+                        },
+                        "filter": {
+                          "type": "Or",
+                          "filters": [
+                            {
+                              "type": "Typed",
+                              "type_filters": [
+                                "Creature"
+                              ],
+                              "controller": null,
+                              "properties": []
+                            },
+                            {
+                              "type": "Typed",
+                              "type_filters": [
+                                "Land"
+                              ],
+                              "controller": null,
+                              "properties": []
+                            }
+                          ]
+                        },
+                        "destination": "Hand",
+                        "rest_destination": null,
+                        "enter_tapped": false,
+                        "reveal_verb": true
+                      }
+                    }
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "RevealHand",
+                    "target": {
+                      "type": "Any"
+                    },
+                    "card_filter": {
+                      "type": "None"
+                    },
+                    "count": null,
+                    "reveal": true
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": true,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 2,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 3
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 126,
+                    "end_byte": 253,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 2
+                  },
+                  "fragment": "If you gained life this turn, you may instead reveal two creature and/or land cards from among them and put them into your hand"
+                },
+                "disposition": {
+                  "ReplaceMeaning": {
+                    "kind": {
+                      "DigAlt": {
+                        "kind": "Spell",
+                        "effect": {
+                          "type": "Dig",
+                          "player": {
+                            "type": "Controller"
+                          },
+                          "count": {
+                            "type": "Fixed",
+                            "value": 4
+                          },
+                          "destination": "Hand",
+                          "keep_count": 2,
+                          "up_to": false,
+                          "filter": {
+                            "type": "Or",
+                            "filters": [
+                              {
+                                "type": "Typed",
+                                "type_filters": [
+                                  "Creature"
+                                ],
+                                "controller": null,
+                                "properties": []
+                              },
+                              {
+                                "type": "Typed",
+                                "type_filters": [
+                                  "Land"
+                                ],
+                                "controller": null,
+                                "properties": []
+                              }
+                            ]
+                          },
+                          "rest_destination": null,
+                          "reveal": false,
+                          "enter_tapped": false
+                        },
+                        "cost": null,
+                        "sub_ability": null,
+                        "duration": null,
+                        "description": null,
+                        "target_prompt": null,
+                        "condition": {
+                          "type": "QuantityCheck",
+                          "lhs": {
+                            "type": "Ref",
+                            "qty": {
+                              "type": "LifeGainedThisTurn",
+                              "player": {
+                                "type": "Controller"
+                              }
+                            }
+                          },
+                          "comparator": "GE",
+                          "rhs": {
+                            "type": "Fixed",
+                            "value": 1
+                          }
+                        },
+                        "optional_targeting": false,
+                        "optional": false,
+                        "forward_result": false
+                      }
+                    }
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Dig",
+                    "player": {
+                      "type": "Controller"
+                    },
+                    "count": {
+                      "type": "Fixed",
+                      "value": 4
+                    },
+                    "destination": "Hand",
+                    "keep_count": 2,
+                    "up_to": false,
+                    "filter": {
+                      "type": "Or",
+                      "filters": [
+                        {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Creature"
+                          ],
+                          "controller": null,
+                          "properties": []
+                        },
+                        {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Land"
+                          ],
+                          "controller": null,
+                          "properties": []
+                        }
+                      ]
+                    },
+                    "rest_destination": null,
+                    "reveal": false,
+                    "enter_tapped": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 3,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 4
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 255,
+                    "end_byte": 315,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 3
+                  },
+                  "fragment": "Put the rest on the bottom of your library in a random order"
+                },
+                "disposition": {
+                  "Continue": {
+                    "continuation": {
+                      "PutRest": {
+                        "destination": "Library",
+                        "reorder_all": false
+                      }
+                    }
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "PutAtLibraryPosition",
+                    "target": {
+                      "type": "TrackedSet",
+                      "id": 0
+                    },
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "position": {
+                      "type": "Bottom"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
-            },
-            "comparator": "GE",
-            "rhs": {
-              "type": "Fixed",
-              "value": 1
-            }
+            ],
+            "kind": "Spell",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null
+          },
+          "die_results": [],
+          "root_transforms": [
+            {
+              "SetMinXValue": 0
+            },
+            {
+              "SetDescription": "Infusion — Look at the top four cards of your library. You may reveal a creature or land card from among them and put it into your hand. If you gained life this turn, you may instead reveal two creature and/or land cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order."
+            }
+          ]
         }
       }
     }

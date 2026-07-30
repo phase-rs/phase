@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 191
 expression: "&ir"
 ---
 {
@@ -153,7 +152,9 @@ expression: "&ir"
           },
           "shell": {
             "sub_link": null
-          }
+          },
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

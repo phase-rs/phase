@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1191
 expression: "&ir"
 ---
 {
@@ -23,22 +22,13 @@ expression: "&ir"
         "fragment": "Haste"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Haste",
             "description": "Haste"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Haste",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },
@@ -60,52 +50,119 @@ expression: "&ir"
         "fragment": "Whenever ~ attacks, exile the top card of your library face down. (You can't look at it.)"
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "Attacks",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "ExileTop",
-              "player": {
-                "type": "Controller"
+        "Trigger": {
+          "Parsed": {
+            "condition": "Attacks",
+            "partial_def": {
+              "mode": "Attacks",
+              "execute": null,
+              "valid_card": {
+                "type": "SelfRef"
               },
-              "count": {
-                "type": "Fixed",
-                "value": 1
-              },
-              "position": {
-                "type": "Top"
-              },
-              "face_down": true
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "Whenever ~ attacks, exile the top card of your library face down.",
-          "constraint": null,
-          "condition": null,
-          "batched": false
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 44,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "exile the top card of your library face down"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "ExileTop",
+                        "player": {
+                          "type": "Controller"
+                        },
+                        "count": {
+                          "type": "Fixed",
+                          "value": 1
+                        },
+                        "position": {
+                          "type": "Top"
+                        },
+                        "face_down": true
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
+              }
+            },
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "SelfRef"
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "exile the top card of your library face down.",
+              "relative_player_scope": null
+            },
+            "source_text": "Whenever ~ attacks, exile the top card of your library face down.",
+            "die_results": []
+          }
         }
       }
     },
@@ -127,61 +184,120 @@ expression: "&ir"
         "fragment": "{R}, Discard your hand, Sacrifice ~: Put all cards exiled with ~ into their owners' hands."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZoneAll",
-            "origin": "Exile",
-            "destination": "Hand",
-            "target": {
-              "type": "ExiledBySource"
-            }
-          },
-          "cost": {
-            "type": "Composite",
-            "costs": [
+        "Spell": {
+          "source_text": "Put all cards exiled with ~ into their owners' hands",
+          "body": {
+            "clauses": [
               {
-                "type": "Mana",
-                "cost": {
-                  "type": "Cost",
-                  "shards": [
-                    "Red"
-                  ],
-                  "generic": 0
-                }
-              },
-              {
-                "type": "Discard",
-                "count": {
-                  "type": "Ref",
-                  "qty": {
-                    "type": "HandSize",
-                    "player": {
-                      "type": "Controller"
-                    }
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 52,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Put all cards exiled with ~ into their owners' hands"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
                   }
                 },
-                "filter": null,
-                "random": false,
-                "self_ref": false
-              },
-              {
-                "type": "Sacrifice",
-                "target": {
-                  "type": "SelfRef"
+                "parsed": {
+                  "effect": {
+                    "type": "ChangeZoneAll",
+                    "origin": "Exile",
+                    "destination": "Hand",
+                    "target": {
+                      "type": "ExiledBySource"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
                 },
-                "count": 1
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Composite",
+              "costs": [
+                {
+                  "type": "Mana",
+                  "cost": {
+                    "type": "Cost",
+                    "shards": [
+                      "Red"
+                    ],
+                    "generic": 0
+                  }
+                },
+                {
+                  "type": "Discard",
+                  "count": {
+                    "type": "Ref",
+                    "qty": {
+                      "type": "HandSize",
+                      "player": {
+                        "type": "Controller"
+                      }
+                    }
+                  },
+                  "filter": null,
+                  "random": false,
+                  "self_ref": false
+                },
+                {
+                  "type": "Sacrifice",
+                  "target": {
+                    "type": "SelfRef"
+                  },
+                  "count": 1
+                }
+              ]
+            },
+            "description": "{R}, Discard your hand, Sacrifice ~: Put all cards exiled with ~ into their owners' hands.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
             ]
           },
-          "sub_ability": null,
-          "duration": null,
-          "description": "{R}, Discard your hand, Sacrifice ~: Put all cards exiled with ~ into their owners' hands.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

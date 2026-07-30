@@ -49,6 +49,7 @@ use crate::types::zones::Zone;
 struct ActiveCombatAssignmentRuleEffect {
     source_id: ObjectId,
     controller: PlayerId,
+    transient_id: Option<u64>,
     timestamp: u64,
     modification: ContinuousModification,
     affected_filter: TargetFilter,
@@ -916,6 +917,54 @@ pub(crate) fn evaluate_condition_with_recipient(
     recipient_id: ObjectId,
 ) -> bool {
     evaluate_condition_with_context(state, condition, controller, source_id, Some(recipient_id))
+}
+
+/// Selects the controller that supplies "you" for an active effect's
+/// condition. Printed and granted static abilities read their source's current
+/// controller; resolution-created transient continuous effects retain the
+/// controller that created them.
+pub(crate) fn active_effect_condition_controller(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+) -> PlayerId {
+    condition_controller(
+        state,
+        effect.transient_id,
+        effect.controller,
+        effect.source_id,
+    )
+}
+
+fn combat_effect_condition_controller(
+    state: &GameState,
+    effect: &ActiveCombatAssignmentRuleEffect,
+) -> PlayerId {
+    condition_controller(
+        state,
+        effect.transient_id,
+        effect.controller,
+        effect.source_id,
+    )
+}
+
+/// Resolves the player named by "you" for a condition on either a printed or
+/// resolution-created continuous effect.
+// CR 109.5: "you"/"your" on a static ability refers to the current controller
+// of its source, while a resolved spell or ability retains its controller.
+fn condition_controller(
+    state: &GameState,
+    transient_id: Option<u64>,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> PlayerId {
+    if transient_id.is_some() {
+        controller
+    } else {
+        state
+            .objects
+            .get(&source_id)
+            .map_or(controller, |source| source.controller)
+    }
 }
 
 fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
@@ -3470,15 +3519,10 @@ pub(crate) fn incremental_flush_must_escalate(
     }
 
     // Axis 2b — source-level enabling CONDITION over the EXISTING static-ability
-    // sources, NARROWED to entries that actually perturb the condition. The
-    // condition axis CANNOT be read off the collected `ActiveContinuousEffect`s:
-    // `active_continuous_effects_from_static_definitions` evaluates a
-    // non-recipient-context (source-level) condition as a gate at COLLECTION time
-    // and stores `condition: None` on the resulting effect (only recipient-context
-    // conditions are retained for per-recipient re-evaluation). So a board-
-    // population gate like "as long as you control N creatures" is already consumed
-    // and invisible on the active-effect set. We must inspect the intact
-    // `StaticDefinition.condition` on each live source instead.
+    // sources, NARROWED to entries that actually perturb the condition. Conditions
+    // remain attached to collected effects for application-time evaluation, while
+    // this source walk supplies the before/after truth comparison required for an
+    // incremental full-rebuild decision.
     //
     // CR 611.3a + CR 611.3b: when such a source-level enabling condition depends
     // on board population, an object entering can flip the condition for the
@@ -3530,7 +3574,7 @@ fn active_effects_force_incremental_escalation(
 /// whose enabling `condition` is board-population-dependent AND that one of the
 /// `entered_ids` actually perturbs. Walks the same source set as
 /// `collect_shared_active_continuous_effects` (`for_each_static_effect_source`)
-/// but reads the intact pre-collection `condition` field.
+/// and reads the source definition's `condition` field.
 /// O(active-source-count × entered-count); short-circuits on the first match.
 ///
 /// Three-stage test:
@@ -3545,8 +3589,7 @@ fn active_effects_force_incremental_escalation(
 ///     cannot be summarized by a single board-level boolean
 ///     (`source_condition_gate_passes` only over-approximates them). This
 ///     preserves the d9a40be71 behavior for that class.
-///  3. SOURCE-LEVEL gates (CR 611.3a — a single on/off switch consumed at
-///     collection): apply the truth-delta short-circuit. The static's BEFORE
+///  3. SOURCE-LEVEL gates: apply the truth-delta short-circuit. The static's BEFORE
 ///     truth was cached at the last full eval in `static_gate_truth`; recompute
 ///     AFTER against the live post-entry board. Escalate iff `before != after`.
 ///     Key absent (source not present / phased out at the last full eval) ->
@@ -4276,14 +4319,7 @@ fn active_continuous_effects_from_static_definitions(
             }
         }
 
-        let retained_condition = if let Some(condition) = &def.condition {
-            if !source_condition_gate_passes(state, condition, controller, source_id) {
-                continue;
-            }
-            condition_uses_recipient_context(condition).then(|| condition.clone())
-        } else {
-            None
-        };
+        let retained_condition = def.condition.clone();
 
         let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
         for (mod_index, modification) in def.modifications.iter().enumerate() {
@@ -4446,17 +4482,9 @@ fn expand_granted_static_effects(
             None => continue,
         };
         // CR 109.5 + CR 113.7: "You" inside the granted ability refers to the
-        // recipient's controller. Re-run any inner condition gate with the
-        // recipient as the source so that gating like "during your turn"
-        // resolves against the recipient's controller.
-        let retained_inner_condition = if let Some(condition) = &inner.condition {
-            if !source_condition_gate_passes(state, condition, recipient_controller, recipient_id) {
-                continue;
-            }
-            condition_uses_recipient_context(condition).then(|| condition.clone())
-        } else {
-            None
-        };
+        // recipient's controller. Keep its condition until application, after
+        // preceding layers have established that controller.
+        let retained_inner_condition = inner.condition.clone();
         for (mod_index, modification) in inner.modifications.iter().enumerate() {
             if is_combat_assignment_rule_modification(modification) {
                 continue;
@@ -4785,11 +4813,14 @@ pub(crate) fn gather_transient_continuous_effects(
             continue;
         }
 
-        let retained_condition = tce
-            .condition
-            .as_ref()
-            .filter(|condition| condition_uses_recipient_context(condition))
-            .cloned();
+        let retained_condition = if let Some(condition) = &tce.condition {
+            if !source_condition_gate_passes(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+            condition_uses_recipient_context(condition).then(|| condition.clone())
+        } else {
+            None
+        };
 
         for (mod_index, modification) in tce.modifications.iter().enumerate() {
             if is_combat_assignment_rule_modification(modification) {
@@ -4932,7 +4963,9 @@ fn apply_combat_assignment_rule_effects_filtered(
 
     for effect in effects {
         let scan_ids = effect_candidate_ids(state, &effect.affected_filter, &mut zone_cache);
-        let ctx = FilterContext::from_source(state, effect.source_id);
+        let condition_controller = combat_effect_condition_controller(state, &effect);
+        let ctx =
+            FilterContext::from_source_with_controller(effect.source_id, condition_controller);
         let affected_ids: Vec<ObjectId> = scan_ids
             .iter()
             .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
@@ -4942,7 +4975,7 @@ fn apply_combat_assignment_rule_effects_filtered(
                     evaluate_condition_with_recipient(
                         state,
                         condition,
-                        effect.controller,
+                        condition_controller,
                         effect.source_id,
                         id,
                     )
@@ -5074,14 +5107,7 @@ fn active_combat_assignment_rule_effects_from_static_definitions(
             continue;
         }
 
-        let retained_condition = if let Some(condition) = &def.condition {
-            if !source_condition_gate_passes(state, condition, controller, source_id) {
-                continue;
-            }
-            condition_uses_recipient_context(condition).then(|| condition.clone())
-        } else {
-            None
-        };
+        let retained_condition = def.condition.clone();
 
         let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
         effects.extend(
@@ -5091,6 +5117,7 @@ fn active_combat_assignment_rule_effects_from_static_definitions(
                 .map(|modification| ActiveCombatAssignmentRuleEffect {
                     source_id,
                     controller,
+                    transient_id: None,
                     timestamp,
                     modification: modification.clone(),
                     affected_filter: affected_filter.clone(),
@@ -5136,6 +5163,7 @@ fn collect_transient_combat_assignment_rule_effects(
                 .map(|modification| ActiveCombatAssignmentRuleEffect {
                     source_id: tce.source_id,
                     controller: tce.controller,
+                    transient_id: Some(tce.id),
                     timestamp: tce.timestamp,
                     modification: modification.clone(),
                     affected_filter: tce.affected.clone(),
@@ -5960,11 +5988,17 @@ fn apply_continuous_effect_filtered(
         // `MustAttackAwayFromSource` affected filter intact
         // (`effects/effect.rs`) — see the T13 regression
         // (`affected_population_does_not_follow_a_stolen_source`).
-        let ctx = if effect.transient_id.is_some() {
-            FilterContext::from_source_with_controller(effect.source_id, effect.controller)
-        } else {
-            FilterContext::from_source(state, effect.source_id)
-        };
+        let condition_controller = active_effect_condition_controller(state, effect);
+        let ctx =
+            FilterContext::from_source_with_controller(effect.source_id, condition_controller);
+        let condition_uses_recipient = effect
+            .condition
+            .as_ref()
+            .is_some_and(condition_uses_recipient_context);
+        let non_recipient_condition_passes = effect.condition.as_ref().is_none_or(|condition| {
+            condition_uses_recipient
+                || evaluate_condition(state, condition, condition_controller, effect.source_id)
+        });
         newly_affected_ids = scan_ids
             .iter()
             // Incremental fast path: re-apply only to the freshly-entered objects.
@@ -5973,15 +6007,17 @@ fn apply_continuous_effect_filtered(
             .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
             .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
             .filter(|&&id| {
-                effect.condition.as_ref().is_none_or(|condition| {
-                    evaluate_condition_with_recipient(
-                        state,
-                        condition,
-                        effect.controller,
-                        effect.source_id,
-                        id,
-                    )
-                })
+                non_recipient_condition_passes
+                    && effect.condition.as_ref().is_none_or(|condition| {
+                        !condition_uses_recipient
+                            || evaluate_condition_with_recipient(
+                                state,
+                                condition,
+                                condition_controller,
+                                effect.source_id,
+                                id,
+                            )
+                    })
             })
             .copied()
             .collect();
@@ -7093,11 +7129,15 @@ pub(crate) fn compute_current_copiable_values(
         gather_active_effects_for_layer(state, Layer::Copy)
             .into_iter()
             .filter(|effect| {
+                let condition_controller = active_effect_condition_controller(state, effect);
                 matches_target_filter(
                     state,
                     object_id,
                     &effect.affected_filter,
-                    &FilterContext::from_source(state, effect.source_id),
+                    &FilterContext::from_source_with_controller(
+                        effect.source_id,
+                        condition_controller,
+                    ),
                 )
             })
             .filter(|effect| {
@@ -7105,7 +7145,7 @@ pub(crate) fn compute_current_copiable_values(
                     evaluate_condition_with_recipient(
                         state,
                         condition,
-                        effect.controller,
+                        active_effect_condition_controller(state, effect),
                         effect.source_id,
                         object_id,
                     )
@@ -7261,7 +7301,7 @@ mod tests {
     use crate::types::game_state::{LayersDirty, StaticSourceIndex, TransientContinuousEffect};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
-    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
@@ -7329,6 +7369,46 @@ mod tests {
         obj.base_toughness = Some(toughness);
         obj.timestamp = ts;
         id
+    }
+
+    fn add_unspent_blue_mana(state: &mut GameState, player: PlayerId, count: usize) {
+        let player = state
+            .players
+            .iter_mut()
+            .find(|candidate| candidate.id == player)
+            .expect("test player must exist");
+        for _ in 0..count {
+            player.mana_pool.add(ManaUnit {
+                color: ManaType::Blue,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+            });
+        }
+    }
+
+    fn six_unspent_mana_condition() -> StaticCondition {
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::UnspentMana { color: None },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 6 },
+        }
+    }
+
+    fn install_static_definition(
+        state: &mut GameState,
+        object_id: ObjectId,
+        def: StaticDefinition,
+    ) {
+        let object = state.objects.get_mut(&object_id).unwrap();
+        Arc::make_mut(&mut object.base_static_definitions).push(def.clone());
+        object.static_definitions.push(def);
     }
 
     /// A bare non-creature Treasure token permanent (CR 111.1: `is_token`; CR 111.6:
@@ -8199,6 +8279,220 @@ mod tests {
 
         evaluate_layers(&mut state);
         assert!(!state.objects[&id].assigns_damage_as_though_unblocked);
+    }
+
+    #[test]
+    fn printed_static_condition_uses_controller_after_layer_two_in_one_pass() {
+        let mut state = setup();
+        let source = make_creature(&mut state, "Conditional Source", 2, 2, P0);
+        install_static_definition(
+            &mut state,
+            source,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }])
+                .condition(six_unspent_mana_condition()),
+        );
+        add_unspent_blue_mana(&mut state, P0, 5);
+        add_unspent_blue_mana(&mut state, P1, 6);
+        state.add_transient_continuous_effect(
+            source,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        let source = &state.objects[&source];
+        assert_eq!(source.controller, P1);
+        assert!(
+            source.has_keyword(&Keyword::Flying),
+            "a layer-6 printed static must read the layer-2 controller in the same pass"
+        );
+    }
+
+    #[test]
+    fn transient_static_condition_keeps_its_captured_controller() {
+        let mut state = setup();
+        let source = make_creature(&mut state, "Transient Source", 2, 2, P0);
+        let recipient = make_creature(&mut state, "Transient Recipient", 2, 2, P0);
+        add_unspent_blue_mana(&mut state, P0, 6);
+        state.add_transient_continuous_effect(
+            source,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: recipient },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }],
+            Some(six_unspent_mana_condition()),
+        );
+        state.add_transient_continuous_effect(
+            source,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&source].controller, P1);
+        assert!(
+            state.objects[&recipient].has_keyword(&Keyword::Flying),
+            "a resolution-created effect must keep its captured P0 condition context"
+        );
+    }
+
+    #[test]
+    fn granted_static_condition_uses_its_recipient_controller_after_layer_two() {
+        let mut state = setup();
+        let grantor = make_creature(&mut state, "Grantor", 2, 2, P0);
+        let recipient = make_creature(&mut state, "Granted Static Source", 2, 2, P0);
+        let inner = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])
+            .condition(six_unspent_mana_condition());
+        install_static_definition(
+            &mut state,
+            grantor,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(inner),
+                }]),
+        );
+        add_unspent_blue_mana(&mut state, P0, 5);
+        add_unspent_blue_mana(&mut state, P1, 6);
+        state.add_transient_continuous_effect(
+            grantor,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: recipient },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        let recipient = &state.objects[&recipient];
+        assert_eq!(recipient.controller, P1);
+        assert!(
+            recipient.has_keyword(&Keyword::Flying),
+            "a granted static must bind its condition to the recipient's layer-2 controller"
+        );
+    }
+
+    #[test]
+    fn combat_assignment_static_condition_uses_controller_after_layer_two() {
+        let mut state = setup();
+        let source = make_creature(&mut state, "Combat Conditional Source", 2, 2, P0);
+        install_static_definition(
+            &mut state,
+            source,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AssignDamageFromToughness])
+                .condition(six_unspent_mana_condition()),
+        );
+        add_unspent_blue_mana(&mut state, P0, 5);
+        add_unspent_blue_mana(&mut state, P1, 6);
+        state.add_transient_continuous_effect(
+            source,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        let source = &state.objects[&source];
+        assert_eq!(source.controller, P1);
+        assert!(
+            source.assigns_damage_from_toughness,
+            "post-layer combat rules must use the layer-2 controller for their condition"
+        );
+    }
+
+    #[test]
+    fn transient_combat_rule_condition_stays_off_when_captured_controller_fails() {
+        let mut state = setup();
+        let source = make_creature(&mut state, "Transient Combat Source", 2, 2, P0);
+        add_unspent_blue_mana(&mut state, P1, 6);
+        state.add_transient_continuous_effect(
+            source,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::AssignDamageFromToughness],
+            Some(six_unspent_mana_condition()),
+        );
+        state.add_transient_continuous_effect(
+            source,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        let source = &state.objects[&source];
+        assert_eq!(source.controller, P1);
+        assert!(
+            !source.assigns_damage_from_toughness,
+            "a transient combat rule must remain gated by its captured P0 controller"
+        );
+    }
+
+    #[test]
+    fn transient_combat_rule_filter_uses_captured_controller_after_source_is_stolen() {
+        // CR 109.5 + CR 613.11: a transient combat-assignment effect's
+        // controller-relative recipient filter remains bound to its creator,
+        // even after a later layer-2 effect changes the source's controller.
+        let mut state = setup();
+        let source = make_creature(&mut state, "Transient Combat Source", 2, 2, P0);
+        let p0_recipient = make_creature(&mut state, "P0 Combat Recipient", 2, 2, P0);
+        let p1_recipient = make_creature(&mut state, "P1 Combat Recipient", 2, 2, P1);
+        state.add_transient_continuous_effect(
+            source,
+            P0,
+            Duration::Permanent,
+            creature_you_ctrl(),
+            vec![ContinuousModification::AssignDamageFromToughness],
+            None,
+        );
+        state.add_transient_continuous_effect(
+            source,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&source].controller, P1);
+        assert!(
+            state.objects[&p0_recipient].assigns_damage_from_toughness,
+            "the captured P0 controller determines the transient effect's recipients"
+        );
+        assert!(
+            !state.objects[&p1_recipient].assigns_damage_from_toughness,
+            "stealing the source must not retarget the transient effect to P1's creatures"
+        );
     }
 
     #[test]

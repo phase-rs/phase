@@ -1,9 +1,151 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
+use crate::parser::oracle_ir::doc::{UnsupportedAbilityCategory, UnsupportedAbilityIr};
 use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment, DoorLockOp,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+
+#[test]
+fn unsupported_ability_ir_lowering_preserves_generic_and_structural_payloads() {
+    let generic = lower_unsupported_node(&UnsupportedAbilityIr::unknown("unknown line"), 1);
+    let Effect::Unimplemented { name, description } = generic.effect.as_ref() else {
+        panic!("expected unimplemented generic residual: {generic:?}");
+    };
+    assert_eq!(name, "unknown");
+    assert_eq!(description.as_deref(), Some("unknown line"));
+    assert_eq!(generic.description.as_deref(), Some("unknown line"));
+    assert_eq!(generic.min_x_value, 1);
+
+    let structural = lower_unsupported_node(
+        &UnsupportedAbilityIr::new(
+            UnsupportedAbilityCategory::EffectStructure,
+            "Effect sentence candidate but line failed effect parser: unsupported line",
+            "unsupported line",
+        ),
+        0,
+    );
+    let Effect::Unimplemented { name, description } = structural.effect.as_ref() else {
+        panic!("expected unimplemented structural residual: {structural:?}");
+    };
+    assert_eq!(name, "effect_structure");
+    assert_eq!(
+        description.as_deref(),
+        Some("Effect sentence candidate but line failed effect parser: unsupported line")
+    );
+    assert_eq!(structural.description.as_deref(), Some("unsupported line"));
+}
+
+#[test]
+fn ozai_document_ir_lowers_keyword_transform_and_unspent_mana_gate() {
+    const ORACLE: &str = "Trample, firebending 4, haste\nIf you would lose unspent mana, that mana becomes red instead.\nOzai has flying and indestructible as long as you have six or more unspent mana.";
+    let keyword_names = [
+        "trample".to_string(),
+        "firebending".to_string(),
+        "haste".to_string(),
+    ];
+    let types = ["Legendary".to_string(), "Creature".to_string()];
+    let subtypes = [
+        "Human".to_string(),
+        "Noble".to_string(),
+        "Wizard".to_string(),
+    ];
+
+    let mut ir = parse_oracle_ir(
+        ORACLE,
+        "Ozai, the Phoenix King",
+        &keyword_names,
+        &types,
+        &subtypes,
+    );
+    assert!(
+        ir.diagnostics.is_empty(),
+        "unexpected parse diagnostics: {ir:#?}"
+    );
+    assert!(
+        ir.items
+            .iter()
+            .all(|item| !matches!(item.node, OracleNodeIr::Unsupported { .. })),
+        "every printed Ozai line must have a typed IR node: {ir:#?}"
+    );
+    let parsed = lower_oracle_ir(&mut ir);
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "lowering must preserve a fully supported Ozai document: {:#?}",
+        parsed.parse_warnings
+    );
+    assert!(parsed.statics.iter().any(|definition| matches!(
+        definition.mode,
+        StaticMode::StepEndUnspentMana {
+            filter: None,
+            action: StepEndManaAction::Transform(ManaType::Red),
+        }
+    ) && definition.affected
+        == Some(TargetFilter::Controller)));
+
+    let gate = parsed
+        .statics
+        .iter()
+        .find(|definition| {
+            matches!(
+                definition.condition,
+                Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::UnspentMana { color: None },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 6 },
+                })
+            )
+        })
+        .expect("Ozai's six-unspent-mana conditional static");
+    assert_eq!(gate.affected, Some(TargetFilter::SelfRef));
+    assert!(gate
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying,
+        }));
+    assert!(gate
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible,
+        }));
+}
+
+#[test]
+fn nominal_dispatch_preserves_precomputed_x_floor_for_spells_and_residuals() {
+    let types = ["Creature".to_string()];
+    let spell = parse_oracle_text(
+        "~ deals 2 damage. X can't be 0.",
+        "X Damage",
+        &[],
+        &types,
+        &[],
+    );
+    assert_eq!(spell.abilities.len(), 1);
+    assert_eq!(spell.abilities[0].min_x_value, 1);
+    assert!(
+        !matches!(
+            spell.abilities[0].effect.as_ref(),
+            Effect::Unimplemented { .. }
+        ),
+        "nominal dispatch must retain a parsed spell"
+    );
+
+    let residual = parse_oracle_text(
+        "Frobnicate target creature. X can't be 0.",
+        "X Residual",
+        &[],
+        &types,
+        &[],
+    );
+    assert_eq!(residual.abilities.len(), 1);
+    assert_eq!(residual.abilities[0].min_x_value, 1);
+    assert!(matches!(
+        residual.abilities[0].effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+}
 
 /// CR 122.1 + CR 608.2d + CR 702.62b (Clockspinning): the whole card parses
 /// with zero `Unimplemented` — buyback consumed as a keyword line, sentence 1
@@ -1127,8 +1269,8 @@ use crate::types::ability::{
     SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, ShieldKind,
     StaticCondition, TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
 };
-use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
-use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind, WardCost};
+use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, StepEndManaAction};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, ProhibitionScope, StaticMode};
 use crate::types::triggers::{PlaneswalkRole, TriggerMode};
@@ -8472,6 +8614,27 @@ fn parses_urza_tower_conditional_mana_as_delta() {
         AbilityCondition::And { conditions } => assert_eq!(conditions.len(), 2),
         other => panic!("expected conjunction condition, got {other:?}"),
     }
+}
+
+#[test]
+fn activated_mana_instead_delta_preserves_non_instead_condition() {
+    let mut ability = parse(
+        "{T}: Add {C}. If you control an Urza's Mine and an Urza's Power-Plant, add {C}{C}{C} instead.",
+        "Urza's Tower",
+        &[],
+        &["Land"],
+        &["Urza's", "Tower"],
+    )
+    .abilities
+    .remove(0);
+    let before = ability.clone();
+
+    normalize_activated_mana_instead_delta(&mut ability);
+
+    assert_eq!(
+        ability, before,
+        "the normalizer must leave an already-lowered non-replacement condition intact"
+    );
 }
 
 /// CR 205.3i + CR 614.1a + CR 605.1a: All three Urza lands share a single

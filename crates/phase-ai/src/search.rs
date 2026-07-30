@@ -20,19 +20,20 @@ use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
+use crate::card_value::{cmp_keep, intrinsic_value, keep_key};
 use crate::cast_facts::cast_facts_for_action;
 use crate::combat_ai::{choose_attackers_with_targets_with_profile, choose_blockers_with_profile};
 use crate::config::{AiConfig, PlannerMode, ThreatAwareness};
 use crate::context::AiContext;
 use crate::features::DeckFeatures;
-use crate::mana_colors::demand_aware_single_color;
-use crate::plan::PlanSnapshot;
+use crate::plan::{PlanSnapshot, PlanState};
 use crate::planner::{
-    apply_candidate, BeamContinuationPlanner, ContinuationPlanner, PlannerServices,
-    RankedCandidate, RungStat, SearchBudget,
+    apply_candidate, prepare_payment_candidates, BeamContinuationPlanner, ContinuationPlanner,
+    PlannerServices, PreparedCandidate, RankedCandidate, RungStat, SearchBudget,
 };
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::copy_value::score_legend_rule_keep;
+use crate::policies::strategy_helpers::{cmp_sacrifice, sacrifice_key};
 use crate::policies::tutor::{score_search_choice_cards, score_search_choice_selection};
 use crate::policies::{PolicyId, PolicyRegistry, PolicyVerdict};
 use crate::session::AiSession;
@@ -97,16 +98,33 @@ fn has_large_battlefield(state: &GameState) -> bool {
     state.battlefield.len() >= LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS
 }
 
+/// CR 701.21a: choose which permanents to sacrifice for a mandatory
+/// spell-effect sacrifice.
+///
+/// `strategy_helpers::sacrifice_cost` is the single battlefield give-up
+/// authority — the same one `SacrificeValuePolicy` uses. Scoring these with the
+/// zone-agnostic card scalar instead made this path land-blind and, because
+/// `deterministic_choice` short-circuits the policy registry, the land-blind
+/// answer won.
+///
+/// The ordering is **total**, via `sacrifice_key` / `cmp_sacrifice`: the
+/// land-vs-nonland axis is a tier, not a scalar gap. `sort_by` is stable, so
+/// ranking on the bare `f64` left equal scores to be decided by enumeration
+/// order — and `sacrifice_land_penalty` is CMA-ES-trained, so a trained profile
+/// could restore that tie under the noncreature cap at any time. Within a tier
+/// the scalar still decides. This mirrors `card_value::cmp_keep` at the cleanup
+/// discard seam, which is the identical problem.
 fn pick_lowest_value_sacrifices(
     state: &GameState,
     cards: &[ObjectId],
     count: usize,
+    penalties: &crate::config::PolicyPenalties,
 ) -> Vec<ObjectId> {
     let mut scored: Vec<_> = cards
         .iter()
-        .map(|&id| (id, evaluate_card_value(state, id)))
+        .map(|&id| (id, sacrifice_key(state, id, penalties)))
         .collect();
-    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| cmp_sacrifice(&a.1, &b.1));
     scored.into_iter().take(count).map(|(id, _)| id).collect()
 }
 
@@ -182,28 +200,6 @@ pub fn choose_action_with_session(
         }
     }
 
-    // CR 106.3 + CR 608.2d: Selecting which color a flexible mana source
-    // produces while paying for a spell is mechanical, not a policy judgment —
-    // the AI must produce the color the in-flight cost demands. `candidates.rs`
-    // enumerates *every* color option, so `score_candidates` is always non-empty
-    // and the old `fallback_action` SingleColor arm never fired on the normal
-    // path; the scorer then picked an arbitrary (first-enumerated) color,
-    // tapping a U/R dual for {R} when the spell needed {U} and stranding the pip
-    // (ManaPayment dead-end). This deterministic pre-emption — parallel to the
-    // TributeChoice and SearchChoice pre-emptions above — is the real fix.
-    if let WaitingFor::ChooseManaColor {
-        choice: ManaChoicePrompt::SingleColor { ref options },
-        ..
-    } = state.waiting_for
-    {
-        if let Some(color) = demand_aware_single_color(options, state) {
-            return Some(GameAction::ChooseManaColor {
-                choice: ManaChoice::SingleColor(color),
-                count: 1,
-            });
-        }
-    }
-
     // CR 608.2d (hidden information): the guesser has no legal access to the
     // committed value / chosen-card identity — it is genuinely a guess. The AI
     // MUST NOT score guess branches via `score_candidates` (eval/search runs on
@@ -229,7 +225,7 @@ pub fn choose_action_with_session(
     if scored.is_empty() {
         // No valid candidates from search — fall back to a safe escape action
         // so the game never deadlocks waiting for the AI.
-        return fallback_action(state);
+        return fallback_action(state, config);
     }
     // Issue #4878: total order before softmax so equal scores never depend on
     // HashSet/HashMap allocation order.
@@ -612,7 +608,7 @@ fn large_board_main_phase_fast_action_from_actions(
             let penalty = candidate.penalty;
             let candidate = candidate.candidate;
             let baseline = match &candidate.action {
-                GameAction::CastSpell { object_id, .. } => evaluate_card_value(state, *object_id),
+                GameAction::CastSpell { object_id, .. } => intrinsic_value(state, *object_id),
                 _ => 0.0,
             };
             let tactical = policies.score(&PolicyContext {
@@ -764,7 +760,13 @@ pub fn emit_trace_for_candidate(
 /// In release builds we still emit `CancelCast` to keep the match running, but
 /// debug builds panic so the gap surfaces during testing instead of silently
 /// degrading AI play into cast/cancel churn.
-fn fallback_action(state: &GameState) -> Option<GameAction> {
+/// Deadlock-safe escape hatch when tactical scoring cannot produce an action.
+/// The WASM bridge exposes this for client AI-controller escape — callers must
+/// not invent actions from legal-action enumeration order (#6393).
+///
+/// `config` supplies policy penalties used by selection escapes (e.g. sacrifice
+/// value ordering); difficulty/search knobs are unused here.
+pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameAction> {
     // CR 601.2c: A spell's target step must use the engine's current legal
     // target list. `target_slots` is a historical snapshot and can be stale
     // after earlier selections; if no current legal action remains, abort the
@@ -941,7 +943,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             effect_kind: engine::types::ability::EffectKind::Sacrifice,
             ..
         } if !cards.is_empty() && !*up_to && *count > 0 => Some(GameAction::SelectCards {
-            cards: pick_lowest_value_sacrifices(state, cards, *count),
+            cards: pick_lowest_value_sacrifices(state, cards, *count, &config.policy_penalties),
         }),
 
         // Selection states: empty selection is a valid "choose nothing".
@@ -1032,7 +1034,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         } => {
             let mut scored: Vec<_> = cards
                 .iter()
-                .map(|&id| (id, evaluate_card_value(state, id)))
+                .map(|&id| (id, intrinsic_value(state, id)))
                 .collect();
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             Some(GameAction::SelectCards {
@@ -1143,12 +1145,13 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
 
-        // Named choice: pick the first option if available.
-        WaitingFor::NamedChoice { options, .. } => {
-            options.first().map(|choice| GameAction::ChooseOption {
-                choice: choice.clone(),
-            })
-        }
+        // Named choice: prefer an engine-legal ChooseOption. CardName prompts
+        // intentionally keep `options` empty and synthesize candidates from
+        // `all_card_names` (#6248); reading `options.first()` softlocks after
+        // restore when rehydrate succeeded but options stayed empty (#6393).
+        WaitingFor::NamedChoice { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|a| matches!(a, GameAction::ChooseOption { .. })),
 
         // CR 608.2d: opponent-guess fallback — any printed guess is legal. The
         // hidden-info determinization in `choose_action` already pre-empts this
@@ -1623,40 +1626,36 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         }
 
         // Mana-related states: picking a color or paying mana.
-        WaitingFor::ChooseManaColor { choice, .. } => {
-            match choice {
-                ManaChoicePrompt::SingleColor { options } => {
-                    // Defense-in-depth: the primary fix is the pre-emption in
-                    // `choose_action_with_session`; this honors the demanded
-                    // color too should this path ever be reached.
-                    demand_aware_single_color(options, state).map(|color| {
-                        GameAction::ChooseManaColor {
-                            choice: ManaChoice::SingleColor(color),
-                            count: 1,
-                        }
-                    })
-                }
-                ManaChoicePrompt::Combination { options } => {
-                    options.first().map(|combo| GameAction::ChooseManaColor {
-                        choice: ManaChoice::Combination(combo.clone()),
+        WaitingFor::ChooseManaColor { choice, .. } => match choice {
+            ManaChoicePrompt::SingleColor { options } => {
+                options
+                    .first()
+                    .copied()
+                    .map(|color| GameAction::ChooseManaColor {
+                        choice: ManaChoice::SingleColor(color),
                         count: 1,
                     })
-                }
-                ManaChoicePrompt::AnyCombination { count, options } => {
-                    let combo = vec![
-                        options
-                            .first()
-                            .copied()
-                            .unwrap_or(engine::types::mana::ManaType::Colorless);
-                        *count
-                    ];
-                    Some(GameAction::ChooseManaColor {
-                        choice: ManaChoice::Combination(combo),
-                        count: 1,
-                    })
-                }
             }
-        }
+            ManaChoicePrompt::Combination { options } => {
+                options.first().map(|combo| GameAction::ChooseManaColor {
+                    choice: ManaChoice::Combination(combo.clone()),
+                    count: 1,
+                })
+            }
+            ManaChoicePrompt::AnyCombination { count, options } => {
+                let combo = vec![
+                    options
+                        .first()
+                        .copied()
+                        .unwrap_or(engine::types::mana::ManaType::Colorless);
+                    *count
+                ];
+                Some(GameAction::ChooseManaColor {
+                    choice: ManaChoice::Combination(combo),
+                    count: 1,
+                })
+            }
+        },
         WaitingFor::PayManaAbilityMana { options, .. } => {
             options.first().map(|plan| GameAction::PayManaAbilityMana {
                 payment: plan.clone(),
@@ -1954,6 +1953,57 @@ fn priority_action_is_allowed_by_loop_guards(
     }
 }
 
+/// Rank the root beam after validation and gating, retaining an affiliated
+/// payment candidate's already-witnessed reducer successor through width
+/// truncation. This is the single production seam for root payment ranking;
+/// tests exercise it directly to prove the enabled-search beam boundary.
+fn rank_root_payment_candidates(
+    state: &GameState,
+    decision: &engine::ai_support::AiDecisionContext,
+    prepared: &[PreparedCandidate],
+    gated: &[crate::tactical_gate::GatedCandidate],
+    services: &PlannerServices<'_>,
+    max_branching: usize,
+) -> Vec<RankedCandidate> {
+    let mut ranked: Vec<RankedCandidate> = gated
+        .iter()
+        .map(|gated_candidate| {
+            let score = services.tactical_score(
+                state,
+                decision,
+                &gated_candidate.candidate,
+                services.ai_player,
+                SearchDepth::Root,
+            ) + gated_candidate.penalty;
+            prepared
+                .iter()
+                .find(|prepared_candidate| {
+                    prepared_candidate.candidate.action == gated_candidate.candidate.action
+                })
+                .and_then(|prepared_candidate| prepared_candidate.payment_successor.clone())
+                .map_or_else(
+                    || RankedCandidate::new(gated_candidate.candidate.clone(), score),
+                    |successor| {
+                        RankedCandidate::with_payment_successor(
+                            gated_candidate.candidate.clone(),
+                            score,
+                            successor,
+                        )
+                    },
+                )
+        })
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.candidate.action.cmp_stable(&right.candidate.action))
+    });
+    ranked.truncate(max_branching);
+    ranked
+}
+
 /// Core scoring for a single (possibly determinized) state. Byte-identical to
 /// the pre-feature `score_candidates_with_session` except it threads a shared
 /// `deadline_override` into `PlannerServices` — `None` reproduces the old
@@ -1970,6 +2020,12 @@ fn score_candidates_core(
     }
 
     let ctx = build_decision_context(state);
+    #[cfg(test)]
+    let policies = session
+        .policy_registry_override
+        .as_deref()
+        .unwrap_or_else(|| PolicyRegistry::shared());
+    #[cfg(not(test))]
     let policies = PolicyRegistry::shared();
     let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
 
@@ -1995,7 +2051,14 @@ fn score_candidates_core(
 
     let mut services =
         PlannerServices::with_deadline(ai_player, config, policies, context, deadline_override);
-    let candidates = services.validate_candidates(state, ctx.candidates.clone());
+    let prepared = prepare_payment_candidates(state, ctx.candidates.clone());
+    let candidates = services.validate_candidates(
+        state,
+        prepared
+            .iter()
+            .map(|candidate| candidate.candidate.clone())
+            .collect(),
+    );
     let gated = gate_candidates(
         state,
         &ctx,
@@ -2026,10 +2089,15 @@ fn score_candidates_core(
     // Deterministic early returns — these don't benefit from search/parallelism.
     // Pass the already-built context so the mulligan branch avoids a second
     // full deck analysis (DeckProfile + SynergyGraph for both players).
-    if let Some(action) =
-        deterministic_choice(state, ai_player, config, &actions, Some(&services.context))
-    {
-        return vec![(action, 1.0)];
+    if matches!(
+        engine::ai_support::classify_payment_continuation(state),
+        engine::ai_support::PaymentContinuationState::NotAffiliated
+    ) {
+        if let Some(action) =
+            deterministic_choice(state, ai_player, config, &actions, Some(&services.context))
+        {
+            return vec![(action, 1.0)];
+        }
     }
 
     // Score actions via search or heuristics
@@ -2070,29 +2138,8 @@ fn score_candidates_core(
         // O(n) linear scan of `gated` per scored candidate — O(n²) overall.
         // GameAction is not Hash, so we can't key a HashMap; carrying the
         // penalty with its candidate is both cheaper and more idiomatic.
-        let mut ranked: Vec<RankedCandidate> = gated
-            .iter()
-            .map(|g| {
-                let tactical = services.tactical_score(
-                    state,
-                    &ctx,
-                    &g.candidate,
-                    ai_player,
-                    SearchDepth::Root,
-                );
-                RankedCandidate {
-                    candidate: g.candidate.clone(),
-                    score: tactical + g.penalty,
-                }
-            })
-            .collect();
-        ranked.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
-        });
-        ranked.truncate(branching);
+        let ranked =
+            rank_root_payment_candidates(state, &ctx, &prepared, &gated, &services, branching);
 
         run_iterative_deepening(state, ranked, tactical_weight, config, &mut services)
     } else {
@@ -2178,7 +2225,11 @@ fn run_iterative_deepening(
                 completed = false;
                 break;
             }
-            let score = if let Some(sim) = apply_candidate(state, &r.candidate) {
+            let score = if let Some(sim) = r
+                .payment_successor
+                .clone()
+                .or_else(|| apply_candidate(state, &r.candidate))
+            {
                 let cont = planner.evaluate_after_action(&sim, services, &mut budget);
                 cont + (r.score * tactical_weight)
             } else {
@@ -2278,7 +2329,9 @@ fn rotate_pv_to_front(ranked: &mut Vec<RankedCandidate>, pv: &GameAction) {
 }
 
 /// Build AI context from the player's deck pool, or a neutral default if unavailable.
-fn build_ai_context_with_session(
+/// `pub(crate)` so `crate::test_support::context_with_plans` — the single shared
+/// builder for plan-carrying test contexts — can reach it.
+pub(crate) fn build_ai_context_with_session(
     state: &GameState,
     player: PlayerId,
     config: &AiConfig,
@@ -2482,7 +2535,7 @@ pub(crate) fn deterministic_choice(
     if let WaitingFor::ScryChoice { cards, .. } = &state.waiting_for {
         let mut scored: Vec<_> = cards
             .iter()
-            .map(|&id| (id, evaluate_card_value(state, id)))
+            .map(|&id| (id, intrinsic_value(state, id)))
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let top_cards: Vec<_> = scored.iter().map(|(id, _)| *id).collect();
@@ -2501,7 +2554,7 @@ pub(crate) fn deterministic_choice(
         }
         let mut scored: Vec<_> = selectable_cards
             .iter()
-            .map(|&id| (id, evaluate_card_value(state, id)))
+            .map(|&id| (id, intrinsic_value(state, id)))
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let kept: Vec<_> = if *up_to && scored.first().is_some_and(|(_, v)| *v < 0.1) {
@@ -2516,7 +2569,7 @@ pub(crate) fn deterministic_choice(
     if let WaitingFor::SurveilChoice { cards, .. } = &state.waiting_for {
         let mut scored: Vec<_> = cards
             .iter()
-            .map(|&id| (id, evaluate_card_value(state, id)))
+            .map(|&id| (id, intrinsic_value(state, id)))
             .collect();
         // CR 701.25a: the action is the ordered keep-on-top set; cards left out
         // are milled. Keep the higher-value half on top (best drawn first) and
@@ -2533,7 +2586,7 @@ pub(crate) fn deterministic_choice(
     {
         let mut scored: Vec<_> = cards
             .iter()
-            .map(|&id| (id, evaluate_card_value(state, id)))
+            .map(|&id| (id, intrinsic_value(state, id)))
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let top_cards: Vec<_> = scored
@@ -2547,7 +2600,7 @@ pub(crate) fn deterministic_choice(
     if let WaitingFor::RevealChoice { cards, .. } = &state.waiting_for {
         let mut scored: Vec<_> = cards
             .iter()
-            .map(|&id| (id, evaluate_card_value(state, id)))
+            .map(|&id| (id, intrinsic_value(state, id)))
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         if let Some((best, _)) = scored.first() {
@@ -2569,7 +2622,7 @@ pub(crate) fn deterministic_choice(
             && *count > 0
         {
             return Some(GameAction::SelectCards {
-                cards: pick_lowest_value_sacrifices(state, cards, *count),
+                cards: pick_lowest_value_sacrifices(state, cards, *count, &config.policy_penalties),
             });
         }
     }
@@ -2646,7 +2699,7 @@ pub(crate) fn deterministic_choice(
     {
         let mut scored: Vec<_> = cards
             .iter()
-            .map(|&id| (id, evaluate_card_value(state, id)))
+            .map(|&id| (id, intrinsic_value(state, id)))
             .collect();
         // The search optimizes for `ai_player`, so a choice made by any other
         // player is an opponent's (they pick the highest-value cards for
@@ -2783,12 +2836,61 @@ pub(crate) fn deterministic_choice(
         return Some(GameAction::DecideOptionalCost { pay });
     }
 
-    if let WaitingFor::DiscardToHandSize { cards, count, .. } = &state.waiting_for {
+    // CR 514.1 + CR 701.9a: cleanup discard. The give-up order is
+    // `card_value::cmp_keep`, not the raw scalar — a mana source the discarding
+    // player's own plan still needs must not be pitched ahead of a spell that
+    // merely scores lower.
+    //
+    // The authority key is the `WaitingFor`'s own `player` — the decision
+    // subject is the *discarding* player, not `ai_player` (they can diverge
+    // under CR 723 turn control). The plan lookup and the land count MUST use
+    // the same id or the tier compares one player's schedule against another's
+    // board.
+    //
+    // `context == None` (the shape `planner/mod.rs`'s quiescence loop passes on
+    // every rollout step) yields `plan == None`, every card `Ordinary`, and the
+    // tuple comparator degenerates to the scalar comparator — the fail-safe.
+    if let WaitingFor::DiscardToHandSize {
+        cards,
+        count,
+        player,
+    } = &state.waiting_for
+    {
+        let plan_state = context
+            .and_then(|c| c.session.plan.get(player))
+            .map(|plan| PlanState::realize(state, *player, plan));
         let mut scored: Vec<_> = cards
             .iter()
-            .map(|&id| (id, evaluate_card_value(state, id)))
+            .map(|&id| (id, keep_key(state, id, plan_state)))
             .collect();
-        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        // CR 723.5: while controlling another player, a player makes all the
+        // choices and decisions that player is told to make — this discard
+        // among them. The AI is then deciding FOR an opponent, so it minimizes
+        // *their* position rather than serving it: the comparator is reversed,
+        // which surrenders the mana sources their own plan still needs first,
+        // their best remaining spell next, and leaves their surplus lands in
+        // hand. Keying the tier on the discarding player (above) chooses WHOSE
+        // schedule is read; this chooses WHOSE interest is served, and both
+        // halves are needed — reading their schedule while serving their
+        // interest is strictly worse than the pre-change behaviour.
+        //
+        // The gate is the engine's own submitter authority rather than the
+        // coarser `*player != ai_player` the `ChooseFromZoneChoice` sibling
+        // uses. `deterministic_choice` is also driven from the rollout
+        // quiescence loop (`planner/mod.rs`), which passes the *acting* player
+        // as the optimizing seat precisely so each simulated player is modelled
+        // playing WELL for themselves; a bare seat comparison would flip to
+        // sabotage the moment a caller passed the real AI seat while simulating
+        // someone else's decision. Turn control is the only shape where the AI
+        // legitimately submits for a seat that is not its own.
+        let decide_against_the_discarder = *player != ai_player
+            && engine::game::turn_control::authorized_submitter_for_player(state, *player)
+                == ai_player;
+        if decide_against_the_discarder {
+            scored.sort_by(|a, b| cmp_keep(&b.1, &a.1));
+        } else {
+            scored.sort_by(|a, b| cmp_keep(&a.1, &b.1));
+        }
         let to_discard: Vec<_> = scored.iter().take(*count).map(|(id, _)| *id).collect();
         return Some(GameAction::SelectCards { cards: to_discard });
     }
@@ -2977,37 +3079,6 @@ fn prefer_land_drop(
     land_actions.next().is_none().then(|| only_land.clone())
 }
 
-/// Evaluate a card's value for scry/dig/surveil decisions.
-/// Higher values mean the card is more desirable to keep/draw.
-fn evaluate_card_value(state: &GameState, obj_id: engine::types::identifiers::ObjectId) -> f64 {
-    let obj = match state.objects.get(&obj_id) {
-        Some(o) => o,
-        None => return 0.0,
-    };
-
-    let mut value = 0.0;
-
-    // Creatures: value based on power + toughness
-    if obj.card_types.core_types.contains(&CoreType::Creature) {
-        let power = obj.power.unwrap_or(0) as f64;
-        let toughness = obj.toughness.unwrap_or(0) as f64;
-        value += power * 1.5 + toughness;
-    }
-
-    // Lands: moderate value (mana development)
-    if obj.card_types.core_types.contains(&CoreType::Land) {
-        value += 3.0;
-    }
-
-    // Instants/Sorceries: base value from mana cost (proxy for power)
-    if let engine::types::mana::ManaCost::Cost { shards, generic } = &obj.mana_cost {
-        let total_mana = shards.len() as f64 + *generic as f64;
-        value += total_mana * 0.5;
-    }
-
-    value
-}
-
 fn plan_aware_bottom_cards(
     state: &GameState,
     player: PlayerId,
@@ -3042,7 +3113,7 @@ fn plan_aware_bottom_cards(
     for id in hand.into_iter().filter(|id| Some(*id) != exclude) {
         let score = state.objects.get(&id).map_or(0.0, |obj| {
             if is_plan_payoff_name(features, &obj.name) {
-                25.0 + evaluate_card_value(state, id)
+                25.0 + intrinsic_value(state, id)
             } else if obj.card_types.core_types.contains(&CoreType::Land) {
                 if surplus_lands > 0 {
                     surplus_lands -= 1;
@@ -3051,7 +3122,7 @@ fn plan_aware_bottom_cards(
                     30.0
                 }
             } else {
-                evaluate_card_value(state, id)
+                intrinsic_value(state, id)
             }
         });
         scored.push((id, score));
@@ -3172,11 +3243,12 @@ pub fn softmax_select_pairs(
 mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::scenario::{GameScenario, P0};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification, Duration,
-        Effect, EffectKind, QuantityExpr, ResolvedAbility, StaticDefinition, TargetFilter,
-        TargetRef, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification,
+        Duration, Effect, EffectKind, ManaProduction, QuantityExpr, ResolvedAbility,
+        StaticDefinition, TargetFilter, TargetRef, TypedFilter,
     };
     use engine::types::ability::{ChoiceType, ChosenAttribute};
     use engine::types::card_type::CoreType;
@@ -3186,7 +3258,8 @@ mod tests {
         PromptSourceBinding, StackEntry, StackEntryKind,
     };
     use engine::types::identifiers::{CardId, ObjectId};
-    use engine::types::mana::{ManaType, ManaUnit};
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
     use rand::rngs::SmallRng;
@@ -3194,7 +3267,9 @@ mod tests {
 
     use crate::config::{create_config, AiDifficulty, Platform};
     use crate::policies::context::PolicyContext;
+    use crate::policies::{DecisionKind, PolicyReason, TacticalPolicy};
     use crate::session::SessionCache;
+    use crate::test_support::{context_with_plans, default_deck_plan, ramp_deck_plan};
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -3206,6 +3281,17 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    /// `fallback_action` under the default policy penalties. These tests assert
+    /// the *shape* of an escape action and do not vary penalties; the
+    /// land-aware sacrifice path threaded through `config` is covered
+    /// separately by `fallback_sacrifice_prefers_creature_over_land`.
+    fn fallback_action_default(state: &GameState) -> Option<GameAction> {
+        fallback_action(
+            state,
+            &create_config(AiDifficulty::VeryHard, Platform::Native),
+        )
     }
 
     fn resolution_choice_source(state: &GameState, object_id: ObjectId) -> NamedChoiceSource {
@@ -3232,7 +3318,7 @@ mod tests {
         };
 
         assert_eq!(
-            fallback_action(&state),
+            fallback_action_default(&state),
             Some(GameAction::DeclineShortcut),
             "the no-score fallback must select DeclineShortcut from engine legal actions"
         );
@@ -3361,7 +3447,7 @@ mod tests {
         };
 
         assert_eq!(
-            fallback_action(&state),
+            fallback_action_default(&state),
             Some(GameAction::ChooseMeldPair {
                 source_id: real_source,
                 partner_id: real_partner,
@@ -3827,12 +3913,14 @@ mod tests {
         };
 
         let mut ai_session = AiSession::empty();
+        // Derived, not hand-built: `[1,2,3,4,5,6,6,…]` was written out by hand
+        // here, and `derive_snapshot` produces exactly that for a default deck
+        // (pinned by `cycling_discipline::tests::
+        // derived_plans_match_the_schedules_they_replaced`) while also filling
+        // the mana and threat schedules a hand-built snapshot left at zero.
         ai_session.plan.insert(
             PlayerId(0),
-            PlanSnapshot {
-                expected_lands: [1, 2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
-                ..PlanSnapshot::default()
-            },
+            crate::plan::derive_snapshot(&crate::features::DeckFeatures::default()),
         );
         let session = Arc::new(ai_session);
         let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(3);
@@ -4425,28 +4513,6 @@ mod tests {
         );
     }
 
-    fn pending_cast_with_cost(
-        shards: Vec<engine::types::mana::ManaCostShard>,
-        generic: u32,
-    ) -> Box<engine::types::game_state::PendingCast> {
-        use engine::types::ability::{QuantityExpr, ResolvedAbility, TargetFilter};
-        use engine::types::game_state::PendingCast;
-        Box::new(PendingCast::new(
-            ObjectId(100),
-            CardId(100),
-            ResolvedAbility::new(
-                engine::types::ability::Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 0 },
-                    target: TargetFilter::Controller,
-                },
-                Vec::new(),
-                ObjectId(100),
-                PlayerId(0),
-            ),
-            engine::types::mana::ManaCost::Cost { shards, generic },
-        ))
-    }
-
     fn spell_target_selection_state(
         current_legal_targets: Vec<TargetRef>,
         stale_slot_targets: Vec<TargetRef>,
@@ -4504,21 +4570,13 @@ mod tests {
         state
     }
 
-    /// Minimal ChooseManaColor SingleColor state with the given option list and
-    /// pending cast. The `context` is a degenerate `ResolvingEffect` resume — the
-    /// pre-emption never inspects it, only `choice` and `state.pending_cast`.
-    /// Production Improvise/dual repro paths use `ManaChoiceContext::ManaAbility`,
-    /// but the context variant is irrelevant to the pre-emption (which reads only
-    /// `pending_cast` + `options`), so `ResolvingEffect` is used for fixture
-    /// simplicity.
-    fn choose_mana_color_state(
-        options: Vec<ManaType>,
-        pending: Option<Box<engine::types::game_state::PendingCast>>,
-    ) -> GameState {
+    /// Minimal non-payment mana-color prompt. The production payment path uses
+    /// a live mana-ability carrier below; this fixture is deliberately outside
+    /// that authority so it pins the established first-option fallback.
+    fn non_affiliated_choose_mana_color_state(options: Vec<ManaType>) -> GameState {
         use engine::types::ability::{QuantityExpr, ResolvedAbility, TargetFilter};
         use engine::types::game_state::{ManaChoiceContext, ManaChoicePrompt};
         let mut state = make_state();
-        state.pending_cast = pending;
         let resume = ResolvedAbility::new(
             engine::types::ability::Effect::Draw {
                 count: QuantityExpr::Fixed { value: 0 },
@@ -4537,39 +4595,8 @@ mod tests {
     }
 
     #[test]
-    fn choose_mana_color_preemption_selects_demanded_color() {
-        // Repro: {2}{U} spell, U/R source offered [Red, Blue]. The AI must
-        // produce Blue (demanded) — the old scorer picked the first-enumerated
-        // color (Red) and stranded the {U} pip into a ManaPayment dead-end.
-        // Drives the PUBLIC choose_action path, not fallback_action.
-        let state = choose_mana_color_state(
-            vec![ManaType::Red, ManaType::Blue],
-            Some(pending_cast_with_cost(
-                vec![engine::types::mana::ManaCostShard::Blue],
-                2,
-            )),
-        );
-        let config = create_config(AiDifficulty::Medium, Platform::Native);
-        let mut rng = SmallRng::seed_from_u64(1);
-        assert_eq!(
-            choose_action(&state, PlayerId(0), &config, &mut rng),
-            Some(GameAction::ChooseManaColor {
-                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Blue),
-                count: 1,
-            })
-        );
-    }
-
-    #[test]
-    fn choose_mana_color_preemption_selects_demanded_red() {
-        // {1}{R} spell, source offered [Blue, Red] → must produce Red.
-        let state = choose_mana_color_state(
-            vec![ManaType::Blue, ManaType::Red],
-            Some(pending_cast_with_cost(
-                vec![engine::types::mana::ManaCostShard::Red],
-                1,
-            )),
-        );
+    fn non_affiliated_choose_mana_color_uses_first_option() {
+        let state = non_affiliated_choose_mana_color_state(vec![ManaType::Red, ManaType::Blue]);
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         let mut rng = SmallRng::seed_from_u64(1);
         assert_eq!(
@@ -4581,41 +4608,383 @@ mod tests {
         );
     }
 
-    #[test]
-    fn choose_mana_color_preemption_demanded_color_first() {
-        // Demanded color is first here; paired with selects_demanded_color
-        // (demanded second) this proves demand-driven, not positional.
-        let state = choose_mana_color_state(
-            vec![ManaType::Blue, ManaType::Red],
-            Some(pending_cast_with_cost(
-                vec![engine::types::mana::ManaCostShard::Blue],
-                2,
-            )),
-        );
-        let config = create_config(AiDifficulty::Medium, Platform::Native);
-        let mut rng = SmallRng::seed_from_u64(1);
-        assert_eq!(
-            choose_action(&state, PlayerId(0), &config, &mut rng),
-            Some(GameAction::ChooseManaColor {
-                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Blue),
-                count: 1,
+    fn flexible_mana_payment_state() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Flexible AI Witness", true, "Draw a card.")
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
             })
-        );
+            .id();
+        let source = scenario.add_creature(P0, "Flexible AI Source", 1, 1).id();
+        let mut runner = scenario.build();
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyCombination {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    color_options: vec![ManaColor::Blue, ManaColor::Red],
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let source_object = runner.state_mut().objects.get_mut(&source).unwrap();
+        Arc::make_mut(&mut source_object.abilities).push(ability);
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Manual,
+            })
+            .expect("the test spell reaches manual payment");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .expect("the real mana ability opens its colour prompt");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ));
+        runner.state().clone()
+    }
+
+    fn mana_product(colors: &[ManaType]) -> GameAction {
+        GameAction::ChooseManaColor {
+            choice: engine::types::game_state::ManaChoice::Combination(colors.to_vec()),
+            count: 1,
+        }
+    }
+
+    /// Reach a live CR 702.126a Improvise payment carrier, then leave its last
+    /// mana open for the red-first flexible mana ability. `improvise_taps`
+    /// deliberately differs between the coloured and generic control so each
+    /// still needs exactly one colour allocation after its artifact payment.
+    fn red_first_improvise_payment_state(cost: ManaCost, improvise_taps: usize) -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = {
+            let mut builder = scenario.add_spell_to_hand_from_oracle(
+                P0,
+                "Improvise Payment Witness",
+                true,
+                "Draw a card.",
+            );
+            builder.with_mana_cost(cost);
+            builder.with_keyword(Keyword::Improvise);
+            builder.id()
+        };
+        let artifacts: Vec<_> = (0..improvise_taps)
+            .map(|index| {
+                let mut builder =
+                    scenario.add_creature(P0, &format!("Improvise Artifact {index}"), 0, 1);
+                builder.as_artifact();
+                builder.id()
+            })
+            .collect();
+        let source = scenario
+            .add_creature(P0, "Red First Mana Source", 1, 1)
+            .id();
+        let mut runner = scenario.build();
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyCombination {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::Red, ManaColor::Blue],
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(
+            &mut runner
+                .state_mut()
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .abilities,
+        )
+        .push(ability);
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Manual,
+            })
+            .expect("the Improvise spell reaches manual payment");
+        for artifact in artifacts {
+            runner
+                .act(GameAction::TapForConvoke {
+                    object_id: artifact,
+                    mana_type: ManaType::Colorless,
+                })
+                .expect("each artifact pays one generic mana through Improvise");
+        }
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .expect("the real mana ability opens its red-first colour prompt");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ));
+        runner.state().clone()
+    }
+
+    struct FlexibleManaPolicy(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl TacticalPolicy for FlexibleManaPolicy {
+        fn id(&self) -> PolicyId {
+            PolicyId::PaymentSelection
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            &[DecisionKind::ActivateAbility]
+        }
+
+        fn activation(
+            &self,
+            _: &crate::features::DeckFeatures,
+            _: &GameState,
+            _: PlayerId,
+        ) -> Option<f32> {
+            Some(1.0)
+        }
+
+        fn verdict(&self, context: &PolicyContext<'_>) -> PolicyVerdict {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match &context.candidate.action {
+                GameAction::ChooseManaColor {
+                    choice: engine::types::game_state::ManaChoice::Combination(colors),
+                    ..
+                } if colors == &[ManaType::Blue, ManaType::Red] => {
+                    PolicyVerdict::critical(15.0, PolicyReason::new("flexible_mana_test"))
+                }
+                GameAction::ChooseManaColor {
+                    choice: engine::types::game_state::ManaChoice::Combination(colors),
+                    ..
+                } if colors == &[ManaType::Red, ManaType::Blue] => {
+                    PolicyVerdict::strong(5.0, PolicyReason::new("flexible_mana_test"))
+                }
+                _ => PolicyVerdict::neutral(PolicyReason::new("flexible_mana_test")),
+            }
+        }
+    }
+
+    fn flexible_mana_session(
+        state: &GameState,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Arc<AiSession> {
+        let mut session = AiSession::from_game(state);
+        session.policy_registry_override =
+            Some(Arc::new(PolicyRegistry::for_tests(vec![Box::new(
+                FlexibleManaPolicy(calls),
+            )])));
+        Arc::new(session)
     }
 
     #[test]
-    fn choose_mana_color_preemption_no_pending_cast_uses_first() {
-        // No pending cast (e.g. a mana-ability color choice at priority) →
-        // first option, identical to the old behavior.
-        let state = choose_mana_color_state(vec![ManaType::Red, ManaType::Blue], None);
-        let config = create_config(AiDifficulty::Medium, Platform::Native);
-        let mut rng = SmallRng::seed_from_u64(1);
+    fn affiliated_flexible_mana_uses_witnessed_support_in_public_and_enabled_beam_paths() {
+        let state = flexible_mana_payment_state();
+        let all = engine::ai_support::legal_actions(&state);
+        let expected_all = vec![
+            mana_product(&[ManaType::Blue, ManaType::Blue]),
+            mana_product(&[ManaType::Blue, ManaType::Red]),
+            mana_product(&[ManaType::Red, ManaType::Blue]),
+            mana_product(&[ManaType::Red, ManaType::Red]),
+        ];
         assert_eq!(
-            choose_action(&state, PlayerId(0), &config, &mut rng),
-            Some(GameAction::ChooseManaColor {
-                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Red),
-                count: 1,
-            })
+            all, expected_all,
+            "live AnyCombination exposes all four products"
+        );
+        let witnessed: Vec<_> = all
+            .iter()
+            .filter_map(|action| engine::ai_support::witness_payment_continuation(&state, action))
+            .collect();
+        let expected = expected_all[..3].to_vec();
+        assert_eq!(
+            witnessed
+                .iter()
+                .map(|accepted| accepted.action.clone())
+                .collect::<Vec<_>>(),
+            expected,
+            "only the three products that can finish the announced root survive"
+        );
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let session = flexible_mana_session(&state, Arc::clone(&calls));
+        let mut disabled = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(43);
+        disabled.search.enabled = false;
+        disabled.temperature = 0.25;
+        let scored = score_candidates_with_session(&state, P0, &disabled, &session);
+        assert_eq!(
+            scored
+                .iter()
+                .map(|(action, _)| action.clone())
+                .collect::<Vec<_>>(),
+            expected,
+            "the public scorer retains every witnessed successor and rejects RR"
+        );
+        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) >= 3);
+        assert_eq!(score_of(&scored, &expected[0]), 0.45);
+        assert_eq!(score_of(&scored, &expected[1]), 15.45);
+        assert_eq!(score_of(&scored, &expected[2]), 5.45);
+
+        let max_score = scored
+            .iter()
+            .map(|(_, score)| *score)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let weights: Vec<_> = scored
+            .iter()
+            .map(|(_, score)| ((*score - max_score) / disabled.temperature).exp())
+            .collect();
+        let total: f64 = weights.iter().sum();
+        let mut threshold_rng = SmallRng::seed_from_u64(0);
+        let threshold = threshold_rng.random::<f64>() * total;
+        assert!(
+            weights[0] < threshold && threshold <= weights[0] + weights[1],
+            "the seeded full-support softmax threshold lies in BR's interval"
+        );
+        let mut direct_rng = SmallRng::seed_from_u64(0);
+        assert_eq!(
+            softmax_select_pairs(&scored, disabled.temperature, &mut direct_rng),
+            Some(expected[1].clone()),
+            "the full accepted support selects BR, not stable-first BB"
+        );
+        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut chooser_rng = SmallRng::seed_from_u64(0);
+        assert_eq!(
+            choose_action_with_session(&state, P0, &disabled, &mut chooser_rng, &session),
+            Some(expected[1].clone()),
+            "the disabled public chooser uses the ordinary full-support softmax path"
+        );
+        assert!(
+            calls.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the public chooser reaches tactical policy scoring after its counter reset"
+        );
+
+        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut enabled = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(43);
+        enabled.search.enabled = true;
+        enabled.search.max_branching = 3;
+        enabled.search.planner_mode = PlannerMode::BeamOnly;
+        enabled.search.determinization_samples = 0;
+        let context = build_ai_context_with_session(&state, P0, &enabled, Arc::clone(&session));
+        let policies = session.policy_registry_override.as_deref().unwrap();
+        let services = PlannerServices::with_deadline(P0, &enabled, policies, context, None);
+        let decision = build_decision_context(&state);
+        let prepared = prepare_payment_candidates(&state, decision.candidates.clone());
+        let validated = services.validate_candidates(
+            &state,
+            prepared
+                .iter()
+                .map(|candidate| candidate.candidate.clone())
+                .collect(),
+        );
+        let gated = gate_candidates(
+            &state,
+            &decision,
+            validated,
+            P0,
+            &enabled,
+            &services.context,
+        );
+        let beam = rank_root_payment_candidates(&state, &decision, &prepared, &gated, &services, 3);
+        assert_eq!(
+            beam.iter()
+                .map(|candidate| candidate.candidate.action.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                expected[1].clone(),
+                expected[2].clone(),
+                expected[0].clone()
+            ],
+            "the enabled root beam ranks BR > RB > BB and retains width three"
+        );
+        assert!(beam
+            .iter()
+            .all(|candidate| candidate.payment_successor.is_some()));
+
+        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        let enabled_scored = score_candidates_with_session(&state, P0, &enabled, &session);
+        assert_eq!(enabled_scored.len(), 3);
+        assert!(enabled_scored
+            .iter()
+            .all(|(action, _)| expected.contains(action)));
+        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+
+        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut rng = SmallRng::seed_from_u64(0);
+        let chosen = choose_action_with_session(&state, P0, &enabled, &mut rng, &session);
+        assert!(chosen
+            .as_ref()
+            .is_some_and(|action| expected.contains(action)));
+        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn improvise_mana_only_strands_mandatory_blue() {
+        let coloured = red_first_improvise_payment_state(
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            },
+            2,
+        );
+        let generic = red_first_improvise_payment_state(ManaCost::generic(2), 1);
+        let red = mana_product(&[ManaType::Red]);
+        let blue = mana_product(&[ManaType::Blue]);
+
+        let coloured_actions = engine::ai_support::legal_actions(&coloured);
+        assert!(
+            coloured_actions.contains(&red),
+            "the live Metallic-Rebuke-style carrier offers a red allocation"
+        );
+        assert!(
+            coloured_actions.contains(&blue),
+            "the live Metallic-Rebuke-style carrier offers a blue allocation"
+        );
+        assert!(matches!(
+            engine::ai_support::classify_payment_continuation(&coloured),
+            engine::ai_support::PaymentContinuationState::Affiliated(_)
+        ));
+        assert!(
+            engine::ai_support::witness_payment_continuation(&coloured, &red).is_none(),
+            "red cannot pay the mandatory blue shard after Improvise covers only generic mana"
+        );
+        assert!(
+            engine::ai_support::witness_payment_continuation(&coloured, &blue).is_some(),
+            "blue finalizes the coloured Improvise cast"
+        );
+        let generic_actions = engine::ai_support::legal_actions(&generic);
+        assert!(
+            generic_actions.contains(&red),
+            "the paired generic control offers a red allocation"
+        );
+        assert!(
+            generic_actions.contains(&blue),
+            "the paired generic control offers a blue allocation"
+        );
+        assert!(
+            engine::ai_support::witness_payment_continuation(&generic, &red).is_some(),
+            "red remains a valid final allocation when no mandatory blue shard exists"
         );
     }
 
@@ -5256,7 +5625,7 @@ mod tests {
             false,
         );
 
-        let action = fallback_action(&state).expect("fallback returns an action");
+        let action = fallback_action_default(&state).expect("fallback returns an action");
         assert_eq!(
             action,
             GameAction::ChooseTarget {
@@ -5271,7 +5640,7 @@ mod tests {
         let mut state =
             spell_target_selection_state(Vec::new(), vec![TargetRef::Player(PlayerId(1))], true);
 
-        let action = fallback_action(&state).expect("fallback returns an action");
+        let action = fallback_action_default(&state).expect("fallback returns an action");
         assert_eq!(action, GameAction::ChooseTarget { target: None });
         assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
     }
@@ -5281,7 +5650,7 @@ mod tests {
         let mut state =
             spell_target_selection_state(Vec::new(), vec![TargetRef::Player(PlayerId(1))], false);
 
-        let action = fallback_action(&state).expect("fallback returns an action");
+        let action = fallback_action_default(&state).expect("fallback returns an action");
         assert_eq!(action, GameAction::CancelCast);
         assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
     }
@@ -5545,7 +5914,7 @@ mod tests {
         let mut state = make_state();
         let controller = PlayerId(0);
         state.waiting_for = vote_choice_for_subject(&state, controller, controller);
-        let action = fallback_action(&state).expect("fallback returns an action");
+        let action = fallback_action_default(&state).expect("fallback returns an action");
         assert!(
             matches!(action, GameAction::ChooseOption { ref choice } if choice == "friend"),
             "AI labeling self must pick friend, got {action:?}"
@@ -5560,7 +5929,7 @@ mod tests {
         let controller = PlayerId(0);
         let opp = PlayerId(1);
         state.waiting_for = vote_choice_for_subject(&state, controller, opp);
-        let action = fallback_action(&state).expect("fallback returns an action");
+        let action = fallback_action_default(&state).expect("fallback returns an action");
         assert!(
             matches!(action, GameAction::ChooseOption { ref choice } if choice == "foe"),
             "AI labeling opponent must pick foe, got {action:?}"
@@ -5695,6 +6064,61 @@ mod tests {
         );
     }
 
+    /// Issue #6393: CardName NamedChoice keeps `options` empty and synthesizes
+    /// candidates from `all_card_names`. Fallback must ask `legal_actions`, not
+    /// `options.first()`, or restore softlocks after a successful rehydrate.
+    #[test]
+    fn named_choice_card_name_fallback_uses_legal_actions_when_options_empty() {
+        let mut state = make_state();
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state.all_card_names = vec!["Forest".to_string(), "Island".to_string()].into();
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+            source: None,
+            persist_player: None,
+        };
+
+        let action = fallback_action_default(&state).expect("fallback returns ChooseOption");
+        assert!(
+            matches!(action, GameAction::ChooseOption { ref choice } if choice == "Forest"),
+            "expected Forest from legal_actions, got {action:?}"
+        );
+    }
+
+    /// Issue #6393: when rehydrate never populated `all_card_names`, CardName
+    /// prompts have zero legal actions — fallback must return None rather than
+    /// inventing an option from the empty `options` list.
+    #[test]
+    fn named_choice_card_name_fallback_none_when_all_card_names_empty() {
+        let mut state = make_state();
+        state.all_card_names = Vec::new().into();
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+            source: None,
+            persist_player: None,
+        };
+
+        assert!(
+            engine::ai_support::legal_actions(&state).is_empty(),
+            "test premise: empty all_card_names must yield no legal ChooseOption"
+        );
+        assert_eq!(
+            fallback_action_default(&state),
+            None,
+            "empty legal set must not fabricate a NamedChoice option"
+        );
+    }
+
     #[test]
     fn copy_retarget_fallback_keeps_existing_targets_with_legal_action() {
         let mut state = make_state();
@@ -5712,7 +6136,7 @@ mod tests {
             paradigm_remaining_offers: None,
         };
 
-        let action = fallback_action(&state).expect("fallback returns an action");
+        let action = fallback_action_default(&state).expect("fallback returns an action");
         assert_eq!(action, GameAction::KeepAllCopyTargets);
         assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
@@ -5741,7 +6165,7 @@ mod tests {
             paradigm_remaining_offers: None,
         };
 
-        let action = fallback_action(&state).expect("fallback returns an action");
+        let action = fallback_action_default(&state).expect("fallback returns an action");
         assert_eq!(action, GameAction::ChooseTarget { target: None });
         assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
         assert!(matches!(
@@ -5770,7 +6194,7 @@ mod tests {
             paradigm_remaining_offers: None,
         };
 
-        let action = fallback_action(&state).expect("fallback returns an action");
+        let action = fallback_action_default(&state).expect("fallback returns an action");
         assert_eq!(
             action,
             GameAction::ChooseTarget {
@@ -5805,7 +6229,7 @@ mod tests {
             outcome_template: None,
             visibility: engine::types::ability::VoteVisibility::Open,
         };
-        let action = fallback_action(&state).expect("fallback returns an action");
+        let action = fallback_action_default(&state).expect("fallback returns an action");
         assert!(
             matches!(action, GameAction::ChooseOption { ref choice } if choice == "evidence"),
             "classic vote must pick first option, got {action:?}"
@@ -5913,7 +6337,7 @@ mod tests {
             scoped_players: Vec::new(),
         };
 
-        let action = fallback_action(&state).expect("fallback returns an action");
+        let action = fallback_action_default(&state).expect("fallback returns an action");
         let choices = match &action {
             GameAction::SelectCategoryPermanents { choices } => choices.clone(),
             other => panic!("expected SelectCategoryPermanents, got {other:?}"),
@@ -6058,7 +6482,7 @@ mod tests {
         id
     }
 
-    /// Create a creature (high `evaluate_card_value`) directly in `owner`'s hand.
+    /// Create a creature (high `intrinsic_value`) directly in `owner`'s hand.
     fn creature_in_hand(state: &mut GameState, owner: PlayerId) -> ObjectId {
         let id = create_object(
             state,
@@ -6274,7 +6698,7 @@ mod tests {
             pw_loyalty: None,
             pw_controller: None,
         };
-        fallback_action(&state).expect("AssignCombatDamage fallback must produce an action")
+        fallback_action_default(&state).expect("AssignCombatDamage fallback must produce an action")
     }
 
     /// CR 702.19b: single-blocker trample attacker — the AI fallback keeps lethal
@@ -6499,14 +6923,19 @@ mod tests {
 
     // ---- U2: PV threading + rung witnesses (drive `run_iterative_deepening`) ----
 
-    /// Rebuild the root beam exactly as `score_candidates_core` does (validate ->
-    /// gate -> tactical rank -> #4878 stable sort -> truncate) so tests can drive
-    /// `run_iterative_deepening` directly and inspect the witness state it leaves
-    /// on `services`. `&PlannerServices` — reads only (validate/tactical_score are
-    /// `&self`); the caller owns construction so it controls the deadline/TT.
+    /// Reach the production root beam seam so iterative-deepening tests observe
+    /// the same validation, payment-successor retention, rank, and width path
+    /// that public scoring uses.
     fn build_root_beam(state: &GameState, services: &PlannerServices<'_>) -> Vec<RankedCandidate> {
         let ctx = build_decision_context(state);
-        let candidates = services.validate_candidates(state, ctx.candidates.clone());
+        let prepared = prepare_payment_candidates(state, ctx.candidates.clone());
+        let candidates = services.validate_candidates(
+            state,
+            prepared
+                .iter()
+                .map(|candidate| candidate.candidate.clone())
+                .collect(),
+        );
         let gated = gate_candidates(
             state,
             &ctx,
@@ -6515,30 +6944,25 @@ mod tests {
             services.config,
             &services.context,
         );
-        let mut ranked: Vec<RankedCandidate> = gated
-            .iter()
-            .map(|g| {
-                let tactical = services.tactical_score(
+        let mut gated: Vec<_> = gated
+            .into_iter()
+            .filter(|candidate| {
+                priority_action_is_allowed_by_loop_guards(
                     state,
-                    &ctx,
-                    &g.candidate,
                     services.ai_player,
-                    SearchDepth::Root,
-                );
-                RankedCandidate {
-                    candidate: g.candidate.clone(),
-                    score: tactical + g.penalty,
-                }
+                    &candidate.candidate.action,
+                )
             })
             .collect();
-        ranked.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
-        });
-        ranked.truncate(services.config.search.max_branching as usize);
-        ranked
+        gated.sort_by(|left, right| left.candidate.action.cmp_stable(&right.candidate.action));
+        rank_root_payment_candidates(
+            state,
+            &ctx,
+            &prepared,
+            &gated,
+            services,
+            services.config.search.max_branching as usize,
+        )
     }
 
     fn score_of(scored: &[(GameAction, f64)], action: &GameAction) -> f64 {
@@ -6547,6 +6971,65 @@ mod tests {
             .find(|(a, _)| a == action)
             .map(|(_, s)| *s)
             .unwrap_or_else(|| panic!("action {action:?} absent from scored output"))
+    }
+
+    #[test]
+    fn retained_root_payment_successor_bypasses_inapplicable_fallback() {
+        let state = make_state();
+        let retained = apply_candidate(
+            &state,
+            &CandidateAction {
+                action: GameAction::PassPriority,
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
+            },
+        )
+        .expect("reach-guard: a concrete root successor exists");
+        let hostile = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id: ObjectId(99999),
+                ability_index: 0,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Mana),
+        };
+        assert!(
+            apply_candidate(&state, &hostile).is_none(),
+            "reach-guard: the fallback action is inapplicable at the root"
+        );
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(43);
+        config.search.planner_mode = PlannerMode::BeamOnly;
+        let policies = PolicyRegistry::shared();
+        let mut hostile_services = PlannerServices::new_default(PlayerId(0), &config, policies);
+        let hostile_result = run_iterative_deepening(
+            &state,
+            vec![RankedCandidate::with_payment_successor(
+                hostile,
+                0.0,
+                retained.clone(),
+            )],
+            0.1,
+            &config,
+            &mut hostile_services,
+        );
+        let mut control_services = PlannerServices::new_default(PlayerId(0), &config, policies);
+        let control_result = run_iterative_deepening(
+            &state,
+            vec![RankedCandidate::with_payment_successor(
+                CandidateAction {
+                    action: GameAction::PassPriority,
+                    metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
+                },
+                0.0,
+                retained,
+            )],
+            0.1,
+            &config,
+            &mut control_services,
+        );
+        assert_eq!(hostile_result[0].1, control_result[0].1);
+        assert!(
+            hostile_result[0].1 > -900.0,
+            "the retained successor prevents the failed-apply penalty"
+        );
     }
 
     /// Fixture with several cheap castable creatures + an opponent threat, so the
@@ -6765,14 +7248,8 @@ mod tests {
         // (no tactical term interfering with the demonstration).
         let (pass, cast) = pass_and_first_cast(&state);
         let ranked = vec![
-            RankedCandidate {
-                candidate: pass.clone(),
-                score: 0.0,
-            },
-            RankedCandidate {
-                candidate: cast.clone(),
-                score: 0.0,
-            },
+            RankedCandidate::new(pass.clone(), 0.0),
+            RankedCandidate::new(cast.clone(), 0.0),
         ];
         let a = ranked[0].candidate.action.clone();
 
@@ -6875,14 +7352,8 @@ mod tests {
         // from ranked[0] = pass — making a rung-0 rotate observable.
         let (pass, cast) = pass_and_first_cast(&state);
         let ranked = vec![
-            RankedCandidate {
-                candidate: pass.clone(),
-                score: 0.0,
-            },
-            RankedCandidate {
-                candidate: cast.clone(),
-                score: 0.0,
-            },
+            RankedCandidate::new(pass.clone(), 0.0),
+            RankedCandidate::new(cast.clone(), 0.0),
         ];
         let a = ranked[0].candidate.action.clone();
 
@@ -6943,5 +7414,1035 @@ mod tests {
             first, second,
             "K >= 2 ensemble output must be byte-identical across runs"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 514.1 cleanup discard — keep-tier fixtures.
+    //
+    // TEST FOOT-GUN: `deterministic_choice(.., None)` yields `plan == None`,
+    // every card `Ordinary`, and therefore `main` behaviour. A tiering test
+    // that forgets `Some(&ctx)` observes `main` VACUOUSLY and proves nothing.
+    // Exactly two tests below pass `None` on purpose — `discard_..._no_plan_entry`
+    // and `quiescence_context_none_keeps_main_discard_ordering` — and both
+    // assert an exact object id, so neither can pass by accident.
+    //
+    // The plan key is the DISCARDING player (the `WaitingFor`'s `player`), not
+    // `ai_player`. In most fixtures they coincide; in
+    // `discard_to_hand_size_keys_plan_and_lands_on_the_discarding_player` they
+    // do not, and that is the point of that fixture.
+    // ---------------------------------------------------------------------
+
+    /// A 4-player Commander state at turn 5 — the regime three of the four
+    /// user reports come from. `scripts/ai-gate.sh` is structurally two-player,
+    /// so it cannot reach this regime; these fixtures are the primary evidence.
+    fn commander_discard_state() -> GameState {
+        let mut state = GameState::new(engine::types::format::FormatConfig::commander(), 4, 0);
+        state.turn_number = 5;
+        state.phase = Phase::PreCombatMain;
+        state
+    }
+
+    /// A land on `player`'s battlefield — the subtrahend in `lands_behind`.
+    fn land_on_battlefield(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            player,
+            "Swamp".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        id
+    }
+
+    fn set_cost(state: &mut GameState, id: ObjectId, shards: Vec<ManaCostShard>, generic: u32) {
+        state.objects.get_mut(&id).unwrap().mana_cost =
+            engine::types::mana::ManaCost::Cost { shards, generic };
+    }
+
+    /// An untargeted activated `Effect::Mana` ability — the structural mark of
+    /// a mana source under CR 605.1a / `is_mana_ability`.
+    fn push_mana_ability(state: &mut GameState, id: ObjectId) {
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: engine::types::ability::ManaProduction::Fixed {
+                    colors: vec![engine::types::mana::ManaColor::Black],
+                    contribution: engine::types::ability::ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+        ability.cost = Some(engine::types::ability::AbilityCost::Tap);
+        let obj = state.objects.get_mut(&id).unwrap();
+        Arc::make_mut(&mut obj.abilities).push(ability);
+    }
+
+    /// MV-3 artifact with a mana ability (Commander's Sphere shape).
+    /// `intrinsic_value` = (0 shards + 3 generic) * 0.5 = **1.5**.
+    fn mana_rock_in_hand(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = named_vanilla_in_hand(state, owner, "Mana Rock");
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        set_cost(state, id, Vec::new(), 3);
+        push_mana_ability(state, id);
+        id
+    }
+
+    /// 5/5 for `{B}{5}`. `intrinsic_value` = 5*1.5 + 5 + (1+5)*0.5 = **15.5**.
+    fn fatty_in_hand(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = named_vanilla_in_hand(state, owner, "Fatty");
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+        }
+        set_cost(state, id, vec![ManaCostShard::Black], 5);
+        id
+    }
+
+    /// MV-1 noncreature spell. `intrinsic_value` = (0 + 1) * 0.5 = **0.5**.
+    fn junk_instant_in_hand(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = named_vanilla_in_hand(state, owner, "Junk");
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        set_cost(state, id, Vec::new(), 1);
+        id
+    }
+
+    fn discard_waiting_for(state: &GameState, player: PlayerId, count: usize) -> WaitingFor {
+        WaitingFor::DiscardToHandSize {
+            player,
+            count,
+            cards: state.players[player.0 as usize]
+                .hand
+                .iter()
+                .copied()
+                .collect(),
+        }
+    }
+
+    fn selected_card(action: Option<GameAction>) -> ObjectId {
+        match action {
+            Some(GameAction::SelectCards { cards }) => {
+                assert_eq!(
+                    cards.len(),
+                    1,
+                    "reach-guard: the discard arm must select exactly one card, \
+                     not an empty or multi selection"
+                );
+                cards[0]
+            }
+            other => panic!("expected SelectCards from the discard arm, got {other:?}"),
+        }
+    }
+
+    /// MAIN TEST. CR 514.1 + CR 701.9a: while the discarding player is behind
+    /// their own land schedule, cleanup discard surrenders a creature rather
+    /// than a mana rock or a land.
+    ///
+    /// FAILS ON BASE: the pre-change arm sorts on the raw scalar, whose minimum
+    /// is the MV-3 rock at 1.5 (vs. Swamp 3.0, 5/5 creature 15.5).
+    #[test]
+    fn discard_to_hand_size_keeps_mana_sources_while_behind_on_lands() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        land_on_battlefield(&mut state, ai);
+
+        let rock = mana_rock_in_hand(&mut state, ai);
+        let swamps = [land_in_hand(&mut state, ai), land_in_hand(&mut state, ai)];
+        let fatties: Vec<_> = (0..4).map(|_| fatty_in_hand(&mut state, ai)).collect();
+        state.waiting_for = discard_waiting_for(&state, ai, 1);
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        // Derived land target 6 against 1 land on board => lands_behind = +5.
+        let ctx = context_with_plans(&state, ai, &config, &[(ai, default_deck_plan())]);
+
+        let chosen = selected_card(deterministic_choice(&state, ai, &config, &[], Some(&ctx)));
+
+        assert_ne!(
+            chosen, rock,
+            "the mana rock must not be pitched while behind"
+        );
+        assert!(
+            !swamps.contains(&chosen),
+            "a land must not be pitched while behind"
+        );
+        assert!(
+            fatties.contains(&chosen),
+            "positive reach-guard: the discarded card must be one of the four creatures"
+        );
+    }
+
+    /// F1 — exactly on curve. `lands_behind == 0` puts every card in
+    /// `Ordinary`, so the tuple comparator degenerates to the scalar and the
+    /// selection is identical to `main`: the junk instant (0.5).
+    ///
+    /// Discriminates against a naive "protect lands whenever a plan exists"
+    /// design, which would tier the Swamp above the instant and pitch it.
+    #[test]
+    fn discard_to_hand_size_on_curve_matches_scalar_ordering() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        // Exactly the derived land target (6) — the `Ordinary` boundary.
+        for _ in 0..6 {
+            land_on_battlefield(&mut state, ai);
+        }
+
+        let swamp = land_in_hand(&mut state, ai);
+        let junk = junk_instant_in_hand(&mut state, ai);
+        let fatties: Vec<_> = (0..2).map(|_| fatty_in_hand(&mut state, ai)).collect();
+        state.waiting_for = discard_waiting_for(&state, ai, 1);
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let plan = default_deck_plan();
+        assert_eq!(
+            plan.land_target(),
+            6,
+            "fixture premise: 6 lands on board must be exactly on plan"
+        );
+        let ctx = context_with_plans(&state, ai, &config, &[(ai, plan)]);
+
+        let chosen = selected_card(deterministic_choice(&state, ai, &config, &[], Some(&ctx)));
+
+        assert_eq!(
+            chosen, junk,
+            "on curve, the lowest scalar (the junk instant) is discarded — \
+             identical to pre-change behaviour"
+        );
+        assert_ne!(chosen, swamp);
+        assert!(!fatties.contains(&chosen));
+    }
+
+    /// F2 — a live context whose session carries NO plan entry for the
+    /// discarding player (the shape `AiSession`'s `deck.is_empty()` early
+    /// return produces). `plan.get()` returns `None`, every card is `Ordinary`,
+    /// and `main` ordering is reproduced.
+    #[test]
+    fn discard_to_hand_size_without_plan_entry_matches_scalar_ordering() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        land_on_battlefield(&mut state, ai);
+
+        let swamp = land_in_hand(&mut state, ai);
+        let junk = junk_instant_in_hand(&mut state, ai);
+        for _ in 0..2 {
+            fatty_in_hand(&mut state, ai);
+        }
+        state.waiting_for = discard_waiting_for(&state, ai, 1);
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        // Context present, plan map EMPTY — the `session.plan.get()` None arm.
+        let ctx = context_with_plans(&state, ai, &config, &[]);
+
+        let chosen = selected_card(deterministic_choice(&state, ai, &config, &[], Some(&ctx)));
+
+        assert_eq!(
+            chosen, junk,
+            "with no plan authority every card is Ordinary, so the scalar minimum wins"
+        );
+        assert_ne!(chosen, swamp);
+    }
+
+    /// F2b — Pins the root/rollout asymmetry as DELIBERATE, not accidental.
+    /// `planner/mod.rs`'s quiescence loop calls `deterministic_choice` with
+    /// `context: None` on every rollout step, so the keep-tier is inert there and
+    /// the rollout still models `main`'s "pitch the mana rock" behaviour. Threading
+    /// an `AiContext` into quiescence is a declared follow-up — building a
+    /// `DeckProfile` + `SynergyGraph` per quiescence step is the expense the
+    /// root-only design deliberately refuses. If you make quiescence
+    /// plan-aware, THIS TEST MUST CHANGE, and that change should be deliberate.
+    ///
+    /// The hand, board, turn and `waiting_for` are the main test's exactly; only
+    /// the `context` argument differs.
+    #[test]
+    fn quiescence_context_none_keeps_main_discard_ordering() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        land_on_battlefield(&mut state, ai);
+
+        let rock = mana_rock_in_hand(&mut state, ai);
+        for _ in 0..2 {
+            land_in_hand(&mut state, ai);
+        }
+        for _ in 0..4 {
+            fatty_in_hand(&mut state, ai);
+        }
+        state.waiting_for = discard_waiting_for(&state, ai, 1);
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let chosen = selected_card(deterministic_choice(&state, ai, &config, &[], None));
+
+        assert_eq!(
+            chosen, rock,
+            "with no context the tier is inert and the rollout reproduces main's \
+             scalar minimum — the mana rock"
+        );
+    }
+
+    /// F3 — flooded (`lands_behind < 0`). The SAME Swamp that the main test
+    /// protects is surrendered here, proving the valuation is contextual and
+    /// not equivalent to bumping the land constant.
+    ///
+    /// FAILS ON BASE: `main`'s minimum is the junk instant (0.5).
+    #[test]
+    fn discard_to_hand_size_pitches_surplus_land_while_flooded() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        for _ in 0..10 {
+            land_on_battlefield(&mut state, ai);
+        }
+
+        let swamps = [land_in_hand(&mut state, ai), land_in_hand(&mut state, ai)];
+        let junk = junk_instant_in_hand(&mut state, ai);
+        for _ in 0..2 {
+            fatty_in_hand(&mut state, ai);
+        }
+        state.waiting_for = discard_waiting_for(&state, ai, 1);
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        // Derived land target 6 against 10 lands => lands_behind = -4.
+        let ctx = context_with_plans(&state, ai, &config, &[(ai, default_deck_plan())]);
+
+        let chosen = selected_card(deterministic_choice(&state, ai, &config, &[], Some(&ctx)));
+
+        assert!(
+            swamps.contains(&chosen),
+            "while flooded a surplus land is Surplus-tiered and pitched ahead of \
+             the junk instant"
+        );
+        assert_ne!(chosen, junk);
+    }
+
+    /// A mana rock on `player`'s battlefield — an artifact carrying a
+    /// renewable `{T}: Add {B}` ability, so `zone_eval::is_intrinsic_mana_source`
+    /// counts it toward `mana_behind` while `plan::controlled_lands` ignores it.
+    fn rock_on_battlefield(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let id = artifact_on_battlefield(state, player, 3);
+        push_mana_ability(state, id);
+        id
+    }
+
+    /// F13 — the two development axes, at the production discard seam. THE
+    /// reported 4-player-Commander failure, end to end.
+    ///
+    /// Board: 2 lands + 4 mana rocks. The land schedule reads **+4 behind**
+    /// (rocks are not lands, CR 305.1); the mana schedule reads **0 — exactly on
+    /// plan** (6 sources against a mature target of 6). So a spare rock in hand
+    /// is `Ordinary` and, at 1.5, the cheapest card to surrender; a Swamp in
+    /// hand is still `NeededManaSource` and must survive.
+    ///
+    /// FAILS ON THE SINGLE-AXIS RULE: reading `lands_behind` for both roles
+    /// promotes the spare rock to `NeededManaSource` off a deficit that playing
+    /// the rock could never close, and the arm surrenders a 15.5 fatty instead.
+    #[test]
+    fn discard_to_hand_size_does_not_promote_a_rock_on_a_land_only_deficit() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        for _ in 0..2 {
+            land_on_battlefield(&mut state, ai);
+        }
+        for _ in 0..4 {
+            rock_on_battlefield(&mut state, ai);
+        }
+
+        let spare_rock = mana_rock_in_hand(&mut state, ai);
+        let swamp = land_in_hand(&mut state, ai);
+        let fatties: Vec<_> = (0..2).map(|_| fatty_in_hand(&mut state, ai)).collect();
+        state.waiting_for = discard_waiting_for(&state, ai, 1);
+
+        let plan = default_deck_plan();
+        let realized = crate::plan::PlanState::realize(&state, ai, &plan);
+        assert_eq!(
+            (realized.lands_behind, realized.mana_behind),
+            (4, 0),
+            "fixture premise: the two axes must DISAGREE here, or this test \
+             cannot discriminate between them"
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let ctx = context_with_plans(&state, ai, &config, &[(ai, plan)]);
+
+        let chosen = selected_card(deterministic_choice(&state, ai, &config, &[], Some(&ctx)));
+
+        assert_eq!(
+            chosen, spare_rock,
+            "with the manabase complete the spare rock is Ordinary and is the \
+             cheapest card in hand; only a LAND-keyed deficit would protect it"
+        );
+        assert_ne!(
+            chosen, swamp,
+            "positive reach-guard: the land axis is still live — the Swamp is \
+             NeededManaSource off lands_behind = +4, so this is not a \
+             plan-blind pass"
+        );
+        assert!(!fatties.contains(&chosen));
+    }
+
+    /// The sibling direction: while the manabase itself is short, an accelerant
+    /// IS promoted. Without this, F13 alone would be satisfied by deleting the
+    /// accelerant branch entirely.
+    #[test]
+    fn discard_to_hand_size_keeps_an_accelerant_while_behind_on_mana() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        for _ in 0..2 {
+            land_on_battlefield(&mut state, ai);
+        }
+
+        let spare_rock = mana_rock_in_hand(&mut state, ai);
+        let fatties: Vec<_> = (0..3).map(|_| fatty_in_hand(&mut state, ai)).collect();
+        state.waiting_for = discard_waiting_for(&state, ai, 1);
+
+        let plan = default_deck_plan();
+        let realized = crate::plan::PlanState::realize(&state, ai, &plan);
+        assert_eq!(
+            (realized.lands_behind, realized.mana_behind),
+            (4, 4),
+            "fixture premise: both axes are short here"
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let ctx = context_with_plans(&state, ai, &config, &[(ai, plan)]);
+
+        let chosen = selected_card(deterministic_choice(&state, ai, &config, &[], Some(&ctx)));
+
+        assert_ne!(
+            chosen, spare_rock,
+            "behind on the MANA schedule, the rock is NeededManaSource"
+        );
+        assert!(
+            fatties.contains(&chosen),
+            "positive reach-guard: a creature is surrendered instead"
+        );
+    }
+
+    /// A 4-player Commander cleanup step in which `controller` controls
+    /// `controlled` under CR 723.1 (the Mindslaver shape), and `controlled` is
+    /// the active player discarding down to hand size.
+    ///
+    /// REACHABILITY: this is the ONLY production shape in which the AI is asked
+    /// to submit a `DiscardToHandSize` for a seat that is not its own. At the
+    /// root the engine only prompts the authorized submitter, and the rollout
+    /// quiescence loop (`planner/mod.rs`) passes the *acting* player as the
+    /// optimizing seat, so `waiting_for.player != ai_player` there never
+    /// happens either. A fixture without the control latch would be testing a
+    /// state the engine cannot produce.
+    ///
+    /// Returns `(state, swamp, fatty)` — the controlled player's whole hand.
+    fn mindslaver_discard_state(
+        controller: PlayerId,
+        controlled: PlayerId,
+        controller_lands: usize,
+        controlled_lands: usize,
+    ) -> (GameState, ObjectId, ObjectId) {
+        let mut state = commander_discard_state();
+        // CR 514.1: the cleanup discard belongs to the active player, and
+        // CR 723.1 control applies for the whole of that player's turn.
+        state.active_player = controlled;
+        state.turn_decision_controller = Some(controller);
+
+        for _ in 0..controller_lands {
+            land_on_battlefield(&mut state, controller);
+        }
+        for _ in 0..controlled_lands {
+            land_on_battlefield(&mut state, controlled);
+        }
+
+        let swamp = land_in_hand(&mut state, controlled);
+        let fatty = fatty_in_hand(&mut state, controlled);
+        state.waiting_for = discard_waiting_for(&state, controlled, 1);
+
+        assert_eq!(
+            engine::game::turn_control::authorized_submitter_for_player(&state, controlled),
+            controller,
+            "fixture premise: the controller must be the authorized submitter, \
+             or the arm never reaches the CR 723.5 branch"
+        );
+        (state, swamp, fatty)
+    }
+
+    /// F4 — the authority key AND the CR 723.5 direction, over the whole design
+    /// space, at a reachable turn-control state.
+    ///
+    /// `ai_player` is `PlayerId(0)` and controls `PlayerId(1)`, who is
+    /// discarding. Seat 0 runs a plain deck (land target 6) with 10 lands; seat
+    /// 1 runs a ramp deck (land target 7) with 6 lands. Those are the only two
+    /// reachable land targets, and the divergence makes all four key
+    /// combinations compute different tiers for the controlled player's Swamp:
+    ///
+    /// | plan key | lands key | lands_behind | Swamp tier | selected |
+    /// |---|---|---|---|---|
+    /// | waiting_for.player | waiting_for.player | 7-6 = +1 | NeededManaSource | **the Swamp** (correct) |
+    /// | ai_player | ai_player | 6-10 = -4 | Surplus | the fatty |
+    /// | waiting_for.player | ai_player | 7-10 = -3 | Surplus | the fatty |
+    /// | ai_player | waiting_for.player | 6-6 = 0 | Ordinary | the fatty |
+    ///
+    /// Under CR 723.5 the AI decides *against* the player it controls, so the
+    /// comparator is reversed and the top tier is surrendered first — which is
+    /// why row 1 pitches the mana source seat 1 still needs. That also makes
+    /// this the discriminating test for the direction itself: the protective
+    /// (unreversed) comparator selects the fatty in row 1 too.
+    ///
+    /// DO NOT "simplify" the two decks to a common plan — rows 1 and 4 would
+    /// then compute the same tier and a wrong plan key would pass.
+    #[test]
+    fn discard_to_hand_size_keys_plan_and_lands_on_the_discarding_player() {
+        let ai = PlayerId(0);
+        let discarder = PlayerId(1);
+        let (state, swamp, fatty) = mindslaver_discard_state(ai, discarder, 10, 6);
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let ctx = context_with_plans(
+            &state,
+            ai,
+            &config,
+            &[(ai, default_deck_plan()), (discarder, ramp_deck_plan())],
+        );
+
+        let chosen = selected_card(deterministic_choice(&state, ai, &config, &[], Some(&ctx)));
+
+        assert_eq!(
+            chosen, swamp,
+            "the tier must read the DISCARDING player's schedule against the \
+             DISCARDING player's board, and CR 723.5 must surrender the mana \
+             source that player still needs; every other key combination, and \
+             the unreversed comparator, select the fatty"
+        );
+        assert_ne!(chosen, fatty);
+    }
+
+    /// F4b — the CR 723.5 reversal is gated on turn control, not on a bare
+    /// seat comparison. Same board, same hand, same plans; the only change is
+    /// that seat 1 is deciding for itself (the shape the rollout quiescence
+    /// loop produces, which passes the acting player as the optimizing seat).
+    /// The protective order returns, so the needed Swamp is kept and the fatty
+    /// goes.
+    #[test]
+    fn discard_to_hand_size_protects_a_self_deciding_seat() {
+        let ai = PlayerId(0);
+        let discarder = PlayerId(1);
+        let (mut state, swamp, fatty) = mindslaver_discard_state(ai, discarder, 10, 6);
+        // Drop the control latch: seat 1 decides for itself again.
+        state.turn_decision_controller = None;
+        assert_eq!(
+            engine::game::turn_control::authorized_submitter_for_player(&state, discarder),
+            discarder,
+            "reach-guard: without the latch the discarder is its own submitter"
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let ctx = context_with_plans(
+            &state,
+            discarder,
+            &config,
+            &[(ai, default_deck_plan()), (discarder, ramp_deck_plan())],
+        );
+
+        let chosen = selected_card(deterministic_choice(
+            &state,
+            discarder,
+            &config,
+            &[],
+            Some(&ctx),
+        ));
+
+        assert_eq!(
+            chosen, fatty,
+            "deciding for itself, seat 1 keeps the mana source it is behind on"
+        );
+        assert_ne!(chosen, swamp);
+    }
+
+    /// F4c — the GATE SHAPE, isolated. F4b varies two inputs at once (it drops
+    /// the latch *and* moves `ai_player` from `0` to the discarder), so under a
+    /// bare `*player != ai_player` gate F4b would take the protective branch
+    /// too: it discriminates the CR 723.5 *reversal*, not the gate's *shape*.
+    /// Here only the latch is removed — `ai_player` stays `PlayerId(0)` while
+    /// `waiting_for.player` stays `PlayerId(1)` — so the two gates disagree and
+    /// the assertion pins the authority gate specifically.
+    ///
+    /// **THIS IS NOT PRODUCTION-PATH COVERAGE, and must not be counted as
+    /// such.** The state it asserts at is unreachable as a *game* state: with no
+    /// turn control, the engine prompts only seat 1 for seat 1's cleanup
+    /// discard, and the rollout quiescence loop passes the acting player as the
+    /// optimizing seat, so no production caller can present
+    /// `ai_player = 0, waiting_for.player = 1, no latch`. It is legitimate only
+    /// as a **caller-contract** test: it fixes what this arm does if some future
+    /// caller ever hands it that pair, and it is the only fixture that
+    /// distinguishes the two candidate gates. A successor reading this must not
+    /// promote it to evidence that production reaches this branch.
+    #[test]
+    fn discard_to_hand_size_gate_is_the_submitter_authority_not_a_seat_compare() {
+        let ai = PlayerId(0);
+        let discarder = PlayerId(1);
+        let (mut state, swamp, fatty) = mindslaver_discard_state(ai, discarder, 10, 6);
+        // Drop ONLY the latch. `ai_player` below is still seat 0.
+        state.turn_decision_controller = None;
+        assert_eq!(
+            engine::game::turn_control::authorized_submitter_for_player(&state, discarder),
+            discarder,
+            "reach-guard: without the latch seat 1 is its own submitter, so the \
+             authority gate is false while `*player != ai_player` is TRUE — \
+             this is exactly where the two candidate gates disagree"
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let ctx = context_with_plans(
+            &state,
+            ai,
+            &config,
+            &[(ai, default_deck_plan()), (discarder, ramp_deck_plan())],
+        );
+
+        let chosen = selected_card(deterministic_choice(&state, ai, &config, &[], Some(&ctx)));
+
+        assert_eq!(
+            chosen, fatty,
+            "with no control latch the arm must serve the discarder even though \
+             the seats differ; a bare `*player != ai_player` gate would reverse \
+             here and pitch the Swamp seat 1 still needs"
+        );
+        assert_ne!(chosen, swamp);
+    }
+
+    /// F5 — the accelerant axis, isolated from the land axis. A `{G}` 1/1 mana
+    /// dork and a `{G}` 1/1 vanilla both score exactly 3.0, so `main`'s pick is
+    /// decided by the stable sort retaining insertion order.
+    ///
+    /// CONSTRUCTION REQUIREMENT: the dork is inserted FIRST, so `main` selects
+    /// the dork and this test fails on base. Inserting the vanilla first would
+    /// make it pass on `main` by accident.
+    #[test]
+    fn discard_to_hand_size_prefers_a_vanilla_sibling_over_a_mana_dork() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        land_on_battlefield(&mut state, ai);
+
+        // Dork first — see the construction requirement above.
+        let dork = named_vanilla_in_hand(&mut state, ai, "Dork");
+        {
+            let obj = state.objects.get_mut(&dork).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        set_cost(&mut state, dork, vec![ManaCostShard::Green], 0);
+        push_mana_ability(&mut state, dork);
+
+        let vanilla = named_vanilla_in_hand(&mut state, ai, "Bear Cub");
+        {
+            let obj = state.objects.get_mut(&vanilla).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        set_cost(&mut state, vanilla, vec![ManaCostShard::Green], 0);
+
+        fatty_in_hand(&mut state, ai);
+        state.waiting_for = discard_waiting_for(&state, ai, 1);
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        // Derived land target 6 against 1 land on board => behind on lands.
+        let ctx = context_with_plans(&state, ai, &config, &[(ai, default_deck_plan())]);
+
+        assert_eq!(
+            crate::card_value::intrinsic_value(&state, dork),
+            crate::card_value::intrinsic_value(&state, vanilla),
+            "fixture premise: the two 1/1s must score identically, so only the \
+             tier can separate them"
+        );
+
+        let chosen = selected_card(deterministic_choice(&state, ai, &config, &[], Some(&ctx)));
+
+        assert_eq!(
+            chosen, vanilla,
+            "the mana dork is an Accelerant and outranks its statistically \
+             identical vanilla sibling while behind on lands"
+        );
+        assert_ne!(chosen, dork);
+    }
+
+    /// An MV-`mv` noncreature artifact on `owner`'s battlefield.
+    /// `sacrifice_cost` prices it at `min(mv, NONCREATURE_SACRIFICE_CAP)`.
+    fn artifact_on_battlefield(state: &mut GameState, owner: PlayerId, mv: u32) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Gilded Lotus".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        set_cost(state, id, Vec::new(), mv);
+        id
+    }
+
+    /// Park a mandatory 1-of-N `EffectZoneChoice { Sacrifice }` over `cards`.
+    ///
+    /// The order of `cards` is load-bearing: `pick_lowest_value_sacrifices`
+    /// sorts *stably*, so at equal scores the first entry is the one given up.
+    /// Every tie-boundary fixture below therefore lists the permanent it must
+    /// NOT lose first.
+    fn park_forced_sacrifice(state: &mut GameState, cards: Vec<ObjectId>) {
+        let ai = PlayerId(0);
+        let source_card = CardId(state.next_object_id);
+        let source = create_object(
+            state,
+            source_card,
+            ai,
+            "Edict Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: ai,
+            cards,
+            count: 1,
+            min_count: 1,
+            up_to: false,
+            source_id: source,
+            effect_kind: EffectKind::Sacrifice,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_profile: None,
+            enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: Vec::new(),
+            count_param: 0,
+            library_position: None,
+            is_cost_payment: false,
+            enters_modified_if: None,
+            duration: None,
+        };
+    }
+
+    /// Build a mandatory `EffectZoneChoice { Sacrifice }` over an artifact land
+    /// and a 1/1 MV-2 creature. Returns `(state, land, creature)`.
+    fn forced_sacrifice_state() -> (GameState, ObjectId, ObjectId) {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+
+        let land_card = CardId(state.next_object_id);
+        let land = create_object(
+            &mut state,
+            land_card,
+            ai,
+            "Artifact Land".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.mana_cost = engine::types::mana::ManaCost::NoCost;
+        }
+
+        let creature = add_creature(&mut state, ai, 1, 1);
+        set_cost(&mut state, creature, Vec::new(), 2);
+
+        park_forced_sacrifice(&mut state, vec![land, creature]);
+        (state, land, creature)
+    }
+
+    /// F11 — the tie boundary. `sacrifice_land_penalty` must be strictly above
+    /// `NONCREATURE_SACRIFICE_CAP`, or a land merely TIES every permanent of
+    /// mana value 4 or more and the stable sort gives up whichever is listed
+    /// first — which, for a `[Swamp, Gilded Lotus]` battlefield, is the Swamp.
+    ///
+    /// FAILS ON BASE (and on the first round of this unit): at 4.0 vs 4.0 the
+    /// land is selected.
+    #[test]
+    fn deterministic_sacrifice_prefers_an_expensive_artifact_over_a_land() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        // Land FIRST — see `park_forced_sacrifice`'s ordering note.
+        let land = land_on_battlefield(&mut state, ai);
+        let lotus = artifact_on_battlefield(&mut state, ai, 5);
+        park_forced_sacrifice(&mut state, vec![land, lotus]);
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let action = deterministic_choice(&state, ai, &config, &[], None);
+        assert_eq!(
+            action,
+            Some(GameAction::SelectCards { cards: vec![lotus] }),
+            "an MV-5 artifact caps at {} and must be given up before a land \
+             worth {} ({land:?})",
+            crate::policies::strategy_helpers::NONCREATURE_SACRIFICE_CAP,
+            config.policy_penalties.sacrifice_land_penalty
+        );
+    }
+
+    /// F11b — the ordering survives a TRAINED scalar that inverts the cap.
+    ///
+    /// `sacrifice_land_penalty` is in `config::ACTIVE_POLICY_PENALTY_FIELDS`,
+    /// so CMA-ES can legitimately train it below `NONCREATURE_SACRIFICE_CAP`
+    /// and the 4.5-vs-4.0 default gap says nothing about what a trained profile
+    /// ships. Here the penalty is driven to **1.0** — far under the cap, so the
+    /// bare scalar ranks the land cheapest and would sacrifice it — and the
+    /// land must still be given up last, because
+    /// `strategy_helpers::SacrificeTier` carries that axis structurally.
+    ///
+    /// FAILS ON A SCALAR-ONLY ORDERING, including this unit's own round-2 form:
+    /// ranking on `sacrifice_cost` alone selects the land at 1.0 over the
+    /// artifact at 4.0. Note the deliberate choice NOT to make an out-of-bounds
+    /// trained config a hard error at load: a bad-but-legal trained profile
+    /// should cost strength, not crash the AI.
+    #[test]
+    fn sacrifice_ordering_survives_a_trained_land_penalty_under_the_cap() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        // Land FIRST, so a stable sort on tied scores would also betray it.
+        let land = land_on_battlefield(&mut state, ai);
+        let lotus = artifact_on_battlefield(&mut state, ai, 5);
+        park_forced_sacrifice(&mut state, vec![land, lotus]);
+
+        let mut config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        config.policy_penalties.sacrifice_land_penalty = 1.0;
+        assert!(
+            config.policy_penalties.sacrifice_land_penalty
+                < crate::policies::strategy_helpers::NONCREATURE_SACRIFICE_CAP,
+            "fixture premise: the trained penalty must be UNDER the cap, or the \
+             scalar and the tier agree and this test cannot discriminate"
+        );
+
+        let action = deterministic_choice(&state, ai, &config, &[], None);
+        assert_eq!(
+            action,
+            Some(GameAction::SelectCards { cards: vec![lotus] }),
+            "the land ({land:?}) must be surrendered last on the tier even when \
+             the trained scalar prices it at 1.0 against the artifact's 4.0"
+        );
+    }
+
+    /// The tier is the ordering authority; this pins the *scalar* invariant the
+    /// shipped defaults still hold, so a config edit fails here with a
+    /// diagnosis rather than as a within-tier surprise.
+    ///
+    /// NOTE: `sacrifice_land_penalty` is a CMA-ES-tuned field
+    /// (`ACTIVE_POLICY_PENALTY_FIELDS`), so a *trained* config can still land
+    /// below the cap. That no longer inverts the land-vs-nonland order — see
+    /// `sacrifice_ordering_survives_a_trained_land_penalty_under_the_cap` — it
+    /// only changes weights *within* a tier. Deliberately NOT enforced at
+    /// config load: turning a bad-but-legal trained config into a hard error is
+    /// the wrong trade.
+    #[test]
+    fn land_penalty_strictly_exceeds_the_noncreature_cap() {
+        let cap = crate::policies::strategy_helpers::NONCREATURE_SACRIFICE_CAP;
+        assert!(
+            crate::config::PolicyPenalties::default().sacrifice_land_penalty > cap,
+            "a land that only ties an MV-4+ permanent is sacrificed by list order"
+        );
+        for difficulty in [
+            AiDifficulty::VeryEasy,
+            AiDifficulty::Easy,
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+            AiDifficulty::CEDH,
+        ] {
+            let config = create_config(difficulty, Platform::Native);
+            assert!(
+                config.policy_penalties.sacrifice_land_penalty > cap,
+                "{difficulty:?} config ties the land penalty with the cap"
+            );
+        }
+    }
+
+    /// F12 — the non-land ordering flip this unit introduced, measured rather
+    /// than assumed. Routing `pick_lowest_value_sacrifices` through
+    /// `sacrifice_cost` replaced the old card scalar (creature `p*1.5 + t +
+    /// mv*0.5` = 3.5, artifact `mv*0.5` = 2.0, so the ARTIFACT was given up)
+    /// with the battlefield authority (`evaluate_creature` = 2.5, artifact
+    /// capped at 4.0, so the CREATURE is given up). The new ordering is the
+    /// intended one — it matches `SacrificeValuePolicy` — and this test exists
+    /// so the flip cannot regress silently in either direction.
+    #[test]
+    fn deterministic_sacrifice_gives_up_a_small_creature_before_a_costly_artifact() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        let creature = add_creature(&mut state, ai, 1, 1);
+        set_cost(&mut state, creature, Vec::new(), 2);
+        let artifact = artifact_on_battlefield(&mut state, ai, 4);
+        park_forced_sacrifice(&mut state, vec![creature, artifact]);
+
+        let cap = crate::policies::strategy_helpers::NONCREATURE_SACRIFICE_CAP;
+        assert!(
+            crate::eval::evaluate_creature(&state, creature) < cap,
+            "fixture premise broken: `eval::evaluate_creature` now prices a 1/1 \
+             at or above the noncreature cap, so this fixture no longer \
+             discriminates"
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        assert_eq!(
+            deterministic_choice(&state, ai, &config, &[], None),
+            Some(GameAction::SelectCards {
+                cards: vec![creature]
+            }),
+            "the 1/1 is the cheapest permanent under the battlefield authority; \
+             the pre-unit card scalar gave up the artifact ({artifact:?})"
+        );
+    }
+
+    /// The mandatory-sacrifice entry point must use the commander-aware key,
+    /// rather than relying on the stable input order that used to break the
+    /// equal-priced pair. Both input orders are intentionally exercised.
+    #[test]
+    fn pick_lowest_value_sacrifices_spares_an_owned_commander_in_both_input_orders() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        let commander = add_creature(&mut state, ai, 4, 4);
+        let bear = add_creature(&mut state, ai, 4, 4);
+        {
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.is_commander = true;
+            obj.mana_cost = engine::types::mana::ManaCost::generic(4);
+            obj.base_mana_cost = engine::types::mana::ManaCost::generic(4);
+        }
+        state.commander_cast_count.insert(commander, 1);
+        let penalties = crate::config::PolicyPenalties::default();
+
+        assert_eq!(
+            sacrifice_key(&state, bear, &penalties).1,
+            10.0,
+            "reach guard: the ordinary 4/4 must retain its board price"
+        );
+        assert_eq!(
+            sacrifice_key(&state, commander, &penalties).1,
+            16.0,
+            "reach guard: the owned commander must carry its 6.0 repurchase premium"
+        );
+        assert_eq!(
+            pick_lowest_value_sacrifices(&state, &[bear, commander], 1, &penalties),
+            vec![bear],
+            "the bear is selected when it is already first"
+        );
+        assert_eq!(
+            pick_lowest_value_sacrifices(&state, &[commander, bear], 1, &penalties),
+            vec![bear],
+            "the bear is still selected when the commander arrives first"
+        );
+    }
+
+    /// F8 — CR 701.21a: `pick_lowest_value_sacrifices` now routes through
+    /// `strategy_helpers::sacrifice_cost`, the same battlefield authority
+    /// `SacrificeValuePolicy` uses, instead of the land-blind card scalar.
+    ///
+    /// FAILS ON BASE: under `evaluate_card_value` the artifact land scores 3.0
+    /// and the 1/1 MV-2 creature 3.5, so `main` sacrifices the land — the
+    /// reported bug in miniature.
+    #[test]
+    fn deterministic_sacrifice_prefers_creature_over_land() {
+        let (state, land, creature) = forced_sacrifice_state();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+
+        // Anti-vacuity guard: `evaluate_creature` lives in `eval.rs`. If it ever
+        // exceeds the land penalty, this fixture stops discriminating — fail
+        // loudly with a diagnosis instead of passing for the wrong reason.
+        assert!(
+            crate::eval::evaluate_creature(&state, creature)
+                < config.policy_penalties.sacrifice_land_penalty,
+            "fixture premise broken: creature valuation now exceeds the land penalty, \
+             so this test no longer discriminates"
+        );
+
+        let action = deterministic_choice(&state, PlayerId(0), &config, &[], None);
+        assert_eq!(
+            action,
+            Some(GameAction::SelectCards {
+                cards: vec![creature]
+            }),
+            "the forced sacrifice must give up the creature, not the land ({land:?})"
+        );
+    }
+
+    /// F8, fallback leg. `fallback_action` reaches the same
+    /// `pick_lowest_value_sacrifices` authority and must not be land-blind
+    /// there either — that is why `config` is threaded through the signature.
+    /// Substituting `PolicyPenalties::default()` at this seam would silently
+    /// diverge from a configured penalty and reintroduce the bypass.
+    #[test]
+    fn fallback_sacrifice_prefers_creature_over_land() {
+        let (state, _land, creature) = forced_sacrifice_state();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+
+        assert_eq!(
+            fallback_action(&state, &config),
+            Some(GameAction::SelectCards {
+                cards: vec![creature]
+            }),
+            "the fallback sacrifice escape must use the land-aware authority"
+        );
+    }
+
+    /// F9 — the `DigChoice` `up_to` path tests the raw scalar against a literal
+    /// `0.1`. That is the only numeric coupling across the twelve former
+    /// `evaluate_card_value` sites, so it guards the relocation: any change to
+    /// `intrinsic_value`'s arithmetic breaks it.
+    #[test]
+    fn dig_choice_up_to_still_takes_nothing_below_the_scalar_threshold() {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        // Vanilla cards: no creature type, no land, zero mana cost => 0.0 < 0.1.
+        let pool: Vec<_> = (0..3).map(|_| vanilla_in_hand(&mut state, ai)).collect();
+        for &id in &pool {
+            assert_eq!(
+                crate::card_value::intrinsic_value(&state, id),
+                0.0,
+                "fixture premise: the pool must score below the 0.1 threshold"
+            );
+        }
+        state.waiting_for = WaitingFor::DigChoice {
+            player: ai,
+            library_owner: ai,
+            cards: pool.clone(),
+            keep_count: 1,
+            up_to: true,
+            selectable_cards: pool,
+            kept_destination: None,
+            rest_destination: None,
+            source_id: None,
+            enter_tapped: false,
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        match deterministic_choice(&state, ai, &config, &[], None) {
+            Some(GameAction::SelectCards { cards }) => assert!(
+                cards.is_empty(),
+                "up_to Dig over a worthless pool must take nothing, got {cards:?}"
+            ),
+            other => panic!("expected SelectCards from the DigChoice arm, got {other:?}"),
+        }
     }
 }

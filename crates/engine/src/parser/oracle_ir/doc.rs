@@ -37,6 +37,60 @@ use crate::types::ability::{
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 
+/// Closed category for an unsupported ability residual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) enum UnsupportedAbilityCategory {
+    Unknown,
+    TriggerStructure,
+    StaticStructure,
+    ReplacementStructure,
+    EffectStructure,
+}
+
+impl UnsupportedAbilityCategory {
+    /// The stable coverage key emitted only when lowering to `Effect::Unimplemented`.
+    pub(crate) const fn legacy_name(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::TriggerStructure => "trigger_structure",
+            Self::StaticStructure => "static_structure",
+            Self::ReplacementStructure => "replacement_structure",
+            Self::EffectStructure => "effect_structure",
+        }
+    }
+}
+
+/// Lossless parser-internal representation of an unsupported ability.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct UnsupportedAbilityIr {
+    pub(crate) category: UnsupportedAbilityCategory,
+    pub(crate) fragment: String,
+    pub(crate) description: String,
+}
+
+impl UnsupportedAbilityIr {
+    pub(crate) fn unknown(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            category: UnsupportedAbilityCategory::Unknown,
+            fragment: text.clone(),
+            description: text,
+        }
+    }
+
+    pub(crate) fn new(
+        category: UnsupportedAbilityCategory,
+        fragment: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            category,
+            fragment: fragment.into(),
+            description: description.into(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Source identity
 // ---------------------------------------------------------------------------
@@ -349,17 +403,15 @@ pub(crate) enum OracleNodeIr {
     /// # Why a node and not a chain parse
     ///
     /// Two sites in the parser build this residual today and both do the same
-    /// thing: they take the line's text and produce an `Effect::Unimplemented`
-    /// whose `name` is the fixed sentinel `"unknown"` and whose `description` is
-    /// the residual text, with that same text on the definition's `description`.
-    /// **That exact `name`/`description` pair is load-bearing for coverage** —
+    /// thing: they retain the exact data used to produce an
+    /// `Effect::Unimplemented`, including the root definition description.
+    /// **That exact payload is load-bearing for coverage** —
     /// `game/coverage.rs` and the parser-gap tooling key on it. Re-deriving the
     /// residual by running the effect-chain parser over the line would produce a
     /// *different* `name` (whatever clause the chain failed inside), which is why
     /// this is a node carrying the raw text rather than a chain seeded with a
-    /// gap clause. Lowered by `oracle::lower_unsupported_node`, which delegates
-    /// to `oracle::make_unimplemented` — the same function both producers call —
-    /// so the residual has exactly one construction authority.
+    /// gap clause. Lowered by `oracle::lower_unsupported_node`, the sole
+    /// definition-construction authority for residuals.
     ///
     /// # Why it carries a CR 601.2b X floor
     ///
@@ -377,10 +429,7 @@ pub(crate) enum OracleNodeIr {
     /// an `AbilityDefinition` root field), so this is a preservation, not a
     /// widening.
     Unsupported {
-        /// The verbatim residual text. Becomes BOTH the `Effect::Unimplemented`
-        /// `description` and the definition's `description`, exactly as
-        /// `make_unimplemented` sets them.
-        text: String,
+        unsupported: UnsupportedAbilityIr,
         /// CR 601.2b: the floor on this residual's announced X ("X can't be 0").
         /// `0` means "no floor", mirroring the root field's own encoding.
         min_x_value: u32,
@@ -419,7 +468,10 @@ pub(crate) enum SpellPayloadIr<'a> {
     /// An already-lowered spell or activated-ability definition.
     Lowered(&'a AbilityDefinition),
     /// An honest unsupported spell residual that lowers to a definition.
-    Residual { text: &'a str, min_x_value: u32 },
+    Residual {
+        unsupported: &'a UnsupportedAbilityIr,
+        min_x_value: u32,
+    },
 }
 
 impl OracleNodeIr {
@@ -431,8 +483,11 @@ impl OracleNodeIr {
         match self {
             OracleNodeIr::Spell(ir) => Some(SpellPayloadIr::Ir(ir)),
             OracleNodeIr::PreLoweredSpell(def) => Some(SpellPayloadIr::Lowered(def)),
-            OracleNodeIr::Unsupported { text, min_x_value } => Some(SpellPayloadIr::Residual {
-                text,
+            OracleNodeIr::Unsupported {
+                unsupported,
+                min_x_value,
+            } => Some(SpellPayloadIr::Residual {
+                unsupported,
                 min_x_value: *min_x_value,
             }),
             OracleNodeIr::Trigger(_)
@@ -1049,6 +1104,13 @@ impl OracleDocBuilder {
     pub(crate) fn peek_last_spell_node(&self) -> Option<&OracleNodeIr> {
         let id = *self.spells_emitted.last()?;
         self.items.values().find(|i| i.id == id).map(|i| &i.node)
+    }
+
+    /// Peek the most-recently emitted spell item's stable document id. The same
+    /// emission-order stack backs the node peek, so a cross-item relation can
+    /// name the preceding spell without removing or re-emitting it.
+    pub(crate) fn peek_last_spell_id(&self) -> Option<OracleItemId> {
+        self.spells_emitted.last().copied()
     }
 
     /// Finish, producing items already in Oracle source order.

@@ -109,6 +109,13 @@ export function export_replay_log(): string;
 export function getFormatRegistry(): any;
 
 /**
+ * Engine-owned AI escape action for the current waiting state.
+ * Same deadlock-safe fallback the search path uses when scoring cannot choose.
+ * Returns null when no legal escape exists.
+ */
+export function get_ai_fallback_action(): any;
+
+/**
  * Get the AI's chosen action for the current game state.
  * `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard",
  * "CEDH" (case-insensitive; see `AiDifficulty::from_label`).
@@ -449,6 +456,7 @@ export function signatureSpellSelectionPolicy(request: any): any;
  * applying the action as another player.
  */
 export function submit_action(actor: number, action: any): any;
+export function submit_interaction_js(actor: number, submission: any): any;
 
 /**
  * Drain the last captured panic message (consuming it). Returns `null` when
@@ -476,6 +484,7 @@ export interface InitOutput {
     readonly export_replay_log: () => [number, number, number, number];
     readonly getFormatRegistry: () => any;
     readonly get_ai_action: (a: number, b: number, c: number) => [number, number, number];
+    readonly get_ai_fallback_action: () => [number, number, number];
     readonly get_ai_scored_candidates: (a: number, b: number, c: number, d: bigint) => [number, number, number];
     readonly get_card_face_data: (a: number, b: number) => any;
     readonly get_card_parse_details: (a: number, b: number) => any;
@@ -507,6 +516,7 @@ export interface InitOutput {
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];
     readonly submit_action: (a: number, b: any) => any;
+    readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly get_game_state: () => any;
     readonly get_legal_actions_js: () => any;

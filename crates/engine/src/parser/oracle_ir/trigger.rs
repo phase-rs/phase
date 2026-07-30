@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::ast::parsed_clause;
 use super::context::ParseContext;
-use super::effect_chain::EffectChainIr;
+use super::effect_chain::{DieResultBranchIr, EffectChainIr};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, ModalChoice,
     TargetFilter, TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
@@ -39,19 +39,14 @@ use crate::types::triggers::TriggerMode;
 /// mechanism that RETIRES that debt. Reusing it would make the burn-down metric
 /// count the fix as debt, so the number would rise as the debt fell.
 ///
-/// One variant today, deliberately. The IR-native sibling (`Parsed`, boxing a
-/// `TriggerIr`) is added by the tranche that lands its first producer, not
-/// before: adding it now would need a `#[allow(dead_code)]` and a CR 707.9a
-/// slot-stamp arm that cannot be written until lowering runs (the stamp targets
-/// `execute`, which does not exist pre-lowering), leaving a latent panic behind.
-/// Adding the variant later instead turns every match site into a compile
-/// error, which is the stronger forcing function.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum TriggerNodeIr {
+    /// Native parsed trigger decomposition, lowered only at the document seam.
+    Parsed(Box<TriggerIr>),
     /// Already-assembled definition from a recognizer that builds its own.
     /// `lower_trigger_node_ir` returns it untouched.
     Assembled {
-        definition: TriggerDefinition,
+        definition: Box<TriggerDefinition>,
         /// The recognizer's own input text — provenance only. Document lowering
         /// derives spans and fragments from the emitting line, never from here.
         source_text: String,
@@ -62,19 +57,8 @@ impl TriggerNodeIr {
     /// Wrap a recognizer-produced trigger definition for source-ordered emission.
     pub(crate) fn from_definition(source_text: &str, definition: TriggerDefinition) -> Self {
         Self::Assembled {
-            definition,
+            definition: Box::new(definition),
             source_text: source_text.to_string(),
-        }
-    }
-
-    /// The assembled definition, when one exists.
-    ///
-    /// Returns `Option` rather than `&TriggerDefinition` because a future
-    /// IR-native variant has no definition before lowering — CR 607.2d relation
-    /// discovery must see `None` there, not a fabricated definition.
-    pub(crate) fn definition(&self) -> Option<&TriggerDefinition> {
-        match self {
-            Self::Assembled { definition, .. } => Some(definition),
         }
     }
 }
@@ -98,6 +82,27 @@ pub(crate) struct TriggerIr {
     pub(crate) modifiers: TriggerModifiers,
     /// Original oracle text for description/provenance.
     pub(crate) source_text: String,
+    /// CR 706.3b result-table rows for the terminal die roll in this trigger.
+    /// They remain IR until trigger-body lowering attaches them before finalization.
+    pub(crate) die_results: Vec<DieResultBranchIr>,
+}
+
+impl TriggerIr {
+    /// Whether the body ends in the typed die-roll node that owns a result table.
+    pub(crate) fn has_terminal_roll_die(&self) -> bool {
+        let chain = match &self.body {
+            Some(TriggerBody::EffectChain(chain)) => chain,
+            Some(TriggerBody::ReflexivePayment(reflexive)) => &reflexive.effect_chain,
+            Some(TriggerBody::Modal(_))
+            | Some(TriggerBody::Vote(_))
+            | Some(TriggerBody::Pile(_))
+            | None => return false,
+        };
+        let Some(clause) = chain.clauses.last() else {
+            return false;
+        };
+        matches!(clause.parsed.effect, Effect::RollDie { .. })
+    }
 }
 
 /// The body of a trigger. Whole-body recognizers retain their typed payloads
@@ -203,8 +208,7 @@ impl VoteIr {
         )
     }
 
-    /// Compatibility lowering for non-trigger callers that have not yet moved
-    /// to trigger-body IR. Trigger parsing uses [`Self::effect_chain`] instead.
+    /// Compatibility lowering for callers outside the native spell router.
     pub(crate) fn into_ability(self, kind: AbilityKind) -> AbilityDefinition {
         let vote = AbilityDefinition::new(kind, self.vote);
         match self.pre_vote_choose {
@@ -268,12 +272,6 @@ impl PileIr {
             self.actor.clone(),
             self.in_trigger,
         )
-    }
-
-    /// Compatibility lowering for non-trigger callers that still consume a
-    /// lowered definition. Trigger parsing uses [`Self::effect_chain`] instead.
-    pub(crate) fn into_ability(self, kind: AbilityKind) -> AbilityDefinition {
-        AbilityDefinition::new(kind, self.effect)
     }
 }
 

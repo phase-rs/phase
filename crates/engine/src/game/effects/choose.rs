@@ -2,8 +2,8 @@ use rand::Rng;
 
 use crate::game::players;
 use crate::types::ability::{
-    ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectError, EffectKind, ResolvedAbility,
-    SeatDirection, TargetSelectionMode,
+    ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectError, EffectKind,
+    PlayerChoiceDistinctness, ResolvedAbility, SeatDirection, TargetSelectionMode,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -180,7 +180,7 @@ pub(crate) fn resolve_random_in_chain(
     // it to the sub via `apply_parent_chain_context`.
     if matches!(
         choice_type,
-        ChoiceType::Player | ChoiceType::Opponent { .. }
+        ChoiceType::Player { .. } | ChoiceType::Opponent { .. }
     ) {
         if let Ok(pid) = chosen.parse::<u8>() {
             let mut updated = ability.chosen_players.clone();
@@ -306,7 +306,7 @@ pub(crate) fn bind_named_choice(
                         | ChoiceType::BasicLandType
                         | ChoiceType::Color { .. }
                         | ChoiceType::Keyword { .. }
-                        | ChoiceType::Player
+                        | ChoiceType::Player { .. }
                         | ChoiceType::Opponent { .. }
                         // CR 613.1: A persisted `Label` gates `ChosenLabelIs`
                         // continuous statics — anchor-word modal permanents
@@ -505,12 +505,16 @@ const LAND_TYPES: &[&str] = &[
 /// casting or resolution. If an option would be illegal, it can't be chosen.
 ///
 /// `already_chosen` is the resolution-scoped list of players picked by earlier
-/// `Choose(Player)` instructions in this chain. CR 608.2c + the Gluntch card
-/// ruling ("three distinct players") require each successive "choose a player"
-/// to exclude players already chosen — `ChoiceType::Player` and
-/// `ChoiceType::Opponent` filter them out. When fewer eligible players remain
-/// than the card asks for, the options list is empty and the choice (and its
-/// dependent effect) does nothing — the standard empty-options path.
+/// `Choose(Player)` instructions in this chain. `ChoiceType::Player` and
+/// `ChoiceType::Opponent` only consult it when their `distinctness` is
+/// `DistinctFromPriorChoices` (CR 608.2c + the Gluntch ordinal-cued "choose a
+/// second/third player" ruling, "three distinct players"). The default
+/// `Independent` distinctness never filters on it — the "Offering" cycle
+/// ruling (Benevolent/Infernal/Intellectual/Sylvan Offering) confirms a
+/// repeated "Choose an opponent." may pick the same player again. When
+/// `DistinctFromPriorChoices` narrows the eligible set below what the card
+/// asks for, the options list is empty and the choice (and its dependent
+/// effect) does nothing — the standard empty-options path.
 fn compute_options(
     state: &GameState,
     choice_type: &ChoiceType,
@@ -612,15 +616,23 @@ fn compute_options(
         // (in a free-for-all game, every other player). `players::opponents`
         // already drops eliminated players (CR 104.3a — a player who loses
         // leaves the game and is no longer an opponent).
-        // CR 608.2c: Exclude players already chosen earlier in this resolution.
+        // CR 608.2c: `DistinctFromPriorChoices` excludes players already chosen
+        // earlier in this resolution; the default `Independent` does not (the
+        // "Offering" cycle may repeat the same opponent).
         // CR 102.3 + CR 608.2d: When a `restriction` is present ("with the most
         // life among your opponents"), narrow the eligible set to opponents
         // satisfying that `PlayerFilter` — the controller then picks ONE of the
         // qualifying opponents (CR 608.2d handles ties), keeping it a single
         // pick rather than fanning the effect out to every tied opponent.
-        ChoiceType::Opponent { restriction } => players::opponents(state, controller)
+        ChoiceType::Opponent {
+            restriction,
+            distinctness,
+        } => players::opponents(state, controller)
             .iter()
-            .filter(|id| !already_chosen.contains(id))
+            .filter(|id| {
+                *distinctness != PlayerChoiceDistinctness::DistinctFromPriorChoices
+                    || !already_chosen.contains(id)
+            })
             .filter(|id| {
                 restriction.as_ref().is_none_or(|filter| {
                     super::matches_player_scope(state, **id, filter, controller, source_id)
@@ -629,11 +641,16 @@ fn compute_options(
             .map(|id| id.0.to_string())
             .collect(),
         // CR 102.1: A player is one of the people in the game.
-        // CR 608.2c: Exclude players already chosen earlier in this resolution.
-        ChoiceType::Player => state
+        // CR 608.2c: `DistinctFromPriorChoices` (Gluntch's "choose a
+        // second/third player") excludes players already chosen earlier in
+        // this resolution; the default `Independent` does not.
+        ChoiceType::Player { distinctness } => state
             .seat_order
             .iter()
-            .filter(|id| !already_chosen.contains(id))
+            .filter(|id| {
+                *distinctness != PlayerChoiceDistinctness::DistinctFromPriorChoices
+                    || !already_chosen.contains(id)
+            })
             .map(|id| id.0.to_string())
             .collect(),
         ChoiceType::TwoColors => two_color_options(),
@@ -1266,7 +1283,7 @@ mod tests {
     #[test]
     fn choose_opponent_lists_opponents() {
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::Opponent { restriction: None });
+        let ability = make_choose_ability(ChoiceType::opponent());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         match &state.waiting_for {
@@ -1278,10 +1295,36 @@ mod tests {
         }
     }
 
+    /// Issue #6381 (Benevolent Offering): the "Offering" cycle ruling —
+    /// "You may choose the same opponent for each of the effects, or you may
+    /// choose different opponents" — means the default `Independent`
+    /// distinctness must NOT exclude an opponent chosen by an earlier
+    /// `Choose(Opponent)` in the same resolution. In a two-player game this is
+    /// the difference between a legal repeat pick (correct) and an impossible
+    /// no-op second choice (the reported bug).
+    #[test]
+    fn choose_opponent_independent_by_default_allows_repeat_choice() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = make_choose_ability(ChoiceType::opponent());
+        ability.chosen_players = vec![PlayerId(1)];
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(
+                    options,
+                    &["1"],
+                    "the previously-chosen opponent must remain a legal repeat pick"
+                );
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
     #[test]
     fn choose_player_lists_all_players() {
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::Player);
+        let ability = make_choose_ability(ChoiceType::player());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         match &state.waiting_for {
@@ -1295,11 +1338,32 @@ mod tests {
     }
 
     #[test]
-    fn choose_player_excludes_already_chosen_players() {
-        // CR 608.2c + Gluntch ruling: a successive "choose a player" omits
-        // players already chosen earlier in the same resolution.
+    fn choose_player_independent_by_default_allows_repeat_choice() {
+        // The default `Independent` distinctness (bare "choose a player") does
+        // NOT exclude a player already chosen earlier in this resolution —
+        // only the ordinal-cued `DistinctFromPriorChoices` (Gluntch) does.
         let mut state = GameState::new_two_player(42);
-        let mut ability = make_choose_ability(ChoiceType::Player);
+        let mut ability = make_choose_ability(ChoiceType::player());
+        ability.chosen_players = vec![PlayerId(0)];
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options.len(), 2);
+                assert!(options.contains(&"0".to_string()));
+                assert!(options.contains(&"1".to_string()));
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_player_distinct_from_prior_excludes_already_chosen_players() {
+        // CR 608.2c + Gluntch ruling ("choose a second/third player"): a
+        // successive `DistinctFromPriorChoices` pick omits players already
+        // chosen earlier in the same resolution.
+        let mut state = GameState::new_two_player(42);
+        let mut ability = make_choose_ability(ChoiceType::player_distinct_from_prior());
         ability.chosen_players = vec![PlayerId(0)];
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -1312,7 +1376,7 @@ mod tests {
     }
 
     #[test]
-    fn choose_player_with_all_players_chosen_resolves_as_no_op() {
+    fn choose_player_distinct_from_prior_with_all_players_chosen_resolves_as_no_op() {
         // CR 609.3 (issue #3040): when every eligible player is already chosen,
         // the engine-enumerated option set is empty — choosing is impossible, so
         // the choice does nothing and resolution continues. It must NOT raise a
@@ -1324,7 +1388,7 @@ mod tests {
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
-        let mut ability = make_choose_ability(ChoiceType::Player);
+        let mut ability = make_choose_ability(ChoiceType::player_distinct_from_prior());
         ability.chosen_players = vec![PlayerId(0), PlayerId(1)];
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -1425,7 +1489,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut ability = ResolvedAbility::new(
             Effect::Choose {
-                choice_type: ChoiceType::Player,
+                choice_type: ChoiceType::player(),
                 persist: false,
                 selection: TargetSelectionMode::Random,
             },
@@ -1454,7 +1518,7 @@ mod tests {
         // Building-block regression: a Chosen Choose is left to the interactive
         // `resolve` path (returns false; raises nothing here).
         let mut state = GameState::new_two_player(42);
-        let mut ability = make_choose_ability(ChoiceType::Player);
+        let mut ability = make_choose_ability(ChoiceType::player());
         let mut events = Vec::new();
         assert!(!resolve_random_in_chain(
             &mut state,

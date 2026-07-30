@@ -2040,8 +2040,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_22() {
-        assert_eq!(PROTOCOL_VERSION, 22);
+    fn protocol_version_is_23() {
+        assert_eq!(PROTOCOL_VERSION, 23);
     }
 
     #[test]

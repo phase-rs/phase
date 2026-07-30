@@ -5909,6 +5909,53 @@ pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
     }
 }
 
+/// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): Resolve a prevent-damage
+/// recipient phrase — the text immediately following "dealt to " or "dealt to
+/// and dealt by " — to a `TargetFilter`. Shared by [`parse_prevent_effect`]
+/// and `lower::try_parse_bidirectional_prevent` (Energy Arc's "dealt to and
+/// dealt by those creatures") so both prevent-recipient parsers agree.
+///
+/// Tries, in priority order:
+/// 1. A singular chosen-target anaphor ("that creature"/"it"/"the creature"),
+///    gated on `parent_target_available` (CR 608.2c, issue #1094).
+/// 2. Any other recipient phrase `parse_target` recognizes as a real filter —
+///    mass typed recipients ("creatures"/"players"/"creatures you control" —
+///    Blinding Fog, Defend the Hearth) AND "those permanents"/"those
+///    creatures", which `parse_target` already maps to a `TrackedSet`
+///    sentinel. The sentinel is resolved to a concrete, FROZEN set id at
+///    shield-creation time by `prevent_damage::resolve` — never left as a
+///    live filter — because the antecedent population must be locked in at
+///    resolution regardless of whether it came from a chosen-target clause
+///    (Energy Arc's untapped creatures) or a Continuous-mode static grant
+///    (Mutational Advantage's countered permanents: the resolution-time
+///    population is enumerated once by the widened `GenericEffect` arm in
+///    `game::effects::affected_objects_from_events`). Mutational Advantage's
+///    official ruling: "The set of permanents affected by Mutational
+///    Advantage is determined at the time Mutational Advantage resolves."
+///
+/// Returns `None` only when neither tier recognizes the phrase — the caller
+/// then falls back to the pre-existing `Any` default.
+pub(super) fn resolve_prevent_recipient(
+    recipient: TextPair<'_>,
+    parent_target_available: bool,
+) -> Option<TargetFilter> {
+    if let Some((filter, _)) =
+        parse_anaphoric_target_ref(recipient.original, parent_target_available)
+    {
+        return Some(filter);
+    }
+    // CR 608.2c: `ParentTarget`/`TriggeringSource`/`CostPaidObject`/`SelfRef`
+    // are inherited-reference filters naming a specific already-established
+    // object — exclusively tier 1's gated domain (`parent_target_available`).
+    // `parse_target` resolves these unconditionally, with no such gate, so
+    // this tier must reject them explicitly — otherwise a standalone recipient
+    // anaphor with `parent_target_available == false` would leak through here
+    // as an ungated `ParentTarget` binding to a nonexistent chosen target.
+    let (filter, _) = parse_target(recipient.original);
+    (!matches!(filter, TargetFilter::Any) && super::is_broadcast_population_filter(&filter))
+        .then_some(filter)
+}
+
 /// CR 615: Parse "prevent" damage effects into `Effect::PreventDamage`.
 ///
 /// Handles patterns like:
@@ -5999,16 +6046,16 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         || nom_primitives::scan_contains(rest, "to its controller")
     {
         TargetFilter::Controller
-    } else if let Some(anaphor_filter) = TextPair::new(text, &lower)
+    } else if let Some(filter) = TextPair::new(text, &lower)
         .strip_after("dealt to ")
-        .and_then(|tp| parse_anaphoric_target_ref(tp.original, parent_target_available))
-        .map(|(filter, _)| filter)
+        .and_then(|tp| resolve_prevent_recipient(tp, parent_target_available))
     {
-        // CR 608.2c: "prevent [amount] damage that would be dealt to that
-        // creature/it/the creature this turn" — a single-direction anaphor
-        // bound to a target an earlier clause selected. Strict superset of the
-        // prior `Any` fallback (only reached when `parent_target_available`).
-        anaphor_filter
+        // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): see
+        // `resolve_prevent_recipient` — a chosen-target anaphor or any other
+        // recipient phrase `parse_target` recognizes. Strict superset of the
+        // prior `Any` fallback: a recipient phrase that no tier recognizes
+        // still falls through to `Any` below.
+        filter
     } else {
         // Default: "that would be dealt" with no specific target → Any
         TargetFilter::Any
@@ -20579,6 +20626,80 @@ mod tests {
         assert!(
             tf.type_filters.is_empty(),
             "\"sources\" carries no type restriction"
+        );
+    }
+
+    /// CR 615.1 (issue #6682 regression guard): a prevent clause with NO
+    /// recipient phrase at all ("prevent all damage that would be dealt this
+    /// turn" — a plain Fog effect) must still resolve to `Any`. Only a
+    /// clause that carries an explicit "dealt to <recipient>" phrase should
+    /// ever be scoped away from the blanket shield — the fix must not turn a
+    /// genuinely unscoped prevent into a falsely-narrowed one.
+    #[test]
+    fn fog_with_no_recipient_phrase_stays_any() {
+        let effect =
+            parse_prevent_effect("Prevent all damage that would be dealt this turn.", false);
+        let Effect::PreventDamage { target, .. } = effect else {
+            panic!("expected PreventDamage");
+        };
+        assert_eq!(target, TargetFilter::Any);
+    }
+
+    /// CR 608.2c + CR 615.11 (issue #6682): `resolve_prevent_recipient` tries a
+    /// chosen-target anaphor, then any other `parse_target`-recognized
+    /// recipient, in that priority order, and returns `None` (not `Any`) only
+    /// when neither tier recognizes the phrase.
+    #[test]
+    fn resolve_prevent_recipient_tries_tiers_in_priority_order() {
+        // Tier 1: a singular chosen-target anaphor.
+        let text = "that creature this turn.";
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, &lower);
+        assert_eq!(
+            resolve_prevent_recipient(tp, true),
+            Some(TargetFilter::ParentTarget),
+            "a chosen-target anaphor must resolve to ParentTarget"
+        );
+
+        // Tier 2: a bare mass typed recipient with no antecedent at all.
+        let text = "creatures this turn.";
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, &lower);
+        let resolved =
+            resolve_prevent_recipient(tp, false).expect("bare \"creatures\" must resolve");
+        assert!(
+            matches!(&resolved, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)),
+            "bare \"creatures\" must resolve to a Typed(Creature) filter, got {resolved:?}"
+        );
+
+        // Tier 2 also recognizes "those permanents"/"those creatures" via
+        // `parse_target`'s own tracked-set dispatch — covers BOTH the
+        // target-derived antecedent class (Energy Arc's "those creatures"
+        // referring to earlier-chosen targets) and the clause-derived
+        // antecedent class (Mutational Advantage's "those permanents"
+        // referring to a preceding Continuous-mode grant's population),
+        // since the runtime freezes the tracked set from whichever producer
+        // clause precedes it (see `game::effects::affected_objects_from_events`).
+        let text = "those creatures this turn.";
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, &lower);
+        assert_eq!(
+            resolve_prevent_recipient(tp, false),
+            Some(TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0)
+            }),
+            "\"those creatures\" must bind via parse_target's tracked-set dispatch"
+        );
+
+        // Neither tier recognizes a genuinely unclassified recipient phrase —
+        // `resolve_prevent_recipient` returns `None`, not `Any`.
+        let text = "xyzzy this turn.";
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, &lower);
+        assert_eq!(
+            resolve_prevent_recipient(tp, false),
+            None,
+            "an unclassified recipient phrase must fall through, not silently guess"
         );
     }
 

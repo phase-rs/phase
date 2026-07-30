@@ -19,9 +19,14 @@ pub(super) fn cancel_pending_cast(
     player: PlayerId,
     pending_cast: &PendingCast,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
+) -> Result<WaitingFor, EngineError> {
+    if pending_cast.activation_cost_committed {
+        return Err(EngineError::ActionNotAllowed(
+            "Cannot cancel an activation after a cost is paid".to_string(),
+        ));
+    }
     casting::handle_cancel_cast(state, pending_cast, events);
-    WaitingFor::Priority { player }
+    Ok(WaitingFor::Priority { player })
 }
 
 pub(super) fn handle_target_selection_select_targets(

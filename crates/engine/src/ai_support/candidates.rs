@@ -1759,7 +1759,7 @@ pub fn candidate_actions_broad_with_probe(
             } else if modal.mode_costs.is_empty() {
                 actions
             } else {
-                // CR 702.172b: For Spree spells, filter out mode combinations the player
+                // CR 702.172a: For Spree spells, filter out mode combinations the player
                 // cannot afford. Each mode has an additional cost that sums with the base cost.
                 let local_probe = casting::PriorityCastProbe::new(state, *player);
                 actions

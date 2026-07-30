@@ -79,6 +79,16 @@ pub(crate) fn capture_library_search_card_view(
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
+    // Pending activation trigger collection retains source contexts and the
+    // uncommitted event journal solely for rules execution. The pending ability
+    // itself remains public, but this implementation carrier is never part of a
+    // viewer projection — including the activating player's projection.
+    if let Some(pending) = filtered.pending_cast.as_mut() {
+        pending.activation_trigger_collection = None;
+    }
+    if let Some(pending) = filtered.waiting_for.pending_cast_mut() {
+        pending.activation_trigger_collection = None;
+    }
     // Interaction capability authority is trusted persistence state. Viewer
     // projections expose only the actor-scoped opaque opportunity IDs produced
     // by `game::interaction`, never the session/serial/slot minting ledger.
@@ -1905,7 +1915,9 @@ mod tests {
             activation_residual: crate::types::game_state::ActivationResidual::None,
             activation_target_selection:
                 crate::types::game_state::ActivationTargetSelection::Pending,
+            activation_cost_committed: false,
             alt_cost_grant_source: None,
+            activation_trigger_collection: None,
         })
     }
 

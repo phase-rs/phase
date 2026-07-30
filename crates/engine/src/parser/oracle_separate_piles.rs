@@ -107,17 +107,6 @@ pub(crate) fn parse_separate_into_piles_ir(
     Some(PileIr::new(effect).with_source(text).with_context(ctx))
 }
 
-/// Compatibility entry point for non-trigger callers that still consume a
-/// lowered definition. Trigger parsing uses [`parse_separate_into_piles_ir`]
-/// so the root flows through ordinary trigger lowering.
-pub(crate) fn parse_separate_into_piles(
-    text: &str,
-    kind: AbilityKind,
-) -> Option<AbilityDefinition> {
-    parse_separate_into_piles_ir(text, kind, &ParseContext::default())
-        .map(|pile| pile.into_ability(kind))
-}
-
 /// CR 700.3 + CR 700.3a: Consume the "Each opponent separates the creatures
 /// they control into two piles." opener. Returns the remainder and the
 /// `VoterScope` for the partitioning subject. Currently supports the
@@ -515,9 +504,10 @@ mod tests {
         let text = "Each opponent separates the creatures they control into two piles. \
                     For each opponent, you choose one of their piles. \
                     Each opponent sacrifices the creatures in their chosen pile.";
-        let def = parse_separate_into_piles(text, AbilityKind::Spell)
+        let pile = parse_separate_into_piles_ir(text, AbilityKind::Spell, &ParseContext::default())
             .expect("Make an Example body parses");
-        match &*def.effect {
+        let chain = pile.effect_chain(AbilityKind::Spell);
+        match &chain.clauses[0].parsed.effect {
             Effect::SeparateIntoPiles {
                 partition_subject,
                 chooser,
@@ -545,9 +535,10 @@ mod tests {
         let text = "Reveal the top five cards of your library. \
                     An opponent separates those cards into two piles. \
                     Put one pile into your hand and the other into your graveyard.";
-        let def = parse_separate_into_piles(text, AbilityKind::Spell)
+        let pile = parse_separate_into_piles_ir(text, AbilityKind::Spell, &ParseContext::default())
             .expect("Fact or Fiction body parses");
-        match &*def.effect {
+        let chain = pile.effect_chain(AbilityKind::Spell);
+        match &chain.clauses[0].parsed.effect {
             Effect::SeparateIntoPiles {
                 partition_subject,
                 chooser,
@@ -623,7 +614,10 @@ mod tests {
     #[test]
     fn rejects_non_pile_body() {
         let text = "Destroy target creature. Draw a card.";
-        assert!(parse_separate_into_piles(text, AbilityKind::Spell).is_none());
+        assert!(
+            parse_separate_into_piles_ir(text, AbilityKind::Spell, &ParseContext::default())
+                .is_none()
+        );
     }
 
     /// CR 700.3 + CR 608.2c: Boneyard Parley mid-chain shape parses to

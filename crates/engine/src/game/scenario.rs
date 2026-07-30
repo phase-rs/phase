@@ -644,6 +644,43 @@ impl GameScenario {
         builder
     }
 
+    /// Add a nonland, noncreature permanent (e.g. an enchantment) to the
+    /// battlefield with abilities parsed from Oracle text. Mirrors
+    /// `add_land_from_oracle`; needed for permanents whose own triggered/
+    /// static abilities (not a cast) are under test — e.g. a Hideaway
+    /// enchantment's beginning-of-combat trigger.
+    pub fn add_enchantment_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = self.state.next_timestamp();
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        // CR 302.6 note: summoning sickness only gates creatures, but the
+        // builder models a pre-existing permanent (entered on a prior turn),
+        // matching `add_land_from_oracle`'s override.
+        obj.summoning_sick = false;
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
     /// Add a creature to hand with abilities parsed from Oracle text.
     pub fn add_creature_to_hand_from_oracle(
         &mut self,

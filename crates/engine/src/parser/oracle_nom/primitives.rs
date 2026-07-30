@@ -11,7 +11,7 @@ use nom::sequence::{delimited, preceded};
 use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
-use crate::types::ability::PtValue;
+use crate::types::ability::{AggregateFunction, ObjectProperty, PtValue};
 use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterType, KEYWORD_COUNTERS};
 use crate::types::keywords::KeywordKind;
@@ -1320,6 +1320,40 @@ pub fn split_once_on<'a>(
     let (rest, before) = take_until(separator).parse(input)?;
     let (after, _) = tag(separator).parse(rest)?;
     Ok(("", (before, after)))
+}
+
+/// Parse a superlative adjective into its corresponding `AggregateFunction`.
+///
+/// CR 208.1 (a creature's power and toughness) + CR 202.3 (an object's mana
+/// value): greatest/highest select the maximum of the population, least/lowest/
+/// smallest the minimum.
+///
+/// Relocated here from `oracle_nom/condition.rs` so the condition layer and the
+/// target/filter layer share ONE atom rather than maintaining parallel tables.
+pub(crate) fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
+    alt((
+        value(AggregateFunction::Max, tag("greatest")),
+        value(AggregateFunction::Max, tag("highest")),
+        value(AggregateFunction::Min, tag("lowest")),
+        value(AggregateFunction::Min, tag("least")),
+        // Parity with the target-suffix table this consolidation absorbs. ZERO
+        // corpus attestation (0 hits over 35,679 MTGJSON faces), so it adds no
+        // card coverage — it exists so the consolidation loses no grammar that
+        // either predecessor table recognized.
+        value(AggregateFunction::Min, tag("smallest")),
+    ))
+    .parse(input)
+}
+
+/// Property keyword → [`ObjectProperty`]. Shared by the condition layer's
+/// comparison grammar and the target/filter layer's superlative head.
+pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
+    alt((
+        value(ObjectProperty::Power, tag("power")),
+        value(ObjectProperty::Toughness, tag("toughness")),
+        value(ObjectProperty::ManaValue, tag("mana value")),
+    ))
+    .parse(input)
 }
 
 #[cfg(test)]

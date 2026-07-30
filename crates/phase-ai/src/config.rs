@@ -458,6 +458,36 @@ pub struct PolicyPenalties {
     /// while a land drop remains available. Consumed by `PaymentSelectionPolicy`.
     #[serde(default = "default_payment_selection_needed_land_penalty")]
     pub payment_selection_needed_land_penalty: f64,
+    /// Finite penalty per land in a *sacrifice* selection. Consumed by
+    /// `SacrificeValuePolicy`, the sibling of the two `*_needed_land_penalty`
+    /// knobs above at the battlefield give-up seam.
+    ///
+    /// **Why this exists rather than a tier.** `strategy_helpers::SacrificeTier`
+    /// gives sort-based consumers a lexicographic "lands last" order that no
+    /// scalar can encode. `SacrificeValuePolicy` is score-based, and its verdict
+    /// is clamped to `registry::CRITICAL_MAX`, so a dominating band is not
+    /// expressible there — see the policy's own docstring. This knob is the
+    /// bounded equivalent: it must strictly exceed
+    /// `strategy_helpers::NONCREATURE_SACRIFICE_CAP` in magnitude, which is
+    /// exactly enough to restore correct ordering against every *non-creature*
+    /// alternative even when `sacrifice_land_penalty` is trained to zero. It
+    /// deliberately does NOT dominate a large creature — giving up a 6/6 to save
+    /// a Swamp is bad play, and a tier would force it.
+    /// `sacrifice_needed_land_penalty_outranks_the_noncreature_cap` pins the
+    /// magnitude invariant.
+    ///
+    /// **The magnitude is load-bearing in a second, less obvious way, so read
+    /// this before re-tuning it.** The guard is an *additive* term in a score
+    /// that is summed over the whole selection and then banded, so raising it
+    /// pushes selections toward `registry::CRITICAL_MAX` — where the band
+    /// mapping, not this constant, decides whether the guard survives at all.
+    /// `SacrificeValuePolicy::verdict` rescales rather than clamps for exactly
+    /// that reason, and `policies::sacrifice_value::SACRIFICE_VALUE_RAW_CEILING`
+    /// is derived from *this* default. Change this and the ceiling must be
+    /// re-derived with it; `sacrifice_value_ceiling_pins_the_compression_it_costs`
+    /// reddens if it is not.
+    #[serde(default = "default_sacrifice_needed_land_penalty")]
+    pub sacrifice_needed_land_penalty: f64,
     /// Strong finite penalty for crewing outside an immediate attack or block
     /// window. Consumed by `CrewTimingPolicy`.
     #[serde(default = "default_crew_no_immediate_use_penalty")]
@@ -503,6 +533,22 @@ pub struct PolicyPenalties {
     /// draw" engine (preference band, per engine).
     #[serde(default = "default_draw_payoff_bonus")]
     pub draw_payoff_bonus: f64,
+    /// CR 702.122a: card-equivalent value of casting a Vehicle the board can
+    /// already crew, scaled by surplus crew power.
+    #[serde(default = "default_vehicle_deployment_bonus")]
+    pub vehicle_deployment_bonus: f64,
+    /// CR 601.2f: card-equivalent value of ONE generic mana saved by deploying a
+    /// cost reducer, multiplied by the capped saved-mana total.
+    #[serde(default = "default_cost_reduction_deploy_bonus")]
+    pub cost_reduction_deploy_bonus: f64,
+    /// CR 601.2f: nudge-band penalty for casting past an unplayed, cheaper cost
+    /// reducer — the discount should be deployed first.
+    #[serde(default = "default_cost_reduction_defer_penalty")]
+    pub cost_reduction_defer_penalty: f64,
+    /// CR 701.9: card-equivalent value of discarding into one active "whenever
+    /// you discard" engine (preference band, per engine).
+    #[serde(default = "default_discard_payoff_bonus")]
+    pub discard_payoff_bonus: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -567,6 +613,7 @@ impl Default for PolicyPenalties {
             cycling_patience_penalty: default_cycling_patience_penalty(),
             cycling_needed_land_penalty: default_cycling_needed_land_penalty(),
             payment_selection_needed_land_penalty: default_payment_selection_needed_land_penalty(),
+            sacrifice_needed_land_penalty: default_sacrifice_needed_land_penalty(),
             crew_no_immediate_use_penalty: default_crew_no_immediate_use_penalty(),
             combat_withdrawal_futile_penalty: default_combat_withdrawal_futile_penalty(),
             self_cost_counter_replacement_prevented_penalty:
@@ -577,6 +624,10 @@ impl Default for PolicyPenalties {
             devotion_pip_progress: default_devotion_pip_progress(),
             devotion_god_activation: default_devotion_god_activation(),
             draw_payoff_bonus: default_draw_payoff_bonus(),
+            vehicle_deployment_bonus: default_vehicle_deployment_bonus(),
+            cost_reduction_deploy_bonus: default_cost_reduction_deploy_bonus(),
+            cost_reduction_defer_penalty: default_cost_reduction_defer_penalty(),
+            discard_payoff_bonus: default_discard_payoff_bonus(),
         }
     }
 }
@@ -628,6 +679,13 @@ fn default_cycling_needed_land_penalty() -> f64 {
 fn default_payment_selection_needed_land_penalty() -> f64 {
     -2.0
 }
+/// Magnitude 4.5 is strictly above `NONCREATURE_SACRIFICE_CAP` (4.0), the
+/// ceiling on every non-creature sacrifice scalar, so a land outranks the most
+/// expensive artifact even when `sacrifice_land_penalty` is trained to zero.
+/// Mirrors `sacrifice_land_penalty`'s own default for legibility.
+fn default_sacrifice_needed_land_penalty() -> f64 {
+    -4.5
+}
 fn default_crew_no_immediate_use_penalty() -> f64 {
     5.0
 }
@@ -660,8 +718,32 @@ fn default_loop_shortcut_winning_declare_bonus() -> f64 {
 fn default_lethality_tapout_penalty() -> f64 {
     -2.5
 }
+/// CR 305.2 + CR 701.21a: a land is the costliest ordinary permanent to give
+/// up, because the land drop that replaces it is rate-limited to one per turn.
+///
+/// Strictly above `strategy_helpers::NONCREATURE_SACRIFICE_CAP` (4.0) — at the
+/// former value of 4.0 a land merely TIED any permanent of mana value 4 or
+/// more, and every consumer sorts stably, so the tie was broken by enumeration
+/// order and the land was sacrificed whenever it happened to be listed first.
+/// The land-vs-nonland ORDER is now carried by `strategy_helpers::SacrificeTier`
+/// rather than by this gap, which a CMA-ES run could close at any time; this
+/// number is a within-class weight.
+///
+/// **CR 305.4 — the rate-limit rationale above is FALSE on one of this
+/// penalty's call sites, and that is a known mispricing, not an oversight.**
+/// CR 305.4 (`docs/MagicCompRules.txt:1700`): "Effects may also allow players to
+/// 'put' lands onto the battlefield. This isn't the same as 'playing a land' and
+/// doesn't count as a land played during the current turn." A fetchland *puts*
+/// its replacement onto the battlefield, so sacrificing it consumes no land
+/// drop and the CR 305.2 rationale does not apply. `self_cost::sacrifice_leaf_cost`
+/// short-circuits on `TargetFilter::SelfRef` and charges this full penalty to a
+/// land that sacrifices itself, so the AI under-activates fetchland-shaped
+/// abilities. Discounting that path is an unmeasured behaviour change and is
+/// deferred, NOT blocked on missing infrastructure: `policies::fetch_land_patience`
+/// (which cites CR 305.4 for the same reason) already carries the predicates —
+/// see the note at `self_cost::sacrifice_leaf_cost`.
 fn default_sacrifice_land_penalty() -> f64 {
-    4.0
+    4.5
 }
 
 fn default_devotion_pip_progress() -> f64 {
@@ -672,6 +754,18 @@ fn default_devotion_god_activation() -> f64 {
     2.5
 }
 fn default_draw_payoff_bonus() -> f64 {
+    0.6
+}
+fn default_vehicle_deployment_bonus() -> f64 {
+    0.5
+}
+fn default_cost_reduction_deploy_bonus() -> f64 {
+    0.2
+}
+fn default_cost_reduction_defer_penalty() -> f64 {
+    -0.25
+}
+fn default_discard_payoff_bonus() -> f64 {
     0.6
 }
 fn default_sacrifice_token_cost() -> f64 {
@@ -823,6 +917,24 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
         "CR 121.1 per-engine draw-payoff weight — awaiting a paired-seed ai-gate calibration.",
     ),
     (
+        "vehicle_deployment_bonus",
+        "CR 702.122a crewable-Vehicle deployment weight — awaiting a paired-seed \
+         ai-gate calibration.",
+    ),
+    (
+        "cost_reduction_deploy_bonus",
+        "CR 601.2f per-saved-mana deployment weight — awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "cost_reduction_defer_penalty",
+        "CR 601.2f sequencing nudge for casting past a cheaper unplayed reducer — \
+         awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "discard_payoff_bonus",
+        "CR 701.9 per-engine discard-payoff weight — awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
         "poison_clock_pressure",
         "CR 104.3d win-detector weight — a critical-band term whose magnitude is \
          load-bearing for correctness, not taste. Promote to ACTIVE only with a \
@@ -924,6 +1036,10 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "payment_selection_needed_land_penalty",
         "PaymentSelectionPolicy retains the final playable hand land at the authoritative PayCost selection boundary; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "sacrifice_needed_land_penalty",
+        "SacrificeValuePolicy land guard at PayCost{Sacrifice}/WardSacrificeChoice; its magnitude is pinned strictly above NONCREATURE_SACRIFICE_CAP by invariant test, so CMA-ES must not be free to train it under that floor — the exposure this knob exists to close",
     ),
     (
         "crew_no_immediate_use_penalty",

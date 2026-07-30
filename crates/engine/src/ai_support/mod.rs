@@ -3,6 +3,7 @@ mod combat_withdrawal;
 mod context;
 mod copy;
 pub mod filter;
+mod payment_continuation;
 
 use std::collections::{HashMap, HashSet};
 
@@ -44,6 +45,11 @@ pub use copy::{
 };
 pub use filter::{
     BasicLegalityFilter, CandidateFilter, FilterCost, FilterPipeline, SimulationFilter,
+};
+pub use payment_continuation::{
+    classify_payment_continuation, witness_payment_continuation, AcceptedPaymentSuccessor,
+    PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationUnsupported,
+    PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
 };
 
 /// Filter `candidate_actions` down to the actions that are actually legal now.

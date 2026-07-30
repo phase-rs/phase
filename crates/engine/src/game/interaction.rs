@@ -1,8 +1,7 @@
 //! Hidden engine-authority interaction projection and submission boundary.
 //!
-//! No production transport calls this module yet. The existing human action UI
-//! remains the only exposed authority until the separately reviewed adapter
-//! cutover. Engine tests may use these entry points to prove the contract.
+//! Production adapters consume this projection while the existing action UI
+//! remains the exposed authority until its separately reviewed cutover.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -38,7 +37,8 @@ use crate::types::identifiers::ObjectId;
 use crate::types::interaction::{
     ActiveInteractionSlot, AggregateComparator, AmountAssignment, ConfirmSemantics,
     InteractionActionCode, InteractionActionId, InteractionAggregateFunction,
-    InteractionAvailability, InteractionChoice, InteractionChoiceId, InteractionChoiceStatus,
+    InteractionAttachmentFan, InteractionAttachmentFanChild, InteractionAvailability,
+    InteractionChoice, InteractionChoiceId, InteractionChoiceStatus,
     InteractionDamageAssignmentMode, InteractionGroupConstraint, InteractionId,
     InteractionIntentCode, InteractionManaAbilityActivationScope, InteractionManaColor,
     InteractionManaComparator, InteractionManaRestriction, InteractionManaSpecialAction,
@@ -67,7 +67,7 @@ use super::dungeon::DungeonId;
 use super::engine::{
     apply_interaction, apply_interaction_for_simulation, EngineError, MAX_SHORTCUT_CYCLES,
 };
-use super::game_object::RoomDoor;
+use super::game_object::{AttachTarget, RoomDoor};
 use super::merge::MergeSide;
 use super::{mana_sources, turn_control, visibility};
 
@@ -7182,6 +7182,7 @@ pub fn derive_viewer_interaction(
             can_submit: false,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Terminal {
                 outcome: InteractionOutcomeCode::Terminal,
             },
@@ -7197,6 +7198,7 @@ pub fn derive_viewer_interaction(
             can_submit: false,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Waiting,
         };
     }
@@ -7214,6 +7216,7 @@ pub fn derive_viewer_interaction(
             can_submit: true,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::AuthorityUnbound,
             },
@@ -7229,6 +7232,7 @@ pub fn derive_viewer_interaction(
             can_submit: true,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::InvalidAuthorityState,
             },
@@ -7255,12 +7259,14 @@ pub fn derive_viewer_interaction(
             can_submit: true,
             auto_pass_recommended: false,
             opportunities: Vec::new(),
+            attachment_fans: BTreeMap::new(),
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::PayloadTooLarge,
             },
         };
     }
     let mut opportunities = Vec::with_capacity(slots.len());
+    let mut attachment_fans = BTreeMap::new();
     let mut first_progress = None;
     let mut first_fallback = None;
     let default_availability = InteractionAvailability::Stuck {
@@ -7269,8 +7275,21 @@ pub fn derive_viewer_interaction(
     for slot in slots {
         let (mut opportunity, mut slot_availability) =
             opportunity_for_slot(authoritative_state, filtered_state, viewer, slot);
-        if bound_outbound_opportunity(&opportunity).is_err() {
+        let opportunity_is_bounded = bound_outbound_opportunity(&opportunity).is_ok();
+        if !opportunity_is_bounded {
             (opportunity, slot_availability) = payload_too_large_opportunity(&slot.interaction_id);
+        }
+        if opportunity_is_bounded
+            && !matches!(
+                slot_availability,
+                InteractionAvailability::Unsupported { .. }
+            )
+        {
+            attachment_fans.extend(attachment_fans_for_slot(
+                authoritative_state,
+                filtered_state,
+                slot,
+            ));
         }
         if matches!(
             slot_availability,
@@ -7299,10 +7318,12 @@ pub fn derive_viewer_interaction(
             WaitingFor::Priority { .. }
         ) && authoritative_state.auto_pass.contains_key(&viewer),
         opportunities,
+        attachment_fans,
         availability,
     };
     if bound_outbound_view(&view).is_err() {
         view.opportunities.clear();
+        view.attachment_fans.clear();
         view.availability = InteractionAvailability::Unsupported {
             reason: InteractionReasonCode::PayloadTooLarge,
         };
@@ -7310,9 +7331,191 @@ pub fn derive_viewer_interaction(
     view
 }
 
+/// Build attachment affordances from typed decision provenance. The host
+/// back-link and child forward-link must agree; this avoids surfacing stale
+/// relationship data or indirect descendants.
+fn attachment_fans_for_slot(
+    authoritative_state: &GameState,
+    filtered_state: &GameState,
+    slot: &ActiveInteractionSlot,
+) -> BTreeMap<u64, InteractionAttachmentFan> {
+    let semantic_owner = PlayerId(slot.semantic_owner);
+    let model = human_response_model(&filtered_state.waiting_for, semantic_owner);
+    let object_choices = match model {
+        HumanResponseModel::TargetSequence => {
+            target_sequence_projection(&filtered_state.waiting_for)
+                .ok()
+                .flatten()
+                .into_iter()
+                .flat_map(|projection| {
+                    projection
+                        .candidates
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, target)| match target {
+                            TargetRef::Object(object_id) => Some((
+                                object_id,
+                                interaction_choice_id(&slot.interaction_id, 't', index),
+                            )),
+                            TargetRef::Player(_) => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        }
+        HumanResponseModel::Select => {
+            selection_projection(&filtered_state.waiting_for, filtered_state, semantic_owner)
+                .ok()
+                .flatten()
+                .into_iter()
+                .flat_map(|projection| {
+                    projection
+                        .object_ids
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, object_id)| {
+                            (
+                                object_id,
+                                interaction_choice_id(&slot.interaction_id, 's', index),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        }
+        HumanResponseModel::ExactCandidates(AuditedExactCandidates) => {
+            actor_candidates(authoritative_state, semantic_owner)
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, candidate)| {
+                    candidate.action.source_object().map(|object_id| {
+                        (
+                            object_id,
+                            interaction_choice_id(&slot.interaction_id, 'c', index),
+                        )
+                    })
+                })
+                .collect()
+        }
+        HumanResponseModel::Terminal
+        | HumanResponseModel::AssignAmounts
+        | HumanResponseModel::AmountAssignments
+        | HumanResponseModel::DamageAssignments
+        | HumanResponseModel::TriggerOrder
+        | HumanResponseModel::CoinFlipSequence
+        | HumanResponseModel::CategorySelection
+        | HumanResponseModel::CombatRelations(_)
+        | HumanResponseModel::ManaGroups(_)
+        | HumanResponseModel::ModeSequence
+        | HumanResponseModel::OutsideSelection
+        | HumanResponseModel::TextChoice
+        | HumanResponseModel::ShortcutReply
+        | HumanResponseModel::DirectChoices
+        | HumanResponseModel::SideboardPartition
+        | HumanResponseModel::NumberRange(_)
+        | HumanResponseModel::LoopShortcut => Vec::new(),
+    };
+    attachment_fans_for_object_choices(filtered_state, &slot.interaction_id, model, object_choices)
+}
+
+fn attachment_fans_for_object_choices(
+    filtered_state: &GameState,
+    interaction_id: &InteractionId,
+    model: HumanResponseModel,
+    object_choices: impl IntoIterator<Item = (ObjectId, InteractionChoiceId)>,
+) -> BTreeMap<u64, InteractionAttachmentFan> {
+    let mut fans: BTreeMap<
+        (InteractionId, ObjectId),
+        BTreeMap<ObjectId, Vec<InteractionChoiceId>>,
+    > = BTreeMap::new();
+
+    for (child_id, choice_id) in object_choices {
+        let Some(child) = filtered_state.objects.get(&child_id) else {
+            continue;
+        };
+        let Some(AttachTarget::Object(host_id)) = child.attached_to else {
+            continue;
+        };
+        let Some(host) = filtered_state.objects.get(&host_id) else {
+            continue;
+        };
+        if !host.attachments.contains(&child_id) {
+            continue;
+        }
+        let choice_ids = fans
+            .entry((interaction_id.clone(), host_id))
+            .or_default()
+            .entry(child_id)
+            .or_default();
+        if !choice_ids.contains(&choice_id) {
+            choice_ids.push(choice_id);
+        }
+    }
+
+    fans.into_iter()
+        .filter_map(|((interaction_id, host_id), children)| {
+            let children = children
+                .into_iter()
+                .filter_map(|(object_id, choice_ids)| {
+                    let [choice_id] = choice_ids.as_slice() else {
+                        return None;
+                    };
+                    attachment_fan_submission(&interaction_id, model, choice_id.clone()).map(
+                        |submission| InteractionAttachmentFanChild {
+                            object_id: object_id.0,
+                            submission,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            (!children.is_empty()).then_some((
+                host_id.0,
+                InteractionAttachmentFan {
+                    host_id: host_id.0,
+                    children,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Only publish one-step attachment picks. Multi-choice objects and response
+/// families that require the UI to synthesize a payload stay in the normal
+/// interaction surface until the engine exposes a dedicated picker model.
+fn attachment_fan_submission(
+    interaction_id: &InteractionId,
+    model: HumanResponseModel,
+    choice_id: InteractionChoiceId,
+) -> Option<InteractionSubmission> {
+    let response = match model {
+        HumanResponseModel::ExactCandidates(_) => InteractionResponse::Choose { choice_id },
+        HumanResponseModel::Select => InteractionResponse::Select {
+            choice_ids: vec![choice_id],
+        },
+        HumanResponseModel::TargetSequence => InteractionResponse::Sequence {
+            choice_ids: vec![choice_id],
+        },
+        _ => return None,
+    };
+    Some(InteractionSubmission {
+        interaction_id: interaction_id.clone(),
+        response,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InteractionSubmitError {
     pub code: InteractionReasonCode,
+}
+
+/// Successful interaction submission. The action is the exact opaque response
+/// materialized by the engine and is available to trusted adapters solely for
+/// post-success replay recording.
+#[derive(Debug, Clone)]
+pub struct AppliedInteraction {
+    pub action: GameAction,
+    pub result: ActionResult,
 }
 
 impl From<InteractionReasonCode> for InteractionSubmitError {
@@ -7595,6 +7798,14 @@ fn bound_outbound_view(view: &ViewerInteraction) -> Result<(), InteractionReason
     budget.list(view.opportunities.len())?;
     for opportunity in &view.opportunities {
         bound_outbound_opportunity_with_budget(opportunity, &mut budget)?;
+    }
+    budget.list(view.attachment_fans.len())?;
+    for fan in view.attachment_fans.values() {
+        budget.list(fan.children.len())?;
+        for child in &fan.children {
+            budget.string(child.submission.interaction_id.as_str())?;
+            bound_outbound_response(&child.submission.response, &mut budget)?;
+        }
     }
     if let InteractionAvailability::ProgressAvailable { witness } = &view.availability {
         budget.string(witness.interaction_id.as_str())?;
@@ -9074,7 +9285,7 @@ pub fn submit_interaction(
     state: &mut GameState,
     actor: PlayerId,
     submission: InteractionSubmission,
-) -> Result<ActionResult, InteractionSubmitError> {
+) -> Result<AppliedInteraction, InteractionSubmitError> {
     let action = resolve_interaction_response(state, actor, &submission)?;
     // Re-read the slot rather than threading it out of `resolve_*`: keeping that
     // function's return to the action alone is what makes it usable as a public
@@ -9082,9 +9293,10 @@ pub fn submit_interaction(
     // slot per pending decision, and it has already succeeded once here.
     let semantic_owner =
         PlayerId(slot_for_submission(state, actor, &submission.interaction_id)?.semantic_owner);
-    apply_interaction(state, actor, semantic_owner, action).map_err(|_error: EngineError| {
-        InteractionSubmitError {
+    let result = apply_interaction(state, actor, semantic_owner, action.clone()).map_err(
+        |_error: EngineError| InteractionSubmitError {
             code: InteractionReasonCode::ReducerRejected,
-        }
-    })
+        },
+    )?;
+    Ok(AppliedInteraction { action, result })
 }

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-07-28T00:00:00Z",
+  "updated": "2026-07-29T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -424,6 +424,177 @@
       ]
     },
     {
+      "name": "Eldrazi",
+      "author": "MTGGoldfish",
+      "colors": [
+        "G",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Windswept Heath"
+        },
+        {
+          "count": 3,
+          "name": "Forest"
+        },
+        {
+          "count": 2,
+          "name": "Ugin's Labyrinth"
+        },
+        {
+          "count": 2,
+          "name": "Thought-Knot Seer"
+        },
+        {
+          "count": 2,
+          "name": "Blade of the Bloodchief"
+        },
+        {
+          "count": 1,
+          "name": "Misty Rainforest"
+        },
+        {
+          "count": 1,
+          "name": "Dismember"
+        },
+        {
+          "count": 1,
+          "name": "Stomping Ground"
+        },
+        {
+          "count": 3,
+          "name": "Basking Broodscale"
+        },
+        {
+          "count": 1,
+          "name": "Pithing Needle"
+        },
+        {
+          "count": 4,
+          "name": "Eldrazi Temple"
+        },
+        {
+          "count": 2,
+          "name": "Writhing Chrysalis"
+        },
+        {
+          "count": 1,
+          "name": "Verdant Catacombs"
+        },
+        {
+          "count": 1,
+          "name": "Thief of Existence"
+        },
+        {
+          "count": 1,
+          "name": "Springleaf Drum"
+        },
+        {
+          "count": 4,
+          "name": "Kozilek's Command"
+        },
+        {
+          "count": 4,
+          "name": "Grove of the Burnwillows"
+        },
+        {
+          "count": 2,
+          "name": "Ancient Stirrings"
+        },
+        {
+          "count": 4,
+          "name": "Malevolent Rumble"
+        },
+        {
+          "count": 4,
+          "name": "Glaring Fleshraker"
+        },
+        {
+          "count": 2,
+          "name": "Unholy Heat"
+        },
+        {
+          "count": 1,
+          "name": "Commercial District"
+        },
+        {
+          "count": 2,
+          "name": "Vexing Bauble"
+        },
+        {
+          "count": 1,
+          "name": "Haywire Mite"
+        },
+        {
+          "count": 4,
+          "name": "Emrakul, the Promised End"
+        },
+        {
+          "count": 2,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 4,
+          "name": "Urza's Saga"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Thought-Knot Seer"
+        },
+        {
+          "count": 2,
+          "name": "Nature's Claim"
+        },
+        {
+          "count": 2,
+          "name": "Firespout"
+        },
+        {
+          "count": 1,
+          "name": "Gemstone Caverns"
+        },
+        {
+          "count": 1,
+          "name": "Disruptor Flute"
+        },
+        {
+          "count": 1,
+          "name": "Writhing Chrysalis"
+        },
+        {
+          "count": 1,
+          "name": "Basking Broodscale"
+        },
+        {
+          "count": 1,
+          "name": "Thief of Existence"
+        },
+        {
+          "count": 2,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 1,
+          "name": "Grafdigger's Cage"
+        },
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Blade of the Bloodchief"
+        }
+      ]
+    },
+    {
       "name": "Eldrazi Tron",
       "author": "MTGGoldfish",
       "colors": [
@@ -705,177 +876,6 @@
       ]
     },
     {
-      "name": "Eldrazi",
-      "author": "MTGGoldfish",
-      "colors": [
-        "G",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Windswept Heath"
-        },
-        {
-          "count": 3,
-          "name": "Forest"
-        },
-        {
-          "count": 2,
-          "name": "Ugin's Labyrinth"
-        },
-        {
-          "count": 2,
-          "name": "Thought-Knot Seer"
-        },
-        {
-          "count": 2,
-          "name": "Blade of the Bloodchief"
-        },
-        {
-          "count": 1,
-          "name": "Misty Rainforest"
-        },
-        {
-          "count": 1,
-          "name": "Dismember"
-        },
-        {
-          "count": 1,
-          "name": "Stomping Ground"
-        },
-        {
-          "count": 3,
-          "name": "Basking Broodscale"
-        },
-        {
-          "count": 1,
-          "name": "Pithing Needle"
-        },
-        {
-          "count": 4,
-          "name": "Eldrazi Temple"
-        },
-        {
-          "count": 2,
-          "name": "Writhing Chrysalis"
-        },
-        {
-          "count": 1,
-          "name": "Verdant Catacombs"
-        },
-        {
-          "count": 1,
-          "name": "Thief of Existence"
-        },
-        {
-          "count": 1,
-          "name": "Springleaf Drum"
-        },
-        {
-          "count": 4,
-          "name": "Kozilek's Command"
-        },
-        {
-          "count": 4,
-          "name": "Grove of the Burnwillows"
-        },
-        {
-          "count": 2,
-          "name": "Ancient Stirrings"
-        },
-        {
-          "count": 4,
-          "name": "Malevolent Rumble"
-        },
-        {
-          "count": 4,
-          "name": "Glaring Fleshraker"
-        },
-        {
-          "count": 2,
-          "name": "Unholy Heat"
-        },
-        {
-          "count": 1,
-          "name": "Commercial District"
-        },
-        {
-          "count": 2,
-          "name": "Vexing Bauble"
-        },
-        {
-          "count": 1,
-          "name": "Haywire Mite"
-        },
-        {
-          "count": 4,
-          "name": "Emrakul, the Promised End"
-        },
-        {
-          "count": 2,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 4,
-          "name": "Urza's Saga"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Thought-Knot Seer"
-        },
-        {
-          "count": 2,
-          "name": "Nature's Claim"
-        },
-        {
-          "count": 2,
-          "name": "Firespout"
-        },
-        {
-          "count": 1,
-          "name": "Gemstone Caverns"
-        },
-        {
-          "count": 1,
-          "name": "Disruptor Flute"
-        },
-        {
-          "count": 1,
-          "name": "Writhing Chrysalis"
-        },
-        {
-          "count": 1,
-          "name": "Basking Broodscale"
-        },
-        {
-          "count": 1,
-          "name": "Thief of Existence"
-        },
-        {
-          "count": 2,
-          "name": "Cavern of Souls"
-        },
-        {
-          "count": 1,
-          "name": "Grafdigger's Cage"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Blade of the Bloodchief"
-        }
-      ]
-    },
-    {
       "name": "Izzet Prowess",
       "author": "MTGGoldfish",
       "colors": [
@@ -1149,6 +1149,132 @@
       ]
     },
     {
+      "name": "Mono-Green Eldrazi",
+      "author": "MTGGoldfish",
+      "colors": [
+        "G"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Gemstone Caverns"
+        },
+        {
+          "count": 2,
+          "name": "Ugin, Eye of the Storms"
+        },
+        {
+          "count": 4,
+          "name": "Slumbering Trudge"
+        },
+        {
+          "count": 4,
+          "name": "Ugin's Labyrinth"
+        },
+        {
+          "count": 2,
+          "name": "Ulamog, the Ceaseless Hunger"
+        },
+        {
+          "count": 1,
+          "name": "Dryad Arbor"
+        },
+        {
+          "count": 5,
+          "name": "Forest"
+        },
+        {
+          "count": 4,
+          "name": "Green Sun's Zenith"
+        },
+        {
+          "count": 4,
+          "name": "Eldrazi Temple"
+        },
+        {
+          "count": 1,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 4,
+          "name": "Disciple of Freyalise"
+        },
+        {
+          "count": 4,
+          "name": "Kozilek's Command"
+        },
+        {
+          "count": 1,
+          "name": "Mosswort Bridge"
+        },
+        {
+          "count": 4,
+          "name": "Malevolent Rumble"
+        },
+        {
+          "count": 4,
+          "name": "Sowing Mycospawn"
+        },
+        {
+          "count": 4,
+          "name": "Emrakul, the Promised End"
+        },
+        {
+          "count": 2,
+          "name": "Drowner of Truth"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 4,
+          "name": "Fanatic of Rhonas"
+        },
+        {
+          "count": 4,
+          "name": "Fight Rigging"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Endurance"
+        },
+        {
+          "count": 2,
+          "name": "Thought-Knot Seer"
+        },
+        {
+          "count": 1,
+          "name": "Gemstone Caverns"
+        },
+        {
+          "count": 3,
+          "name": "Chalice of the Void"
+        },
+        {
+          "count": 2,
+          "name": "Trinisphere"
+        },
+        {
+          "count": 3,
+          "name": "Force of Vigor"
+        },
+        {
+          "count": 1,
+          "name": "Dismember"
+        },
+        {
+          "count": 1,
+          "name": "Elder Gargaroth"
+        }
+      ]
+    },
+    {
       "name": "Boros Ponza",
       "author": "MTGGoldfish",
       "colors": [
@@ -1272,132 +1398,6 @@
         {
           "count": 1,
           "name": "Kaheera, the Orphanguard"
-        }
-      ]
-    },
-    {
-      "name": "Mono-Green Eldrazi",
-      "author": "MTGGoldfish",
-      "colors": [
-        "G"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Gemstone Caverns"
-        },
-        {
-          "count": 2,
-          "name": "Ugin, Eye of the Storms"
-        },
-        {
-          "count": 4,
-          "name": "Slumbering Trudge"
-        },
-        {
-          "count": 4,
-          "name": "Ugin's Labyrinth"
-        },
-        {
-          "count": 2,
-          "name": "Ulamog, the Ceaseless Hunger"
-        },
-        {
-          "count": 1,
-          "name": "Dryad Arbor"
-        },
-        {
-          "count": 5,
-          "name": "Forest"
-        },
-        {
-          "count": 4,
-          "name": "Green Sun's Zenith"
-        },
-        {
-          "count": 4,
-          "name": "Eldrazi Temple"
-        },
-        {
-          "count": 1,
-          "name": "Cavern of Souls"
-        },
-        {
-          "count": 4,
-          "name": "Disciple of Freyalise"
-        },
-        {
-          "count": 4,
-          "name": "Kozilek's Command"
-        },
-        {
-          "count": 1,
-          "name": "Mosswort Bridge"
-        },
-        {
-          "count": 4,
-          "name": "Malevolent Rumble"
-        },
-        {
-          "count": 4,
-          "name": "Sowing Mycospawn"
-        },
-        {
-          "count": 4,
-          "name": "Emrakul, the Promised End"
-        },
-        {
-          "count": 2,
-          "name": "Drowner of Truth"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 4,
-          "name": "Fanatic of Rhonas"
-        },
-        {
-          "count": 4,
-          "name": "Fight Rigging"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Endurance"
-        },
-        {
-          "count": 2,
-          "name": "Thought-Knot Seer"
-        },
-        {
-          "count": 1,
-          "name": "Gemstone Caverns"
-        },
-        {
-          "count": 3,
-          "name": "Chalice of the Void"
-        },
-        {
-          "count": 2,
-          "name": "Trinisphere"
-        },
-        {
-          "count": 3,
-          "name": "Force of Vigor"
-        },
-        {
-          "count": 1,
-          "name": "Dismember"
-        },
-        {
-          "count": 1,
-          "name": "Elder Gargaroth"
         }
       ]
     }

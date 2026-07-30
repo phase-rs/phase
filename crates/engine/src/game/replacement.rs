@@ -7186,6 +7186,40 @@ pub fn find_applicable_replacements(
                             }
                         }
                     }
+                    // CR 608.2c + CR 611.2c + CR 615.1a (issue #6682): an
+                    // OBJECT-population recipient (`valid_card` — Blinding
+                    // Fog's "creatures", Mutational Advantage's countered
+                    // permanents, Energy Arc's untapped-creatures tracked
+                    // set) must ALSO gate a GLOBAL (stack-sourced) shield's
+                    // OBJECT damage target, exactly as an object-hosted
+                    // shield's own per-object scan already enforces it.
+                    // Previously unreachable: every prior card whose prevent
+                    // clause carried a real `valid_card` recipient filter
+                    // happened to be sourced from a permanent already on the
+                    // battlefield (object-hosted path, checked elsewhere), so
+                    // this pending-registry path never needed to read it —
+                    // silently turning a scoped shield into a blanket one for
+                    // the FIRST instant/sorcery-sourced population recipient.
+                    // Player-target damage events are unaffected: a card-shaped
+                    // filter has no player to check against (mirrors why
+                    // `damage_target_filter` above is the player-side gate).
+                    if let Some(ref vc) = repl_def.valid_card {
+                        if let ProposedEvent::Damage {
+                            target: TargetRef::Object(obj_id),
+                            ..
+                        } = event
+                        {
+                            let ctx = match repl_def.source_controller {
+                                Some(pid) => {
+                                    FilterContext::from_source_with_controller(ObjectId(0), pid)
+                                }
+                                None => FilterContext::from_source(state, ObjectId(0)),
+                            };
+                            if !matches_target_filter(state, *obj_id, vc, &ctx) {
+                                continue;
+                            }
+                        }
+                    }
                     if is_damage_prevention_replacement(state, &rid, &repl_def.event)
                         && is_prevention_disabled(state, event)
                     {
@@ -19440,13 +19474,17 @@ mod tests {
     }
 
     #[test]
-    fn global_store_damage_path_ignores_valid_card_filter() {
-        // REGRESSION (BLOCKER guard): the prevent_damage typed-recipient shield
-        // sets a `valid_card` recipient filter that is DELIBERATELY not enforced
-        // for damage (prevent_damage.rs: "global shields must match any damage
-        // event"). The generalized scan must still prevent a damage event whose
-        // recipient does NOT match that typed filter — i.e. the new valid_card
-        // gate must NOT run on the Damage path.
+    fn global_store_damage_path_ignores_valid_card_filter_for_player_targets() {
+        // A card-shaped `valid_card` recipient filter has no player to check
+        // against, so it must remain a no-op for a PLAYER-target damage
+        // event — the generalized scan must still prevent damage dealt to a
+        // player even though the shield's `valid_card` is creature-shaped.
+        // CR 608.2c + CR 615.1a (issue #6682): `valid_card` IS now enforced
+        // on this path for OBJECT-target damage events (see
+        // `find_applicable_replacements`'s dedicated `valid_card` gate,
+        // covered by `game::effects::prevent_damage::tests`'s tracked-set
+        // recipient tests) — this test pins the complementary player-target
+        // case, where the gate correctly does not apply.
         let registry = build_replacement_registry();
         let mut state = GameState::new_two_player(42);
         // Global prevention shield carrying a typed recipient valid_card filter
@@ -19470,6 +19508,73 @@ mod tests {
                 index: 0
             }],
             "damage prevention shield must remain a candidate despite a non-matching valid_card recipient filter"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2c + CR 615.1a (issue #6682): a GLOBAL (stack-sourced)
+    /// prevention shield's `valid_card` recipient filter MUST gate an
+    /// OBJECT-target damage event — the mass/tracked-set recipient class
+    /// (Blinding Fog's "creatures", Mutational Advantage's countered
+    /// permanents, Energy Arc's untapped creatures) that only ever reaches
+    /// the pending registry because its source is an instant/sorcery on the
+    /// stack, never a battlefield permanent. Without this gate, ANY object
+    /// took damage as if the shield were unscoped.
+    #[test]
+    fn global_store_damage_path_enforces_valid_card_filter_for_object_targets() {
+        let registry = build_replacement_registry();
+        let mut state = GameState::new_two_player(42);
+        let mut land = GameObject::new(
+            ObjectId(30),
+            CardId(1),
+            PlayerId(0),
+            "Land".to_string(),
+            Zone::Battlefield,
+        );
+        land.card_types.core_types = vec![CoreType::Land];
+        state.objects.insert(ObjectId(30), land);
+        let mut creature = GameObject::new(
+            ObjectId(31),
+            CardId(2),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        creature.card_types.core_types = vec![CoreType::Creature];
+        state.objects.insert(ObjectId(31), creature);
+
+        let shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All)
+            .valid_card(TargetFilter::Typed(TypedFilter::creature()));
+        state.pending_damage_replacements.push(shield);
+
+        // The land does NOT match the creature-shaped valid_card filter.
+        let land_event = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(30)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &land_event, &registry).is_empty(),
+            "a non-matching object target must NOT be gated in by an unscoped shield"
+        );
+
+        // The creature DOES match.
+        let creature_event = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(31)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert_eq!(
+            find_applicable_replacements(&state, &creature_event, &registry),
+            vec![ReplacementId {
+                source: ObjectId(0),
+                index: 0
+            }],
+            "a matching object target must still be gated in"
         );
     }
 

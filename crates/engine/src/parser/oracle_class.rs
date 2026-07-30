@@ -1,4 +1,4 @@
-use super::oracle_ir::doc::{OracleNodeIr, PrintedTriggerIndex};
+use super::oracle_ir::doc::{OracleNodeIr, PrintedTriggerIndex, UnsupportedAbilityIr};
 use crate::parser::oracle_nom::error::OracleError;
 use nom::bytes::complete::tag;
 use nom::Parser;
@@ -164,6 +164,8 @@ pub(crate) fn parse_class_oracle_text(
                     ],
                     ..AbilityShellIr::default()
                 },
+                die_results: vec![],
+                root_transforms: vec![],
             };
             items.push((
                 *level_line,
@@ -373,7 +375,7 @@ pub(crate) fn parse_class_oracle_text(
             items.push((
                 line_index,
                 OracleNodeIr::Unsupported {
-                    text: line.to_string(),
+                    unsupported: UnsupportedAbilityIr::unknown(line),
                     min_x_value: 0,
                 },
             ));

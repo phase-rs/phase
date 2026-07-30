@@ -22,61 +22,153 @@ expression: "&ir"
         "fragment": "Exile target creature. Its controller gains life equal to its power."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": null,
-            "destination": "Exile",
-            "target": {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": null,
-              "properties": []
-            },
-            "owner_library": false,
-            "enter_transformed": false,
-            "enter_tapped": false,
-            "enters_attacking": false
-          },
-          "cost": null,
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "GainLife",
-              "amount": {
-                "type": "Ref",
-                "qty": {
-                  "type": "Power",
-                  "scope": {
-                    "type": "Target"
+        "Spell": {
+          "source_text": "Exile target creature. Its controller gains life equal to its power.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 21,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Exile target creature"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
                   }
-                }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "ChangeZone",
+                    "origin": null,
+                    "destination": "Exile",
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": null,
+                      "properties": []
+                    },
+                    "owner_library": false,
+                    "enter_transformed": false,
+                    "enter_tapped": false,
+                    "enters_attacking": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               },
-              "player": {
-                "type": "ParentTargetController"
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 23,
+                    "end_byte": 67,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "Its controller gains life equal to its power"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "GainLife",
+                    "amount": {
+                      "type": "Ref",
+                      "qty": {
+                        "type": "Power",
+                        "scope": {
+                          "type": "Target"
+                        }
+                      }
+                    },
+                    "player": {
+                      "type": "ParentTargetController"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false,
-            "sub_link": "SequentialSibling"
+            ],
+            "kind": "Spell",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": null,
-          "description": "Exile target creature. Its controller gains life equal to its power.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null
+          },
+          "die_results": [],
+          "root_transforms": [
+            {
+              "SetMinXValue": 0
+            },
+            {
+              "SetDescription": "Exile target creature. Its controller gains life equal to its power."
+            }
+          ]
         }
       }
     }
