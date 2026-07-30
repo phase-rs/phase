@@ -11127,6 +11127,24 @@ fn effect_tzaangor_copy_next_spell_when_cast() {
     );
 }
 
+/// CR 603.7: Tzaangor Shaman's copy-next clause is reachable from the
+/// effect-chain parser, but not from the spell trigger-prefix router. Its
+/// temporal helper must therefore construct native IR directly.
+#[test]
+fn temporal_copy_next_helper_emits_native_ir() {
+    let text = "Copy the next instant or sorcery spell you cast this turn when you cast it. \
+                You may choose new targets for the copy.";
+    let ir = try_parse_temporal_delayed_trigger_ability(text, AbilityKind::Spell)
+        .expect("Tzaangor Shaman copy-next grammar must parse");
+
+    assert_eq!(ir.source_text, text);
+    assert_eq!(ir.body.clauses.len(), 1);
+    assert!(matches!(
+        &ir.body.clauses[0].parsed.effect,
+        Effect::CreateDelayedTrigger { .. }
+    ));
+}
+
 #[test]
 fn effect_each_merfolk_creature_you_control_explores_uses_explore_all() {
     let e = parse_effect("Each Merfolk creature you control explores");
