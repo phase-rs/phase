@@ -5,6 +5,7 @@
     "cantActivateDuring": "Nie można teraz aktywować",
     "prohibited": "Aktywacja tej zdolności jest zabroniona"
   },
+  "manaSourceSelection": { "title": "Wybierz źródło many", "description": "Ta zdolność many wymaga poświęcenia permanenta.", "sacrifice": "Poświęć", "back": "Wróć do płatności many", "unknownSource": "Źródło many" },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",

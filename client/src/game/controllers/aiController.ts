@@ -280,7 +280,16 @@ export function createAIController(config: AIControllerConfig): AIController {
     waitingFor: WaitingFor,
     state: GameState,
   ): Promise<GameAction | null> {
-    if (state.has_pending_cast) {
+    if (waitingFor.type === "ManaSourceSelection") {
+      const { adapter } = useGameStore.getState();
+      if (!adapter) return Promise.resolve(null);
+      return adapter.getLegalActions().then((result) => {
+        return result.actions.find((action) => action.type === "ActivateManaSource")
+          ?? result.actions.find((action) => action.type === "BackToManaPayment")
+          ?? null;
+      });
+    }
+    if (state.has_pending_cast && state.allows_cancel_cast) {
       return Promise.resolve({ type: "CancelCast" });
     }
     const { adapter } = useGameStore.getState();

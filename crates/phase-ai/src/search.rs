@@ -767,6 +767,19 @@ pub fn emit_trace_for_candidate(
 /// `config` supplies policy penalties used by selection escapes (e.g. sacrifice
 /// value ordering); difficulty/search knobs are unused here.
 pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameAction> {
+    // CR 605.3b: A sacrificial mana prompt is an explicit payment decision,
+    // not a generic pending-cast failure. Pick only an engine-issued source or
+    // the exact BackToManaPayment escape; never synthesize CancelCast here.
+    if matches!(state.waiting_for, WaitingFor::ManaSourceSelection { .. }) {
+        return engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::ActivateManaSource { .. } | GameAction::BackToManaPayment
+                )
+            });
+    }
     // CR 601.2c: A spell's target step must use the engine's current legal
     // target list. `target_slots` is a historical snapshot and can be stale
     // after earlier selections; if no current legal action remains, abort the
@@ -781,7 +794,11 @@ pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameActio
     // Pending-cast states can always be escaped with CancelCast (CR 601.2).
     // Check this before the exhaustive match so every pending-cast variant
     // is covered without repeating CancelCast per-arm.
-    if state.waiting_for.has_pending_cast() {
+    if state.waiting_for.allows_cancel_cast()
+        || state.allows_cancel_cast
+        || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
+            && state.pending_cast.is_some())
+    {
         // The internal discriminant tag is niche-optimized (non-sequential), so
         // print the variant *name* (the Debug prefix before its first field) and
         // the in-flight spell's card name instead — an opaque discriminant alone
@@ -1747,6 +1764,7 @@ pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameActio
         // guard above. This arm is structurally unreachable but required
         // for exhaustive match. ManaPayment is a pending-cast state.
         WaitingFor::ManaPayment { .. }
+        | WaitingFor::ManaSourceSelection { .. }
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
@@ -1759,8 +1777,9 @@ pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameActio
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. } => {
             // These are all pending-cast states — the has_pending_cast guard
-            // above already returned CancelCast. This branch is unreachable
-            // at runtime but keeps the match exhaustive.
+            // above already returned CancelCast. ManaSourceSelection is
+            // intercepted above and never synthesizes CancelCast. This branch
+            // is unreachable at runtime but keeps the match exhaustive.
             Some(GameAction::CancelCast)
         }
     }

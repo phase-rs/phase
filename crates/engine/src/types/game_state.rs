@@ -5352,6 +5352,10 @@ fn default_copy_retarget_effect_kind() -> EffectKind {
 pub enum CastPaymentMode {
     #[default]
     Auto,
+    /// CR 601.2g-h: auto-pay every safe mana row, but stop before an
+    /// activation whose cost sacrifices a permanent so its controller makes
+    /// that irreversible payment decision explicitly.
+    AutoExceptSacrificialMana,
     Manual,
 }
 
@@ -6135,6 +6139,16 @@ pub enum ManaAbilityResume {
         /// `WaitingFor::ManaPayment` root.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outer_player: Option<PlayerId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        convoke_mode: Option<ConvokeMode>,
+    },
+    /// CR 601.2g-h + CR 605.3b: automatic payment reached a mana source that
+    /// sacrifices a permanent. The options are the frozen, engine-authored
+    /// semantic capability snapshot; submission revalidates one exact current
+    /// candidate before it can mutate the payment.
+    ManaSourceSelection {
+        player: PlayerId,
+        options: Vec<crate::types::mana::ManaSourceSelection>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         convoke_mode: Option<ConvokeMode>,
     },
@@ -7702,6 +7716,16 @@ pub enum WaitingFor {
         player: PlayerId,
         /// CR 702.51a / Waterbend: When present, the player can tap untapped
         /// creatures/artifacts to pay mana. Summoning sickness does not apply (CR 302.6).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        convoke_mode: Option<ConvokeMode>,
+    },
+    /// CR 601.2g-h + CR 605.3b: automatic payment reached a mana source that
+    /// sacrifices a permanent. The options are the frozen, engine-authored
+    /// semantic capability snapshot; submission revalidates one exact current
+    /// candidate before it can mutate the payment.
+    ManaSourceSelection {
+        player: PlayerId,
+        options: Vec<crate::types::mana::ManaSourceSelection>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         convoke_mode: Option<ConvokeMode>,
     },
@@ -9838,6 +9862,7 @@ impl WaitingFor {
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
+            WaitingFor::ManaSourceSelection { .. } => "ManaSourceSelection",
             WaitingFor::ChooseXValue { .. } => "ChooseXValue",
             WaitingFor::TargetSelection { .. } => "TargetSelection",
             WaitingFor::DeclareAttackers { .. } => "DeclareAttackers",
@@ -9988,6 +10013,7 @@ impl WaitingFor {
             | WaitingFor::MeldPairChoice { player, .. }
             | WaitingFor::MeldAttackTargetChoice { player, .. }
             | WaitingFor::ManaPayment { player, .. }
+            | WaitingFor::ManaSourceSelection { player, .. }
             | WaitingFor::ChooseXValue { player, .. }
             | WaitingFor::TargetSelection { player, .. }
             | WaitingFor::DeclareAttackers { player, .. }
@@ -10148,12 +10174,13 @@ impl WaitingFor {
     ///
     /// Runtime drift detector: the `debug_assert!` in `game::derived` trips
     /// in tests if a new variant populates `GameState::pending_cast` without
-    /// being covered here (or by the `ManaPayment` exception in
+    /// being covered here (or by an external payment-state exception in
     /// `has_pending_cast`). That is the practical safeguard — the `_ => None`
     /// wildcard below does not compile-enforce variant coverage on its own.
     ///
-    /// Note: `ManaPayment` is the one casting-flow variant that does NOT embed
-    /// its `PendingCast`. It reads from `GameState::pending_cast` instead so
+    /// Note: `ManaPayment` and `ManaSourceSelection` are casting-flow variants
+    /// that do NOT embed their `PendingCast`. They read from
+    /// `GameState::pending_cast` instead so
     /// multiplayer visibility filtering (`game::visibility`) can clear
     /// mid-payment detail for opponents while preserving the public "spell on
     /// the stack" view elsewhere. `has_pending_cast()` accounts for this.
@@ -10228,8 +10255,8 @@ impl WaitingFor {
     /// Whether this state is part of the casting flow and can be backed out of
     /// with `CancelCast` (CR 601.2).
     ///
-    /// Derived from `pending_cast_ref()` plus the single `ManaPayment`
-    /// exception (which externalizes its `PendingCast` into
+    /// Derived from `pending_cast_ref()` plus the external payment states
+    /// (which externalize their `PendingCast` into
     /// `GameState::pending_cast`). Centralizing the predicate here guarantees
     /// that every variant carrying a `PendingCast` is covered — drift between
     /// data model and predicate is structurally prevented.
@@ -10243,8 +10270,17 @@ impl WaitingFor {
         self.pending_cast_ref().is_some()
             || matches!(
                 self,
-                WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. }
+                WaitingFor::ManaPayment { .. }
+                    | WaitingFor::ManaSourceSelection { .. }
+                    | WaitingFor::PhyrexianPayment { .. }
             )
+    }
+
+    /// CR 601.2i: Whether the current prompt permits withdrawing the pending
+    /// spell. Kept distinct from `has_pending_cast`: a cast can be pending at
+    /// a mandatory choice without granting a cancellation action.
+    pub fn allows_cancel_cast(&self) -> bool {
+        self.has_pending_cast() && !matches!(self, WaitingFor::ManaSourceSelection { .. })
     }
 }
 
@@ -11482,6 +11518,11 @@ pub struct GameState {
     /// frontend doesn't need to maintain a parallel list of casting states.
     #[serde(skip_deserializing, default)]
     pub has_pending_cast: bool,
+    /// CR 601.2i: display-only authority for whether the current pending cast
+    /// may be withdrawn. Separate from `has_pending_cast` so choice prompts
+    /// can expose an in-flight cast without encouraging an illegal cancel.
+    #[serde(skip_deserializing, default)]
+    pub allows_cancel_cast: bool,
     pub lands_played_this_turn: u8,
     pub max_lands_per_turn: u8,
     pub priority_pass_count: u8,
@@ -16615,6 +16656,7 @@ impl GameState {
             next_interaction_serial: default_interaction_serial(),
             active_interaction_slots: Vec::new(),
             has_pending_cast: false,
+            allows_cancel_cast: false,
             lands_played_this_turn: 0,
             max_lands_per_turn: 1,
             priority_pass_count: 0,
@@ -18064,6 +18106,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_interaction_serial: _,
         active_interaction_slots: _,
         has_pending_cast: _,
+        allows_cancel_cast: _,
         lands_played_this_turn: _,
         max_lands_per_turn: _,
         priority_pass_count: _,
@@ -21409,6 +21452,11 @@ mod tests {
             player: PlayerId(0),
             convoke_mode: None,
         }));
+        variants.push(Box::new(WaitingFor::ManaSourceSelection {
+            player: PlayerId(0),
+            options: Vec::new(),
+            convoke_mode: None,
+        }));
         variants.push(Box::new(WaitingFor::DeclareAttackers {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
@@ -21691,7 +21739,7 @@ mod tests {
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 36);
+        assert_eq!(variants.len(), 37);
     }
 
     #[test]
@@ -21785,6 +21833,14 @@ mod tests {
         };
         assert!(mana_payment.pending_cast_ref().is_none());
         assert!(mana_payment.has_pending_cast());
+
+        let source_selection = WaitingFor::ManaSourceSelection {
+            player: PlayerId(0),
+            options: Vec::new(),
+            convoke_mode: None,
+        };
+        assert!(source_selection.has_pending_cast());
+        assert!(!source_selection.allows_cancel_cast());
     }
 
     #[test]

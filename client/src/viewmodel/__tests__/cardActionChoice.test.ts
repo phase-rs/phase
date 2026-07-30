@@ -66,6 +66,7 @@ function tapLandAction(objectId: number): Extract<GameAction, { type: "TapLandFo
         source: { object_id: objectId, incarnation: 1 },
         ability_index: null,
         mana_type: "Green",
+        output: { type: "Concrete", data: "Green" },
         atomic_combination: null,
         restrictions: [],
         penalty: "None",

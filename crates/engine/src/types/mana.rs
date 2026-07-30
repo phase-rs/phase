@@ -669,6 +669,19 @@ pub enum ManaSourcePenalty {
     Sacrifices,
 }
 
+/// CR 106.1a: The output choice captured for a mana-source activation.
+///
+/// `Concrete` is the planner-selected output used by automatic payment. A
+/// manually selected flexible producer instead retains `DeferredColorChoice`,
+/// so the normal mana-choice interaction chooses its color at activation time
+/// rather than silently committing to an arbitrary planner row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ManaSourceOutput {
+    Concrete(ManaType),
+    DeferredColorChoice,
+}
+
 /// Exact identity of one triggered mana ability that augments a land's own
 /// production when that land is tapped for mana.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -678,22 +691,60 @@ pub struct TapsForManaSelection {
     pub production_override: ProductionOverride,
 }
 
-/// Stable semantic selection for one currently activatable land-mana row.
+/// Stable semantic selection for one currently activatable mana-source row.
 ///
 /// The action carries every field that can change legality or resolution, but
 /// the reducer never trusts those fields directly: it enumerates current live
 /// options and requires one exact semantic match before activating that live
 /// option. `ObjectIncarnationRef` prevents a stale choice from rebinding to an
 /// object that left and re-entered the battlefield (CR 400.7).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ManaSourceSelection {
     pub source: ObjectIncarnationRef,
     pub ability_index: Option<usize>,
     pub mana_type: ManaType,
+    pub output: ManaSourceOutput,
     pub atomic_combination: Option<Vec<ManaType>>,
     pub restrictions: Vec<ManaRestriction>,
     pub penalty: ManaSourcePenalty,
     pub taps_for_mana: Vec<TapsForManaSelection>,
+}
+
+impl<'de> Deserialize<'de> for ManaSourceSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireSelection {
+            source: ObjectIncarnationRef,
+            ability_index: Option<usize>,
+            mana_type: ManaType,
+            #[serde(default)]
+            output: Option<ManaSourceOutput>,
+            atomic_combination: Option<Vec<ManaType>>,
+            restrictions: Vec<ManaRestriction>,
+            penalty: ManaSourcePenalty,
+            taps_for_mana: Vec<TapsForManaSelection>,
+        }
+
+        let wire = WireSelection::deserialize(deserializer)?;
+        Ok(Self {
+            source: wire.source,
+            ability_index: wire.ability_index,
+            mana_type: wire.mana_type,
+            // `TapLandForMana` actions saved before output provenance existed
+            // selected this exact row's `mana_type`; preserve that choice on
+            // replay instead of silently turning every old colored row colorless.
+            output: wire
+                .output
+                .unwrap_or(ManaSourceOutput::Concrete(wire.mana_type)),
+            atomic_combination: wire.atomic_combination,
+            restrictions: wire.restrictions,
+            penalty: wire.penalty,
+            taps_for_mana: wire.taps_for_mana,
+        })
+    }
 }
 
 impl ManaSourceSelection {
@@ -705,10 +756,26 @@ impl ManaSourceSelection {
             .cmp(&other.source)
             .then_with(|| self.ability_index.cmp(&other.ability_index))
             .then_with(|| self.mana_type.cmp(&other.mana_type))
+            .then_with(|| cmp_mana_source_output(self.output, other.output))
             .then_with(|| self.atomic_combination.cmp(&other.atomic_combination))
             .then_with(|| cmp_mana_restriction_slices(&self.restrictions, &other.restrictions))
             .then_with(|| cmp_mana_source_penalty(self.penalty, other.penalty))
             .then_with(|| cmp_taps_for_mana_slices(&self.taps_for_mana, &other.taps_for_mana))
+    }
+}
+
+fn cmp_mana_source_output(left: ManaSourceOutput, right: ManaSourceOutput) -> std::cmp::Ordering {
+    match (left, right) {
+        (ManaSourceOutput::Concrete(a), ManaSourceOutput::Concrete(b)) => a.cmp(&b),
+        (ManaSourceOutput::DeferredColorChoice, ManaSourceOutput::DeferredColorChoice) => {
+            std::cmp::Ordering::Equal
+        }
+        (ManaSourceOutput::Concrete(_), ManaSourceOutput::DeferredColorChoice) => {
+            std::cmp::Ordering::Less
+        }
+        (ManaSourceOutput::DeferredColorChoice, ManaSourceOutput::Concrete(_)) => {
+            std::cmp::Ordering::Greater
+        }
     }
 }
 

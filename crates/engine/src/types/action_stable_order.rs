@@ -227,6 +227,18 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             a0.cmp_stable(b0)
         }
+        GameAction::ActivateManaSource { selection: a0 } => {
+            let GameAction::ActivateManaSource { selection: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            a0.cmp_stable(b0)
+        }
+        GameAction::BackToManaPayment => {
+            let GameAction::BackToManaPayment = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            Ordering::Equal
+        }
         GameAction::UntapLandForMana { object_id: a0 } => {
             let GameAction::UntapLandForMana { object_id: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");

@@ -627,6 +627,7 @@ mod tests {
                 source: ObjectIncarnationRef::of(ObjectId(7), 3),
                 ability_index: None,
                 mana_type: ManaType::Green,
+                output: engine::types::mana::ManaSourceOutput::Concrete(ManaType::Green),
                 atomic_combination: None,
                 restrictions: Vec::new(),
                 penalty: ManaSourcePenalty::None,
@@ -651,6 +652,22 @@ mod tests {
             } => {
                 assert_eq!(restored_action, action);
             }
+            _ => panic!("wrong variant"),
+        }
+
+        let GameAction::TapLandForMana { selection } = action else {
+            unreachable!("fixture action is a land-mana selection");
+        };
+        let generic = GameAction::ActivateManaSource { selection };
+        let json = serde_json::to_string(&ClientMessage::Action {
+            action: generic.clone(),
+        })
+        .unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::Action {
+                action: restored_action,
+            } => assert_eq!(restored_action, generic),
             _ => panic!("wrong variant"),
         }
     }

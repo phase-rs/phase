@@ -256,6 +256,15 @@ pub enum GameAction {
     TapLandForMana {
         selection: ManaSourceSelection,
     },
+    /// CR 605.3a: Activate one exact engine-authored mana-source capability.
+    /// Unlike the legacy land-only action, this covers mana abilities on every
+    /// permanent type and preserves the selected output provenance.
+    ActivateManaSource {
+        selection: ManaSourceSelection,
+    },
+    /// Return from a sacrificial-mana choice to the exact saved payment state
+    /// without re-planning or mutating the mana pool.
+    BackToManaPayment,
     /// CR 605.3a: Undo a manual mana ability activation — untap source, remove produced mana.
     /// Only valid for lands in `lands_tapped_for_mana` whose mana hasn't been spent.
     UntapLandForMana {
@@ -1497,6 +1506,7 @@ impl GameAction {
         matches!(
             self,
             GameAction::TapLandForMana { .. }
+                | GameAction::ActivateManaSource { .. }
                 | GameAction::UntapLandForMana { .. }
                 // CR 118.3a: pinning/unpinning a pool unit is a mana-payment-window
                 // action; classifying it here keeps it out of AI priority-action
@@ -1551,6 +1561,7 @@ impl GameAction {
             | GameAction::CastSpellAsMadness { object_id, .. } => Some(*object_id),
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
             GameAction::TapLandForMana { selection } => Some(selection.source.object_id),
+            GameAction::ActivateManaSource { selection } => Some(selection.source.object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),
             // CR 118.3a: act on a pool pip, not a battlefield object.
             GameAction::SpendPoolMana { .. } | GameAction::UnspendPoolMana { .. } => None,
@@ -1588,6 +1599,7 @@ impl GameAction {
             | GameAction::ChooseReplacement { .. }
             | GameAction::OrderTriggers { .. }
             | GameAction::CancelCast
+            | GameAction::BackToManaPayment
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
@@ -1870,6 +1882,9 @@ mod tests {
                         },
                         ability_index: None,
                         mana_type: crate::types::mana::ManaType::Green,
+                        output: crate::types::mana::ManaSourceOutput::Concrete(
+                            crate::types::mana::ManaType::Green,
+                        ),
                         atomic_combination: None,
                         restrictions: Vec::new(),
                         penalty: crate::types::mana::ManaSourcePenalty::None,
