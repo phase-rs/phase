@@ -126,6 +126,7 @@ impl GameDb {
     /// Legacy persistence path retained while Full runtime callers migrate to
     /// generation-fenced snapshots. New lifecycle code must use
     /// [`Self::save_full_session`] instead.
+    #[cfg(test)]
     pub(crate) fn save_session(&self, game_code: &str, json: &str) -> rusqlite::Result<()> {
         let now = now_epoch();
         let conn = self.conn.lock().unwrap();
@@ -142,6 +143,7 @@ impl GameDb {
     }
 
     /// Load all persisted sessions. Returns (game_code, json) pairs.
+    #[cfg(test)]
     pub(crate) fn load_all(&self) -> rusqlite::Result<Vec<(String, String)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -163,6 +165,7 @@ impl GameDb {
 
     /// Legacy destructive removal retained until Full terminal finalization is
     /// routed through retirement tombstones.
+    #[cfg(test)]
     pub(crate) fn delete_session(&self, game_code: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
