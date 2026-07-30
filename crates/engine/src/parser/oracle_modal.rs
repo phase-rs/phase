@@ -3831,6 +3831,11 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             &non_self_trigger.partial_def.valid_source,
             Some(TargetFilter::Typed(_))
         ));
+        assert_eq!(
+            modal_relative_player_scope_for_trigger(non_self_trigger),
+            None,
+            "non-self damage triggers keep their established context"
+        );
         let Some(TriggerBody::Modal(non_self_modal)) = non_self_trigger.body.as_ref() else {
             panic!("non-self damage modal must retain nested mode payload");
         };
