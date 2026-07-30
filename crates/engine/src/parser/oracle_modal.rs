@@ -3149,7 +3149,14 @@ mod tests {
                     "{name}: migrated modal route may emit only native modal or spell IR"
                 );
             }
-            assert!(matches!(&ir.items[0].node, OracleNodeIr::Modal(_)));
+            assert!(
+                matches!(&ir.items[0].node, OracleNodeIr::Modal(_))
+                    || matches!(
+                        &ir.items[0].node,
+                        OracleNodeIr::Spell(ability) if ability.modal.is_some()
+                    ),
+                "{name}: header must retain native modal metadata"
+            );
             assert!(
                 ir.items.iter().skip(1).all(|item| matches!(
                     &item.node,
