@@ -21739,7 +21739,7 @@ mod tests {
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 36);
+        assert_eq!(variants.len(), 37);
     }
 
     #[test]
