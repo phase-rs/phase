@@ -3106,8 +3106,13 @@ mod tests {
 
         for (name, oracle, expected_lines, expected_mode_count) in cases {
             let types = vec!["Instant".to_string()];
-            let mut ir = parse_oracle_ir(oracle, name, &[], &types, &[]);
-            let span_source = oracle.replacen(name, "~", 1);
+            let card_name = if name == "Spree" {
+                "Spree Slot Witness"
+            } else {
+                name
+            };
+            let mut ir = parse_oracle_ir(oracle, card_name, &[], &types, &[]);
+            let span_source = oracle;
 
             assert_eq!(
                 ir.items.len(),
@@ -3122,10 +3127,7 @@ mod tests {
                     (*expected_line, *expected_line),
                     "{name}: source-order slot drift"
                 );
-                let expected_fragment = match (name, *expected_line) {
-                    ("Spree", 0) => "~ (Choose one or more additional costs.)",
-                    _ => oracle.lines().nth(*expected_line).unwrap(),
-                };
+                let expected_fragment = oracle.lines().nth(*expected_line).unwrap();
                 assert_eq!(
                     item.source.fragment(),
                     Some(expected_fragment),
@@ -3149,14 +3151,7 @@ mod tests {
                     "{name}: migrated modal route may emit only native modal or spell IR"
                 );
             }
-            assert!(
-                matches!(&ir.items[0].node, OracleNodeIr::Modal(_))
-                    || matches!(
-                        &ir.items[0].node,
-                        OracleNodeIr::Spell(ability) if ability.modal.is_some()
-                    ),
-                "{name}: header must retain native modal metadata"
-            );
+            assert!(matches!(&ir.items[0].node, OracleNodeIr::Modal(_)));
             assert!(
                 ir.items.iter().skip(1).all(|item| matches!(
                     &item.node,
