@@ -92,6 +92,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="Nightly AI gate drift"
+          if [ ! -s target/ai-gate-report.md ]; then
+            echo "AI gate failed without a drift report" >&2
+            exit 1
+          fi
           body="$(cat target/ai-gate-report.md)"
           existing="$(gh issue list --label ai-gate-drift --state open --json number --jq '.[0].number')"
           if [ -n "$existing" ]; then
@@ -180,6 +184,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="Nightly decision-cost perf drift"
+          if [ ! -s target/ai-perf-gate-report.md ]; then
+            echo "Decision-cost perf gate failed without a drift report" >&2
+            exit 1
+          fi
           body="$(cat target/ai-perf-gate-report.md)"
           existing="$(gh issue list --label ai-perf-drift --state open --json number --jq '.[0].number')"
           if [ -n "$existing" ]; then
