@@ -475,9 +475,7 @@ pub(crate) fn scope_to_unit(
             | OracleNodeIr::Static(_)
             | OracleNodeIr::Replacement(_)
             | OracleNodeIr::PreLoweredSpell(_)
-            | OracleNodeIr::PreLoweredTrigger(_)
-            | OracleNodeIr::PreLoweredStatic(_)
-            | OracleNodeIr::PreLoweredReplacement(_) => {}
+            | OracleNodeIr::PreLoweredTrigger(_) => {}
         }
     }
     scoped

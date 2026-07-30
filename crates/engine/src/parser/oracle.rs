@@ -1195,7 +1195,6 @@ fn try_split_and_cant_become_untapped(
 fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
     match &item.node {
         OracleNodeIr::Replacement(replacement_ir) => Some(&replacement_ir.definition),
-        OracleNodeIr::PreLoweredReplacement(def) => Some(def),
         _ => None,
     }
 }
@@ -1266,7 +1265,6 @@ fn item_trigger(item: &OracleItemIr) -> Option<Cow<'_, TriggerDefinition>> {
 fn item_static(item: &OracleItemIr) -> Option<&StaticDefinition> {
     match &item.node {
         OracleNodeIr::Static(ir) => Some(&ir.definition),
-        OracleNodeIr::PreLoweredStatic(def) => Some(def),
         _ => None,
     }
 }
@@ -3129,14 +3127,6 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                 result.triggers.push(def);
                 trigger_ids.push(item.id);
             }
-            OracleNodeIr::PreLoweredStatic(def) => {
-                result.statics.push(def.clone());
-                static_ids.push(item.id);
-            }
-            OracleNodeIr::PreLoweredReplacement(def) => {
-                result.replacements.push(def.clone());
-                replacement_ids.push(item.id);
-            }
             OracleNodeIr::PreLoweredSpell(def) => {
                 let mut def = def.clone();
                 stamp_printed_ability_slot(&mut def, result.abilities.len());
@@ -3851,10 +3841,6 @@ impl<'a> DocEmitter<'a> {
             },
         );
     }
-    fn trigger_at(&mut self, line: usize, def: TriggerDefinition) {
-        self.last_trigger = Some(def.clone());
-        self.emit_at(line, OracleNodeIr::PreLoweredTrigger(def));
-    }
     /// Mirrors `static_ir_at`: the peek mirror stores the LOWERED definition, so
     /// the peek reader is unchanged and no `source_text` is invented for a slot
     /// nothing reads it from. Lowering here is a clone (`lower_trigger_node_ir`
@@ -3862,10 +3848,6 @@ impl<'a> DocEmitter<'a> {
     fn trigger_ir_at(&mut self, line: usize, ir: TriggerNodeIr) {
         self.last_trigger = Some(lower_trigger_node_ir(&ir));
         self.emit_at(line, OracleNodeIr::Trigger(ir));
-    }
-    fn static_at(&mut self, line: usize, def: StaticDefinition) {
-        self.last_static = Some(def.clone());
-        self.emit_at(line, OracleNodeIr::PreLoweredStatic(def));
     }
     fn static_ir_at(&mut self, line: usize, ir: StaticIr) {
         self.last_static = Some(lower_static_ir(&ir));
@@ -3922,39 +3904,6 @@ impl<'a> DocEmitter<'a> {
         }
     }
 
-    /// Move every vector item a `&mut ParsedAbilities`-taking mutator just pushed
-    /// into the builder at `item_line`, then clear them. Used for the complex
-    /// cross-file mutators (modal / enters-replacement lowering) that the (B)
-    /// tuple-return design does NOT rewrite internally: they still push into a
-    /// scratch `ParsedAbilities`, and this drains that scratch into source-ordered
-    /// emission. `result`'s SINGLETON fields (modal/additional_cost/…) are left
-    /// untouched — the caller handles those.
-    fn drain_result_vectors(&mut self, item_line: usize, result: &mut ParsedAbilities) {
-        for def in std::mem::take(&mut result.abilities) {
-            self.ability_at(item_line, def);
-        }
-        for def in std::mem::take(&mut result.triggers) {
-            self.trigger_at(item_line, def);
-        }
-        for def in std::mem::take(&mut result.statics) {
-            self.static_at(item_line, def);
-        }
-        for def in std::mem::take(&mut result.replacements) {
-            self.replacement_at(item_line, def);
-        }
-        for kw in std::mem::take(&mut result.extracted_keywords) {
-            self.keyword_at(item_line, kw);
-        }
-        for r in std::mem::take(&mut result.casting_restrictions) {
-            self.casting_restriction_at(item_line, r);
-        }
-        for o in std::mem::take(&mut result.casting_options) {
-            self.casting_option_at(item_line, o);
-        }
-    }
-    fn replacement_at(&mut self, line: usize, def: ReplacementDefinition) {
-        self.emit_at(line, OracleNodeIr::PreLoweredReplacement(def));
-    }
     fn keyword_at(&mut self, line: usize, kw: Keyword) {
         self.emit_at(line, OracleNodeIr::Keyword(kw));
     }

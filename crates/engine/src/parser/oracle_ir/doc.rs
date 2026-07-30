@@ -452,10 +452,6 @@ pub(crate) enum OracleNodeIr {
     // -----------------------------------------------------------------------
     /// Pre-lowered trigger from a preprocessor. UNIT-4 DEBT.
     PreLoweredTrigger(TriggerDefinition),
-    /// Pre-lowered static from a preprocessor. UNIT-4 DEBT.
-    PreLoweredStatic(StaticDefinition),
-    /// Pre-lowered replacement from a preprocessor. UNIT-4 DEBT.
-    PreLoweredReplacement(ReplacementDefinition),
     /// Pre-lowered spell/activated ability from a preprocessor or dispatch path
     /// that constructs an `AbilityDefinition` directly. UNIT-4 DEBT.
     PreLoweredSpell(AbilityDefinition),
@@ -500,9 +496,7 @@ impl OracleNodeIr {
             | OracleNodeIr::CastingOption(_)
             | OracleNodeIr::SolveCondition(_)
             | OracleNodeIr::StriveCost(_)
-            | OracleNodeIr::PreLoweredTrigger(_)
-            | OracleNodeIr::PreLoweredStatic(_)
-            | OracleNodeIr::PreLoweredReplacement(_) => None,
+            | OracleNodeIr::PreLoweredTrigger(_) => None,
         }
     }
 
@@ -548,9 +542,7 @@ impl OracleNodeIr {
             | OracleNodeIr::CastingOption(_)
             | OracleNodeIr::SolveCondition(_)
             | OracleNodeIr::StriveCost(_)
-            | OracleNodeIr::PreLoweredTrigger(_)
-            | OracleNodeIr::PreLoweredStatic(_)
-            | OracleNodeIr::PreLoweredReplacement(_) => None,
+            | OracleNodeIr::PreLoweredTrigger(_) => None,
         }
     }
 }
@@ -1021,9 +1013,7 @@ impl OracleDocBuilder {
                 self.trigger_index += 1
             }
             OracleNodeIr::Static(_)
-            | OracleNodeIr::PreLoweredStatic(_)
             | OracleNodeIr::Replacement(_)
-            | OracleNodeIr::PreLoweredReplacement(_)
             | OracleNodeIr::Keyword(_)
             | OracleNodeIr::Modal(_)
             | OracleNodeIr::AdditionalCost(_)
