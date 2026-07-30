@@ -42,13 +42,27 @@ const TEST_ACTION_CAP: &str = "300";
 /// legitimate outcomes for a bounded-action-cap test game, and every one of
 /// them still prints a full `=== RESULT ===` block — `normalized_result_block`
 /// panics if that block is missing, which already catches an actual crash.
-fn run_ai_commander(args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_ai-commander"))
-        .arg(cards_dir())
-        .args(args)
-        .output()
-        .expect("spawn ai-commander");
+///
+/// `measurement` controls whether `PHASE_AI_MEASUREMENT=1` is set on the
+/// child process (D1's harness escape hatch, matching the `PHASE_DUMP_*` env
+/// convention). This is a process-level knob that `parse_cli` consults via
+/// the `measurement_env` parameter, forcing a solo route to
+/// `RunContext::Measurement`.
+fn run_ai_commander_with_context(args: &[&str], measurement: bool) -> String {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ai-commander"));
+    command.arg(cards_dir()).args(args);
+    if measurement {
+        command.env("PHASE_AI_MEASUREMENT", "1");
+    }
+    let output = command.output().expect("spawn ai-commander");
     String::from_utf8(output.stdout).expect("stdout is valid UTF-8")
+}
+
+/// Thin wrapper over [`run_ai_commander_with_context`] for call sites that
+/// don't care about run context -- preserves the pre-D1 behavior (always
+/// measurement) for them.
+fn run_ai_commander(args: &[&str]) -> String {
+    run_ai_commander_with_context(args, true)
 }
 
 /// Splits `stdout` into one chunk per game. Batch mode anchors on the
@@ -114,15 +128,22 @@ fn batched_third_game_matches_same_game_run_alone() {
     let prefix_a = "95000000";
     let prefix_b = "95000001";
 
-    // The target game run entirely alone (single-game mode).
-    let solo = run_ai_commander(&[
-        "--seed",
-        target_seed,
-        "--difficulty",
-        "Hard",
-        "--action-cap",
-        LEAK_REGRESSION_ACTION_CAP,
-    ]);
+    // The target game run entirely alone (single-game mode), explicitly
+    // under measurement: this is the re-derived invariant post-D1 -- a
+    // batch game (always Measurement) must match a solo game run under the
+    // same PHASE_AI_MEASUREMENT harness escape hatch, not a bare solo run
+    // (which routes to Interactive by default).
+    let solo = run_ai_commander_with_context(
+        &[
+            "--seed",
+            target_seed,
+            "--difficulty",
+            "Hard",
+            "--action-cap",
+            LEAK_REGRESSION_ACTION_CAP,
+        ],
+        true,
+    );
 
     // The SAME target game, but 3rd in a batch process that first played two
     // unrelated games — the exact configuration that leaked before the fix.
@@ -239,5 +260,64 @@ fn single_game_stdout_is_deterministic_and_preamble_is_pinned() {
     assert!(
         out1.starts_with(&expected_preamble),
         "single-game preamble format changed:\n{out1}"
+    );
+}
+
+/// D1 must-pass gate for B3: a plain single-game invocation (no
+/// `--games-file`, no `PHASE_AI_MEASUREMENT` override) must route to
+/// `RunContext::Interactive` and print the exact preamble marker
+/// `ExecutionMode: interactive` (lowercase literal, not `{:?}`), placed after
+/// the blank line that closes the existing pinned preamble (see
+/// `single_game_stdout_is_deterministic_and_preamble_is_pinned`'s
+/// `expected_preamble` -- that assertion is `starts_with`, so an appended
+/// marker line does not conflict with it; that constant must not be edited).
+#[test]
+#[ignore = "loads card-data.json + runs real games; opt in via --ignored"]
+fn single_game_default_route_prints_interactive_marker() {
+    let out = run_ai_commander_with_context(
+        &[
+            "--seed",
+            "9301",
+            "--difficulty",
+            "Easy",
+            "--action-cap",
+            TEST_ACTION_CAP,
+        ],
+        false,
+    );
+    assert!(
+        out.contains("ExecutionMode: interactive"),
+        "a plain single-game invocation must print the ExecutionMode: interactive marker line:
+{out}"
+    );
+}
+
+/// D1 must-pass gate for B3: a single-game invocation run under the
+/// `PHASE_AI_MEASUREMENT` harness escape hatch must route to
+/// `RunContext::Measurement` and print the exact preamble marker
+/// `ExecutionMode: measurement` (lowercase literal, not `{:?}`). Sibling of
+/// `single_game_default_route_prints_interactive_marker` -- together they
+/// pin both `RunContext` variants at the same call site so neither can
+/// silently regress. This is pod-lab's exact invocation shape (`runner.py`
+/// sets `PHASE_AI_MEASUREMENT=1` on every single-game call per D7), so a
+/// missing marker here is a live pod-lab tripwire failure, not a hypothetical.
+#[test]
+#[ignore = "loads card-data.json + runs real games; opt in via --ignored"]
+fn single_game_measurement_env_prints_measurement_marker() {
+    let out = run_ai_commander_with_context(
+        &[
+            "--seed",
+            "9301",
+            "--difficulty",
+            "Easy",
+            "--action-cap",
+            TEST_ACTION_CAP,
+        ],
+        true,
+    );
+    assert!(
+        out.contains("ExecutionMode: measurement"),
+        "a single-game invocation under PHASE_AI_MEASUREMENT=1 must print the ExecutionMode: measurement marker line:
+{out}"
     );
 }

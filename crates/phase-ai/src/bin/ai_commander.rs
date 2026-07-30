@@ -73,13 +73,91 @@ const GAME_THREAD_STACK_SIZE: usize = 32 << 20;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Harness escape hatch (pod-lab): forces the run into measurement mode
+    // even on the single-game route. Read exactly once, here, and threaded
+    // through as a plain `bool` — this repo's "no `set_var`" rule.
+    // `parse_cli` decides what to do with it.
+    // Contract: presence-based, matching PHASE_DUMP_*'s convention -- var
+    // set to any value (including "") counts as true, not `== "1"`. Presence
+    // only, so `var_os` (no Unicode validation needed for a bool check).
+    let measurement_env = std::env::var_os("PHASE_AI_MEASUREMENT").is_some();
 
-    let cards_path = args
-        .iter()
-        .skip(1)
-        .find(|a| !a.starts_with("--"))
-        .cloned()
-        .unwrap_or_else(|| "client/public".to_string());
+    let cli = match parse_cli(&args, measurement_env) {
+        Ok(cli) => cli,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Argument parsing and validation above needs no special stack; the actual
+    // game-driving work (both the single-game path and `--games-file` batch
+    // mode) does — see `GAME_THREAD_STACK_SIZE`. Spawning unconditionally
+    // (rather than only under `--games-file`) fixes the pre-existing
+    // single-game overflow too, not just the batch case.
+    let handle = std::thread::Builder::new()
+        .name("ai-commander-driver".to_string())
+        .stack_size(GAME_THREAD_STACK_SIZE)
+        .spawn(move || run(cli))
+        .expect("failed to spawn game-driving thread");
+
+    // A non-batch (`games_file.is_none()`) game that panics is NOT caught (see
+    // `run`'s doc) — it unwinds only the spawned thread, which by itself would
+    // leave the process silently exiting 0. Detect that here and exit 101, the
+    // same code an uncaught panic on the plain main thread would have produced
+    // before this thread split existed, so a caller keying off exit status sees
+    // an unmistakable failure either way.
+    let exit_code = handle.join().unwrap_or(101);
+    std::process::exit(exit_code);
+}
+
+/// Bundles the parsed CLI arguments `run` needs. A plain struct (not more
+/// positional params on `run`) so the seam between "parse args" (plain main
+/// thread) and "drive games" (large-stack spawned thread) stays one value to
+/// move across the `thread::spawn` boundary, not eight.
+struct CliArgs {
+    cards_path: String,
+    feed: String,
+    seed: u64,
+    difficulty: AiDifficulty,
+    seat_difficulty: [Option<AiDifficulty>; 4],
+    action_cap: usize,
+    games_file: Option<String>,
+    batch_games: Option<Vec<(u64, AiDifficulty)>>,
+    watch_cards: HashSet<String>,
+    run_context: RunContext,
+}
+
+/// Which execution mode every seat's `AiConfig` should run under for a given
+/// process (see `build_seat_config`). `Measurement` disables the wall-clock
+/// search deadline so every decision is a pure function of the game's inputs
+/// (see `build_seat_config`'s doc for why that matters); `Interactive` leaves
+/// the deadline in place.
+///
+/// Route table (`parse_cli`): `--games-file` (batch) always resolves to
+/// `Measurement` (the cross-game wall-clock-deadline leak fix, see
+/// `build_seat_config`'s doc, applies regardless of the env override). A
+/// solo invocation resolves to `Interactive` by default, unless the
+/// `PHASE_AI_MEASUREMENT` harness escape hatch forces it to `Measurement`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunContext {
+    Interactive,
+    Measurement,
+}
+
+/// Pure argument parser: consumes the raw process args plus the one
+/// env-derived flag `main` reads once (`measurement_env`, from
+/// `PHASE_AI_MEASUREMENT` -- presence-based, matching `PHASE_DUMP_*`
+/// convention, not `== "1"`) and returns either a fully resolved `CliArgs`
+/// or an error message ready for the caller to print verbatim before exiting
+/// with status 1. Contains the entire pre-`run` pre-pass (positional
+/// `cards_path` resolution, the flag loop, and `--games-file` validation)
+/// that used to live directly in `main`, so `main` itself does nothing but
+/// read the env var, call this, and report success/failure. Never calls
+/// `std::process::exit` itself -- every error path here becomes an `Err`
+/// instead, exactly mirroring the direct-exit message each replaces.
+fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> {
+    let mut cards_path: Option<String> = None;
 
     let mut seed: u64 = 42;
     let mut difficulty = AiDifficulty::Easy;
@@ -120,10 +198,7 @@ fn main() {
             }
             "--games-file" => match args_iter.next() {
                 Some(v) => games_file = Some(v.clone()),
-                None => {
-                    eprintln!("error: --games-file requires a path");
-                    std::process::exit(1);
-                }
+                None => return Err("error: --games-file requires a path".to_string()),
             },
             "--watch-cards" => match args_iter.next() {
                 Some(v) => {
@@ -135,8 +210,10 @@ fn main() {
                         .collect();
                 }
                 None => {
-                    eprintln!("error: --watch-cards requires a comma-separated card name list");
-                    std::process::exit(1);
+                    return Err(
+                        "error: --watch-cards requires a comma-separated card name list"
+                            .to_string(),
+                    );
                 }
             },
             other => {
@@ -150,41 +227,54 @@ fn main() {
                     let value = args_iter.next().map(String::as_str);
                     match parse_seat_override(suffix, value) {
                         Ok((idx, label)) => seat_difficulty[idx] = Some(parse_difficulty(label)),
-                        Err(e) => {
-                            eprintln!("{e}");
-                            std::process::exit(1);
-                        }
+                        Err(e) => return Err(e),
+                    }
+                } else if !other.starts_with("--") {
+                    // F4: first non-`--`-prefixed token is the positional
+                    // `cards_path`. This arm only sees tokens that were NOT
+                    // consumed as a value by one of the flag arms above, so a
+                    // preceding `--flag value` pair's value can never land
+                    // here mistaken for the positional path. A bare unknown
+                    // `--flag` (still starts with `--`) falls through this
+                    // `else if` and is silently ignored without consuming the
+                    // next token, so it can't eat the real positional either.
+                    if cards_path.is_none() {
+                        cards_path = Some(other.to_string());
                     }
                 }
             }
         }
     }
 
+    let cards_path = cards_path.unwrap_or_else(|| "client/public".to_string());
+
     // `--games-file` batch entries are validated up front — same hard-fail-at-
     // startup discipline as `parse_difficulty`/`parse_action_cap`/
     // `parse_seat_override` above: a garbled batch file should fail before the
     // ~1.8s database load, not silently skip or misinterpret one line mid-batch.
-    let batch_games: Option<Vec<(u64, AiDifficulty)>> =
-        games_file
-            .as_deref()
-            .map(|path| match parse_games_file(path) {
-                Ok(games) if games.is_empty() => {
-                    eprintln!("error: --games-file {path:?} contains no games");
-                    std::process::exit(1);
-                }
-                Ok(games) => games,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            });
+    let batch_games: Option<Vec<(u64, AiDifficulty)>> = match games_file.as_deref() {
+        None => None,
+        Some(path) => match parse_games_file(path) {
+            Ok(games) if games.is_empty() => {
+                return Err(format!("error: --games-file {path:?} contains no games"));
+            }
+            Ok(games) => Some(games),
+            Err(e) => return Err(format!("error: {e}")),
+        },
+    };
 
-    // Argument parsing and validation above needs no special stack; the actual
-    // game-driving work (both the single-game path and `--games-file` batch
-    // mode) does — see `GAME_THREAD_STACK_SIZE`. Spawning unconditionally
-    // (rather than only under `--games-file`) fixes the pre-existing
-    // single-game overflow too, not just the batch case.
-    let cli = CliArgs {
+    // F3 route table: `--games-file` (batch) always runs every seat in
+    // Measurement mode (cross-game wall-clock-deadline leak fix, see
+    // `build_seat_config`'s doc). A solo invocation defaults to Interactive
+    // (real wall-clock deadline preserved) unless the `PHASE_AI_MEASUREMENT`
+    // harness escape hatch forces it to Measurement too.
+    let run_context = if batch_games.is_some() || measurement_env {
+        RunContext::Measurement
+    } else {
+        RunContext::Interactive
+    };
+
+    Ok(CliArgs {
         cards_path,
         feed,
         seed,
@@ -194,37 +284,8 @@ fn main() {
         games_file,
         batch_games,
         watch_cards,
-    };
-    let handle = std::thread::Builder::new()
-        .name("ai-commander-driver".to_string())
-        .stack_size(GAME_THREAD_STACK_SIZE)
-        .spawn(move || run(cli))
-        .expect("failed to spawn game-driving thread");
-
-    // A non-batch (`games_file.is_none()`) game that panics is NOT caught (see
-    // `run`'s doc) — it unwinds only the spawned thread, which by itself would
-    // leave the process silently exiting 0. Detect that here and exit 101, the
-    // same code an uncaught panic on the plain main thread would have produced
-    // before this thread split existed, so a caller keying off exit status sees
-    // an unmistakable failure either way.
-    let exit_code = handle.join().unwrap_or(101);
-    std::process::exit(exit_code);
-}
-
-/// Bundles the parsed CLI arguments `run` needs. A plain struct (not more
-/// positional params on `run`) so the seam between "parse args" (plain main
-/// thread) and "drive games" (large-stack spawned thread) stays one value to
-/// move across the `thread::spawn` boundary, not eight.
-struct CliArgs {
-    cards_path: String,
-    feed: String,
-    seed: u64,
-    difficulty: AiDifficulty,
-    seat_difficulty: [Option<AiDifficulty>; 4],
-    action_cap: usize,
-    games_file: Option<String>,
-    batch_games: Option<Vec<(u64, AiDifficulty)>>,
-    watch_cards: HashSet<String>,
+        run_context,
+    })
 }
 
 /// Shared immutable inputs for one or more AI-commander game runs.
@@ -237,6 +298,7 @@ struct GameRunContext<'a> {
     dump_log_path: Option<&'a str>,
     dump_actions_path: Option<&'a str>,
     watch_cards: &'a HashSet<String>,
+    run_context: RunContext,
 }
 
 /// Everything that isn't argument parsing: loads the card database and feed
@@ -256,6 +318,7 @@ fn run(cli: CliArgs) -> i32 {
         games_file,
         batch_games,
         watch_cards,
+        run_context,
     } = cli;
 
     let export_path = PathBuf::from(&cards_path).join("card-data.json");
@@ -295,6 +358,16 @@ fn run(cli: CliArgs) -> i32 {
         None => println!("Seed: {seed}   Difficulty: {difficulty:?}"),
     }
     println!();
+    // D1 must-pass gate for B3: pod-lab's harness greps for this exact
+    // lowercase literal (not `{run_context:?}`) to distinguish a solo
+    // Interactive-route game from a Measurement-route one. Appended after
+    // the blank line that closes the pre-existing pinned preamble (see
+    // `single_game_stdout_is_deterministic_and_preamble_is_pinned`'s
+    // `starts_with` assertion), so it never conflicts with that pin.
+    match run_context {
+        RunContext::Interactive => println!("ExecutionMode: interactive"),
+        RunContext::Measurement => println!("ExecutionMode: measurement"),
+    }
 
     let mut deck_lists: Vec<PlayerDeckList> = Vec::new();
     // Commander names are populated in PlayerDeckList.commander and resolved
@@ -392,6 +465,7 @@ fn run(cli: CliArgs) -> i32 {
         dump_log_path: dump_log_path.as_deref(),
         dump_actions_path: dump_actions_path.as_deref(),
         watch_cards: &watch_cards,
+        run_context,
     };
 
     match batch_games {
@@ -446,6 +520,7 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
         dump_log_path,
         dump_actions_path,
         watch_cards,
+        run_context,
     } = *context;
     let mut state = build_game_state(db, payload, seed);
 
@@ -464,7 +539,10 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     for (i, override_diff) in seat_difficulty.iter().enumerate() {
         let seat_diff = override_diff.unwrap_or(difficulty);
         println!("  P{i}  difficulty={seat_diff:?}");
-        ai_configs.insert(PlayerId(i as u8), build_seat_config(seat_diff, seed));
+        ai_configs.insert(
+            PlayerId(i as u8),
+            build_seat_config(seat_diff, seed, run_context),
+        );
     }
     println!();
 
@@ -990,8 +1068,19 @@ fn build_game_state(db: &CardDatabase, payload: &DeckPayload, seed: u64) -> Game
 /// game's inputs; the value inside `ExecutionMode::Measurement { seed }` only
 /// tags the mode — the search's determinization entropy is derived from game
 /// state (`search.rs`), not from this seed.
-fn build_seat_config(difficulty: AiDifficulty, seed: u64) -> AiConfig {
-    create_config_for_players(difficulty, Platform::Native, 4).into_measurement(seed)
+///
+/// `run_context` (see its doc) is a required parameter, not an implicit
+/// always-on: `RunContext::Measurement` calls `.into_measurement(seed)` as
+/// before; `RunContext::Interactive` leaves the wall-clock deadline in
+/// place. `parse_cli` constructs `RunContext::Interactive` for a solo
+/// invocation with no measurement override, and `RunContext::Measurement`
+/// for `--games-file` batches or the `PHASE_AI_MEASUREMENT` override.
+fn build_seat_config(difficulty: AiDifficulty, seed: u64, run_context: RunContext) -> AiConfig {
+    let config = create_config_for_players(difficulty, Platform::Native, 4);
+    match run_context {
+        RunContext::Measurement => config.into_measurement(seed),
+        RunContext::Interactive => config,
+    }
 }
 
 #[cfg(test)]
@@ -1137,13 +1226,37 @@ mod tests {
             AiDifficulty::Hard,
             AiDifficulty::VeryHard,
         ] {
-            let config = build_seat_config(difficulty, 95_000_004);
+            let config = build_seat_config(difficulty, 95_000_004, RunContext::Measurement);
             assert!(
                 config.execution_mode.is_measurement(),
                 "{difficulty:?} seat must run in measurement mode so a batched \
                  game is bit-identical to the same game run solo; interactive \
                  mode makes search wall-clock-dependent and non-reproducible \
                  under batch load"
+            );
+        }
+    }
+
+    /// Companion to the assertion above: `Interactive` must leave the
+    /// wall-clock deadline in place (i.e. NOT call `into_measurement`).
+    /// `parse_cli` constructs `RunContext::Interactive` for the default solo
+    /// route; pinning both directions here means routing can't silently
+    /// collapse `Interactive` into `Measurement` (or vice versa) without a
+    /// red test.
+    #[test]
+    fn seat_config_leaves_interactive_mode_wall_clock_bounded() {
+        for difficulty in [
+            AiDifficulty::Easy,
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+        ] {
+            let config = build_seat_config(difficulty, 95_000_004, RunContext::Interactive);
+            assert!(
+                !config.execution_mode.is_measurement(),
+                "{difficulty:?} seat under RunContext::Interactive must NOT run in \
+                 measurement mode; collapsing it into Measurement would defeat the \
+                 whole point of having the two variants"
             );
         }
     }
@@ -1406,6 +1519,96 @@ mod tests {
         // stop game 3 (or anything) from running. This is the direct proof
         // that one bad game can't take down the rest of the batch.
         assert_eq!(*seen.lock().unwrap(), games);
+    }
+
+    /// D1 route table: a bare solo invocation with no `--games-file` and no
+    /// measurement env override resolves to `RunContext::Interactive`.
+    #[test]
+    fn parse_cli_solo_invocation_routes_to_interactive() {
+        let args = vec!["ai-commander".to_string(), "client/public".to_string()];
+        let cli = parse_cli(&args, false).expect("solo invocation must parse");
+        assert_eq!(
+            cli.run_context,
+            RunContext::Interactive,
+            "a solo (non-games-file) invocation with no measurement env override must route to RunContext::Interactive"
+        );
+    }
+
+    /// D1 route table: `--games-file` invocations must resolve to
+    /// `RunContext::Measurement`.
+    #[test]
+    fn parse_cli_games_file_invocation_routes_to_measurement() {
+        let path = temp_games_file_path("parse_cli_route_games_file");
+        let _guard = TempFileGuard(path.clone());
+        std::fs::write(
+            &path,
+            "1009,Easy
+",
+        )
+        .unwrap();
+        let args = vec![
+            "ai-commander".to_string(),
+            "--games-file".to_string(),
+            path.to_str().unwrap().to_string(),
+        ];
+        let cli = parse_cli(&args, false).expect("games-file invocation must parse");
+        assert_eq!(cli.run_context, RunContext::Measurement);
+    }
+
+    /// D1 route table: the `PHASE_AI_MEASUREMENT` harness escape hatch forces
+    /// a solo (non-games-file) invocation to `RunContext::Measurement`.
+    #[test]
+    fn parse_cli_measurement_env_forces_measurement_on_solo() {
+        let args = vec!["ai-commander".to_string(), "client/public".to_string()];
+        let cli = parse_cli(&args, true).expect("solo invocation must parse");
+        assert_eq!(cli.run_context, RunContext::Measurement);
+    }
+
+    /// F4: the positional `cards_path` scan must not be poisoned by the
+    /// *value* of any preceding `--flag value` pair (e.g. `--seed 42
+    /// some/path` must resolve `cards_path` to `"some/path"`, not `"42"`).
+    /// Table-driven over every flag that takes a value.
+    #[test]
+    fn parse_cli_positional_cards_path_survives_preceding_flag_value() {
+        let rows: &[&[&str]] = &[
+            &["--seed", "42", "some/path"],
+            &["--feed", "x.json", "some/path"],
+            &["--action-cap", "5", "some/path"],
+            &["--difficulty", "Easy", "some/path"],
+        ];
+        for row in rows {
+            let mut args = vec!["ai-commander".to_string()];
+            args.extend(row.iter().map(|s| s.to_string()));
+            let cli = parse_cli(&args, false).expect("row must parse");
+            assert_eq!(
+                cli.cards_path, "some/path",
+                "row {row:?}: positional cards_path must survive a preceding --flag value pair (F4)"
+            );
+        }
+    }
+
+    /// F4 companion (green today, and a real pin): an *unknown* bare flag
+    /// (no recognized value-consuming arm) must not eat the following
+    /// positional arg. Guards against a naive single-loop F4 fix that
+    /// assumes every `--flag` consumes the next token.
+    #[test]
+    fn parse_cli_bare_unknown_flag_does_not_consume_positional_path() {
+        let args = vec![
+            "ai-commander".to_string(),
+            "--foo".to_string(),
+            "some/path".to_string(),
+        ];
+        let cli = parse_cli(&args, false).expect("row must parse");
+        assert_eq!(cli.cards_path, "some/path");
+    }
+
+    /// F4 companion (green today): with no positional arg at all,
+    /// `cards_path` must default to `client/public`.
+    #[test]
+    fn parse_cli_defaults_cards_path_to_client_public_when_no_positional() {
+        let args = vec!["ai-commander".to_string()];
+        let cli = parse_cli(&args, false).expect("bare invocation must parse");
+        assert_eq!(cli.cards_path, "client/public");
     }
 
     #[test]
