@@ -687,6 +687,22 @@ pub(crate) fn mark_pending_continuation_parent(state: &mut GameState, kind: Effe
 /// All `pending_continuation.take()` sites should use this helper rather
 /// than rolling their own `take + resolve_ability_chain`, so the parent
 /// event is never silently dropped.
+fn restore_continuation_trigger_firing(
+    state: &mut GameState,
+    continuation_firing: Option<crate::types::identifiers::TriggerFiring>,
+) {
+    match (state.resolving_trigger_firing, continuation_firing) {
+        // A paused triggered ability retains its live classification until the
+        // next stack resolution. A missing or disagreeing continuation carrier
+        // must not erase that delayed identity; decoded state rejects either
+        // malformed shape through `validate_trigger_firing_coherence`.
+        (Some(live), Some(stashed)) if live != stashed => {}
+        (Some(_), _) => {}
+        (None, Some(stashed)) => state.resolving_trigger_firing = Some(stashed),
+        (None, None) => {}
+    }
+}
+
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
     counters::drain_pending_counter_moves(state, events);
     counters::drain_pending_counter_removals(state, events);
@@ -744,7 +760,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             parent_kind,
             search_attach_host,
             trigger_context,
+            trigger_firing,
         } = cont;
+        restore_continuation_trigger_firing(state, trigger_firing);
         state.resolving_continuation_attach_host = search_attach_host;
         let source_id = chain.source_id;
         // CR 608.2: replay the resolving ability's snapshotted trigger
@@ -1613,6 +1631,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             parent_kind,
             search_attach_host,
             trigger_context,
+            trigger_firing,
         } = existing;
         super::ability_utils::append_to_sub_chain(&mut head, *chain);
         state.push_ability_continuation(AbilityContinuationFrame {
@@ -1624,6 +1643,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
                 // ability's resolution is anchored to its earliest pause, not
                 // re-latched to whatever is live at splice time.
                 trigger_context,
+                trigger_firing,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
@@ -2221,6 +2241,7 @@ fn try_begin_reflexive_target_selection_inner(
             events,
         );
         state.pending_trigger = Some(Box::new(pending_for_state));
+        state.pending_trigger_firing = Some(crate::types::identifiers::TriggerFiring::Ordinary);
         state.pending_trigger_entry = Some(entry_id);
 
         match crate::game::engine::begin_pending_trigger_target_selection(state)
@@ -2314,6 +2335,7 @@ fn try_begin_reflexive_target_selection_inner(
         events,
     );
     state.pending_trigger = Some(Box::new(pending_for_state));
+    state.pending_trigger_firing = Some(crate::types::identifiers::TriggerFiring::Ordinary);
     state.pending_trigger_entry = Some(entry_id);
     // CR 115.1d + CR 603.3d: the reflexive triggered ability is on the stack
     // before targets are chosen; finalization mutates this pending entry once
@@ -12109,7 +12131,10 @@ mod tests {
         AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, LKISnapshot, LinkedExileSnapshot,
         MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
-    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+    use crate::types::identifiers::{
+        CardId, DelayedTriggerInstanceId, DelayedTriggerProvenance, DelayedTriggerToken, ObjectId,
+        TrackedSetId, TriggerFiring,
+    };
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
@@ -12127,6 +12152,31 @@ mod tests {
     // that much damage. Before the fix the returned card was not bound as the
     // earlier-instruction referent (only PUBLIC-zone moves were), so the damage
     // resolved to 0.
+    #[test]
+    fn continuation_resume_preserves_live_delayed_trigger_firing() {
+        let mut state = GameState::new_two_player(42);
+        let live = TriggerFiring::Delayed(Some(DelayedTriggerProvenance {
+            token: DelayedTriggerToken(7),
+            instance: DelayedTriggerInstanceId(11),
+            source_id: ObjectId(13),
+        }));
+        state.resolving_trigger_firing = Some(live);
+
+        restore_continuation_trigger_firing(&mut state, None);
+        assert_eq!(
+            state.resolving_trigger_firing,
+            Some(live),
+            "a missing continuation carrier must not erase active delayed identity"
+        );
+
+        restore_continuation_trigger_firing(&mut state, Some(TriggerFiring::Ordinary));
+        assert_eq!(
+            state.resolving_trigger_firing,
+            Some(live),
+            "a disagreeing continuation carrier must not overwrite active delayed identity"
+        );
+    }
+
     #[test]
     fn volcanic_vision_deals_returned_cards_mana_value_after_return_to_hand() {
         use crate::game::scenario::{GameScenario, P0, P1};

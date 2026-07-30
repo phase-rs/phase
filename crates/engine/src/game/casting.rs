@@ -4794,6 +4794,20 @@ fn casting_variant_choice_set(
     }
 }
 
+/// Return the current legal cast-variant options for an object.
+///
+/// This is the same freshly prepared option set that the cast-choice handler
+/// validates before it commits a selected variant (CR 601.2b). Read-only AI
+/// consumers use it to reject stale displayed prompts rather than recreating
+/// casting-variant legality.
+pub fn current_casting_variant_choice_options(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<CastingVariantChoiceOption> {
+    casting_variant_choice_set(state, player, object_id, None).options
+}
+
 fn casting_variant_candidates(
     state: &GameState,
     player: PlayerId,
@@ -10323,7 +10337,7 @@ pub fn handle_cast_spell_with_payment_mode(
     // CR 707.10: `resolving_stack_entry` may intentionally persist after a
     // resolution for deferred self-copy choices, but a fresh normal cast starts
     // a new stack-object announcement outside that old resolution context.
-    state.resolving_stack_entry = None;
+    super::stack::clear_resolving_stack_entry(state);
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
 

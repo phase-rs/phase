@@ -141,6 +141,7 @@ pub fn eliminate_players_simultaneously(
         state.pending_trigger_order = None;
         state.deferred_triggers.clear();
         state.pending_trigger = None;
+        state.pending_trigger_firing = None;
         state.pending_trigger_entry = None;
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
@@ -762,6 +763,7 @@ fn do_eliminate(
     {
         state.pending_trigger_entry = None;
         state.pending_trigger = None;
+        state.pending_trigger_firing = None;
         state.pending_trigger_event_batch.clear();
     }
 
@@ -1065,7 +1067,7 @@ fn abandon_source_bound_resolution_prompt(state: &mut GameState, player: PlayerI
     let _ = state
         .clear_active_ability_continuation()
         .expect("elimination cannot clear a buried ability continuation");
-    state.resolving_stack_entry = None;
+    crate::game::stack::clear_resolving_stack_entry(state);
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
     state.waiting_for = WaitingFor::Priority {
@@ -1095,7 +1097,7 @@ fn abandon_change_zone_family_for_controller(state: &mut GameState, player: Play
     let _ = state
         .clear_active_ability_continuation()
         .expect("elimination cannot clear a buried ability continuation");
-    state.resolving_stack_entry = None;
+    crate::game::stack::clear_resolving_stack_entry(state);
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
     state.waiting_for = WaitingFor::Priority {

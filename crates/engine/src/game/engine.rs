@@ -7607,7 +7607,7 @@ fn apply_action(
                 description: Some("Miracle — you may cast this card".to_string()),
                 may_trigger_origin: None,
                 subject_match_count: None,
-                die_result: None,
+        die_result: None,
             };
             super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
 
@@ -8584,6 +8584,7 @@ fn apply_action(
                     }
                 }
             } else if let Some(mut pending_trigger) = state.pending_trigger.take() {
+                state.pending_trigger_firing = None;
                 // CR 601.2d + CR 603.3d: Triggered abilities divide effects
                 // while being put on the stack. The chosen per-target amounts
                 // are resolution data on the resolved ability. The entry is
@@ -8917,6 +8918,7 @@ fn apply_retarget(
 pub(super) fn drop_mid_construction_pending_trigger(state: &mut GameState) {
     super::stack::pop_uncommitted_pending_trigger_entry(state);
     state.pending_trigger = None;
+    state.pending_trigger_firing = None;
 }
 
 /// Clear optionality after the controller accepts a "you may choose N" gate so
@@ -9012,6 +9014,7 @@ pub(super) fn begin_pending_trigger_target_selection(
             ) else {
                 super::stack::pop_uncommitted_pending_trigger_entry(state);
                 state.pending_trigger = None;
+                state.pending_trigger_firing = None;
                 return Ok(None);
             };
 
@@ -9031,6 +9034,7 @@ pub(super) fn begin_pending_trigger_target_selection(
             if modal.selection.is_random() {
                 super::stack::pop_uncommitted_pending_trigger_entry(state);
                 state.pending_trigger = None;
+                state.pending_trigger_firing = None;
                 return Ok(None);
             }
 

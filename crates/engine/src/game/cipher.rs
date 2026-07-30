@@ -24,10 +24,7 @@
 //! later cipher spell can re-encode onto the same creature (CR 702.99); each
 //! encode is an independent link.
 
-use super::triggers::{
-    trigger_source_context_for_latch, PendingTrigger, PendingTriggerContext,
-    PendingTriggerDispatchOrigin,
-};
+use super::triggers::{trigger_source_context_for_latch, PendingTrigger, PendingTriggerContext};
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{Effect, ResolvedAbility, TargetFilter, TargetRef};
 use crate::types::card_type::CoreType;
@@ -271,24 +268,20 @@ fn recast_trigger(
     ability.optional = true;
     ability.set_trigger_source_recursive(source_context);
 
-    PendingTriggerContext {
-        pending: PendingTrigger {
-            source_id: creature_id,
-            controller,
-            condition: None,
-            ability: Box::new(ability),
-            timestamp: 0,
-            target_constraints: Vec::new(),
-            distribute: None,
-            trigger_event: Some(event.clone()),
-            modal: None,
-            mode_abilities: Vec::new(),
-            description: Some("Cipher — cast a copy of the encoded card".to_string()),
-            may_trigger_origin: None,
-            subject_match_count: None,
-            die_result: None,
-        },
-        trigger_events: vec![event.clone()],
-        dispatch_origin: PendingTriggerDispatchOrigin::Normal,
-    }
+    PendingTriggerContext::single(PendingTrigger {
+        source_id: creature_id,
+        controller,
+        condition: None,
+        ability: Box::new(ability),
+        timestamp: 0,
+        target_constraints: Vec::new(),
+        distribute: None,
+        trigger_event: Some(event.clone()),
+        modal: None,
+        mode_abilities: Vec::new(),
+        description: Some("Cipher — cast a copy of the encoded card".to_string()),
+        may_trigger_origin: None,
+        subject_match_count: None,
+        die_result: None,
+    })
 }

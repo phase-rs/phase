@@ -629,7 +629,7 @@ fn park_search_observer_triggers(
     if state.active_ability_continuation().is_none()
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
-        state.resolving_stack_entry = None;
+        super::stack::clear_resolving_stack_entry(state);
         // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
         state.resolution_source_relatch = None;
     }

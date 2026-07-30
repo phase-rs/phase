@@ -291,6 +291,7 @@ pub(super) fn resolve_random_modal_trigger(
         // clear the cursor here.
         super::stack::pop_uncommitted_pending_trigger_entry(state);
         state.pending_trigger = None;
+        state.pending_trigger_firing = None;
         return Ok(None);
     };
 

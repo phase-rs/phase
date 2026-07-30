@@ -385,10 +385,81 @@ pub struct DerivedViews {
 /// to avoid an O(n) clone of `state.objects` and other owned collections
 /// (GameState is not rpds-backed at the top level). The wire shape is
 /// `{ state: <GameState>, derived: <DerivedViews> }`.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct ClientGameStateRef<'a> {
     pub state: &'a GameState,
     pub derived: DerivedViews,
+}
+
+impl Serialize for ClientGameStateRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct ClientGameStateEnvelope<'a> {
+            state: &'a serde_json::Value,
+            derived: &'a DerivedViews,
+        }
+
+        let state = client_state_wire_value(self.state).map_err(serde::ser::Error::custom)?;
+        ClientGameStateEnvelope {
+            state: &state,
+            derived: &self.derived,
+        }
+        .serialize(serializer)
+    }
+}
+
+/// Produces the client-only state representation without changing the trusted
+/// persistence schema of [`GameState`]. Delayed-trigger receipts and their
+/// allocators authorize replay/transition handling; clients receive neither
+/// those private capabilities nor the resolved journal that contains them.
+fn client_state_wire_value(state: &GameState) -> serde_json::Result<serde_json::Value> {
+    let mut value = serde_json::to_value(state)?;
+    let Some(root) = value.as_object_mut() else {
+        return Ok(value);
+    };
+
+    root.remove("next_delayed_trigger_token");
+    root.remove("next_delayed_trigger_instance");
+    root.remove("pending_trigger_firing");
+    root.remove("stack_trigger_firings");
+    root.remove("resolving_trigger_firing");
+    root.remove("resolved_rules_journal");
+
+    redact_private_trigger_firing(&mut value);
+
+    Ok(value)
+}
+
+/// Removes every private firing/provenance carrier recursively. Resolution
+/// frames evolve frequently, so redacting only named queue paths would leak a
+/// newly nested continuation without any compiler signal.
+fn redact_private_trigger_firing(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for key in [
+                "provenance",
+                "firing",
+                "firing_classification",
+                "trigger_firing",
+                "stack_trigger_firings",
+                "resolving_trigger_firing",
+            ] {
+                object.remove(key);
+            }
+            for child in object.values_mut() {
+                redact_private_trigger_firing(child);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                redact_private_trigger_firing(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 impl<'a> ClientGameStateRef<'a> {
@@ -1420,18 +1491,22 @@ mod tests {
     use super::*;
     use crate::game::combat::CombatState;
     use crate::game::game_object::DisplaySource;
+    use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Duration, Effect, ModalChoice, ResolvedAbility, RestrictionExpiry, StaticCondition,
-        TargetFilter, TargetRef,
+        DelayedTriggerCondition, Duration, Effect, ModalChoice, ResolvedAbility, RestrictionExpiry,
+        StaticCondition, TargetFilter, TargetRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot,
-        WaitingFor, ZoneChangeRecord,
+        CommanderDamageEntry, DelayedTrigger, PendingCast, StackEntry, StackEntryKind,
+        StackPaidSnapshot, TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
     };
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{
+        CardId, DelayedTriggerInstanceId, DelayedTriggerProvenance, DelayedTriggerToken,
+        TriggerFiring,
+    };
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
     use crate::types::statics::ActivationExemption;
@@ -2561,6 +2636,164 @@ mod tests {
             .get(&PlayerId(1))
             .expect("P1 entry survives round-trip");
         assert_eq!(from_p1[0].damage, 14);
+    }
+
+    #[test]
+    fn client_wire_omits_private_delayed_trigger_authority() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(3_002),
+            PlayerId(0),
+            "Delayed source".into(),
+            Zone::Battlefield,
+        );
+        let provenance = DelayedTriggerProvenance {
+            token: DelayedTriggerToken(17),
+            instance: DelayedTriggerInstanceId(23),
+            source_id: source,
+        };
+        state.next_delayed_trigger_token = 18;
+        state.next_delayed_trigger_instance = 24;
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Upkeep,
+            },
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "client-wire fixture".into(),
+                    description: None,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            )),
+            controller: PlayerId(0),
+            source_id: source,
+            one_shot: true,
+            provenance: Some(provenance),
+        });
+        state
+            .stack_trigger_firings
+            .insert(ObjectId(999), TriggerFiring::Delayed(Some(provenance)));
+        state.resolving_trigger_firing = Some(TriggerFiring::Delayed(Some(provenance)));
+        let delayed_pending_context = || {
+            PendingTriggerContext::delayed_for_test(
+                PendingTrigger {
+                    source_id: source,
+                    controller: PlayerId(0),
+                    condition: None,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::Unimplemented {
+                            name: "delayed queue fixture".into(),
+                            description: None,
+                        },
+                        Vec::new(),
+                        source,
+                        PlayerId(0),
+                    )),
+                    timestamp: 0,
+                    target_constraints: Vec::new(),
+                    distribute: None,
+                    trigger_event: None,
+                    modal: None,
+                    mode_abilities: Vec::new(),
+                    description: None,
+                    may_trigger_origin: None,
+                    subject_match_count: None,
+                    die_result: None,
+                },
+                provenance,
+            )
+        };
+        state.pending_trigger = Some(Box::new(delayed_pending_context().pending));
+        state.pending_trigger_firing = Some(TriggerFiring::Delayed(Some(provenance)));
+        state.deferred_triggers.push(delayed_pending_context());
+        state.pending_trigger_order = Some(crate::types::game_state::PendingTriggerOrder {
+            groups: vec![TriggerOrderGroup {
+                controller: PlayerId(0),
+                triggers: vec![delayed_pending_context()],
+                ordered: false,
+            }],
+            resume_after_ordering: None,
+        });
+
+        let persisted = serde_json::to_value(&state).expect("serialize trusted state");
+        assert_eq!(persisted["next_delayed_trigger_token"], 18);
+        assert_eq!(persisted["next_delayed_trigger_instance"], 24);
+        assert_eq!(persisted["delayed_triggers"][0]["provenance"]["token"], 17);
+        assert!(persisted["stack_trigger_firings"].is_object());
+        assert_eq!(
+            persisted["resolving_trigger_firing"]["Delayed"]["instance"],
+            23,
+        );
+        assert_eq!(
+            persisted["pending_trigger_firing"]["Delayed"]["token"], 17,
+            "test precondition: trusted persistence retains active delayed authority"
+        );
+        assert_eq!(
+            persisted["deferred_triggers"][0]["firing"]["Delayed"]["token"], 17,
+            "test precondition: trusted persistence retains delayed queue authority"
+        );
+        assert_eq!(
+            persisted["pending_trigger_order"]["groups"][0]["triggers"][0]["firing"]["Delayed"]
+                ["instance"],
+            23,
+            "test precondition: trusted ordering queue retains delayed authority"
+        );
+
+        let client = serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(0))))
+            .expect("serialize client state");
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
+        let filtered_client = serde_json::to_value(ClientGameStateRef::wrap_filtered(
+            &state,
+            &filtered,
+            Some(PlayerId(0)),
+        ))
+        .expect("serialize filtered client state");
+
+        for client_state in [&client["state"], &filtered_client["state"]] {
+            for private_field in [
+                "next_delayed_trigger_token",
+                "next_delayed_trigger_instance",
+                "pending_trigger_firing",
+                "stack_trigger_firings",
+                "resolving_trigger_firing",
+                "resolved_rules_journal",
+            ] {
+                assert!(
+                    client_state.get(private_field).is_none(),
+                    "client wire must omit {private_field}"
+                );
+            }
+            assert!(
+                client_state["delayed_triggers"][0]
+                    .get("provenance")
+                    .is_none(),
+                "client wire must omit delayed-trigger provenance"
+            );
+            for contexts in [
+                &client_state["deferred_triggers"],
+                &client_state["pending_trigger_order"]["groups"][0]["triggers"],
+            ] {
+                let contexts = contexts.as_array().expect("nonempty trigger queue");
+                assert!(
+                    !contexts.is_empty(),
+                    "test precondition: trigger queue must remain present"
+                );
+                for context in contexts {
+                    assert!(
+                        context.get("firing").is_none(),
+                        "client wire must omit delayed firing classification"
+                    );
+                    let context = context.to_string();
+                    assert!(
+                        !context.contains("\"token\"") && !context.contains("\"instance\""),
+                        "client queue must omit delayed authority: {context}"
+                    );
+                }
+            }
+        }
     }
 
     /// CR 303.4 + CR 702.5: A Player-attached Aura on the battlefield must

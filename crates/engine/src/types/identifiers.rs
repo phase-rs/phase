@@ -41,6 +41,61 @@ pub struct LogicalZoneChangeGroupId(pub u64);
 #[serde(transparent)]
 pub struct TrackedSetId(pub u64);
 
+/// CR 603.7: Monotonic identity of one installed delayed triggered ability.
+///
+/// This is deliberately distinct from its source object: multiple delayed
+/// triggers may be created by the same source, and a source can change zones
+/// before its trigger fires.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct DelayedTriggerToken(pub u64);
+
+/// CR 603.7: Monotonic identity for one durable delayed-trigger installation.
+///
+/// This remains separate from [`DelayedTriggerToken`]: the token identifies the
+/// installation receipt while this value identifies the specific installed
+/// occurrence. Keeping both prevents a legacy record from being rebound to a
+/// later trigger merely because its source object is the same.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct DelayedTriggerInstanceId(pub u64);
+
+/// Private durable provenance for a delayed-trigger installation.
+///
+/// This belongs to engine scheduling state, never to a public `GameEvent`.
+/// `None` remains a supported legacy state when an older persisted delayed
+/// record cannot be matched unambiguously to a durable install command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct DelayedTriggerProvenance {
+    pub(crate) token: DelayedTriggerToken,
+    pub(crate) instance: DelayedTriggerInstanceId,
+    pub(crate) source_id: ObjectId,
+}
+
+/// Private classification of a triggered-ability firing.
+///
+/// CR 603.7: a delayed ability remains distinct from an ordinary triggered
+/// ability even when an older persisted delayed record has no reconstructible
+/// installation receipt. `UnknownLegacy` is intentionally fail-closed and is
+/// never inferred from an omitted historical discriminator.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) enum TriggerFiring {
+    Ordinary,
+    Delayed(Option<DelayedTriggerProvenance>),
+    #[default]
+    UnknownLegacy,
+}
+
+impl TriggerFiring {
+    pub(crate) fn is_delayed(self) -> bool {
+        matches!(self, Self::Delayed(_))
+    }
+}
+
 /// Sentinel `incarnation` bound to a pre-migration `crew_activated_this_turn`
 /// record that serialized as a bare `ObjectId` (no incarnation was stored).
 ///
