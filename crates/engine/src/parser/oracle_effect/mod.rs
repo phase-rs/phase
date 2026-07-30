@@ -14451,7 +14451,6 @@ fn is_player_filter(filter: &TargetFilter) -> bool {
         )
 }
 
-/// CR 109.5 + CR 608.2c: True when this clause's own effect targets a PLAYER, so a
 /// CR 109.5 + CR 608.2c: Capture the player scope that a trailing where-X anaphor
 /// ("they control" / "that player controls") must bind to for this clause. The
 /// scope is exactly the `relative_player_scope` a trigger / for-each / fanout
