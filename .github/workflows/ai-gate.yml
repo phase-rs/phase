@@ -79,6 +79,11 @@ jobs:
         id: gate
         continue-on-error: true
         run: |
+          # bash opens the redirect before cargo runs, so `target/` has to exist
+          # first. On a cardgen cache hit the `Generate card data` step above is
+          # skipped, and nothing else has invoked cargo yet — the redirect then
+          # dies with "No such file or directory" and the gate never executes.
+          mkdir -p target
           cargo ai-gate --full-suite --games 100 > target/ai-gate-report.md
 
       - name: Open or update drift issue
@@ -162,6 +167,8 @@ jobs:
         id: gate
         continue-on-error: true
         run: |
+          # Same redirect-before-cargo ordering as the win-rate job above.
+          mkdir -p target
           cargo ai-perf-gate > target/ai-perf-gate-report.md
 
       - name: Open or update drift issue
