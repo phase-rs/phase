@@ -1720,7 +1720,13 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       type: "reconnect",
       playerToken: setup!.playerToken,
     });
-    await flushPromises();
+    await vi.waitFor(async () => {
+      const messages = await reconnect.getSentMessages();
+      expect(messages.some((message) =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "terminal_result")).toBe(true);
+    });
     const messages = await reconnect.getSentMessages();
     const ackIndex = messages.findIndex((message) =>
       typeof message === "object"

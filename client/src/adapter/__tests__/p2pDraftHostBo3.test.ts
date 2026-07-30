@@ -167,6 +167,7 @@ describe("P2PDraftHost Bo3", () => {
         const privateHost = host as unknown as {
           bo3State: Map<string, unknown>;
           launchDigests: Map<string, Map<number, string>>;
+          matchDecks: Map<string, Map<number, { main_deck: string[]; sideboard: string[]; commander: string[] }>>;
           matchLaunches: Map<string, Map<number, DraftMatchLaunch>>;
           guestSessions: Map<number, { send: (message: DraftP2PMessage) => void; close: () => void }>;
           intergameCommands: { snapshot: () => DraftIntergameCommand[] };
@@ -183,6 +184,10 @@ describe("P2PDraftHost Bo3", () => {
         privateHost.launchDigests.set("bo3-1", new Map([
           [1, draftIntergameDigest(launch1)],
           [2, draftIntergameDigest(launch2)],
+        ]));
+        privateHost.matchDecks.set("bo3-1", new Map([
+          [1, launch1.localDeck],
+          [2, launch2.localDeck],
         ]));
         privateHost.matchLaunches.set("bo3-1", new Map([[1, launch1], [2, launch2]]));
         for (const seat of [1, 2]) {
