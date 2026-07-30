@@ -118,17 +118,65 @@ def js_downcase:
   | implode;
 '
 
-# scryfall_fetch_bulk TYPE FILE [VALIDATOR] — resolve a bulk-data download_uri
-# by type (e.g. oracle_cards, default_cards) and download it to FILE.
-# VALIDATOR is forwarded to scryfall_download unchanged (see its doc comment).
-scryfall_fetch_bulk() {
-  local type="$1" file="$2" validator="${3:-scryfall_validate_json}" uri
-  uri=$("${SCRYFALL_CURL[@]}" "https://api.scryfall.com/bulk-data" \
-    | jq -r --arg t "$type" '.data[] | select(.type == $t) | .download_uri') \
-    || return 1
-  if [ -z "$uri" ] || [ "$uri" = "null" ]; then
-    echo "scryfall: no download_uri for bulk-data type '$type'" >&2
+# scryfall_download_jsonl_gzip URL FILE [VALIDATOR] — download Scryfall's gzip-compressed
+# JSON Lines bulk format, validate its card-object records, and stream it into
+# the JSON array the generators consume. The temp+rename has the same atomicity
+# guarantee and optional semantic validator as scryfall_download.
+scryfall_download_jsonl_gzip() {
+  local url="$1" file="$2" validator="${3:-scryfall_validate_json}" archive tmp
+  archive=$(mktemp "${file}.jsonl.gz.XXXXXX")
+  tmp=$(mktemp "${file}.XXXXXX")
+  if ! "${SCRYFALL_CURL[@]}" -o "$archive" "$url"; then
+    rm -f "$archive" "$tmp"
     return 1
   fi
-  scryfall_download "$uri" "$file" "$validator"
+  if ! gzip -dc "$archive" \
+    | jq -ce 'if .object == "card" then . else error("Scryfall JSONL bulk data must contain card objects") end' \
+    | awk 'BEGIN { print "[" } NR > 1 { printf "," } { print } END { print "]" }' > "$tmp"; then
+    echo "scryfall: download of $url is not valid gzip-compressed JSON Lines" >&2
+    rm -f "$archive" "$tmp"
+    return 1
+  fi
+  if [ "$validator" != scryfall_validate_json ] && ! ( "$validator" "$tmp" ); then
+    echo "scryfall: download of $url failed $validator" >&2
+    rm -f "$archive" "$tmp"
+    return 1
+  fi
+  rm -f "$archive"
+  if ! mv -f "$tmp" "$file" 2>/dev/null; then
+    if [ -f "$file" ] && ( "$validator" "$file" ); then
+      rm -f "$tmp"
+      return 0
+    else
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
+}
+
+# scryfall_fetch_bulk TYPE FILE [VALIDATOR] — resolve and download a bulk-data export by
+# type (e.g. oracle_cards, default_cards). Prefer Scryfall's legacy JSON array
+# download when present; otherwise normalize its JSON Lines export to that
+# same array shape for existing generators. VALIDATOR is applied to either
+# completed output shape before it is promoted.
+scryfall_fetch_bulk() {
+  local type="$1" file="$2" validator="${3:-scryfall_validate_json}" metadata uri jsonl_uri
+  metadata=$("${SCRYFALL_CURL[@]}" "https://api.scryfall.com/bulk-data" \
+    | jq -cer --arg t "$type" '.data[] | select(.type == $t) | {
+      download_uri,
+      jsonl_download_uri
+    }') \
+    || return 1
+  uri=$(jq -r '.download_uri // empty' <<< "$metadata")
+  if [ -n "$uri" ]; then
+    scryfall_download "$uri" "$file" "$validator"
+    return
+  fi
+  jsonl_uri=$(jq -r '.jsonl_download_uri // empty' <<< "$metadata")
+  if [ -n "$jsonl_uri" ]; then
+    scryfall_download_jsonl_gzip "$jsonl_uri" "$file" "$validator"
+    return
+  fi
+  echo "scryfall: no bulk download URI for type '$type'" >&2
+  return 1
 }
