@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 183,
+      "date": "2026-07-29",
+      "title": "Repeated payments resolve correctly",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Deathbringer Regent joins the supported pool, while Ozai’s conditional mana ability and Runadi, Behemoth Caller’s counter-and-haste package now work as printed\n\n🛠️ Cards That Now Work Right\n• Repeated optional payments now happen one at a time, with each resulting trigger appearing only after the payment succeeds\n• Elenda and Azor’s X payment now charges its colored mana as well as X; Mosswort Bridge correctly lets you play its hidden card\n• Fight Rigging and Collector’s Cage keep their counter target separate from their hidden card, while Culling Scales correctly finds the lowest-mana-value nonland permanent\n• Captain America’s Shield and similar Equipment attack triggers can affect creatures the defending player controls; Mockingbird correctly uses the mana spent to cast it for its copy limit\n• Activated abilities now choose targets before paying their costs, correctly handle independent repeated player choices, and keep required player targets distinct\n\n⚔️ Combat & Gameplay\n• Damage prevention now applies to the intended recipient instead of broadening to every possible target\n• Turn-control effects no longer lose queued payment choices, so controlled players can pay costs such as Lava Dart’s flashback sacrifice\n\n🖥️ Interface\n• Attachments can now be selected reliably from their interaction fan\n\n🤖 AI\n• AI better recognizes Vehicle, discard-matters, and cost-reduction decks, and makes more reliable land, mana-payment, and sacrifice decisions",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1532224460164301061"
+    },
+    {
       "id": 182,
       "date": "2026-07-28",
       "title": "Yurlok brings mana burn back",
