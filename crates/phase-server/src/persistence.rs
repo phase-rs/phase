@@ -200,32 +200,6 @@ impl GameDb {
         Ok(deleted)
     }
 
-    /// Allocates the next lifetime generation for `game_code`.
-    ///
-    /// Generations are kept independently from session rows because terminal
-    /// sessions retain tombstones and an operator may later compact them.
-    pub fn allocate_full_generation(&self, game_code: &str) -> rusqlite::Result<u64> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-        let previous = tx
-            .query_row(
-                "SELECT generation FROM full_generation_high_water WHERE game_code = ?1",
-                params![game_code],
-                |row| row.get::<_, u64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        let generation = previous.saturating_add(1);
-        tx.execute(
-            "INSERT INTO full_generation_high_water (game_code, generation)
-             VALUES (?1, ?2)
-             ON CONFLICT(game_code) DO UPDATE SET generation = excluded.generation",
-            params![game_code, generation],
-        )?;
-        tx.commit()?;
-        Ok(generation)
-    }
-
     /// Allocates and durably binds a new Full key to `game_code` before any
     /// caller can publish credentials for that session. The placeholder row is
     /// intentionally snapshot-less; the first mutation save supplies its
@@ -1331,19 +1305,25 @@ mod tests {
     #[test]
     fn full_generation_fences_a_delayed_save_from_an_older_lifetime() {
         let db = test_db();
-        assert_eq!(db.allocate_full_generation("REUSE1").unwrap(), 1);
-        assert_eq!(db.allocate_full_generation("REUSE1").unwrap(), 2);
+        let first = db.create_full_session_key("REUSE1").unwrap();
+        db.retire_unstarted_full_session(&first, None).unwrap();
+        let second = db.create_full_session_key("REUSE1").unwrap();
+        assert_eq!(first.generation, 1);
+        assert_eq!(second.generation, 2);
         assert_eq!(
-            db.save_full_session(&full_snapshot("REUSE1", 2, 1, None, false))
+            db.save_full_session(&full_snapshot("REUSE1", second.generation, 1, None, false))
                 .unwrap(),
             FullPersistDisposition::Applied
         );
         assert_eq!(
-            db.save_full_session(&full_snapshot("REUSE1", 1, 99, None, false))
+            db.save_full_session(&full_snapshot("REUSE1", first.generation, 99, None, false))
                 .unwrap(),
             FullPersistDisposition::SupersededOrRetired
         );
-        assert_eq!(db.load_active_full_sessions().unwrap()[0].key.generation, 2);
+        assert_eq!(
+            db.load_active_full_sessions().unwrap()[0].key.generation,
+            second.generation
+        );
     }
 
     #[test]
