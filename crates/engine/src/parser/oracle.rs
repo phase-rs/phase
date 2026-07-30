@@ -87,9 +87,9 @@ use super::oracle_keyword::{
 };
 use super::oracle_level::parse_level_blocks;
 use super::oracle_modal::{
-    extract_ability_word_reminder_body, lower_oracle_block, parse_oracle_block,
+    extract_ability_word_reminder_body, lower_oracle_block_ir, parse_oracle_block,
     split_short_label_prefix, strip_ability_word, strip_ability_word_with_name,
-    strip_flavor_word_with_name, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
+    strip_flavor_word_with_name, AnchorModeIr, OracleBlockIr, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_replacement::{
     find_copy_verb_present, lower_as_enters_becomes_choice_modal,
@@ -4536,18 +4536,44 @@ pub(crate) fn parse_oracle_ir(
         // Must run before keyword extraction so "Spree" header + follow-on `+` lines
         // are consumed as a modal block, not swallowed as a keyword-only line.
         if let Some((block, next_i)) = parse_oracle_block(&lines, i) {
-            // Modal lowering still pushes into a scratch `ParsedAbilities`; drain
-            // its vector output into source-ordered emission at the block's line,
-            // and capture the `modal` singleton's line for post-loop emission.
-            lower_oracle_block(
-                block,
-                card_name,
-                ctx.host_self_reference.clone(),
-                &mut result,
-            );
-            emitter.drain_result_vectors(item_line, &mut result);
-            if result.modal.is_some() {
-                modal_line.get_or_insert(item_line);
+            match lower_oracle_block_ir(block, card_name, ctx.host_self_reference.clone(), &mut ctx)
+            {
+                OracleBlockIr::Activated(ability) => emitter.ability_ir_at(item_line, ability),
+                OracleBlockIr::Modal { choice, modes } => {
+                    for mode in modes {
+                        emitter.ability_ir_at(
+                            mode.source_line
+                                .expect("collected modal bullets have source lines"),
+                            *mode.ability,
+                        );
+                    }
+                    emitter.modal_at(item_line, choice);
+                }
+                OracleBlockIr::Triggered(triggers) => {
+                    for trigger in triggers {
+                        emitter.trigger_ir_at(item_line, TriggerNodeIr::Parsed(Box::new(trigger)));
+                    }
+                }
+                OracleBlockIr::AsEnters {
+                    replacement,
+                    children,
+                } => {
+                    emitter.replacement_ir_at(item_line, replacement);
+                    for (line, children) in children {
+                        for child in children {
+                            match child {
+                                AnchorModeIr::Trigger(trigger) => emitter
+                                    .trigger_ir_at(line, TriggerNodeIr::Parsed(Box::new(trigger))),
+                                AnchorModeIr::Static(static_ir) => {
+                                    emitter.static_ir_at(line, static_ir)
+                                }
+                                AnchorModeIr::Unsupported(ability) => {
+                                    emitter.ability_ir_at(line, ability)
+                                }
+                            }
+                        }
+                    }
+                }
             }
             i = next_i;
             continue;
@@ -6286,6 +6312,7 @@ pub(crate) fn parse_oracle_ir(
                     shell: AbilityShellIr::default(),
                     die_results: vec![],
                     root_transforms: vec![],
+                    modal: None,
                 }
             } else if let Some(vote) = crate::parser::oracle_vote::parse_vote_block_ir(
                 parse_line,
@@ -6298,6 +6325,7 @@ pub(crate) fn parse_oracle_ir(
                     shell: AbilityShellIr::default(),
                     die_results: vec![],
                     root_transforms: vec![],
+                    modal: None,
                 }
             } else {
                 parse_ability_ir_with_context(parse_line, AbilityKind::Spell, &mut ctx)
@@ -7127,6 +7155,7 @@ pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityIr> {
             ..AbilityShellIr::default()
         },
         die_results: vec![],
+        modal: None,
         root_transforms: vec![],
     })
 }

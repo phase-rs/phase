@@ -4317,6 +4317,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         shell: AbilityShellIr::default(),
         die_results: vec![],
         root_transforms: vec![AbilityRootTransform::AppendCondition(condition)],
+        modal: None,
     })
 }
 

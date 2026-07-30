@@ -441,6 +441,23 @@ pub(crate) struct AbilityIr {
     /// metadata whose order depends on the root that chain assembly selected.
     /// An empty list is a lowering no-op.
     pub(crate) root_transforms: Vec<AbilityRootTransform>,
+    /// Modal metadata attached to this ability root and lowered with it.
+    pub(crate) modal: Option<ModalPayloadIr>,
+}
+
+/// Native modal payload. Its modes retain parser provenance until their
+/// ordinary `AbilityIr` lowering runs at the owning root's lowering seam.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ModalPayloadIr {
+    pub(crate) choice: crate::types::ability::ModalChoice,
+    pub(crate) modes: Vec<ModalModeIr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ModalModeIr {
+    pub(crate) source_text: String,
+    pub(crate) source_line: Option<usize>,
+    pub(crate) ability: Box<AbilityIr>,
 }
 
 /// A root-level transform applied only after an [`AbilityIr`] has been fully

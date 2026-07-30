@@ -1666,6 +1666,7 @@ pub(crate) fn try_parse_temporal_delayed_trigger_ability(
         shell: AbilityShellIr::default(),
         die_results: vec![],
         root_transforms: vec![],
+        modal: None,
     })
 }
 
@@ -27029,6 +27030,16 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
         }
     }
     apply_ability_root_transforms(&mut def, &ir.root_transforms);
+    if let Some(modal) = &ir.modal {
+        def = def.with_modal(
+            modal.choice.clone(),
+            modal
+                .modes
+                .iter()
+                .map(|mode| lower_ability_ir(&mode.ability))
+                .collect(),
+        );
+    }
     def
 }
 
@@ -27211,6 +27222,7 @@ pub(crate) fn parse_ability_ir(
             shell: AbilityShellIr::default(),
             die_results: vec![],
             root_transforms: vec![],
+            modal: None,
         };
     }
     if let Some(body) = parse_for_each_attacker_copy_blocker_ir(text, kind, ctx) {
@@ -27220,6 +27232,7 @@ pub(crate) fn parse_ability_ir(
             shell: AbilityShellIr::default(),
             die_results: vec![],
             root_transforms: vec![],
+            modal: None,
         };
     }
     if let ChainLoweringMode::WithContext = mode {
@@ -27230,6 +27243,7 @@ pub(crate) fn parse_ability_ir(
                 shell: AbilityShellIr::default(),
                 die_results: vec![],
                 root_transforms: vec![],
+                modal: None,
             };
         }
     }
@@ -27245,6 +27259,7 @@ pub(crate) fn parse_ability_ir(
             },
             die_results: vec![],
             root_transforms: vec![],
+            modal: None,
         };
     }
     AbilityIr {
@@ -27253,6 +27268,7 @@ pub(crate) fn parse_ability_ir(
         shell: AbilityShellIr::default(),
         die_results: vec![],
         root_transforms: vec![],
+        modal: None,
     }
 }
 

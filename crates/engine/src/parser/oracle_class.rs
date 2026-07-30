@@ -165,6 +165,7 @@ pub(crate) fn parse_class_oracle_text(
                     ..AbilityShellIr::default()
                 },
                 die_results: vec![],
+                modal: None,
                 root_transforms: vec![],
             };
             items.push((
