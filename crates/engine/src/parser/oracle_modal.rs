@@ -2432,6 +2432,8 @@ fn scan_modal_count_override(text: &str) -> Option<ModalCountSpec> {
 
 #[cfg(test)]
 mod tests {
+    use crate::parser::oracle_util::normalize_card_name_refs;
+
     use super::*;
 
     #[test]
@@ -3079,25 +3081,19 @@ mod tests {
             ),
             (
                 "Spree",
-                "Spree\n+\
-+ {1} — Draw a card.\n+\
-+ {2} — Gain 3 life.",
+                "Spree\n+ {1} — Draw a card.\n+ {2} — Gain 3 life.",
                 &[0, 1, 2][..],
                 2,
             ),
             (
                 "pawprint",
-                "Choose up to five {P} worth of modes. You may choose the same mode more than once.\n+\
-{P} — Draw a card.\n+\
-{P}{P} — Gain 3 life.",
+                "Choose up to five {P} worth of modes. You may choose the same mode more than once.\n{P} — Draw a card.\n{P}{P} — Gain 3 life.",
                 &[0, 1, 2][..],
                 2,
             ),
             (
                 "ordinary Tiered",
-                "Tiered (Choose one additional cost.)\n+\
-• Cure — {0} — Draw a card.\n+\
-• Cura — {1} — Gain 3 life.",
+                "Tiered (Choose one additional cost.)\n• Cure — {0} — Draw a card.\n• Cura — {1} — Gain 3 life.",
                 &[0, 1, 2][..],
                 2,
             ),
@@ -3107,12 +3103,12 @@ mod tests {
         for (name, oracle, expected_lines, expected_mode_count) in cases {
             let types = vec!["Instant".to_string()];
             let card_name = if name == "Spree" {
-                "Spree Slot Witness"
+                "Modal Slot Witness"
             } else {
                 name
             };
             let mut ir = parse_oracle_ir(oracle, card_name, &[], &types, &[]);
-            let span_source = oracle.replacen("Spree", "~", 1);
+            let span_source = normalize_card_name_refs(oracle, card_name);
 
             assert_eq!(
                 ir.items.len(),
@@ -3127,10 +3123,7 @@ mod tests {
                     (*expected_line, *expected_line),
                     "{name}: source-order slot drift"
                 );
-                let expected_fragment = match (name, *expected_line) {
-                    ("Spree", 0) => "~",
-                    _ => oracle.lines().nth(*expected_line).unwrap(),
-                };
+                let expected_fragment = oracle.lines().nth(*expected_line).unwrap();
                 assert_eq!(
                     item.source.fragment(),
                     Some(expected_fragment),
