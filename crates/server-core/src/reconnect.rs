@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use engine::types::player::PlayerId;
@@ -85,12 +85,11 @@ impl ReconnectManager {
     /// [`Self::check_expired_with_players`] stays per-seat: its entries are
     /// already distinct, and draft auto-pick acts on each seat individually.
     pub fn check_expired(&mut self) -> Vec<String> {
-        let mut expired: Vec<String> = Vec::new();
+        let mut expired = Vec::new();
+        let mut expired_game_codes = HashSet::new();
         self.disconnected.retain(|_key, info| {
             if info.disconnect_time.elapsed() > info.grace_period {
-                // Linear scan: bounded by the games lapsing within one sweep
-                // tick, so it stays cheaper than hashing.
-                if !expired.contains(&info.game_code) {
+                if expired_game_codes.insert(info.game_code.clone()) {
                     expired.push(info.game_code.clone());
                 }
                 false
