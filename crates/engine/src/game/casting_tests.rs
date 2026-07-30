@@ -42773,6 +42773,74 @@ fn add_exiled_land(state: &mut GameState, player: PlayerId, name: &str) -> Objec
     object_id
 }
 
+fn grant_object_exile_land_play_permission(
+    state: &mut GameState,
+    land: ObjectId,
+    player: PlayerId,
+    source: ObjectId,
+    frequency: CastFrequency,
+) {
+    state
+        .objects
+        .get_mut(&land)
+        .unwrap()
+        .casting_permissions
+        .push(CastingPermission::PlayFromExile {
+            duration: crate::types::ability::Duration::UntilEndOfNextTurnOf {
+                player: crate::types::ability::PlayerScope::Controller,
+            },
+            granted_to: player,
+            frequency,
+            source_id: Some(source),
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        });
+}
+
+fn add_extra_land_drop_source(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let source = create_object(
+        state,
+        CardId(state.next_object_id),
+        player,
+        "Exploration Stand-In".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::MayPlayAdditionalLand));
+    source
+}
+
+fn add_exiled_land_with_oracle(
+    state: &mut GameState,
+    player: PlayerId,
+    name: &str,
+    oracle_text: &str,
+) -> ObjectId {
+    let land = add_exiled_land(state, player, name);
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        oracle_text,
+        name,
+        &[],
+        &["Land".to_string()],
+        &[],
+    );
+    let obj = state.objects.get_mut(&land).unwrap();
+    obj.replacement_definitions
+        .extend(parsed.replacements.clone());
+    Arc::make_mut(&mut obj.base_replacement_definitions).extend(parsed.replacements);
+    land
+}
+
 /// Link `exiled_id` to `source_id` in the persistent `exile_links` pool
 /// (CR 406.6 / CR 607.2a) — the lifetime tracker the `Persistent` pool
 /// scope reads, independent of the per-turn rolling list.
@@ -43031,6 +43099,356 @@ fn persistent_exile_play_permission_plays_linked_land_through_action() {
     let obj = state.objects.get(&land).unwrap();
     assert_eq!(obj.zone, Zone::Battlefield);
     assert_eq!(obj.played_from_zone, Some(Zone::Exile));
+}
+
+/// CR 305.2 + CR 400.7i: Unlimited object-attached permissions authorize each
+/// exiled land independently. An additional land drop makes both public
+/// `PlayLand` actions legal, and neither may consume a once-per-turn ledger.
+#[test]
+fn unlimited_object_exile_land_permissions_do_not_consume_a_ledger_slot() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    add_extra_land_drop_source(&mut state, player);
+    let source = ObjectId(99_001);
+    let first = add_exiled_land(&mut state, player, "First Exiled Forest");
+    let second = add_exiled_land(&mut state, player, "Second Exiled Forest");
+    grant_object_exile_land_play_permission(
+        &mut state,
+        first,
+        player,
+        source,
+        CastFrequency::Unlimited,
+    );
+    grant_object_exile_land_play_permission(
+        &mut state,
+        second,
+        player,
+        source,
+        CastFrequency::Unlimited,
+    );
+
+    for land in [first, second] {
+        let card_id = state.objects[&land].card_id;
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land,
+                card_id,
+            },
+        )
+        .expect("an unlimited object-attached exile permission must remain usable");
+    }
+
+    assert!(state.exile_play_permissions_used.is_empty());
+    assert!(state.exile_cast_permissions_used.is_empty());
+}
+
+/// CR 305.2 + CR 400.7i: Object-attached `OncePerTurn` permissions sharing a
+/// source use the object-play ledger. The second public action is rejected
+/// after the first consumes that exact source's slot.
+#[test]
+fn bounded_object_exile_land_permissions_share_the_exile_play_ledger() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    add_extra_land_drop_source(&mut state, player);
+    let source = ObjectId(99_002);
+    let first = add_exiled_land(&mut state, player, "First Bounded Exiled Forest");
+    let second = add_exiled_land(&mut state, player, "Second Bounded Exiled Forest");
+    for land in [first, second] {
+        grant_object_exile_land_play_permission(
+            &mut state,
+            land,
+            player,
+            source,
+            CastFrequency::OncePerTurn,
+        );
+    }
+
+    let first_card_id = state.objects[&first].card_id;
+    apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: first,
+            card_id: first_card_id,
+        },
+    )
+    .expect("the first bounded object-attached land play must succeed");
+    assert!(state.exile_play_permissions_used.contains(&source));
+    assert!(!state.exile_cast_permissions_used.contains(&source));
+
+    let second_card_id = state.objects[&second].card_id;
+    assert!(
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: second,
+                card_id: second_card_id,
+            },
+        )
+        .is_err(),
+        "the shared once-per-turn object permission must reject a second land"
+    );
+}
+
+/// CR 305.1 + CR 601.2a + CR 113.6b: A bounded static Play permission uses
+/// its `ExileCast` ledger for both land plays and later spell casts from its
+/// linked exile pool.
+#[test]
+fn bounded_static_exile_land_play_locks_the_linked_spell_permission() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Bounded Matrix of Time",
+        TargetFilter::Any,
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    let land = add_exiled_land(&mut state, player, "Bounded Exiled Island");
+    let spell = add_exiled_card(&mut state, player, "Bounded Exiled Bear");
+    link_exiled_to_source(&mut state, land, source);
+    link_exiled_to_source(&mut state, spell, source);
+
+    let card_id = state.objects[&land].card_id;
+    apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        },
+    )
+    .expect("the static permission must authorize its first linked land play");
+
+    assert!(state.exile_cast_permissions_used.contains(&source));
+    assert!(!state.exile_play_permissions_used.contains(&source));
+    assert!(
+        !spell_objects_available_to_cast(&state, player).contains(&spell),
+        "a land play must consume the same bounded static authority as a spell cast"
+    );
+}
+
+/// CR 305.1 + CR 614.12a: A bounded static permission is consumed when the
+/// land-entry path drains an as-enters choice after delivery (Thriving Grove),
+/// before returning its `NamedChoice` prompt.
+#[test]
+fn bounded_static_exile_land_play_records_exile_cast_in_post_replacement_drain() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Bounded Thriving Permission",
+        TargetFilter::Any,
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    let land = add_exiled_land_with_oracle(
+        &mut state,
+        player,
+        "Thriving Grove",
+        "This land enters tapped. As it enters, choose a color other than green.",
+    );
+    link_exiled_to_source(&mut state, land, source);
+
+    let card_id = state.objects[&land].card_id;
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        },
+    )
+    .expect("the Thriving Grove replacement drain must leave a named choice");
+
+    assert!(matches!(result.waiting_for, WaitingFor::NamedChoice { .. }));
+    assert_eq!(state.exile_cast_permissions_used.len(), 1);
+    assert!(state.exile_cast_permissions_used.contains(&source));
+    assert!(state.exile_play_permissions_used.is_empty());
+}
+
+/// CR 305.1 + CR 614.1c: A bounded static permission is consumed before the
+/// immediate shock-land replacement choice is returned. This specifically
+/// covers `ReplacementResult::NeedsChoice`, not the nested delivery pause.
+#[test]
+fn bounded_static_exile_land_play_records_exile_cast_before_replacement_choice() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Bounded Shockland Permission",
+        TargetFilter::Any,
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    let land = add_exiled_land_with_oracle(
+        &mut state,
+        player,
+        "Watery Grave",
+        "As this land enters, you may pay 2 life. If you don't, it enters tapped.",
+    );
+    link_exiled_to_source(&mut state, land, source);
+
+    let card_id = state.objects[&land].card_id;
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        },
+    )
+    .expect("the shock-land replacement must return a replacement choice");
+
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(state.exile_cast_permissions_used.len(), 1);
+    assert!(state.exile_cast_permissions_used.contains(&source));
+    assert!(state.exile_play_permissions_used.is_empty());
+}
+
+/// CR 305.1 + CR 614.1a + CR 614.1c: A land that has already entered may
+/// pause in the delivery tail while choosing an order for counter replacements.
+/// The bounded static exile authority is consumed at that committed-play seam,
+/// not deferred to the tail continuation that does not retain it.
+#[test]
+fn bounded_static_exile_land_play_records_exile_cast_before_delivery_tail_choice() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let permission_source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Bounded Delivery-Pause Permission",
+        TargetFilter::Any,
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    let counter_source = create_object(
+        &mut state,
+        CardId(state.next_object_id),
+        player,
+        "Entry Counter Source".to_string(),
+        Zone::Battlefield,
+    );
+    let entry_counter = StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+        counter_type: CounterType::Plus1Plus1,
+        count: 1,
+    })
+    .affected(TargetFilter::Typed(
+        TypedFilter::permanent()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::Another]),
+    ));
+    {
+        let source = state.objects.get_mut(&counter_source).unwrap();
+        source.static_definitions.push(entry_counter.clone());
+        Arc::make_mut(&mut source.base_static_definitions).push(entry_counter);
+    }
+    for (name, quantity_modification) in [
+        (
+            "Counter Doubler",
+            crate::types::ability::QuantityModification::DOUBLE,
+        ),
+        (
+            "Counter Incrementer",
+            crate::types::ability::QuantityModification::Plus { value: 1 },
+        ),
+    ] {
+        let source = create_object(
+            &mut state,
+            CardId(state.next_object_id),
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(quantity_modification),
+            );
+    }
+    let land = add_exiled_land(&mut state, player, "Delivery-Paused Exiled Land");
+    link_exiled_to_source(&mut state, land, permission_source);
+
+    let card_id = state.objects[&land].card_id;
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        },
+    )
+    .expect("counter replacement ordering must pause after the land enters");
+
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+    assert_eq!(state.exile_cast_permissions_used.len(), 1);
+    assert!(state
+        .exile_cast_permissions_used
+        .contains(&permission_source));
+    assert!(state.exile_play_permissions_used.is_empty());
+}
+
+/// CR 601.2a + CR 305.1: When both authorization classes apply, the elected
+/// object-attached permission wins. Its unlimited frequency must not consume
+/// the bounded static fallback's `ExileCast` slot.
+#[test]
+fn object_exile_land_authorization_precedes_static_fallback() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let static_source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Bounded Static Fallback",
+        TargetFilter::Any,
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    let land = add_exiled_land(&mut state, player, "Overlapping Exiled Island");
+    link_exiled_to_source(&mut state, land, static_source);
+    grant_object_exile_land_play_permission(
+        &mut state,
+        land,
+        player,
+        ObjectId(99_003),
+        CastFrequency::Unlimited,
+    );
+
+    let card_id = state.objects[&land].card_id;
+    apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        },
+    )
+    .expect("the elected unlimited object permission must authorize the land");
+
+    assert!(!state.exile_cast_permissions_used.contains(&static_source));
 }
 
 /// Build a persistent, your-turn-only, Cast-mode `ExileCastPermission`

@@ -4205,6 +4205,29 @@ pub fn graveyard_lands_playable_by_permission(
     results
 }
 
+/// The elected authority for a land play from exile. The object-attached and
+/// static forms use different once-per-turn ledgers, so callers must retain
+/// this distinction through the zone move and completion seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExileLandPlayAuthorization {
+    ObjectAttached {
+        source: ObjectId,
+        frequency: CastFrequency,
+    },
+    Static {
+        source: ObjectId,
+        frequency: CastFrequency,
+    },
+}
+
+impl ExileLandPlayAuthorization {
+    pub(super) fn source(self) -> ObjectId {
+        match self {
+            Self::ObjectAttached { source, .. } | Self::Static { source, .. } => source,
+        }
+    }
+}
+
 /// CR 305.1 + CR 113.6b + CR 406.6: Find the `StaticMode::ExileCastPermission`
 /// source (if any) authorizing `player` to play the exiled land `land_id`. Only
 /// `play_mode: Play` sources admit lands (CR 305.1: lands are played, not cast);
@@ -4214,7 +4237,7 @@ fn exile_land_playable_by_static_permission(
     state: &GameState,
     player: PlayerId,
     land_id: ObjectId,
-) -> Option<ObjectId> {
+) -> Option<(ObjectId, CastFrequency)> {
     if state.cards_exiled_with_source_this_turn.is_empty() && state.exile_links.is_empty() {
         return None;
     }
@@ -4241,8 +4264,33 @@ fn exile_land_playable_by_static_permission(
         if !super::filter::matches_target_filter(state, land_id, source.filter, &ctx) {
             return None;
         }
-        Some(source.source_id)
+        Some((source.source_id, source.frequency))
     })
+}
+
+/// CR 305.1 + CR 601.2a + CR 113.6b: Elect the exact exile-play authority for
+/// `land_id` before the land changes zones. Object-attached permissions take
+/// precedence over a static fallback, matching the public legal-actions surface.
+pub(super) fn exile_land_play_authorization(
+    state: &GameState,
+    player: PlayerId,
+    land_id: ObjectId,
+) -> Option<ExileLandPlayAuthorization> {
+    let obj = state.objects.get(&land_id)?;
+    if !obj
+        .card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Land)
+    {
+        return None;
+    }
+    if let Some((source, frequency)) =
+        play_from_exile_permission_source(state, obj, player, state.turn_number)
+    {
+        return Some(ExileLandPlayAuthorization::ObjectAttached { source, frequency });
+    }
+    let (source, frequency) = exile_land_playable_by_static_permission(state, player, land_id)?;
+    Some(ExileLandPlayAuthorization::Static { source, frequency })
 }
 
 /// CR 305.1 + CR 601.2a + CR 113.6b: Find exiled lands `player` may play, via
@@ -4258,23 +4306,8 @@ pub fn exile_lands_playable_by_permission(
         .exile
         .iter()
         .filter_map(|&obj_id| {
-            let obj = state.objects.get(&obj_id)?;
-            if !obj
-                .card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-            {
-                return None;
-            }
-            // Object-tagged impulse permission first; fall back to the
-            // battlefield-static exile-play permission.
-            if let Some((source, _)) =
-                play_from_exile_permission_source(state, obj, player, state.turn_number)
-            {
-                return Some((obj_id, source));
-            }
-            let source = exile_land_playable_by_static_permission(state, player, obj_id)?;
-            Some((obj_id, source))
+            exile_land_play_authorization(state, player, obj_id)
+                .map(|authorization| (obj_id, authorization.source()))
         })
         .collect()
 }
