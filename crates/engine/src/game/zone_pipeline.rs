@@ -4279,4 +4279,71 @@ mod layers_incremental_flush_tests {
             state.layers_dirty
         );
     }
+
+    /// F5 (CodeRabbit, PR #6777 round): the incremental `EnteredObjects` path
+    /// (Row 1) is only safe when nothing on the board reads membership of the
+    /// entering object's origin or destination zone. A Graveyard->Battlefield
+    /// entry (reanimation) is neither the Hand nor Exile carve-out, so it
+    /// would wrongly take the cheap path unless `static_dependency_before`/
+    /// `after` itself catches it: a live static (Tarmogoyf class) whose
+    /// `affected` filter reads `Zone::Graveyard` must still force `Full` when
+    /// a card leaves that zone for the battlefield.
+    #[test]
+    fn battlefield_entry_with_static_dependency_marks_full_via_pipeline() {
+        let mut state = GameState::new_two_player(42);
+        let watcher = create_object(
+            &mut state,
+            CardId(80041),
+            PlayerId(0),
+            "Graveyard Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&watcher).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::Continuous).affected(TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Creature)
+                        .properties(vec![FilterProp::InAnyZone {
+                            zones: vec![Zone::Graveyard],
+                        }]),
+                )),
+            );
+        }
+        let source = create_object(
+            &mut state,
+            CardId(80042),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let reanimated = create_object(
+            &mut state,
+            CardId(80043),
+            PlayerId(0),
+            "Graveyard Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&reanimated).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+        }
+        reset_clean(&mut state);
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(reanimated, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&reanimated].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "a Graveyard-origin battlefield entry with a live zone-membership-dependent static must force a full re-evaluation via static_dependency_before/after, got {:?}",
+            state.layers_dirty
+        );
+    }
 }
