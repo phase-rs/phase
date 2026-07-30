@@ -623,6 +623,7 @@ mod issue_6431_lava_dart_flashback_control_turn;
 mod issue_6435_mosswort_bridge_hideaway_play;
 mod issue_6437_fight_rigging_exiled_card_target;
 mod issue_6440_mockingbird_uncast_copy_ceiling;
+mod issue_6442_elenda_dusk_rose_death_tokens;
 mod issue_6459_scheming_symmetry;
 mod issue_6498_portent_of_calamity;
 mod issue_6499_flickering_ward_protection_exemption;
