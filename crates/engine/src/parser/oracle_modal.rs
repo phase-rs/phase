@@ -1062,25 +1062,25 @@ pub(crate) enum AnchorModeIr {
 /// second, narrower Oracle grammar here. In particular, the trigger parser
 /// already accounts for combat/noncombat, plural damage verbs, and thresholds.
 fn modal_relative_player_scope_for_trigger(trigger: &TriggerIr) -> Option<ControllerRef> {
-    matches!(
-        (
-            &trigger.condition,
-            &trigger.partial_def.valid_source,
-            &trigger.partial_def.valid_target
-        ),
+    match (
+        &trigger.condition,
+        &trigger.partial_def.valid_source,
+        &trigger.partial_def.valid_target,
+    ) {
+        (TriggerMode::DamageDone, Some(TargetFilter::SelfRef), Some(TargetFilter::Player)) => {
+            Some(ControllerRef::TriggeringPlayer)
+        }
         (
             TriggerMode::DamageDone,
             Some(TargetFilter::SelfRef),
-            Some(
-                TargetFilter::Player
-                    | TargetFilter::Typed(TypedFilter {
-                        controller: Some(ControllerRef::Opponent),
-                        ..
-                    }),
-            ),
-        )
-    )
-    .then_some(ControllerRef::TriggeringPlayer)
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::Opponent),
+                ..
+            })),
+        ) if type_filters.is_empty() => Some(ControllerRef::TriggeringPlayer),
+        _ => None,
+    }
 }
 
 pub(crate) fn lower_oracle_block_ir(
@@ -3748,6 +3748,15 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         let Some(TriggerBody::Modal(modal)) = trigger.body.as_ref() else {
             panic!("damage modal must retain nested mode payload");
         };
+        let mut opponent_controlled_object_trigger = trigger.clone();
+        opponent_controlled_object_trigger.partial_def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+        assert_eq!(
+            modal_relative_player_scope_for_trigger(&opponent_controlled_object_trigger),
+            None,
+            "an opponent-controlled object is not the damaged player"
+        );
         assert!(matches!(
             &modal.modes[0].ability.body.clauses[0].parsed.effect,
             Effect::Draw {
