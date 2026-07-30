@@ -52,17 +52,25 @@ impl ReconnectManager {
     /// here we check if the disconnect is within the grace period.
     pub fn attempt_reconnect(&mut self, game_code: &str, player: PlayerId) -> ReconnectResult {
         let key = format!("{}:{}", game_code, player.0);
-        match self.disconnected.remove(&key) {
-            Some(info) => {
-                if info.disconnect_time.elapsed() <= info.grace_period {
-                    ReconnectResult::Ok {
-                        game_code: info.game_code,
-                    }
-                } else {
-                    ReconnectResult::Expired
-                }
-            }
-            None => ReconnectResult::NotFound,
+        // Only a successful reconnect consumes the record. An expired one must
+        // leave it in place: `check_expired` is what turns it into a forfeit,
+        // and removing it here both skipped that forfeit and downgraded every
+        // retry to `NotFound` — which callers treat as "was never disconnected,
+        // allow the reconnect anyway", re-seating a player who had already
+        // timed out.
+        let expired = match self.disconnected.get(&key) {
+            Some(info) => info.disconnect_time.elapsed() > info.grace_period,
+            None => return ReconnectResult::NotFound,
+        };
+        if expired {
+            return ReconnectResult::Expired;
+        }
+        let info = self
+            .disconnected
+            .remove(&key)
+            .expect("entry observed present above");
+        ReconnectResult::Ok {
+            game_code: info.game_code,
         }
     }
 
@@ -140,6 +148,29 @@ mod tests {
             ReconnectResult::Expired => {}
             _ => panic!("expected Expired, got {:?}", result),
         }
+    }
+
+    #[test]
+    fn expired_attempt_does_not_consume_the_forfeit_record() {
+        let mut mgr = ReconnectManager::new(Duration::from_millis(0));
+        mgr.record_disconnect("GAME01", PlayerId(0), Duration::from_millis(0));
+        std::thread::sleep(Duration::from_millis(1));
+
+        // A late reconnect must not clear the record the forfeit sweep needs.
+        assert!(matches!(
+            mgr.attempt_reconnect("GAME01", PlayerId(0)),
+            ReconnectResult::Expired
+        ));
+
+        // Retrying must stay Expired, not fall through to the permissive
+        // NotFound branch that lets the caller re-seat the player.
+        assert!(matches!(
+            mgr.attempt_reconnect("GAME01", PlayerId(0)),
+            ReconnectResult::Expired
+        ));
+
+        assert!(mgr.is_disconnected("GAME01", PlayerId(0)));
+        assert_eq!(mgr.check_expired(), vec!["GAME01".to_string()]);
     }
 
     #[test]
