@@ -65,7 +65,7 @@ fn add_mana(runner: &mut GameRunner, player: PlayerId, ty: ManaType, count: usiz
     }
 }
 
-/// RUNTIME — CR 603.6d + CR 603.10a + CR 702.93. Undying Malice grants a
+/// RUNTIME — CR 603.6d + CR 603.10a. Undying Malice grants a
 /// dies-trigger to a creature; a second player then Diabolic-Edicts the
 /// controller, who has TWO eligible creatures and so must choose one via the
 /// interactive `EffectZoneChoice` pool-choice path (not the mandatory-sac
@@ -119,10 +119,7 @@ fn undying_malice_returns_creature_sacrificed_to_edict() {
     outcome.assert_zone(&[victim], Zone::Battlefield);
 
     let obj = &outcome.state().objects[&victim];
-    assert!(
-        obj.tapped,
-        "Undying Malice returns the creature tapped (CR 702.93a wording)"
-    );
+    assert!(obj.tapped, "Undying Malice returns the creature tapped");
     assert_eq!(
         obj.counters.get(&CounterType::Plus1Plus1).copied(),
         Some(1),
@@ -171,10 +168,7 @@ fn undying_malice_returns_creature_sacrificed_to_mandatory_edict() {
     outcome.assert_zone(&[victim], Zone::Battlefield);
 
     let obj = &outcome.state().objects[&victim];
-    assert!(
-        obj.tapped,
-        "Undying Malice returns the creature tapped (CR 702.93a wording)"
-    );
+    assert!(obj.tapped, "Undying Malice returns the creature tapped");
     assert_eq!(
         obj.counters.get(&CounterType::Plus1Plus1).copied(),
         Some(1),
@@ -234,10 +228,7 @@ fn undying_malice_returns_creature_sacrificed_to_each_player_edict() {
     outcome.assert_zone(&[opponent_creature], Zone::Graveyard);
 
     let obj = &outcome.state().objects[&victim];
-    assert!(
-        obj.tapped,
-        "Undying Malice returns the creature tapped (CR 702.93a wording)"
-    );
+    assert!(obj.tapped, "Undying Malice returns the creature tapped");
     assert_eq!(
         obj.counters.get(&CounterType::Plus1Plus1).copied(),
         Some(1),
@@ -283,18 +274,18 @@ fn undying_malice_cast_in_response_to_edict_on_stack() {
         &["Instant".to_string()],
         &[],
     );
-    let edict_ability = ResolvedAbility::new(
-        edict_parsed.abilities[0].effect.as_ref().clone(),
-        vec![TargetRef::Player(P0)],
-        ObjectId(0),
-        P1,
-    );
     let edict_id = create_object(
         runner.state_mut(),
         CardId(9001),
         P1,
         "Diabolic Edict".to_string(),
         Zone::Stack,
+    );
+    let edict_ability = ResolvedAbility::new(
+        edict_parsed.abilities[0].effect.as_ref().clone(),
+        vec![TargetRef::Player(P0)],
+        edict_id,
+        P1,
     );
     {
         let edict_obj = runner.state_mut().objects.get_mut(&edict_id).unwrap();
@@ -324,10 +315,7 @@ fn undying_malice_cast_in_response_to_edict_on_stack() {
     outcome.assert_zone(&[victim], Zone::Battlefield);
 
     let obj = &outcome.state().objects[&victim];
-    assert!(
-        obj.tapped,
-        "Undying Malice returns the creature tapped (CR 702.93a wording)"
-    );
+    assert!(obj.tapped, "Undying Malice returns the creature tapped");
     assert_eq!(
         obj.counters.get(&CounterType::Plus1Plus1).copied(),
         Some(1),
