@@ -30685,10 +30685,25 @@ pub(crate) fn parse_effect_chain_ir(
         // unbound sacrifice target into `ParentTarget`, which resolves to nothing at
         // runtime — see the sibling fixup immediately below for the other half of the
         // fix (rebinding that unbound default to the ability's own source instead).
+        //
+        // `target_filter().is_none()` alone over-fires on two OTHER legitimate
+        // non-target antecedents, so both must be excluded here too:
+        //   - `Effect::Populate` has no `target` field (`target_filter()` is `None`)
+        //     but DOES publish a created-token referent — the exact "populate anaphor
+        //     chain" class already documented at `parse_targeted_action_ast`'s bare-"it"
+        //     sacrifice binding. `chain_prior_referent_is_created_token` is the single
+        //     authority that already recognizes this (Token/CopyTokenOf are excluded
+        //     for free since both DO have a `target_filter()`).
+        //   - A `GenericEffect` whose referent lives only in a granted static's
+        //     `affected` field (not its own top-level `target`) still has
+        //     `target_filter() == None`, but `if_you_do_object_anchor` — computed just
+        //     above for this exact clause's "if you do" gate — already finds it.
         let prior_clause_has_no_target_concept = builder
             .clauses()
             .last()
-            .is_some_and(|prev| prev.parsed.effect.target_filter().is_none());
+            .is_some_and(|prev| prev.parsed.effect.target_filter().is_none())
+            && !chain_prior_referent_is_created_token(builder.clauses())
+            && if_you_do_anchor.is_none();
         if condition.is_some()
             && !is_distributed_chunk
             && !condition.as_ref().is_some_and(condition_refs_source_object)
