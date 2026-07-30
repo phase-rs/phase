@@ -21888,12 +21888,14 @@ fn smothering_tithe_that_player_pays_as_triggering_player() {
     }
 }
 
-/// CR 608.2k + CR 608.2d (issue #6477): the bare-pronoun counterpart of
+/// CR 608.2d + CR 608.2k (issue #6477): the bare-pronoun counterpart of
 /// `smothering_tithe_that_player_pays_as_triggering_player` — "they may pay"
 /// anaphors back to "an opponent" from the trigger condition and must resolve
 /// identically to the explicit "that player may pay" phrasing: the opponent
 /// who cast the spell pays (not the Wandering Archaic controller), and the
-/// payment is optional so a decline can gate the copy.
+/// payment is optional (CR 608.2d) so a decline can gate the copy. The copy's
+/// "that spell" target is the untargeted spell object the trigger condition
+/// already named, carried forward per CR 608.2k.
 #[test]
 fn wandering_archaic_they_pay_as_triggering_player() {
     let def = parse_trigger_line(
