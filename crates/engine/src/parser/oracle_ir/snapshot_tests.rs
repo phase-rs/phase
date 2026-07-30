@@ -998,31 +998,46 @@ fn chandra_nalaar_minus_x_loyalty_is_ir_native() {
 /// lowered boxed ability inside the outer delayed-trigger clause.
 #[test]
 fn temporal_delayed_trigger_spell_router_is_ir_native() {
+    // The three established grammar representatives remain the stable IR/lowered
+    // snapshot fixtures. The direct `Whenever … this turn` arm uses the same
+    // structural assertions without a fourth snapshot pair.
     let cases = [
         (
-            "pact_of_negation_temporal_ir",
-            "pact_of_negation_temporal_lowered",
+            None,
+            "Whenever you cast a creature spell this turn, draw a card.",
+            "Glimpse of Nature",
+            &["Sorcery"][..],
+        ),
+        (
+            Some((
+                "pact_of_negation_temporal_ir",
+                "pact_of_negation_temporal_lowered",
+            )),
             "At the beginning of your next upkeep, pay {3}{U}{U}. If you don't, you lose the game.",
             "Pact of Negation",
             &["Instant"][..],
         ),
         (
-            "full_throttle_temporal_ir",
-            "full_throttle_temporal_lowered",
+            Some((
+                "full_throttle_temporal_ir",
+                "full_throttle_temporal_lowered",
+            )),
             "At the beginning of each combat this turn, untap all creatures that attacked this turn.",
             "Full Throttle",
             &["Sorcery"][..],
         ),
         (
-            "galvanic_iteration_temporal_ir",
-            "galvanic_iteration_temporal_lowered",
+            Some((
+                "galvanic_iteration_temporal_ir",
+                "galvanic_iteration_temporal_lowered",
+            )),
             "When you next cast an instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.",
             "Galvanic Iteration",
             &["Instant"][..],
         ),
     ];
 
-    for (ir_snapshot, lowered_snapshot, oracle_text, card_name, types) in cases {
+    for (snapshots, oracle_text, card_name, types) in cases {
         let (ir, lowered) = parse_two_layer(oracle_text, card_name, types, &[]);
         assert_eq!(
             ir.items.len(),
@@ -1058,12 +1073,14 @@ fn temporal_delayed_trigger_spell_router_is_ir_native() {
             ));
         }
 
-        insta::with_settings!({ snapshot_suffix => ir_snapshot }, {
-            insta::assert_json_snapshot!("temporal_delayed_trigger", &ir);
-        });
-        insta::with_settings!({ snapshot_suffix => lowered_snapshot }, {
-            insta::assert_json_snapshot!("temporal_delayed_trigger", &lowered);
-        });
+        if let Some((ir_snapshot, lowered_snapshot)) = snapshots {
+            insta::with_settings!({ snapshot_suffix => ir_snapshot }, {
+                insta::assert_json_snapshot!("temporal_delayed_trigger", &ir);
+            });
+            insta::with_settings!({ snapshot_suffix => lowered_snapshot }, {
+                insta::assert_json_snapshot!("temporal_delayed_trigger", &lowered);
+            });
+        }
     }
 }
 
