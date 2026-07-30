@@ -35,13 +35,25 @@ scryfall_validate_json() {
   jq -e 'type' "$1" >/dev/null 2>&1
 }
 
-# scryfall_download URL FILE — download URL with retries to a unique temp,
-# validate it, then atomically rename into place. The temp+rename keeps
-# concurrent writers (setup.sh fetches default-cards.json from two scripts at
-# once) and interrupted/throttled downloads from corrupting or clobbering a
-# good FILE — readers only ever see the old or new complete file.
+# scryfall_download URL FILE [VALIDATOR] — download URL with retries to a
+# unique temp, validate it, then atomically rename into place. The temp+rename
+# keeps concurrent writers (setup.sh fetches default-cards.json from two
+# scripts at once) and interrupted/throttled downloads from corrupting or
+# clobbering a good FILE — readers only ever see the old or new complete file.
+#
+# VALIDATOR is the name of a function to run instead of the default
+# scryfall_validate_json when deciding whether a downloaded/pre-existing FILE
+# is trustworthy enough to keep (e.g. a caller that needs a specific
+# top-level key, not just "is this JSON"). It gates both the common path --
+# the freshly-downloaded tmp file BEFORE the mv into FILE, so a body that
+# fails it never lands where a later non-validating reader would trust it --
+# and the mv-failure recovery path below, which re-checks a pre-existing
+# FILE left behind by a concurrent writer. scryfall_validate_json itself
+# always gates the freshly-downloaded tmp file first -- that check exists to
+# catch a throttled/truncated Cloudflare body, a transport-level concern
+# independent of the caller's semantic shape.
 scryfall_download() {
-  local url="$1" file="$2" tmp
+  local url="$1" file="$2" validator="${3:-scryfall_validate_json}" tmp
   tmp=$(mktemp "${file}.XXXXXX")
   if ! "${SCRYFALL_CURL[@]}" -o "$tmp" "$url"; then
     rm -f "$tmp"
@@ -52,6 +64,16 @@ scryfall_download() {
     rm -f "$tmp"
     return 1
   fi
+  # Caller-supplied semantic validation runs on the tmp file, before the mv.
+  # Skipped for the default validator: the identical bytes already passed the
+  # identical check above, and default_cards.json-sized bodies make a second
+  # full jq parse measurably wasteful. Run in a subshell for the same
+  # scope-isolation reason as the recovery path below.
+  if [ "$validator" != scryfall_validate_json ] && ! ( "$validator" "$tmp" ); then
+    echo "scryfall: download of $url failed $validator" >&2
+    rm -f "$tmp"
+    return 1
+  fi
   if ! mv -f "$tmp" "$file" 2>/dev/null; then
     # POSIX rename silently replaces FILE even if another process has it open
     # -- the concurrent-writer safety this function is designed around (see
@@ -59,8 +81,14 @@ scryfall_download() {
     # open, so the losing side of a race hard-fails here instead of just
     # losing harmlessly. If a concurrent invocation already produced a valid
     # FILE, our own download is redundant: drop it and let the winner stand.
-    if [ -f "$file" ] && scryfall_validate_json "$file"; then
+    #
+    # Run VALIDATOR in a subshell: scripts/lib/scryfall-fetch.sh callers pass
+    # in a function name defined in their own scope, and isolating it here
+    # keeps this recovery check from being able to leak variables back into
+    # the caller's shell.
+    if [ -f "$file" ] && ( "$validator" "$file" ); then
       rm -f "$tmp"
+      return 0
     else
       rm -f "$tmp"
       return 1
@@ -90,10 +118,11 @@ def js_downcase:
   | implode;
 '
 
-# scryfall_fetch_bulk TYPE FILE — resolve a bulk-data download_uri by type
-# (e.g. oracle_cards, default_cards) and download it to FILE.
+# scryfall_fetch_bulk TYPE FILE [VALIDATOR] — resolve a bulk-data download_uri
+# by type (e.g. oracle_cards, default_cards) and download it to FILE.
+# VALIDATOR is forwarded to scryfall_download unchanged (see its doc comment).
 scryfall_fetch_bulk() {
-  local type="$1" file="$2" uri
+  local type="$1" file="$2" validator="${3:-scryfall_validate_json}" uri
   uri=$("${SCRYFALL_CURL[@]}" "https://api.scryfall.com/bulk-data" \
     | jq -r --arg t "$type" '.data[] | select(.type == $t) | .download_uri') \
     || return 1
@@ -101,5 +130,5 @@ scryfall_fetch_bulk() {
     echo "scryfall: no download_uri for bulk-data type '$type'" >&2
     return 1
   fi
-  scryfall_download "$uri" "$file"
+  scryfall_download "$uri" "$file" "$validator"
 }
