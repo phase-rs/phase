@@ -31,8 +31,8 @@ use super::static_ir::StaticIr;
 use super::trigger::TriggerNodeIr;
 use crate::types::ability::{
     AbilityDefinition, AdditionalCost, CastingPermission, CastingRestriction,
-    ContinuousModification, Effect, ModalChoice, ReplacementDefinition, SolveCondition,
-    SpellCastingOption, StaticDefinition, TriggerDefinition, VoteSubject,
+    ContinuousModification, Effect, ModalChoice, SolveCondition, SpellCastingOption,
+    StaticDefinition, TriggerDefinition, VoteSubject,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
