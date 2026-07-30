@@ -52,8 +52,8 @@ pub use game_state::{
     ZoneChangeRecord,
 };
 pub use identifiers::{
-    CardId, DelayedTriggerToken, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef,
-    ObjectProvenance, LEGACY_INCARNATION,
+    CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, ObjectProvenance,
+    LEGACY_INCARNATION,
 };
 pub use interaction::{
     ActiveInteractionSlot, InteractionChoiceId, InteractionId, InteractionSessionId,

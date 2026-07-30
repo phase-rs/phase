@@ -35,7 +35,7 @@ use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
     ColoredManaCount, ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction,
 };
-use super::match_config::{MatchConfig, MatchPhase, MatchScore};
+use super::match_config::{MatchConfig, MatchForfeitResult, MatchPhase, MatchScore};
 use super::phase::{Phase, PhaseStop, TurnDirection};
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{
