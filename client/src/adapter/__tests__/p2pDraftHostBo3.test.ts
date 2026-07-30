@@ -149,7 +149,7 @@ describe("P2PDraftHost Bo3", () => {
         const binding: DraftMatchBinding = {
           podId: "draft-1", matchId: "bo3-1", round: 1, sessionKey: "session", lease: "lease", nonce: "nonce", revision: 0, matchAuthoritySeat: 1,
         };
-        const launch = (seat: number): DraftMatchLaunch => ({
+        const launch = (seat: number): Extract<DraftMatchLaunch, { type: "HumanGuest" }> => ({
           type: "HumanGuest",
           matchId: "bo3-1",
           matchRoomCode: "room",
