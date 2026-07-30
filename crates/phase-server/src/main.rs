@@ -8470,7 +8470,8 @@ mod p2p_backup_delete_tests {
         let (base_url, server) = spawn_p2p_backup_http_test(app_state).await;
 
         // Client-shaped host session (secrets must be redacted on store).
-        let snapshot = r#"{"status":"Drafting","seatTokens":{"0":"secret-token"},"kickedTokens":["kicked"]}"#;
+        let snapshot =
+            r#"{"status":"Drafting","seatTokens":{"0":"secret-token"},"kickedTokens":["kicked"]}"#;
         let body = format!(
             r#"{{"draft_code":"{DRAFT_CODE}","host_peer_id":"{HOST_PEER}","snapshot_json":{}}}"#,
             serde_json::to_string(snapshot).expect("json")
