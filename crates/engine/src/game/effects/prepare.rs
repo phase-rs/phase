@@ -344,7 +344,9 @@ fn mark_prepare_copy_cancel_rollback(
 
     if matches!(
         waiting,
-        WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. }
+        WaitingFor::ManaPayment { .. }
+            | WaitingFor::ManaSourceSelection { .. }
+            | WaitingFor::PhyrexianPayment { .. }
     ) {
         if let Some(pending) = state.pending_cast.as_mut() {
             debug_assert_eq!(

@@ -867,6 +867,27 @@ pub fn candidate_actions_broad_with_probe(
             player,
             convoke_mode,
         } => mana_payment_actions(state, *player, *convoke_mode),
+        WaitingFor::ManaSourceSelection {
+            player, options, ..
+        } => {
+            let mut actions = options
+                .iter()
+                .cloned()
+                .map(|selection| {
+                    candidate(
+                        GameAction::ActivateManaSource { selection },
+                        TacticalClass::Mana,
+                        Some(*player),
+                    )
+                })
+                .collect::<Vec<_>>();
+            actions.push(candidate(
+                GameAction::BackToManaPayment,
+                TacticalClass::Pass,
+                Some(*player),
+            ));
+            actions
+        }
         WaitingFor::MoveCountersDistribution {
             player,
             available,
@@ -3362,7 +3383,10 @@ fn semantic_candidate_actions_with_probe(
     let has_pending_cast = state.waiting_for.has_pending_cast()
         || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
             && state.pending_cast.is_some());
-    if has_pending_cast {
+    let allows_cancel_cast = state.waiting_for.allows_cancel_cast()
+        || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
+            && state.pending_cast.is_some());
+    if has_pending_cast && allows_cancel_cast {
         if let Some(player) = state.waiting_for.acting_player() {
             actions.push(candidate(
                 GameAction::CancelCast,

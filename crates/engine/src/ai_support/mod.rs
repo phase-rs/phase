@@ -188,6 +188,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                     },
             },
         )
+        | (
+            WaitingFor::Priority { .. },
+            GameAction::ActivateManaSource {
+                selection:
+                    crate::types::mana::ManaSourceSelection {
+                        source: crate::types::identifiers::ObjectIncarnationRef { object_id, .. },
+                        ..
+                    },
+            },
+        )
         | (WaitingFor::Priority { .. }, GameAction::UntapLandForMana { object_id })
         | (
             WaitingFor::Priority { .. },
@@ -1010,6 +1020,18 @@ fn grouped_mana_requires_priority(state: &GameState, player: PlayerId) -> bool {
                 &aura_sources,
                 &mana_activation_gates,
             ),
+            GameAction::ActivateManaSource { selection } => {
+                selection.ability_index.is_some_and(|ability_index| {
+                    activate_mana_action_would_queue_non_mana_trigger(
+                        state,
+                        player,
+                        selection.source.object_id,
+                        ability_index,
+                        &aura_sources,
+                        &mana_activation_gates,
+                    )
+                })
+            }
             _ => false,
         })
 }
@@ -1435,6 +1457,21 @@ fn beneficial_mana_tap_trigger_hold(
                     return false;
                 }
                 *source_id
+            }
+            GameAction::ActivateManaSource { selection } => {
+                let Some(ability_index) = selection.ability_index else {
+                    return false;
+                };
+                let object_id = selection.source.object_id;
+                let has_tap = state
+                    .objects
+                    .get(&object_id)
+                    .and_then(|obj| obj.abilities.get(ability_index))
+                    .is_some_and(|ability| mana_sources::has_tap_component(&ability.cost));
+                if !has_tap {
+                    return false;
+                }
+                object_id
             }
             _ => return false,
         };

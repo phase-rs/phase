@@ -668,7 +668,10 @@ export interface CastingVariantChoiceOption {
   mana_cost: ManaCost;
 }
 
-export type CastPaymentMode = { type: "Auto" } | { type: "Manual" };
+export type CastPaymentMode =
+  | { type: "Auto" }
+  | { type: "AutoExceptSacrificialMana" }
+  | { type: "Manual" };
 
 export type UnlessCost =
   | { type: "Fixed"; cost: ManaCost }
@@ -1158,6 +1161,10 @@ export type ManaSourcePenalty =
   | { PaysLifeOnActivation: { fixed_amount: number | null } }
   | "Sacrifices";
 
+export type ManaSourceOutput =
+  | { type: "Concrete"; data: ManaType }
+  | { type: "DeferredColorChoice" };
+
 export type ProductionOverride =
   | { type: "SingleColor"; data: ManaType }
   | { type: "Combination"; data: ManaType[] };
@@ -1172,6 +1179,7 @@ export interface ManaSourceSelection {
   source: ObjectIncarnationRef;
   ability_index: number | null;
   mana_type: ManaType;
+  output: ManaSourceOutput;
   atomic_combination: ManaType[] | null;
   restrictions: ManaRestriction[];
   penalty: ManaSourcePenalty;
@@ -1659,6 +1667,7 @@ export type WaitingFor =
       };
     }
   | { type: "ManaPayment"; data: { player: PlayerId; convoke_mode?: ConvokeMode } }
+  | { type: "ManaSourceSelection"; data: { player: PlayerId; options: ManaSourceSelection[]; convoke_mode?: ConvokeMode } }
   | {
       type: "ChooseXValue";
       data: {
@@ -2186,6 +2195,8 @@ export type GameAction =
   | { type: "MulliganDecision"; data: { choice: MulliganChoice } }
   | { type: "ReorderHand"; data: { order: ObjectId[] } }
   | { type: "TapLandForMana"; data: { selection: ManaSourceSelection } }
+  | { type: "ActivateManaSource"; data: { selection: ManaSourceSelection } }
+  | { type: "BackToManaPayment" }
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
   // CR 118.3a: pin / unpin a specific pool unit during manual mana payment.
   | { type: "SpendPoolMana"; data: { pip_id: number } }
@@ -2927,6 +2938,7 @@ export interface GameState {
   combat: CombatState | null;
   waiting_for: WaitingFor;
   has_pending_cast: boolean;
+  allows_cancel_cast?: boolean;
   /**
    * CR 601.2f: The locked-in pending cast (cost, ability, object) while the
    * caster is mid-cast. Present during ManaPayment / cost-choice WaitingFor

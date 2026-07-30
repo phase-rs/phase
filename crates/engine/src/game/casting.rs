@@ -15060,6 +15060,7 @@ fn auto_tap_and_pay_cost_excluding(
         Some(source_id),
         ctx,
         excluded_sources,
+        None,
         resume,
         parent,
     );

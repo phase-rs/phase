@@ -29,6 +29,7 @@
     "logDefault": "Registro Padrão",
     "spellPayment": "Pagamento de Mágicas",
     "manualManaPayment": "Pagamento manual de mana para mágicas",
+    "spellPaymentOptions": { "auto": "Automático", "autoExceptSacrificialMana": "Perguntar antes de sacrificar", "manual": "Manual" },
     "nativeEngine": "Usar o motor nativo para partidas locais e multijogador hospedado",
     "nativeEngineDescription": "Use o motor baixado para partidas locais contra IA e partidas hospedadas por você em um lobby. Os convidados continuam a se conectar pela conexão ponto a ponto do lobby. Usa o motor integrado quando não está disponível.",
     "boardBackground": "Plano de Fundo do Tabuleiro",

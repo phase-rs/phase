@@ -71,7 +71,7 @@ import { HelpSheet } from "../components/help/HelpSheet.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { AssistPaymentUI } from "../components/mana/AssistPaymentUI.tsx";
-import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
+import { ManaPaymentUI, ManaSourceSelectionUI } from "../components/mana/ManaPaymentUI.tsx";
 import { PayAmountChoiceUI } from "../components/mana/PayAmountChoiceUI.tsx";
 import { RichLabel } from "../components/mana/RichLabel.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
@@ -1770,6 +1770,8 @@ function GamePageContent({
         {waitingFor != null &&
           MANA_PAYMENT_WAITING_FOR_TYPES.has(waitingFor.type) &&
           canActForWaitingState && <ManaPaymentUI />}
+        {waitingFor?.type === "ManaSourceSelection" &&
+          canActForWaitingState && <ManaSourceSelectionUI />}
         {waitingFor?.type === "ChooseXValue" &&
           canActForWaitingState && <ChooseXValueUI />}
         {waitingFor?.type === "PayAmountChoice" &&

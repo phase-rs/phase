@@ -304,6 +304,7 @@ mod tests {
                     source: ObjectIncarnationRef::of(ObjectId(1), 1),
                     ability_index: None,
                     mana_type: ManaType::Green,
+                    output: engine::types::mana::ManaSourceOutput::Concrete(ManaType::Green),
                     atomic_combination: None,
                     restrictions: vec![ManaRestriction::OnlyForAny(vec![
                         ManaRestriction::OnlyForSpell;
@@ -328,6 +329,7 @@ mod tests {
                     source: ObjectIncarnationRef::of(ObjectId(1), 1),
                     ability_index: None,
                     mana_type: ManaType::Green,
+                    output: engine::types::mana::ManaSourceOutput::Concrete(ManaType::Green),
                     atomic_combination: None,
                     restrictions: Vec::new(),
                     penalty: ManaSourcePenalty::None,

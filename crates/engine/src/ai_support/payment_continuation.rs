@@ -92,7 +92,9 @@ pub fn classify_payment_continuation(state: &GameState) -> PaymentContinuationSt
     match &state.waiting_for {
         // CR 601.2g–h: during the ordinary mana-payment window, the visible
         // payer and live pending cast jointly identify the payment root.
-        WaitingFor::ManaPayment { player, .. } => classify_global_root(state, *player),
+        WaitingFor::ManaPayment { player, .. } | WaitingFor::ManaSourceSelection { player, .. } => {
+            classify_global_root(state, *player)
+        }
         // CR 601.2f–h: submitting Phyrexian choices remains part of the same
         // cost payment. The prompt's object must agree with the announced root.
         WaitingFor::PhyrexianPayment {

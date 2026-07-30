@@ -4477,6 +4477,48 @@ fn apply_action(
             );
             waiting_for
         }
+        (WaitingFor::Priority { player }, GameAction::ActivateManaSource { selection }) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            if state
+                .objects
+                .get(&selection.source.object_id)
+                .is_some_and(|object| {
+                    object
+                        .card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Land)
+                })
+            {
+                return Err(EngineError::ActionNotAllowed(
+                    "Land mana abilities use TapLandForMana".to_string(),
+                ));
+            }
+            let events_before = events.len();
+            let waiting_for = mana_sources::activate_mana_source_selection(
+                state,
+                *player,
+                &selection,
+                &mut events,
+                ManaAbilityResume::Priority,
+            )?;
+            triggers::resolve_tap_mana_triggers_inline(state, &mut events, events_before);
+            if let Some(ability_index) = selection.ability_index {
+                record_mana_loop_action_step(
+                    state,
+                    *player,
+                    selection.source.object_id,
+                    crate::types::game_state::LoopAction::Activate {
+                        source_id: selection.source.object_id,
+                        ability_index,
+                    },
+                );
+            }
+            waiting_for
+        }
         (WaitingFor::Priority { player }, GameAction::UntapLandForMana { object_id }) => {
             if state.priority_player
                 != turn_control::authorized_submitter_for_player(state, *player)
@@ -6054,6 +6096,49 @@ fn apply_action(
                 }
                 None => WaitingFor::Priority { player },
             }
+        }
+        (
+            WaitingFor::ManaSourceSelection {
+                player,
+                options,
+                convoke_mode,
+            },
+            GameAction::BackToManaPayment,
+        ) => {
+            // The selection window never consumes mana or changes pins. Restore
+            // the exact payment state rather than re-running the planner.
+            let _ = options;
+            WaitingFor::ManaPayment {
+                player: *player,
+                convoke_mode: *convoke_mode,
+            }
+        }
+        (
+            WaitingFor::ManaSourceSelection {
+                player,
+                options,
+                convoke_mode,
+            },
+            GameAction::ActivateManaSource { selection },
+        ) => {
+            if !options.contains(&selection) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Mana source was not offered for this payment".to_string(),
+                ));
+            }
+            let events_before = events.len();
+            let waiting_for = mana_sources::activate_mana_source_selection(
+                state,
+                *player,
+                &selection,
+                &mut events,
+                ManaAbilityResume::ManaPayment {
+                    outer_player: Some(*player),
+                    convoke_mode: *convoke_mode,
+                },
+            )?;
+            triggers::resolve_tap_mana_triggers_inline(state, &mut events, events_before);
+            waiting_for
         }
         (WaitingFor::ChooseXValue { player, .. }, GameAction::CancelCast) => {
             // CR 601.2f + CR 601.2i: Caster may back out before committing to an

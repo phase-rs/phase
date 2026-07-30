@@ -248,7 +248,9 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::UntapChoice { .. } => HumanResponseModel::DirectChoices,
         WaitingFor::BetweenGamesSideboard { .. } => HumanResponseModel::SideboardPartition,
-        WaitingFor::ManaPayment { .. } => HumanResponseModel::DirectChoices,
+        WaitingFor::ManaPayment { .. } | WaitingFor::ManaSourceSelection { .. } => {
+            HumanResponseModel::DirectChoices
+        }
         WaitingFor::LoopShortcut { .. } => HumanResponseModel::LoopShortcut,
         WaitingFor::Priority { .. }
         | WaitingFor::MeldPairChoice { .. }
@@ -334,6 +336,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
             Some(InteractionSlotKind::OpeningBottom),
         ),
         WaitingFor::ManaPayment { .. }
+        | WaitingFor::ManaSourceSelection { .. }
         | WaitingFor::AssistPayment { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::UnlessPayment { .. }
@@ -2008,6 +2011,20 @@ fn direct_choice_projection(
             }
             mana_payment_direct_actions(state, *player, *convoke_mode)?
         }
+        WaitingFor::ManaSourceSelection {
+            player, options, ..
+        } => {
+            if *player != semantic_owner {
+                return Err(InteractionReasonCode::InvalidAuthorityState);
+            }
+            let mut actions = options
+                .iter()
+                .cloned()
+                .map(|selection| GameAction::ActivateManaSource { selection })
+                .collect::<Vec<_>>();
+            actions.push(GameAction::BackToManaPayment);
+            actions
+        }
         WaitingFor::PrecastCopyShortcutOffer {
             epoch, route_count, ..
         } => {
@@ -3351,6 +3368,7 @@ fn selection_projection(
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::ManaPayment { .. }
+        | WaitingFor::ManaSourceSelection { .. }
         | WaitingFor::AssistChoosePlayer { .. }
         | WaitingFor::AssistPayment { .. }
         | WaitingFor::ChooseXValue { .. }
@@ -3873,6 +3891,7 @@ fn object_property_code(property: ObjectProperty) -> InteractionObjectProperty {
 fn cast_payment_mode_code(mode: CastPaymentMode) -> &'static str {
     match mode {
         CastPaymentMode::Auto => "auto",
+        CastPaymentMode::AutoExceptSacrificialMana => "autoExceptSacrificialMana",
         CastPaymentMode::Manual => "manual",
     }
 }
@@ -4157,7 +4176,7 @@ fn project_action_payload(
         GameAction::ChooseEntryAttackTarget { target } => {
             push_attack_target_surface(surfaces, state, target, InteractionRoleCode::AttackTarget)
         }
-        GameAction::TapLandForMana { selection } => {
+        GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
             let Some(player) = state
                 .objects
                 .get(&selection.source.object_id)
@@ -4166,7 +4185,7 @@ fn project_action_payload(
                 return;
             };
             let Ok(option) =
-                mana_sources::live_land_mana_option_for_selection(state, player, selection)
+                mana_sources::live_mana_source_option_for_selection(state, player, selection)
             else {
                 return;
             };
@@ -4969,6 +4988,8 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::MulliganDecision { .. } => InteractionActionCode::MulliganDecision,
         GameAction::ReorderHand { .. } => InteractionActionCode::ReorderHand,
         GameAction::TapLandForMana { .. } => InteractionActionCode::TapLandForMana,
+        GameAction::ActivateManaSource { .. } => InteractionActionCode::ActivateManaSource,
+        GameAction::BackToManaPayment => InteractionActionCode::BackToManaPayment,
         GameAction::UntapLandForMana { .. } => InteractionActionCode::UntapLandForMana,
         GameAction::SpendPoolMana { .. } => InteractionActionCode::SpendPoolMana,
         GameAction::UnspendPoolMana { .. } => InteractionActionCode::UnspendPoolMana,
@@ -5137,7 +5158,7 @@ fn actor_candidates(
         .filter_map(|candidate| {
             let mut manual = candidate.clone();
             let payment_mode = manual.action.payment_mode_mut()?;
-            if *payment_mode != CastPaymentMode::Auto {
+            if *payment_mode == CastPaymentMode::Manual {
                 return None;
             }
             *payment_mode = CastPaymentMode::Manual;
