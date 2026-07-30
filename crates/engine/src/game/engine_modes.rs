@@ -313,7 +313,6 @@ pub(super) fn resolve_random_modal_trigger(
         },
         events,
     )?;
-    settle_completed_repeated_optional_payment_frame(state)?;
     Ok(Some(waiting_for))
 }
 
