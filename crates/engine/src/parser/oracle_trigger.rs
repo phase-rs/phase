@@ -9,19 +9,22 @@ use nom::Parser;
 
 use super::oracle_effect::conditions::source_saddled_filter;
 use super::oracle_effect::{
-    condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
-    try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
+    attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
+    lower_effect_chain_ir, parse_effect_chain_ir, try_parse_reanimator_aura_etb_effect_ir,
+    try_parse_reanimator_aura_grant_etb_effect_ir,
 };
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
-use super::oracle_ir::effect_chain::EffectChainIr;
+use super::oracle_ir::effect_chain::{DieResultBranchIr, EffectChainIr};
 use super::oracle_ir::trigger::{
     FirstTimeLimit, ReflexivePaymentIr, TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
 };
 use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::condition::parse_elided_subject_state_condition;
-use super::oracle_nom::condition::parse_inner_condition;
+use super::oracle_nom::condition::{
+    parse_inner_condition, parse_there_are_battlefield_count_clause,
+};
 use super::oracle_nom::condition::{parse_source_counters_exist, parse_source_has_counters};
 use super::oracle_nom::error::{oracle_err, OracleResult};
 use super::oracle_nom::filter::{
@@ -1474,6 +1477,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             relative_player_scope,
         },
         source_text: text.to_string(),
+        die_results: Vec::new(),
     }
 }
 
@@ -1533,8 +1537,10 @@ fn mode_exposes_subject_batch(mode: &TriggerMode) -> bool {
 fn lower_trigger_effect_chain(
     chain_ir: &EffectChainIr,
     modifiers: &TriggerModifiers,
+    die_results: &[DieResultBranchIr],
 ) -> AbilityDefinition {
     let mut ability = lower_effect_chain_ir(chain_ir);
+    attach_terminal_die_result_branches_before_finalization(&mut ability, die_results);
     crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
     if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
         && matches!(
@@ -1583,7 +1589,8 @@ fn lower_trigger_effect_chain(
 /// which nothing added to `lower_trigger_ir` can invalidate.
 pub(crate) fn lower_trigger_node_ir(ir: &TriggerNodeIr) -> TriggerDefinition {
     match ir {
-        TriggerNodeIr::Assembled { definition, .. } => definition.clone(),
+        TriggerNodeIr::Parsed(trigger) => lower_trigger_ir(trigger),
+        TriggerNodeIr::Assembled { definition, .. } => (**definition).clone(),
     }
 }
 
@@ -1593,12 +1600,14 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
 
     // Lower the body
     let execute = match &ir.body {
-        Some(TriggerBody::EffectChain(chain_ir)) => {
-            Some(Box::new(lower_trigger_effect_chain(chain_ir, modifiers)))
-        }
+        Some(TriggerBody::EffectChain(chain_ir)) => Some(Box::new(lower_trigger_effect_chain(
+            chain_ir,
+            modifiers,
+            &ir.die_results,
+        ))),
         Some(TriggerBody::ReflexivePayment(reflexive)) => {
             let mut reflexive_ability =
-                lower_trigger_effect_chain(&reflexive.effect_chain, modifiers);
+                lower_trigger_effect_chain(&reflexive.effect_chain, modifiers, &ir.die_results);
             reflexive_ability.condition = Some(AbilityCondition::WhenYouDo);
 
             let mut pay_ability = AbilityDefinition::new(
@@ -1614,16 +1623,18 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             Some(Box::new(pay_ability))
         }
         Some(TriggerBody::Modal(modal)) => Some(Box::new(
-            lower_trigger_effect_chain(&modal.marker, modifiers)
+            lower_trigger_effect_chain(&modal.marker, modifiers, &[])
                 .with_modal(modal.choice.clone(), modal.mode_abilities.clone()),
         )),
         Some(TriggerBody::Vote(vote)) => Some(Box::new(lower_trigger_effect_chain(
             &vote.effect_chain(AbilityKind::Spell),
             modifiers,
+            &[],
         ))),
         Some(TriggerBody::Pile(pile)) => Some(Box::new(lower_trigger_effect_chain(
             &pile.effect_chain(AbilityKind::Spell),
             modifiers,
+            &[],
         ))),
         None => None,
     };
@@ -4795,33 +4806,44 @@ fn parse_cast_from_zone_intervening_if(input: &str) -> OracleResult<'_, TriggerC
     Ok((rest, scoped_you_cast_from_zone(zone)))
 }
 
-/// CR 603.4 + CR 404.1 + CR 205.3: "if you cast it/them and <game-state condition>"
-/// — cast-provenance AND a second conjunct (Ran and Shaw: "if you cast them and
-/// there are three or more Dragon and/or Lesson cards in your graveyard"). The
-/// "you cast it/them" conjunct binds the unscoped `WasCast` (matching the sibling
-/// "if you cast it" convention at the bare handler below — the meaningful ETB
-/// discriminator is cast vs put-into-play, and the caster controls their own
-/// creature). The second conjunct is delegated to `parse_inner_condition` (the
-/// shared game-state authority) and bridged via `static_condition_to_trigger_condition`,
-/// so the graveyard multi-subtype "and/or" threshold (CR 404.1 owner-specific
-/// graveyard, CR 205.3 subtypes) rides the existing `ZoneCardCount` path with no
-/// new combinator. Both conjuncts fold into `TriggerCondition::And`, mirroring the
-/// BB4 Fearless conjunction `parse_typed_attacked_this_combat_conjunction`. MUST be
-/// registered before the bare "if you cast it" handler, which strips only the cast
-/// conjunct and would drop the second clause.
-fn parse_cast_them_and_graveyard_count_intervening_if(
-    input: &str,
-) -> OracleResult<'_, TriggerCondition> {
+/// CR 603.4 + CR 601.2: Parse "if you cast it/them [from <zone>] and
+/// <game-state condition>" as a cast-provenance AND a second conjunct. The
+/// game-state side is delegated to `parse_inner_condition` and bridged through
+/// `static_condition_to_trigger_condition`, keeping all quantity/filter grammar
+/// in its shared authority. A zoned cast uses the same caster/owner scoping as
+/// the simple "if you cast it from <zone>" handler; the unzoned form preserves
+/// the established bare `WasCast` representation used by Ran and Shaw.
+///
+/// This must be registered before the simple positive zoned and bare cast
+/// scanners: either scanner would otherwise consume only the cast prefix and
+/// silently discard the trailing conjunct.
+fn parse_cast_and_condition_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
     let (rest, _) = tag("if ").parse(input)?;
     let (rest, _) = alt((tag("you cast them"), tag("you cast it"))).parse(rest)?;
+    let (rest, zone) = opt(preceded(
+        tag(" from "),
+        alt((
+            value(Zone::Hand, tag("your hand")),
+            value(Zone::Graveyard, tag("your graveyard")),
+            value(Zone::Exile, tag("exile")),
+        )),
+    ))
+    .parse(rest)?;
     let (rest, _) = tag(" and ").parse(rest)?;
-    let (rest, sc) = parse_inner_condition(rest)?;
+    // First use the complete shared condition grammar: some conditions own
+    // commas themselves (for example, multi-zone lists). Only the strict
+    // battlefield-count noun phrase needs the clause-aware fallback below.
+    let (rest, sc) =
+        parse_inner_condition(rest).or_else(|_| parse_there_are_battlefield_count_clause(rest))?;
     let cond_b = static_condition_to_trigger_condition(&sc).ok_or_else(|| oracle_err(input))?;
-    let cond_a = TriggerCondition::WasCast {
-        zone: None,
-        controller: None,
-        owner: None,
-    };
+    let cond_a = zone.map_or(
+        TriggerCondition::WasCast {
+            zone: None,
+            controller: None,
+            owner: None,
+        },
+        scoped_you_cast_from_zone,
+    );
     Ok((
         rest,
         TriggerCondition::And {
@@ -4944,11 +4966,11 @@ fn extract_if_condition_with_card_name(
         );
     }
 
-    // CR 603.4 + CR 601.2: "if you cast it from your hand/graveyard/exile" —
-    // positive zone-specific cast check. The entering object must have been cast
-    // from the named zone. MUST precede the zoneless "if you cast it" arm.
+    // CR 603.4 + CR 601.2: "if you cast it/them [from <zone>] and <game-state
+    // condition>". This must precede both simple positive and bare cast scanners,
+    // which otherwise truncate the condition after its cast-provenance prefix.
     if let Some((before, condition, rest)) =
-        scan_preceded(&lower, parse_cast_from_zone_intervening_if)
+        scan_preceded(&lower, parse_cast_and_condition_intervening_if)
     {
         let pos = before.len();
         let clause_len = lower.len() - before.len() - rest.len();
@@ -4958,13 +4980,10 @@ fn extract_if_condition_with_card_name(
         );
     }
 
-    // CR 603.4 + CR 404.1 + CR 205.3: "if you cast it/them and <game-state
-    // condition>" — cast-provenance AND a second conjunct (Ran and Shaw's
-    // graveyard-count gate). MUST precede the bare "if you cast it" handler
-    // below: that handler strips only the cast conjunct and would silently drop
-    // the trailing And clause, truncating the condition.
+    // CR 603.4 + CR 601.2: simple positive zone-specific cast check. Keep this
+    // after the conjunction scanner so an `and <condition>` tail cannot be lost.
     if let Some((before, condition, rest)) =
-        scan_preceded(&lower, parse_cast_them_and_graveyard_count_intervening_if)
+        scan_preceded(&lower, parse_cast_from_zone_intervening_if)
     {
         let pos = before.len();
         let clause_len = lower.len() - before.len() - rest.len();

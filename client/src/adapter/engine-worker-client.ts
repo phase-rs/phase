@@ -16,6 +16,7 @@ import type {
   ViewerSnapshot,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
@@ -238,6 +239,13 @@ export class EngineWorkerClient {
     );
   }
 
+  async submitInteraction(actor: number, submission: InteractionSubmission): Promise<SubmitResult> {
+    return this.request<SubmitResult>(
+      { type: "submitInteraction", actor, submission },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
   async previewManaPayment(actor: number, action: GameAction): Promise<number[]> {
     return this.request<number[]>(
       { type: "previewManaPayment", actor, action },
@@ -301,6 +309,13 @@ export class EngineWorkerClient {
         playerId,
       },
       ENGINE_AI_TIMEOUT_MS,
+    );
+  }
+
+  async getAiFallbackAction(): Promise<GameAction | null> {
+    return this.request<GameAction | null>(
+      { type: "getAiFallbackAction" },
+      ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
 

@@ -14,6 +14,7 @@ import type {
   SubmitResult,
   FormatConfig,
 } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
@@ -100,6 +101,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 23 — PayableResource::ManaGeneric changed from { per_x } to
+ *      { base_cost: ManaCost } (#6410) — a GameState payload field type
+ *      change, and base_cost intentionally carries no serde default (a
+ *      missing base_cost must fail deserialization, not silently resolve
+ *      to a zero-cost payment), so old and new peers can't parse each
+ *      other's serialized state.
  * 22 — Viewer interaction projections and semantic object-action identities.
  * 21 — Native P2P host bridge identity and server-authored state revisions.
  * 20 — Actor-scoped priority-passing settings and filtered per-player state.
@@ -114,7 +121,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 22;
+export const PROTOCOL_VERSION = 23;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -633,6 +640,27 @@ export class WebSocketAdapter implements EngineAdapter {
         this.pendingReject = null;
         this.emit({ type: "actionPendingChanged", pending: false });
         reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
+      }
+    });
+  }
+
+  async submitInteraction(
+    submission: InteractionSubmission,
+    _actor: PlayerId,
+  ): Promise<SubmitResult> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    this.emit({ type: "actionPendingChanged", pending: true });
+    return new Promise<SubmitResult>((resolve, reject) => {
+      this.pendingResolve = resolve;
+      this.pendingReject = reject;
+      if (!this.send({ type: "Interaction", data: { submission } })) {
+        this.pendingResolve = null;
+        this.pendingReject = null;
+        this.emit({ type: "actionPendingChanged", pending: false });
+        reject(new AdapterError("WS_CLOSED", "Failed to send interaction", true));
       }
     });
   }

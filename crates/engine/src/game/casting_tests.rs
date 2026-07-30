@@ -5155,7 +5155,7 @@ fn composite_tap_self_exile_activation_moves_battlefield_source_to_exile() {
 }
 
 #[test]
-fn activated_sacrifice_cost_resumes_to_effect_target_selection() {
+fn activated_sacrifice_cost_selects_effect_target_before_payment() {
     let mut state = setup_game_at_main_phase();
     let source = create_object(
         &mut state,
@@ -5238,22 +5238,8 @@ fn activated_sacrifice_cost_resumes_to_effect_target_selection() {
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
 
     let waiting = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
-        .expect("activation should ask for the token sacrifice cost first");
+        .expect("activation should ask for its effect target before payment");
     state.waiting_for = waiting;
-    let WaitingFor::PayCost {
-        kind: PayCostKind::Sacrifice,
-        choices: permanents,
-        count,
-        ..
-    } = &state.waiting_for
-    else {
-        panic!("expected PayCost Sacrifice, got {:?}", state.waiting_for);
-    };
-    assert_eq!(*count, 1);
-    assert_eq!(permanents, &vec![token]);
-
-    apply_as_current(&mut state, GameAction::SelectCards { cards: vec![token] })
-        .expect("sacrificing the token should resume activation");
     let WaitingFor::TargetSelection {
         target_slots,
         selection,
@@ -5267,13 +5253,13 @@ fn activated_sacrifice_cost_resumes_to_effect_target_selection() {
         selection
             .current_legal_targets
             .contains(&TargetRef::Object(creature)),
-        "the post-cost target prompt must include the target creature"
+        "the target prompt must include the target creature before payment"
     );
     assert!(
         selection
             .current_legal_targets
             .contains(&TargetRef::Object(other_creature)),
-        "the post-cost target prompt must include each legal target creature"
+        "the target prompt must include each legal target creature before payment"
     );
 
     apply_as_current(
@@ -5283,6 +5269,23 @@ fn activated_sacrifice_cost_resumes_to_effect_target_selection() {
         },
     )
     .expect("target creature should be selectable");
+
+    let WaitingFor::PayCost {
+        kind: PayCostKind::Sacrifice,
+        choices: permanents,
+        count,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "expected PayCost Sacrifice after target declaration, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(*count, 1);
+    assert_eq!(permanents, &vec![token]);
+    apply_as_current(&mut state, GameAction::SelectCards { cards: vec![token] })
+        .expect("sacrificing the token should resume activation");
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
@@ -7232,12 +7235,10 @@ fn x_cost_activated_composite_tap_prompts_for_x_and_taps_on_resolution() {
     );
 }
 
-/// Regression test for issue #897: X-cost activated ability with Composite
-/// {Tap, Mana{X}} cost must NOT attempt to pay the Tap sub-cost a second
-/// time when interactive target selection is required. Before the fix,
-/// `push_activated_ability_to_stack` paid the Tap cost and then stored it
-/// in `pending_act.activation_cost`; the resumed target-selection path in
-/// `casting_targets.rs` would try to pay it again, causing a softlock.
+/// Regression test for issue #897: an X-cost activated ability with Composite
+/// `{T}, {X}` chooses its target after X is announced but before either cost
+/// component is paid. The pending root retains the tap cost through selection,
+/// then pays it exactly once while completing the activation.
 #[test]
 fn x_cost_activated_composite_tap_no_double_payment_on_interactive_targets() {
     let mut state = setup_game_at_main_phase();
@@ -7299,33 +7300,268 @@ fn x_cost_activated_composite_tap_no_double_payment_on_interactive_targets() {
         state.waiting_for
     );
 
-    // Commit X = 2. After mana payment + Tap, the ability needs interactive
-    // target selection (multiple legal targets: both players).
+    // Commit X = 2. X is announced, then the target is selected before the
+    // mana and tap costs are paid (CR 601.2c before CR 601.2h).
     apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
-    // Note: In strict CR 601.2, target selection (601.2c) occurs before cost
-    // payment (601.2h). The engine shortcuts this by paying non-mana costs
-    // first, so the source is already tapped before target selection begins.
     assert!(
-        state.objects[&source].tapped,
-        "source must be tapped after cost payment"
+        !state.objects[&source].tapped,
+        "source must remain untapped while choosing the target"
     );
-    // The waiting_for should be TargetSelection, NOT a softlock/error.
     assert!(
         matches!(state.waiting_for, WaitingFor::TargetSelection { .. }),
         "expected TargetSelection for interactive target choice, got {:?}",
         state.waiting_for
     );
 
-    // Verify the pending_cast does NOT carry activation_cost (no double-pay).
+    // The residual tap cost survives target selection and is paid once after
+    // the target is committed.
     if let WaitingFor::TargetSelection {
         ref pending_cast, ..
     } = state.waiting_for
     {
         assert!(
-            pending_cast.activation_cost.is_none(),
-            "activation_cost must be None after cost was already paid (issue #897)"
+            matches!(pending_cast.activation_cost, Some(AbilityCost::Tap)),
+            "target selection must retain the unpaid tap cost"
         );
     }
+
+    apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(PlayerId(1))],
+        },
+    )
+    .expect("selecting the target must complete payment");
+    assert!(
+        state.objects[&source].tapped,
+        "the tap cost is paid exactly once"
+    );
+    assert_eq!(state.stack.len(), 1, "the activation reaches the stack");
+}
+
+/// CR 602.2b + CR 601.2b/c/f: An X-cost activation whose exact target count
+/// is X cannot build target slots until X is announced. The pre-announcement
+/// target-slot error must defer only this X-dependent declaration, not suppress
+/// ordinary target-legality errors or start paying costs first.
+#[test]
+fn x_cost_activation_defers_exact_target_count_until_x_is_announced() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(954),
+        PlayerId(0),
+        "X Target Relic".to_string(),
+        Zone::Battlefield,
+    );
+    let target = create_object(
+        &mut state,
+        CardId(955),
+        PlayerId(1),
+        "Target Creature".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&target)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+    let other_target = create_object(
+        &mut state,
+        CardId(959),
+        PlayerId(1),
+        "Other Target Creature".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&other_target)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        },
+    )
+    .cost(AbilityCost::Mana {
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        },
+    });
+    ability.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    }));
+    Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability);
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+    state.waiting_for =
+        handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
+            .expect("the X activation must defer its target count");
+    assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
+
+    apply_as_current(&mut state, GameAction::ChooseX { value: 1 })
+        .expect("announcing X must allow target-slot construction");
+    let WaitingFor::TargetSelection { target_slots, .. } = &state.waiting_for else {
+        panic!(
+            "expected target selection after X announcement, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(target_slots.len(), 1);
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(target)));
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(other_target)));
+}
+
+/// CR 602.2b + CR 601.2b/c/f: Target legality that depends on X is evaluated
+/// only after X is announced, even when the unannounced value would leave no
+/// legal target.
+#[test]
+fn x_cost_activation_defers_x_dependent_target_filter_until_x_is_announced() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(957),
+        PlayerId(0),
+        "X Filter Relic".to_string(),
+        Zone::Battlefield,
+    );
+    let target = create_object(
+        &mut state,
+        CardId(958),
+        PlayerId(1),
+        "Mana Value Two Creature".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let target_obj = state.objects.get_mut(&target).unwrap();
+        target_obj.card_types.core_types.push(CoreType::Creature);
+        target_obj.mana_cost = ManaCost::generic(2);
+    }
+    let other_target = create_object(
+        &mut state,
+        CardId(960),
+        PlayerId(1),
+        "Other Mana Value Two Creature".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let target_obj = state.objects.get_mut(&other_target).unwrap();
+        target_obj.card_types.core_types.push(CoreType::Creature);
+        target_obj.mana_cost = ManaCost::generic(2);
+    }
+    let ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+            ])),
+            cant_regenerate: false,
+        },
+    )
+    .cost(AbilityCost::Mana {
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        },
+    });
+    Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability);
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+    state.waiting_for =
+        handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
+            .expect("the X-dependent filter must defer target legality");
+    assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
+
+    apply_as_current(&mut state, GameAction::ChooseX { value: 2 })
+        .expect("announcing X must make the mana-value-two target legal");
+    let WaitingFor::TargetSelection { target_slots, .. } = &state.waiting_for else {
+        panic!(
+            "expected target selection after X announcement, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(target_slots.len(), 1);
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(target)));
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(other_target)));
+}
+
+/// CR 602.2b + CR 601.2b/c/f: An unresolved X target count may defer target
+/// declaration, but it cannot conceal a separate mandatory target's absence.
+#[test]
+fn x_target_count_does_not_mask_missing_fixed_target() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(956),
+        PlayerId(0),
+        "Mixed Target Relic".to_string(),
+        Zone::Battlefield,
+    );
+    let mut x_target = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        },
+    );
+    x_target.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    }));
+    let ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        },
+    )
+    .cost(AbilityCost::Mana {
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        },
+    })
+    .sub_ability(x_target);
+    Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability);
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(0), source, 0),
+        "legal-action generation must not mask the missing fixed target with the later X target"
+    );
+
+    let error = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
+        .expect_err("the missing fixed target must reject before choosing X");
+    assert!(matches!(
+        error,
+        EngineError::ActionNotAllowed(message) if message == "No legal targets available"
+    ));
+    assert!(state.pending_cast.is_none());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
 #[test]
@@ -25993,6 +26229,91 @@ fn colored_cost_reduction_can_remove_hybrid_symbol_once() {
     );
 }
 
+/// CR 118.7b: a colored reduction shard with no matching component anywhere in
+/// the cost converts to a generic reduction instead of being discarded. Mirrors
+/// Aang, Master of Elements' `{W}{U}{B}{R}{G}` reduction against an all-generic
+/// spell (issue #6405) — none of the five colors are present, so all five
+/// units must spill over to reduce the {5} generic cost to {0}.
+#[test]
+fn colored_cost_reduction_spills_to_generic_when_cost_has_no_matching_color() {
+    let mut cost = ManaCost::Cost {
+        generic: 5,
+        shards: vec![],
+    };
+    let reduction = ManaCost::Cost {
+        generic: 0,
+        shards: vec![
+            ManaCostShard::White,
+            ManaCostShard::Blue,
+            ManaCostShard::Black,
+            ManaCostShard::Red,
+            ManaCostShard::Green,
+        ],
+    };
+    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    assert_eq!(
+        cost,
+        ManaCost::Cost {
+            generic: 0,
+            shards: vec![],
+        }
+    );
+}
+
+/// CR 118.7c: a colored reduction that exceeds the cost's component of that
+/// color reduces the color to nothing, then spills the excess to generic. A
+/// {2}{R} cost hit by Aang's five-color reduction loses its lone red pip (1
+/// unit) and then 4 more units spill to generic, flooring {2} at {0}.
+#[test]
+fn colored_cost_reduction_spills_excess_beyond_matching_color_to_generic() {
+    let mut cost = ManaCost::Cost {
+        generic: 2,
+        shards: vec![ManaCostShard::Red],
+    };
+    let reduction = ManaCost::Cost {
+        generic: 0,
+        shards: vec![
+            ManaCostShard::White,
+            ManaCostShard::Blue,
+            ManaCostShard::Black,
+            ManaCostShard::Red,
+            ManaCostShard::Green,
+        ],
+    };
+    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    assert_eq!(
+        cost,
+        ManaCost::Cost {
+            generic: 0,
+            shards: vec![],
+        }
+    );
+}
+
+/// CR 118.7b: a reduction shard never reduces a mismatched color's pip — a
+/// {G} cost is untouched by a {W} reduction unit (which instead spills to
+/// generic), so the green pip must survive.
+#[test]
+fn colored_cost_reduction_never_touches_mismatched_color_pip() {
+    let mut cost = ManaCost::Cost {
+        generic: 0,
+        shards: vec![ManaCostShard::Green],
+    };
+    let reduction = ManaCost::Cost {
+        generic: 0,
+        shards: vec![ManaCostShard::White],
+    };
+    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    assert_eq!(
+        cost,
+        ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::Green],
+        },
+        "a colored reduction must never cancel a differently-colored pip"
+    );
+}
+
 /// CR 601.2f: "The total cost is the mana cost ... plus all ... cost
 /// increases, and minus all cost reductions. ... If the mana component of the
 /// total cost is reduced to nothing by cost reduction effects, it is considered
@@ -34552,21 +34873,6 @@ mod remove_counter_cost {
         assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
 
         apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::PayCost {
-                kind: PayCostKind::RemoveCounter { .. },
-                ..
-            }
-        ));
-
-        apply_as_current(
-            &mut state,
-            GameAction::SelectCards {
-                cards: vec![counter_source],
-            },
-        )
-        .unwrap();
         match &state.waiting_for {
             WaitingFor::TargetSelection {
                 target_slots,
@@ -34583,6 +34889,38 @@ mod remove_counter_cost {
             }
             other => panic!("expected deferred modal target selection, got {other:?}"),
         }
+
+        let target_slots = match &state.waiting_for {
+            WaitingFor::TargetSelection { target_slots, .. } => target_slots,
+            _ => unreachable!("matched TargetSelection above"),
+        };
+        let selected_target = target_slots[0]
+            .legal_targets
+            .first()
+            .cloned()
+            .expect("modal target slot must have a legal creature");
+        apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![selected_target],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::RemoveCounter { .. },
+                ..
+            }
+        ));
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![counter_source],
+            },
+        )
+        .unwrap();
     }
 }
 

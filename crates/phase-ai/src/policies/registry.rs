@@ -151,8 +151,16 @@ pub enum PolicyId {
     CombatWithdrawal,
     /// CR 608.2c: "return a land you control" self-bounce target choice.
     SelfBounceTarget,
+    /// CR 601.2f: deploy a "spells you cast cost less" engine before the spells
+    /// it discounts.
+    CostReduction,
     /// CR 121.1: reward drawing into an on-battlefield "whenever you draw" engine.
     DrawPayoff,
+    /// CR 701.9: reward discarding into an on-battlefield "whenever you discard"
+    /// engine — disjoint from `HandDisruption`, which scores OPPONENT discard.
+    DiscardPayoff,
+    /// CR 702.122a: cast a Vehicle when the board can actually crew it.
+    VehicleDeployment,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -409,8 +417,17 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),
             Box::new(LoopShortcutPolicy),
             Box::new(super::self_bounce_target::SelfBounceTargetPolicy),
+            Box::new(super::cost_reduction::CostReductionPolicy),
             Box::new(super::draw_payoff::DrawPayoffPolicy),
+            Box::new(super::discard_payoff::DiscardPayoffPolicy),
+            Box::new(super::vehicle_deployment::VehicleDeploymentPolicy),
         ];
+        Self::from_policies(policies)
+    }
+}
+
+impl PolicyRegistry {
+    fn from_policies(policies: Vec<Box<dyn TacticalPolicy>>) -> Self {
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {
             for kind in policy.decision_kinds() {
@@ -419,9 +436,13 @@ impl Default for PolicyRegistry {
         }
         Self { policies, by_kind }
     }
-}
 
-impl PolicyRegistry {
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn for_tests(policies: Vec<Box<dyn TacticalPolicy>>) -> Self {
+        Self::from_policies(policies)
+    }
+
     /// Return a process-wide shared `PolicyRegistry`, constructed once on first
     /// access. Policies are stateless (`TacticalPolicy: Send + Sync`, no
     /// interior mutability by construction), so a single instance safely
@@ -572,7 +593,11 @@ impl PolicyRegistry {
             return candidates
                 .iter()
                 .cloned()
-                .map(|candidate| PolicyPrior { candidate, prior })
+                .map(|candidate| PolicyPrior {
+                    candidate,
+                    prior,
+                    payment_successor: None,
+                })
                 .collect();
         }
         let shifted: Vec<f64> = raw_scores
@@ -596,7 +621,11 @@ impl PolicyRegistry {
             return candidates
                 .iter()
                 .cloned()
-                .map(|candidate| PolicyPrior { candidate, prior })
+                .map(|candidate| PolicyPrior {
+                    candidate,
+                    prior,
+                    payment_successor: None,
+                })
                 .collect();
         }
 
@@ -607,6 +636,7 @@ impl PolicyRegistry {
             .map(|(candidate, prior)| PolicyPrior {
                 candidate,
                 prior: prior / total,
+                payment_successor: None,
             })
             .collect()
     }

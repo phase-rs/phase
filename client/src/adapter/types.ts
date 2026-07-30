@@ -1,5 +1,9 @@
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
-import type { InteractionActionId, ViewerInteraction } from "./generated/interaction";
+import type {
+  InteractionActionId,
+  InteractionSubmission,
+  ViewerInteraction,
+} from "./generated/interaction";
 
 // ── Identifiers ──────────────────────────────────────────────────────────
 
@@ -2350,7 +2354,11 @@ export type LoopCollapseAxis = "Tokens" | "Counters" | "Life" | "Mixed";
 
 export type PayableResource =
   | { type: "Energy" }
-  | { type: "ManaGeneric"; data: { per_x: number } }
+  // CR 107.3f + CR 118.1 + CR 118.12: `base_cost` is the UNCONCRETIZED mana
+  // cost (still carrying the X shard alongside any colored/generic pips,
+  // e.g. `{X}{W}{U}{B}`) — the engine concretizes X into it and pays the
+  // full result, so colored requirements are never dropped (#6410).
+  | { type: "ManaGeneric"; data: { base_cost: ManaCost } }
   | { type: "Counters" }
   | { type: "Speed" }
   // CR 732.2a: not a resource payment — the finite count an accepted
@@ -3233,6 +3241,7 @@ export const AdapterErrorCode = {
    * original dispatch.
    */
   ENGINE_UNRESPONSIVE: "ENGINE_UNRESPONSIVE",
+  UNSUPPORTED: "UNSUPPORTED",
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
   DECK_REJECTED: "DECK_REJECTED",
@@ -3518,6 +3527,8 @@ export interface EngineAdapter {
    * action payload or the UI state.
    */
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  /** Submit an opaque response from the engine's current interaction projection. */
+  submitInteraction?(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   /**
    * Read-only preview of the exact automatic `CastSpell` action currently
    * offered by the engine. Unsupported transports omit this capability.
@@ -3535,6 +3546,12 @@ export interface EngineAdapter {
    */
   getSnapshot(): Promise<EngineSnapshot>;
   getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null> | GameAction | null;
+  /**
+   * Engine-owned deadlock-safe AI escape action for the current waiting state.
+   * Null when no legal escape exists. Non-Priority AI escape must use this —
+   * never invent from `getLegalActions()` enumeration order (#6393).
+   */
+  getAiFallbackAction?(): Promise<GameAction | null> | GameAction | null;
   resolveAll?(
     requester: number,
     aiSeats: { playerId: number; difficulty: string }[],

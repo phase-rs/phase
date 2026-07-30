@@ -11,6 +11,21 @@ pub struct CardId(pub u64);
 #[serde(transparent)]
 pub struct ObjectId(pub u64);
 
+/// CR 603.2 + CR 603.3b + CR 117.3b: parse-time placeholder for "the specific
+/// spell object that will cause this trigger to fire", embedded inside a
+/// `TargetFilter::SpecificObject` leaf of a floating (`TargetFilter::None`)
+/// replacement's `valid_card` tree by `parse_whenever_you_cast_enters_with_trigger`.
+/// `Effect::AddTargetReplacement`'s resolve function (`add_target_replacement.rs`)
+/// concretizes this to the real triggering spell's id (from
+/// `state.current_trigger_event`) — or to `ObjectId(0)` (matches nothing) if
+/// none is extractable — before the install is pushed. Never a real object's
+/// id (the allocator starts well below `u64::MAX`), so this is safe to use as
+/// a sentinel without a dedicated `TargetFilter`/`ReplacementDefinition`
+/// variant, which would ripple through every exhaustive match on those types
+/// across the workspace (including the dormant `mtgish-import` crate, which
+/// must remain untouched).
+pub(crate) const TRIGGERING_SPELL_PLACEHOLDER: ObjectId = ObjectId(u64::MAX);
+
 /// Monotonic identity for one logical simultaneous zone-change action.
 ///
 /// This remains distinct from an [`ObjectId`]: a logical group can contain

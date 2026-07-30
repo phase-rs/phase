@@ -24,6 +24,128 @@ use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
 
+#[test]
+fn extract_hand_cast_battlefield_threshold_leaves_effect_text() {
+    let (cleaned, condition) = extract_if_condition(
+        "if you cast it from your hand and there are five or more other creatures on the battlefield, destroy all other creatures",
+    );
+    assert_eq!(cleaned, "destroy all other creatures");
+
+    let TriggerCondition::And { conditions } = condition.expect("expected conjunction") else {
+        panic!("expected cast-and-threshold trigger condition");
+    };
+    assert_eq!(conditions.len(), 2);
+    assert!(matches!(
+        &conditions[0],
+        TriggerCondition::WasCast {
+            zone: Some(crate::types::zones::Zone::Hand),
+            controller: Some(ControllerRef::You),
+            owner: Some(ControllerRef::You),
+        }
+    ));
+    let TriggerCondition::QuantityComparison {
+        lhs:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(filter),
+                    },
+            },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 5 },
+    } = &conditions[1]
+    else {
+        panic!("expected other-creature threshold, got {:?}", conditions[1]);
+    };
+    assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+    assert!(filter
+        .properties
+        .contains(&FilterProp::OtherThanTriggerObject));
+    assert!(filter.properties.contains(&FilterProp::InZone {
+        zone: crate::types::zones::Zone::Battlefield,
+    }));
+}
+
+/// The zoned cast-and-condition parser shares its condition branch across all
+/// supported origin zones. These focused extractor cases prove the graveyard
+/// owner scope and shared-exile owner scope without inventing a runtime card.
+#[test]
+fn extract_zoned_cast_and_threshold_preserves_graveyard_and_exile_scopes() {
+    for (origin, expected_zone, expected_owner) in [
+        ("your graveyard", Zone::Graveyard, Some(ControllerRef::You)),
+        ("exile", Zone::Exile, None),
+    ] {
+        let input = format!(
+            "if you cast it from {origin} and there are five or more other creatures on the battlefield, destroy all other creatures"
+        );
+        let (cleaned, condition) = extract_if_condition(&input);
+        assert_eq!(cleaned, "destroy all other creatures");
+
+        let Some(TriggerCondition::And { conditions }) = condition else {
+            panic!("expected {origin} cast-and-threshold conjunction, got {condition:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        match &conditions[0] {
+            TriggerCondition::WasCast {
+                zone: Some(zone),
+                controller: Some(ControllerRef::You),
+                owner,
+            } => {
+                assert_eq!(zone, &expected_zone, "unexpected origin zone for {origin}");
+                assert_eq!(
+                    owner, &expected_owner,
+                    "unexpected owner scope for {origin}"
+                );
+            }
+            other => panic!("expected scoped WasCast for {origin}, got {other:?}"),
+        }
+        assert!(matches!(
+            &conditions[1],
+            TriggerCondition::QuantityComparison {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn extract_cast_and_condition_keeps_condition_internal_commas() {
+    let (cleaned, condition) = extract_if_condition(
+        "if you cast it and ~ is in your graveyard, in your hand, or in exile, draw a card",
+    );
+    assert_eq!(cleaned, "draw a card");
+    let Some(TriggerCondition::And { conditions }) = condition else {
+        panic!("expected cast-and-zone-list conjunction, got {condition:?}");
+    };
+    assert!(matches!(conditions[0], TriggerCondition::WasCast { .. }));
+    assert!(matches!(
+        &conditions[1],
+        TriggerCondition::Or { conditions: zones } if zones.len() == 3
+    ));
+}
+
+#[test]
+fn extract_cast_and_condition_keeps_grouped_number() {
+    let (cleaned, condition) = extract_if_condition(
+        "if you cast it and there are 1,000 or more other creatures on the battlefield, destroy all other creatures",
+    );
+    assert_eq!(cleaned, "destroy all other creatures");
+    let Some(TriggerCondition::And { conditions }) = condition else {
+        panic!("expected cast-and-threshold conjunction, got {condition:?}");
+    };
+    assert!(matches!(conditions[0], TriggerCondition::WasCast { .. }));
+    assert!(matches!(
+        &conditions[1],
+        TriggerCondition::QuantityComparison {
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1000 },
+            ..
+        }
+    ));
+}
+
 // --- Fix B: damage-recipient qualifier (player axis preserved + object axis added) ---
 
 #[test]

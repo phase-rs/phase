@@ -2637,6 +2637,12 @@ impl ResolutionStateWire {
                 let frames_value = object
                     .get("resolution_frames")
                     .ok_or_else(|| "v2 resolution state is missing resolution_frames".to_string())?;
+                if has_removed_batched_repeated_optional_payment(frames_value) {
+                    return Err(
+                        "v2 repeated optional-payment snapshot uses removed batched:true flow; restart the game from a current save"
+                            .to_string(),
+                    );
+                }
                 let mut frames: ResolutionStack = serde_json::from_value(frames_value.clone())
                     .map_err(|error| error.to_string())?;
                 frames.recover_draw_sequence_allocator();
@@ -2688,6 +2694,35 @@ impl<'de> Deserialize<'de> for ResolutionStateWire {
         D: Deserializer<'de>,
     {
         Self::from_value(Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// The one-dialog repeated-payment experiment serialized a `batched` marker
+/// inside its frame. It created a reflexive trigger before payment succeeded,
+/// so treating such a snapshot as the sequential flow would change game state
+/// mid-resolution. Reject only that obsolete persisted frame explicitly.
+fn has_removed_batched_repeated_optional_payment(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(has_removed_batched_repeated_optional_payment),
+        Value::Object(values) => {
+            values
+                .get("type")
+                .and_then(Value::as_str)
+                .filter(|kind| *kind == "RepeatedOptionalPayment")
+                .and_then(|_| values.get("data"))
+                .and_then(Value::as_object)
+                .and_then(|frame| frame.get("pending"))
+                .and_then(Value::as_object)
+                .and_then(|pending| pending.get("batched"))
+                .and_then(Value::as_bool)
+                .is_some_and(|batched| batched)
+                || values
+                    .values()
+                    .any(has_removed_batched_repeated_optional_payment)
+        }
+        _ => false,
     }
 }
 
@@ -3481,12 +3516,29 @@ mod tests {
         PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
         ResidentDrainPolicy, ZoneDeliveryExileTracking,
     };
+
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::{ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::{EtbTapState, Zone};
     use std::collections::VecDeque;
+
+    #[test]
+    fn removed_batched_repeated_payment_snapshot_is_detected() {
+        assert!(has_removed_batched_repeated_optional_payment(
+            &serde_json::json!([{
+                "type": "RepeatedOptionalPayment",
+                "data": { "pending": { "batched": true } }
+            }])
+        ));
+        assert!(!has_removed_batched_repeated_optional_payment(
+            &serde_json::json!([{
+                "type": "RepeatedOptionalPayment",
+                "data": { "pending": { "batched": false } }
+            }])
+        ));
+    }
 
     fn resolved_draw(source_id: u64) -> ResolvedAbility {
         ResolvedAbility::new(

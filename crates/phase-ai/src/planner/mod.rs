@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use engine::ai_support::{
-    build_decision_context, AiDecisionContext, CandidateAction, TacticalClass,
+    build_decision_context, classify_payment_continuation, witness_payment_continuation,
+    AiDecisionContext, CandidateAction, PaymentContinuationState, TacticalClass,
 };
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players;
@@ -26,6 +27,99 @@ use crate::policies::PolicyRegistry;
 pub struct RankedCandidate {
     pub candidate: CandidateAction,
     pub score: f64,
+    pub(crate) payment_successor: Option<GameState>,
+}
+
+impl RankedCandidate {
+    pub fn new(candidate: CandidateAction, score: f64) -> Self {
+        Self {
+            candidate,
+            score,
+            payment_successor: None,
+        }
+    }
+
+    pub(crate) fn with_payment_successor(
+        candidate: CandidateAction,
+        score: f64,
+        state: GameState,
+    ) -> Self {
+        Self {
+            candidate,
+            score,
+            payment_successor: Some(state),
+        }
+    }
+}
+
+/// A raw engine candidate plus the first reducer successor already witnessed
+/// for an affiliated payment root. This stays private to planning: the engine
+/// owns both the carrier classification and the finalization proof.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedCandidate {
+    pub candidate: CandidateAction,
+    pub payment_successor: Option<GameState>,
+}
+
+/// Fail closed for affiliated payment states before ranking or width limits.
+///
+/// The accepted successor is retained so a planning edge does not apply its
+/// first reducer action once for the witness and again for search.
+pub(crate) fn prepare_payment_candidates(
+    state: &GameState,
+    candidates: impl IntoIterator<Item = CandidateAction>,
+) -> Vec<PreparedCandidate> {
+    match classify_payment_continuation(state) {
+        PaymentContinuationState::NotAffiliated => candidates
+            .into_iter()
+            .map(|candidate| PreparedCandidate {
+                candidate,
+                payment_successor: None,
+            })
+            .collect(),
+        PaymentContinuationState::UnsupportedAffiliated(_) => Vec::new(),
+        PaymentContinuationState::Affiliated(_) => candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                witness_payment_continuation(state, &candidate.action).map(|accepted| {
+                    PreparedCandidate {
+                        candidate,
+                        payment_successor: Some(accepted.state),
+                    }
+                })
+            })
+            .collect(),
+    }
+}
+
+pub(crate) fn rank_prepared_candidates<F>(
+    candidates: impl IntoIterator<Item = PreparedCandidate>,
+    mut scorer: F,
+    limit: usize,
+) -> Vec<RankedCandidate>
+where
+    F: FnMut(&CandidateAction) -> f64,
+{
+    let mut ranked: Vec<RankedCandidate> = candidates
+        .into_iter()
+        .map(|prepared| {
+            let score = scorer(&prepared.candidate);
+            match prepared.payment_successor {
+                Some(state) => {
+                    RankedCandidate::with_payment_successor(prepared.candidate, score, state)
+                }
+                None => RankedCandidate::new(prepared.candidate, score),
+            }
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
+    });
+    ranked.truncate(limit);
+    ranked
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +170,7 @@ impl SearchBudget {
 pub struct PolicyPrior {
     pub candidate: CandidateAction,
     pub prior: f64,
+    pub(crate) payment_successor: Option<GameState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -721,7 +816,10 @@ impl<'a> PlannerServices<'a> {
             if out.len() == sample_count || self.deadline.expired() {
                 break;
             }
-            if let Some(sim) = self.apply_candidate(state, &prior.candidate) {
+            let sim = prior
+                .payment_successor
+                .or_else(|| self.apply_candidate(state, &prior.candidate));
+            if let Some(sim) = sim {
                 out.push((prior.prior, sim));
             }
         }
@@ -1104,17 +1202,28 @@ impl<'a> PlannerServices<'a> {
         // (`apply_candidate` → None), mirroring the beam path. This removes one
         // clone-and-apply-per-candidate probe (`state_clone_for_legality`).
         let ctx = self.build_decision_context(state);
+        let candidates = prepare_payment_candidates(state, ctx.candidates.clone());
         let scoring_player = state.waiting_for.acting_player().unwrap_or(self.ai_player);
+        let mut priors = self.policy_priors(
+            state,
+            &ctx,
+            &candidates
+                .iter()
+                .map(|prepared| prepared.candidate.clone())
+                .collect::<Vec<_>>(),
+            scoring_player,
+            SearchDepth::Lookahead,
+        );
+        for prior in &mut priors {
+            prior.payment_successor = candidates
+                .iter()
+                .find(|prepared| prepared.candidate.action == prior.candidate.action)
+                .and_then(|prepared| prepared.payment_successor.clone());
+        }
         PlannerEvaluation {
             // Rollout leaf: every node reached here is deep lookahead, never the
             // committed decision, so board-wide/affordability policies self-gate.
-            priors: self.policy_priors(
-                state,
-                &ctx,
-                &ctx.candidates,
-                scoring_player,
-                SearchDepth::Lookahead,
-            ),
+            priors,
             value: self.evaluate_for_planner(state),
         }
     }
@@ -1243,15 +1352,16 @@ impl BeamContinuationPlanner {
         // path (planner_evaluation → sample_backfilled_continuations) applies the
         // same skip: illegal candidates are dropped when apply_candidate returns
         // None during backfill sampling, not by an upfront clone-per-candidate probe.
-        if ctx.candidates.is_empty() {
+        let candidates = prepare_payment_candidates(state, ctx.candidates.clone());
+        if candidates.is_empty() {
             return services.evaluate_state_quiesced(state);
         }
 
         let node_player = state.waiting_for.acting_player();
         let is_maximizing = node_player.is_none_or(|player| player == services.ai_player);
         let scoring_player = node_player.unwrap_or(services.ai_player);
-        let mut ranked = rank_candidates(
-            ctx.candidates.clone(),
+        let mut ranked = rank_prepared_candidates(
+            candidates,
             // Interior beam node: `search_value` is always entered ≥1 ply below
             // the decision root, so move-ordering scoring runs in lookahead.
             |candidate| {
@@ -1285,7 +1395,11 @@ impl BeamContinuationPlanner {
             if services.deadline.expired() {
                 break;
             }
-            let Some(sim) = services.apply_candidate(state, &ranked.candidate) else {
+            let Some(sim) = ranked
+                .payment_successor
+                .clone()
+                .or_else(|| services.apply_candidate(state, &ranked.candidate))
+            else {
                 continue;
             };
             let value = self.search_value(&sim, depth - 1, ply + 1, alpha, beta, services, budget)
@@ -1357,27 +1471,25 @@ pub fn rank_candidates<F>(
 where
     F: FnMut(&CandidateAction) -> f64,
 {
-    let mut ranked: Vec<RankedCandidate> = candidates
-        .into_iter()
-        .map(|candidate| RankedCandidate {
-            score: scorer(&candidate),
+    rank_prepared_candidates(
+        candidates.into_iter().map(|candidate| PreparedCandidate {
             candidate,
-        })
-        .collect();
-    ranked.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            // Issue #4878: without this tie-break, equal-score candidates fall
-            // back to `ranked`'s pre-sort (enumeration) order, which is not
-            // guaranteed stable across processes — mirrors search.rs:1956/2205.
-            .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
-    });
-    ranked.truncate(limit);
-    ranked
+            payment_successor: None,
+        }),
+        |candidate| scorer(candidate),
+        limit,
+    )
 }
 
 pub fn apply_candidate(state: &GameState, candidate: &CandidateAction) -> Option<GameState> {
+    match classify_payment_continuation(state) {
+        PaymentContinuationState::Affiliated(_) => {
+            return witness_payment_continuation(state, &candidate.action)
+                .map(|accepted| accepted.state);
+        }
+        PaymentContinuationState::UnsupportedAffiliated(_) => return None,
+        PaymentContinuationState::NotAffiliated => {}
+    }
     let mut sim = state.clone();
     apply_as_current_for_simulation(&mut sim, candidate.action.clone()).ok()?;
     Some(sim)
@@ -2265,10 +2377,12 @@ mod tests {
         let illegal_prior = PolicyPrior {
             candidate: illegal.clone(),
             prior: 0.9,
+            payment_successor: None,
         };
         let legal_prior = PolicyPrior {
             candidate: legal.clone(),
             prior: 0.1,
+            payment_successor: None,
         };
 
         // sample_count=1: the high-prior illegal candidate is backfilled past, and
@@ -2293,10 +2407,12 @@ mod tests {
         let legal_a = PolicyPrior {
             candidate: legal.clone(),
             prior: 0.2,
+            payment_successor: None,
         };
         let legal_b = PolicyPrior {
             candidate: legal.clone(),
             prior: 0.15,
+            payment_successor: None,
         };
         let two = services.sample_backfilled_continuations(
             &state,
@@ -2324,6 +2440,49 @@ mod tests {
                 )
                 .is_empty(),
             "all-illegal priors yield no continuations"
+        );
+    }
+
+    #[test]
+    fn retained_payment_successor_bypasses_inapplicable_rollout_fallback() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        let fallback = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id: ObjectId(99999),
+                ability_index: 0,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Mana),
+        };
+        assert!(
+            services.apply_candidate(&state, &fallback).is_none(),
+            "reach-guard: the hostile fallback cannot be applied at this root"
+        );
+        let retained = services
+            .apply_candidate(
+                &state,
+                &CandidateAction {
+                    action: GameAction::PassPriority,
+                    metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
+                },
+            )
+            .expect("reach-guard: a concrete retained successor exists");
+        let sampled = services.sample_backfilled_continuations(
+            &state,
+            vec![PolicyPrior {
+                candidate: fallback,
+                prior: 1.0,
+                payment_successor: Some(retained.clone()),
+            }],
+            1,
+        );
+        assert_eq!(sampled.len(), 1);
+        assert_eq!(
+            quick_state_hash(&sampled[0].1),
+            quick_state_hash(&retained),
+            "rollout consumes the witnessed successor instead of retrying its hostile fallback"
         );
     }
 
@@ -2898,13 +3057,13 @@ mod tests {
     // ---- U2: move ordering (killers) + witness counters ----
 
     fn ranked_candidate(action: GameAction, score: f64) -> RankedCandidate {
-        RankedCandidate {
-            candidate: CandidateAction {
+        RankedCandidate::new(
+            CandidateAction {
                 action,
                 metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
             },
             score,
-        }
+        )
     }
 
     // V1: a beta cutoff records the cutting move as the ply's primary killer.

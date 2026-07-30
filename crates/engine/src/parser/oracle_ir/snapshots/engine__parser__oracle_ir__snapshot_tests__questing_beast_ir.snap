@@ -22,22 +22,13 @@ expression: "&ir"
         "fragment": "Vigilance, deathtouch, haste"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Vigilance, deathtouch, haste",
             "description": "Vigilance, deathtouch, haste"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Vigilance, deathtouch, haste",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },
@@ -118,31 +109,83 @@ expression: "&ir"
         "fragment": "Combat damage that would be dealt by creatures you control can't be prevented."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "AddRestriction",
-            "restriction": {
-              "type": "DamagePreventionDisabled",
-              "source": 0,
-              "expiry": {
-                "type": "EndOfTurn"
-              },
-              "scope": {
-                "type": "SourcesControlledBy",
-                "data": 0
+        "Spell": {
+          "source_text": "Combat damage that would be dealt by creatures you control can't be prevented.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 77,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Combat damage that would be dealt by creatures you control can't be prevented"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "AddRestriction",
+                    "restriction": {
+                      "type": "DamagePreventionDisabled",
+                      "source": 0,
+                      "expiry": {
+                        "type": "EndOfTurn"
+                      },
+                      "scope": {
+                        "type": "SourcesControlledBy",
+                        "data": 0
+                      }
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
-            }
+            ],
+            "kind": "Spell",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": null,
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null
+          },
+          "die_results": [],
+          "root_transforms": []
         }
       }
     },
@@ -164,60 +207,127 @@ expression: "&ir"
         "fragment": "Whenever ~ deals combat damage to an opponent, it deals that much damage to target planeswalker that player controls."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "DamageDone",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "DealDamage",
-              "amount": {
-                "type": "Ref",
-                "qty": {
-                  "type": "EventContextAmount"
-                }
-              },
-              "target": {
+        "Trigger": {
+          "Parsed": {
+            "condition": "DamageDone",
+            "partial_def": {
+              "mode": "DamageDone",
+              "execute": null,
+              "valid_card": null,
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "CombatOnly",
+              "secondary": false,
+              "valid_target": {
                 "type": "Typed",
-                "type_filters": [
-                  "Planeswalker"
-                ],
-                "controller": "TargetPlayer",
+                "type_filters": [],
+                "controller": "Opponent",
                 "properties": []
+              },
+              "valid_source": {
+                "type": "SelfRef"
+              },
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
+            },
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 69,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "it deals that much damage to target planeswalker that player controls"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "DealDamage",
+                        "amount": {
+                          "type": "Ref",
+                          "qty": {
+                            "type": "EventContextAmount"
+                          }
+                        },
+                        "target": {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Planeswalker"
+                          ],
+                          "controller": "TargetPlayer",
+                          "properties": []
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
               }
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": null,
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "CombatOnly",
-          "secondary": false,
-          "valid_target": {
-            "type": "Typed",
-            "type_filters": [],
-            "controller": "Opponent",
-            "properties": []
-          },
-          "valid_source": {
-            "type": "SelfRef"
-          },
-          "description": "Whenever ~ deals combat damage to an opponent, it deals that much damage to target planeswalker that player controls.",
-          "constraint": null,
-          "condition": null,
-          "batched": false
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "SelfRef"
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "it deals that much damage to target planeswalker that player controls.",
+              "relative_player_scope": "TargetPlayer"
+            },
+            "source_text": "Whenever ~ deals combat damage to an opponent, it deals that much damage to target planeswalker that player controls.",
+            "die_results": []
+          }
         }
       }
     }

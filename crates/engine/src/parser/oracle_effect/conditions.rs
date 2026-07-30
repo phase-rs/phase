@@ -22,8 +22,11 @@ use super::super::oracle_target::{parse_target, parse_type_phrase, parse_zone_wo
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 use super::sequence::parse_dig_from_among;
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
-use crate::parser::oracle_ir::ast::ContinuationAst;
+use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_ir::effect_chain::{
+    AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope,
@@ -4167,8 +4170,8 @@ fn is_replacement_marker_tail(after_instead_lower: &str) -> bool {
 ///    you may instead reveal two creature and/or land cards from among them and put
 ///    them into your hand."
 ///
-/// Returns a new AbilityDefinition carrying the alternative Dig plus condition; the
-/// caller wraps the preceding Dig as `else_ability`. Class coverage: any card of form
+/// Returns native IR carrying the alternative Dig plus condition; the caller wraps
+/// the preceding Dig as `else_ability`. Class coverage: any card of form
 /// "look at top N / reveal a <filter> card from among them ... if <cond>, you may
 /// instead reveal M <filter'> cards from among them" (CR 608.2c replacement effect).
 pub(crate) fn try_parse_dig_instead_alternative(
@@ -4176,7 +4179,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
     previous: Option<&AbilityDefinition>,
     kind: AbilityKind,
     ctx: &mut ParseContext,
-) -> Option<AbilityDefinition> {
+) -> Option<AbilityIr> {
     // Gate: previous effect must be a Dig that the alternative can piggy-back on.
     let prev = previous?;
     let Effect::Dig {
@@ -4301,9 +4304,20 @@ pub(crate) fn try_parse_dig_instead_alternative(
         source: DigSource::Library,
     };
 
-    let mut result = AbilityDefinition::new(kind, alt_effect);
-    result.condition = Some(condition);
-    Some(result)
+    Some(AbilityIr {
+        source_text: text.to_string(),
+        body: EffectChainIr::single_clause(
+            text,
+            kind,
+            parsed_clause(alt_effect),
+            None,
+            None,
+            false,
+        ),
+        shell: AbilityShellIr::default(),
+        die_results: vec![],
+        root_transforms: vec![AbilityRootTransform::AppendCondition(condition)],
+    })
 }
 
 pub(crate) fn parse_additional_cost_instead_condition_fragment(

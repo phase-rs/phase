@@ -279,21 +279,34 @@ export function createAIController(config: AIControllerConfig): AIController {
   function pickEscapeAction(
     waitingFor: WaitingFor,
     state: GameState,
-  ): Promise<GameAction> {
+  ): Promise<GameAction | null> {
     if (state.has_pending_cast) {
       return Promise.resolve({ type: "CancelCast" });
     }
     const { adapter } = useGameStore.getState();
-    if (!adapter) return Promise.resolve({ type: "PassPriority" });
-    return adapter.getLegalActions().then((result) => {
+    // Priority may still fabricate PassPriority (the only legal Priority
+    // escape). Non-Priority must never invent PassPriority — the engine
+    // rejects it and the controller softlocks (#6393).
+    if (!adapter) {
       if (waitingFor.type === "Priority") {
+        return Promise.resolve({ type: "PassPriority" });
+      }
+      return Promise.resolve(null);
+    }
+    if (waitingFor.type === "Priority") {
+      return adapter.getLegalActions().then((result) => {
         return (
           result.actions.find((a) => a.type === "PassPriority") ??
           { type: "PassPriority" }
         );
-      }
-      return result.actions[0] ?? { type: "PassPriority" };
-    });
+      });
+    }
+    // Non-Priority: engine owns escape selection via fallback_action. Legal-
+    // action list order is not a decision contract (#6393 review).
+    if (!adapter.getAiFallbackAction) {
+      return Promise.resolve(null);
+    }
+    return Promise.resolve(adapter.getAiFallbackAction());
   }
 
   async function runEscapeFallback(
@@ -306,6 +319,17 @@ export function createAIController(config: AIControllerConfig): AIController {
     try {
       const fallback = await pickEscapeAction(waitingFor, state);
       if (!isAttemptCurrent(attempt)) return;
+      // Empty non-Priority legal set: halt immediately rather than dispatching
+      // a fabricated PassPriority that the engine rejects in a loop (#6393).
+      if (fallback == null) {
+        debugLog(
+          `AI controller halting: no legal escape for ${waitingFor.type}`,
+          "error",
+        );
+        notifyEngineLost(`ai-controller-stuck:${waitingFor.type}`);
+        stop();
+        return;
+      }
       await dispatchAction(fallback, waitingPlayerId);
       if (!isAttemptCurrent(attempt)) return;
       consecutiveFailures = 0;

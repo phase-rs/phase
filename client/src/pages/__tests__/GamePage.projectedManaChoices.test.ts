@@ -65,6 +65,7 @@ function interactionWith(choices: InteractionChoice[]): ViewerInteraction {
         },
       },
     ],
+    attachmentFans: {},
     availability: { type: "inputRequired" },
   };
 }

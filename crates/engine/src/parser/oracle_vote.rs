@@ -1210,10 +1210,13 @@ fn parse_vote_for_each_suffix_clause<'a>(
         opt(tag_no_case("then ")),
         alt((
             value(
-                ChoiceType::Opponent { restriction: None },
+                ChoiceType::opponent(),
                 tag_no_case("choose an opponent at random"),
             ),
-            value(ChoiceType::Player, tag_no_case("choose a player at random")),
+            value(
+                ChoiceType::player(),
+                tag_no_case("choose a player at random"),
+            ),
         )),
         tag(". "),
     ))
@@ -2397,7 +2400,10 @@ mod tests {
         assert_eq!(rest, "");
         assert!(matches!(
             setup,
-            Some(ChoiceType::Opponent { restriction: None })
+            Some(ChoiceType::Opponent {
+                restriction: None,
+                ..
+            })
         ));
         match &*def.effect {
             Effect::DealDamage { amount, target, .. } => {

@@ -12,6 +12,7 @@ import type {
   PlayerId,
   SubmitResult,
 } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import { actionRejectionError, AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
@@ -195,6 +196,30 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.pendingReject = null;
         this.emit({ type: "actionPendingChanged", pending: false });
         reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
+      }
+    });
+  }
+
+  async submitInteraction(
+    submission: InteractionSubmission,
+    _actor: PlayerId,
+  ): Promise<SubmitResult> {
+    if (this.phase !== "match") {
+      throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
+    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    this.emit({ type: "actionPendingChanged", pending: true });
+    return new Promise<SubmitResult>((resolve, reject) => {
+      this.pendingResolve = resolve;
+      this.pendingReject = reject;
+      if (!this.send({ type: "Interaction", data: { submission } })) {
+        this.pendingResolve = null;
+        this.pendingReject = null;
+        this.emit({ type: "actionPendingChanged", pending: false });
+        reject(new AdapterError("WS_CLOSED", "Failed to send interaction", true));
       }
     });
   }

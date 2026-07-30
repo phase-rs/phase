@@ -22,66 +22,175 @@ expression: "&ir"
         "fragment": "~ deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "DealDamage",
-            "amount": {
-              "type": "Fixed",
-              "value": 3
-            },
-            "target": {
-              "type": "Any"
-            }
-          },
-          "cost": null,
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "GenericEffect",
-              "static_abilities": [
-                {
-                  "mode": "CantBeRegenerated",
-                  "affected": {
-                    "type": "ParentTarget"
+        "Spell": {
+          "source_text": "~ deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
                   },
-                  "modifications": [
-                    {
-                      "type": "AddStaticMode",
-                      "mode": "CantBeRegenerated"
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 30,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "~ deals 3 damage to any target"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "DealDamage",
+                    "amount": {
+                      "type": "Fixed",
+                      "value": 3
+                    },
+                    "target": {
+                      "type": "Any"
                     }
-                  ],
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
                   "condition": null,
-                  "affected_zone": null,
-                  "effect_zone": null,
-                  "active_zones": [],
-                  "characteristic_defining": false,
-                  "description": null
-                }
-              ],
-              "duration": "UntilEndOfTurn",
-              "target": {
-                "type": "TrackedSet",
-                "id": 0
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 32,
+                    "end_byte": 95,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "A creature dealt damage this way can't be regenerated this turn"
+                },
+                "disposition": {
+                  "Absorb": {
+                    "rider": {
+                      "kind": "Spell",
+                      "effect": {
+                        "type": "GenericEffect",
+                        "static_abilities": [
+                          {
+                            "mode": "CantBeRegenerated",
+                            "affected": {
+                              "type": "ParentTarget"
+                            },
+                            "modifications": [
+                              {
+                                "type": "AddStaticMode",
+                                "mode": "CantBeRegenerated"
+                              }
+                            ],
+                            "condition": null,
+                            "affected_zone": null,
+                            "effect_zone": null,
+                            "active_zones": [],
+                            "characteristic_defining": false,
+                            "description": null
+                          }
+                        ],
+                        "duration": "UntilEndOfTurn",
+                        "target": {
+                          "type": "TrackedSet",
+                          "id": 0
+                        }
+                      },
+                      "cost": null,
+                      "sub_ability": null,
+                      "duration": "UntilEndOfTurn",
+                      "description": null,
+                      "target_prompt": null,
+                      "condition": null,
+                      "optional_targeting": false,
+                      "optional": false,
+                      "forward_result": false
+                    },
+                    "kind": "CantBeRegenerated"
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Unimplemented",
+                    "name": "cant_be_regenerated_rider_placeholder",
+                    "description": ""
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": "UntilEndOfTurn",
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+            ],
+            "kind": "Spell",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": null,
-          "description": "~ deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null
+          },
+          "die_results": [],
+          "root_transforms": [
+            {
+              "SetMinXValue": 0
+            },
+            {
+              "SetDescription": "~ deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn."
+            }
+          ]
         }
       }
     }

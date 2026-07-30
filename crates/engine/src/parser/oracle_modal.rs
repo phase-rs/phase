@@ -31,6 +31,7 @@ use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
 use crate::parser::oracle_ir::ast::{
     parsed_clause, ModalHeaderAst, ModalOptionality, ModeAst, OracleBlockAst,
 };
+use crate::types::mana::ManaCost;
 
 pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, usize)> {
     let line = strip_reminder_text(lines.get(start)?.trim());
@@ -1379,6 +1380,20 @@ fn header_is_opponent_chooser_with_additional_cost(
     has_mode_cost || has_additional_cost_constraint
 }
 
+/// CR 700.2 / CR 702.172a: when any mode carries a per-mode cost, preserve a
+/// positional `mode_costs` entry for every mode (zero cost where omitted) so
+/// consumers indexing by mode index stay aligned.
+fn build_mode_costs(modes: &[ModeAst]) -> Vec<ManaCost> {
+    if modes.iter().any(|m| m.mode_cost.is_some()) {
+        modes
+            .iter()
+            .map(|m| m.mode_cost.clone().unwrap_or_else(ManaCost::zero))
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice {
     let mode_count = modes.len();
     let mode_pawprints: Vec<u8> = modes.iter().filter_map(|m| m.mode_pawprint).collect();
@@ -1401,7 +1416,7 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
             mode_count,
             !mode_pawprints.is_empty(),
         ),
-        mode_costs: modes.iter().filter_map(|m| m.mode_cost.clone()).collect(),
+        mode_costs: build_mode_costs(modes),
         mode_pawprints,
         entwine_cost: None,
         // CR 700.2e: the player who chooses the mode(s).
@@ -2579,6 +2594,58 @@ mod tests {
         assert_eq!(modes[2].mode_pawprint, Some(3));
         // Pawprint modes never carry a Spree mode cost.
         assert!(modes.iter().all(|m| m.mode_cost.is_none()));
+    }
+
+    #[test]
+    fn build_modal_choice_preserves_positional_mode_costs_with_zero_for_costless_modes() {
+        let modes = vec![
+            ModeAst {
+                raw: "Draw a card.".to_string(),
+                label: None,
+                body: "Draw a card.".to_string(),
+                mode_cost: None,
+                mode_pawprint: None,
+            },
+            ModeAst {
+                raw: "Gain 3 life.".to_string(),
+                label: None,
+                body: "Gain 3 life.".to_string(),
+                mode_cost: Some(ManaCost::generic(1)),
+                mode_pawprint: None,
+            },
+            ModeAst {
+                raw: "Deal 3 damage.".to_string(),
+                label: None,
+                body: "Deal 3 damage.".to_string(),
+                mode_cost: Some(ManaCost::generic(2)),
+                mode_pawprint: None,
+            },
+        ];
+        let header = ModalHeaderAst {
+            raw: "Choose one or more —".to_string(),
+            min_choices: 1,
+            max_choices: 3,
+            allow_repeat_modes: false,
+            constraints: vec![],
+            chooser: PlayerFilter::Controller,
+            selection: TargetSelectionMode::Chosen,
+            dynamic_max_choices: None,
+            optionality: ModalOptionality::Mandatory,
+        };
+        let modal = build_modal_choice(&header, &modes);
+        assert_eq!(modal.mode_costs.len(), modal.mode_count);
+        assert_eq!(modal.mode_costs[0], ManaCost::zero());
+        assert_eq!(modal.mode_costs[1], ManaCost::generic(1));
+        assert_eq!(modal.mode_costs[2], ManaCost::generic(2));
+    }
+
+    #[test]
+    fn build_modal_choice_leaves_mode_costs_empty_when_no_mode_has_cost() {
+        let lines = vec!["Choose one —", "• Draw a card.", "• Gain 3 life."];
+        let modes = collect_mode_asts(&lines, 1);
+        let header = parse_modal_header_ast(lines[0]).expect("header should parse");
+        let modal = build_modal_choice(&header, &modes);
+        assert!(modal.mode_costs.is_empty());
     }
 
     #[test]

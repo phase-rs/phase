@@ -16,7 +16,7 @@ use engine::game::engine::{
     apply, apply_for_simulation, resolve_all_fast_forward, ResolveAllCallbackDecision,
     ResolveAllFastForwardResult as BatchResolveResult,
 };
-use engine::game::interaction::bind_interaction_authority;
+use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::game::preview::{compute_preview_diff, preview_auto_payment_sources};
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
@@ -30,7 +30,7 @@ use engine::game::{
 use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
 use engine::types::game_state::{PersistedGameState, TrustedGameStateEnvelope, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::interaction::InteractionSessionId;
+use engine::types::interaction::{InteractionSessionId, InteractionSubmission};
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::{GameAction, GameState, PlayerId, ReplayHeader, ReplayLog};
@@ -117,7 +117,8 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
 
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::{
-    choose_action_with_session, score_candidates_with_session, AiSession, SessionCache,
+    choose_action_with_session, fallback_action, score_candidates_with_session, AiSession,
+    SessionCache,
 };
 thread_local! {
     /// Game state uses Cell<Option<T>> with take/set to avoid RefCell borrow poisoning.
@@ -1026,6 +1027,30 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     }
 }
 
+/// Submit one opaque, engine-authored interaction response. The browser never
+/// materializes a `GameAction`; only a successful engine reducer result exposes
+/// the exact action to the replay recorder.
+#[wasm_bindgen]
+pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
+    let submission: InteractionSubmission = match serde_wasm_bindgen::from_value(submission) {
+        Ok(submission) => submission,
+        Err(error) => {
+            return JsValue::from_str(&format!(
+                "Engine error: failed to deserialize interaction submission: {error}"
+            ));
+        }
+    };
+    let actor = PlayerId(actor);
+    match with_state_mut(|state| submit_interaction(state, actor, submission)) {
+        Ok(Ok(applied)) => {
+            record_replay_action(false, actor, applied.action);
+            to_js(&applied.result)
+        }
+        Ok(Err(error)) => JsValue::from_str(&format!("Engine error: {:?}", error.code)),
+        Err(error) => error,
+    }
+}
+
 /// Record a successfully-applied action into REPLAY_LOG, or invalidate any
 /// in-progress recording if it was a (non-CreateCard) debug action.
 ///
@@ -1802,6 +1827,31 @@ pub fn replay_seek_js(target: u32) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn clear_replay_playback() {
     REPLAY_PLAYER.with(|cell| cell.set(None));
+}
+
+/// Engine-owned AI escape action for the current waiting state.
+///
+/// Returns the same deadlock-safe `fallback_action` the search path uses when
+/// scoring cannot choose — never invents from legal-action list order. Null
+/// when no legal escape exists (#6393).
+#[wasm_bindgen]
+pub fn get_ai_fallback_action() -> Result<JsValue, JsValue> {
+    with_state_mut(|state| {
+        // Freshly-restored states carry dirty layers; flush so candidate
+        // generation matches `get_ai_action` / `get_legal_actions_js`.
+        engine::game::layers::flush_layers(state);
+        // Escape uses policy penalties from config (sacrifice ordering); Medium
+        // is the controller's default seat difficulty for softlock recovery.
+        let config = create_config_for_players(
+            AiDifficulty::Medium,
+            Platform::Wasm,
+            state.players.len() as u8,
+        );
+        match fallback_action(state, &config) {
+            Some(action) => Ok(to_js(&action)),
+            None => Ok(JsValue::NULL),
+        }
+    })?
 }
 
 /// Get the AI's chosen action for the current game state.

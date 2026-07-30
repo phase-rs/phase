@@ -15,7 +15,9 @@ use crate::types::card_type::CardType;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::format::FormatConfig;
-use crate::types::game_state::{CastPaymentMode, CastingVariant, ProductionOverride};
+use crate::types::game_state::{
+    CastPaymentMode, CastingVariant, PendingCast, ProductionOverride, TargetSelectionProgress,
+};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::statics::{CastFrequency, StaticMode};
@@ -108,6 +110,34 @@ fn cards_revealed_events_are_remembered_publicly() {
     let mut replay = pre_state;
     replay.apply_resolved_information(&command).unwrap();
     assert_eq!(replay.public_revealed_cards, state.public_revealed_cards);
+}
+
+#[test]
+fn assist_cancellation_rejects_committed_activation_held_by_waiting_for() {
+    let mut state = setup_game_at_main_phase();
+    let mut pending = PendingCast::new(
+        ObjectId(1),
+        CardId(1),
+        ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0)),
+        ManaCost::NoCost,
+    );
+    pending.activation_cost_committed = true;
+    state.waiting_for = WaitingFor::TargetSelection {
+        player: PlayerId(0),
+        pending_cast: Box::new(pending),
+        target_slots: vec![],
+        mode_labels: vec![],
+        selection: TargetSelectionProgress {
+            current_slot: 0,
+            selected_slots: vec![],
+            current_legal_targets: vec![],
+        },
+    };
+
+    assert!(matches!(
+        ensure_assist_cancellation_is_allowed(&state),
+        Err(EngineError::ActionNotAllowed(message)) if message == "Cannot cancel an activation after a cost is paid"
+    ));
 }
 
 /// CR 603.3d regression — reported turn-34 Commander freeze (All Will Be
@@ -7611,7 +7641,9 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         assist_state: AssistState::NotOffered,
         activation_residual: crate::types::game_state::ActivationResidual::None,
         activation_target_selection: crate::types::game_state::ActivationTargetSelection::Pending,
+        activation_cost_committed: false,
         alt_cost_grant_source: None,
+        activation_trigger_collection: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
         player: PlayerId(0),
@@ -8006,7 +8038,9 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         assist_state: AssistState::NotOffered,
         activation_residual: crate::types::game_state::ActivationResidual::None,
         activation_target_selection: crate::types::game_state::ActivationTargetSelection::Pending,
+        activation_cost_committed: false,
         alt_cost_grant_source: None,
+        activation_trigger_collection: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
         player: PlayerId(0),

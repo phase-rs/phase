@@ -100,40 +100,6 @@ fn push_color(colors: &mut Vec<ManaType>, mana_type: ManaType) {
     }
 }
 
-/// Pick which color a flexible mana source (dual land, Mox Opal, City of Brass)
-/// should produce when answering a `ManaChoicePrompt::SingleColor` *during a
-/// pending cast*. The AI must produce the color the in-flight spell actually
-/// demands, not the first option in the list: tapping a U/R source for {R} when
-/// the spell needs {U} strands the colored pip and dead-ends the ManaPayment.
-///
-/// Returns the first option whose WUBRG colored demand of the pending cast is
-/// nonzero; if none of the options match a demanded color (generic-only cost, no
-/// pending cast), falls back to the first option — identical to the old `first()`
-/// behavior, so this is a strict improvement everywhere.
-///
-/// Limitation: `pending_cast.cost` is the FULL locked outer cost, not decremented
-/// per-pip as colors are produced. Demand is therefore exact for single-colored-pip
-/// costs (the repro: {2}{U}, {5}{U}) and a strict improvement over `first()` for
-/// all costs. Incremental per-pip demand tracking for multi-colored-pip costs
-/// (e.g. {U}{U}{R}, where two blues must be produced before red) is a documented
-/// follow-up, out of scope here.
-pub(crate) fn demand_aware_single_color(
-    options: &[ManaType],
-    state: &GameState,
-) -> Option<ManaType> {
-    let demand: ColorDemand = state
-        .pending_cast
-        .as_deref()
-        .map(|pc| outer_cost_color_demand(&pc.cost))
-        .unwrap_or([0u32; 5]);
-
-    options
-        .iter()
-        .copied()
-        .find(|&opt| color_is_demanded(demand, opt))
-        .or_else(|| options.first().copied())
-}
-
 /// Whether `mana_type` satisfies a colored pip the in-flight cost still demands.
 /// WUBRG demand slot per color; Colorless has no slot, so it never satisfies a
 /// colored pip.
@@ -155,9 +121,7 @@ fn color_is_demanded(demand: ColorDemand, mana_type: ManaType) -> bool {
 /// would*, i.e. taking this row strands the demanded pip in a `ManaPayment`
 /// dead-end (a U/R dual tapped for {R} against a {2}{U} spell).
 ///
-/// This is the [`demand_aware_single_color`] rule for the OTHER shape the same
-/// choice takes. That helper answers a `ManaChoicePrompt::SingleColor` prompt; here
-/// the color is instead carried in each `TapLandForMana` candidate's
+/// The color is carried in each `TapLandForMana` candidate's
 /// `ManaSourceSelection::mana_type`, so the choice is expressed as a *set of
 /// candidates* and must be resolved by eliminating the stranding ones rather than
 /// by returning a color.
@@ -168,10 +132,6 @@ fn color_is_demanded(demand: ColorDemand, mana_type: ManaType) -> bool {
 /// false — tapping it for an undemanded color may still be a fine way to pay
 /// generic.
 ///
-/// Shares [`demand_aware_single_color`]'s limitation: `pending_cast.cost` is the
-/// full locked outer cost, not decremented per-pip as colors are produced, so
-/// demand is exact for single-colored-pip costs and a strict improvement for the
-/// rest.
 pub(crate) fn tap_strands_demanded_color(
     state: &GameState,
     player: PlayerId,
@@ -206,62 +166,6 @@ mod tests {
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaCost, ManaCostShard};
     use engine::types::player::PlayerId;
-
-    fn state_with_cost(shards: Vec<ManaCostShard>, generic: u32) -> GameState {
-        let mut state = GameState::new_two_player(42);
-        state.pending_cast = Some(Box::new(PendingCast::new(
-            ObjectId(100),
-            CardId(100),
-            ResolvedAbility::new(
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 0 },
-                    target: TargetFilter::Controller,
-                },
-                Vec::new(),
-                ObjectId(100),
-                PlayerId(0),
-            ),
-            ManaCost::Cost { shards, generic },
-        )));
-        state
-    }
-
-    #[test]
-    fn picks_demanded_blue_over_first_red() {
-        // {2}{U}: a U/R source offered [Red, Blue] must produce Blue (the
-        // demanded color), not Red (the first option).
-        let state = state_with_cost(vec![ManaCostShard::Blue], 2);
-        assert_eq!(
-            demand_aware_single_color(&[ManaType::Red, ManaType::Blue], &state),
-            Some(ManaType::Blue)
-        );
-    }
-
-    #[test]
-    fn generic_only_cost_falls_back_to_first() {
-        // {2}: no colored demand, so the first option (Red) is fine.
-        let state = state_with_cost(Vec::new(), 2);
-        assert_eq!(
-            demand_aware_single_color(&[ManaType::Red, ManaType::Blue], &state),
-            Some(ManaType::Red)
-        );
-    }
-
-    #[test]
-    fn no_pending_cast_falls_back_to_first() {
-        let state = GameState::new_two_player(42);
-        assert!(state.pending_cast.is_none());
-        assert_eq!(
-            demand_aware_single_color(&[ManaType::Red, ManaType::Blue], &state),
-            Some(ManaType::Red)
-        );
-    }
-
-    #[test]
-    fn empty_options_returns_none() {
-        let state = state_with_cost(vec![ManaCostShard::Blue], 2);
-        assert_eq!(demand_aware_single_color(&[], &state), None);
-    }
 
     /// Battlefield fixture: one land for `P0` with `oracle_text`, plus a pending
     /// cast of `{2}{U}` — the shape of the measured `Metallic Rebuke` repro.

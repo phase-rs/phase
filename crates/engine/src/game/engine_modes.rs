@@ -1,5 +1,5 @@
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CostResume, GameState, PayCostKind, PendingCast, WaitingFor};
+use crate::types::game_state::{GameState, PendingCast, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaCost;
 
@@ -38,6 +38,7 @@ pub(super) fn handle_ability_mode_choice(
     };
 
     validate_modal_indices(&modal, &indices, &unavailable_modes)?;
+
     record_modal_mode_choices(state, source_id, &modal, &indices);
 
     let mut resolved =
@@ -74,28 +75,7 @@ pub(super) fn handle_ability_mode_choice(
         )
     }?;
 
-    if !is_activated {
-        settle_completed_repeated_optional_payment_frame(state)?;
-    }
-
     Ok(waiting_for)
-}
-
-/// CR 603.12a: A repeated-payment frame retains K only until its reflexive
-/// modal has consumed the dynamic cap. The frame is then an AfterChild owner
-/// with no driver, so selection completion is its exact action boundary.
-fn settle_completed_repeated_optional_payment_frame(
-    state: &mut GameState,
-) -> Result<(), EngineError> {
-    if state
-        .active_repeated_optional_payment_frame()
-        .is_some_and(|frame| frame.pending.is_none())
-    {
-        state
-            .take_active_repeated_optional_payment_frame()
-            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
-    }
-    Ok(())
 }
 
 struct ActivatedModeChoice {
@@ -182,41 +162,6 @@ fn handle_activated_mode_choice(
             state.pending_cast = Some(Box::new(pending_x));
             return casting_costs::enter_payment_step(state, player, None, events);
         }
-
-        // CR 118.3 + CR 602.2b: Modal activated abilities detour to the
-        // interactive sacrifice prompt before targets or direct cost payment.
-        // Non-modal activations take this path in `handle_activate_ability`;
-        // without it, `pay_ability_cost` no-ops non-self `Sacrifice` sub-costs.
-        if let Some((count, sac_filter)) = casting::find_non_self_sacrifice_cost(cost) {
-            let eligible =
-                casting::find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
-            let (min_count, max_count) = casting::sacrifice_cost_bounds(count, eligible.len());
-            if eligible.len() < min_count {
-                return Err(EngineError::ActionNotAllowed(
-                    "Not enough eligible permanents to sacrifice".into(),
-                ));
-            }
-            let mut pending_sac =
-                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-            pending_sac.activation_cost = Some(cost.clone());
-            pending_sac.activation_ability_index = ability_index;
-            pending_sac.target_constraints = target_constraints_from_modal(&modal);
-            pending_sac.distribute = mode_distribute.clone();
-            pending_sac.deferred_target_selection = true;
-            let mut chosen_modes = indices.clone();
-            chosen_modes.sort_unstable();
-            pending_sac.chosen_modes = chosen_modes;
-            return Ok(WaitingFor::PayCost {
-                player,
-                kind: PayCostKind::Sacrifice,
-                choices: eligible,
-                count: max_count,
-                min_count,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending_sac),
-                },
-            });
-        }
     }
 
     super::layers::flush_layers(state);
@@ -262,39 +207,37 @@ fn handle_activated_mode_choice(
         if let Some(targets) = resolved_targets {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
+            // CR 602.2b + CR 601.2c: automatic target assignment is still a
+            // declaration before activation costs are paid.
+            casting::emit_targeting_events(
+                state,
+                &super::ability_utils::flatten_targets_in_chain(&resolved),
+                source_id,
+                player,
+                events,
+            );
             let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending.activation_cost = ability_cost.clone();
             pending.activation_ability_index = ability_index;
             pending.target_constraints = target_constraints;
             pending.distribute = mode_distribute;
+            pending.begin_activation_trigger_collection();
             casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
                 state, player, pending, events,
             )
         } else {
-            let selection = begin_target_selection_for_ability(
-                state,
-                &resolved,
-                &target_slots,
-                &target_constraints,
-            )?;
             let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending.activation_cost = ability_cost;
             pending.activation_ability_index = ability_index;
             pending.target_constraints = target_constraints;
             pending.distribute = mode_distribute;
-            // CR 601.2c + CR 602.2b: first slot's announcer (controller unless the
-            // slot is "of an opponent's choice").
-            let initial_player = target_slots
-                .first()
-                .and_then(|slot| slot.chooser)
-                .unwrap_or(player);
-            Ok(WaitingFor::TargetSelection {
-                player: initial_player,
-                pending_cast: Box::new(pending),
+            super::casting_targets::begin_activated_target_selection(
+                state,
+                player,
+                pending,
                 target_slots,
                 mode_labels,
-                selection,
-            })
+            )
         }
     } else {
         let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
@@ -370,7 +313,6 @@ pub(super) fn resolve_random_modal_trigger(
         },
         events,
     )?;
-    settle_completed_repeated_optional_payment_frame(state)?;
     Ok(Some(waiting_for))
 }
 

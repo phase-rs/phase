@@ -4,13 +4,12 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActivationTargetSelection, CostResume, GameState, PayCostKind, PendingCast, WaitingFor,
+    ActivationTargetSelection, GameState, PendingCast, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
-use crate::types::zones::ExileCostSourceZone;
 
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_selected_slots_in_chain,
@@ -23,9 +22,45 @@ use super::ability_utils::{
 use super::casting_costs::{
     cost_has_x, drain_deferred_triggers_after_stack_object_announcement, enter_payment_step,
     finish_pending_cast_cost_or_pay,
+    target_first_activation_defers_interactive_costs_to_payment_boundary,
+    TargetFirstPaymentHandoff,
 };
 use super::engine::EngineError;
 use super::restrictions;
+
+/// Creates the sole interactive target-declaration boundary for an activated
+/// ability after its announcement-only choices have settled.
+///
+/// CR 602.2b + CR 601.2b-c: Modes and X are announced before targets, and
+/// costs are paid only after the target declaration has completed. Keeping the
+/// prompt construction here prevents cost-specific activation detours from
+/// accidentally moving ahead of target selection.
+pub(crate) fn begin_activated_target_selection(
+    state: &GameState,
+    player: PlayerId,
+    mut pending_cast: PendingCast,
+    target_slots: Vec<TargetSelectionSlot>,
+    mode_labels: Vec<Option<String>>,
+) -> Result<WaitingFor, EngineError> {
+    pending_cast.begin_activation_trigger_collection();
+    let selection = begin_target_selection_for_ability(
+        state,
+        &pending_cast.ability,
+        &target_slots,
+        &pending_cast.target_constraints,
+    )?;
+    let initial_player = target_slots
+        .first()
+        .and_then(|slot| slot.chooser)
+        .unwrap_or(player);
+    Ok(WaitingFor::TargetSelection {
+        player: initial_player,
+        pending_cast: Box::new(pending_cast),
+        target_slots,
+        mode_labels,
+        selection,
+    })
+}
 
 /// Handle mode selection for a modal spell.
 ///
@@ -256,6 +291,7 @@ fn maybe_pause_for_cast_distribution(
     player: PlayerId,
     pending: &PendingCast,
     ability: &ResolvedAbility,
+    events: &[GameEvent],
 ) -> Result<Option<WaitingFor>, EngineError> {
     let Some(unit) = &pending.distribute else {
         return Ok(None);
@@ -270,6 +306,7 @@ fn maybe_pause_for_cast_distribution(
     }
     let mut pending_dist = pending.clone();
     pending_dist.ability = Box::new(ability.clone());
+    stage_activation_target_events_before_distribution(state, &mut pending_dist, events);
     state.pending_cast = Some(Box::new(pending_dist));
     Ok(Some(WaitingFor::DistributeAmong {
         player,
@@ -277,6 +314,19 @@ fn maybe_pause_for_cast_distribution(
         targets: assigned_targets,
         unit: unit.clone(),
     }))
+}
+
+/// CR 602.2b + CR 603.3b: A target-bearing activation keeps target-declaration
+/// triggers local while an intervening distribution choice is pending. The later
+/// stack-commit boundary publishes this already-collected prefix with cost events.
+fn stage_activation_target_events_before_distribution(
+    state: &GameState,
+    pending: &mut PendingCast,
+    events: &[GameEvent],
+) {
+    if let Some(collection) = pending.activation_trigger_collection.as_mut() {
+        collection.collect(state, events);
+    }
 }
 
 /// Handle target selection for a pending cast.
@@ -322,7 +372,20 @@ pub(crate) fn handle_select_targets(
     let mut ability = pending.ability.clone();
     assign_targets_in_chain(state, &mut ability, &targets)?;
 
-    if let Some(waiting_for) = maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
+    if pending.activation_ability_index.is_some() {
+        // CR 602.2b + CR 601.2c: the target event occurs when targets are
+        // declared, before a distribution choice or any activation cost.
+        super::casting::emit_targeting_events(
+            state,
+            &super::ability_utils::flatten_targets_in_chain(&ability),
+            pending.object_id,
+            pending.ability.controller,
+            events,
+        );
+    }
+
+    if let Some(waiting_for) =
+        maybe_pause_for_cast_distribution(state, player, &pending, &ability, events)?
     {
         return Ok(waiting_for);
     }
@@ -331,13 +394,20 @@ pub(crate) fn handle_select_targets(
         let mut pending = pending;
         pending.ability = ability;
         pending.activation_target_selection = ActivationTargetSelection::Settled;
-        if let Some(waiting_for) = pay_activation_costs_after_target_selection(
-            state,
-            player,
+        if !target_first_activation_defers_interactive_costs_to_payment_boundary(
             &pending,
-            (*pending.ability).clone(),
-        )? {
-            return Ok(waiting_for);
+            TargetFirstPaymentHandoff::BeforeManaPayment,
+        ) {
+            if let Some(waiting_for) =
+                super::casting_costs::surface_next_unpaid_interactive_activation_cost(
+                    state,
+                    player,
+                    &mut pending,
+                    events,
+                )?
+            {
+                return Ok(waiting_for);
+            }
         }
 
         return super::casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
@@ -417,8 +487,20 @@ pub(crate) fn handle_choose_target(
             // inbound per-slot `player` (the opponent) would pay and stack the spell.
             let controller = pending.ability.controller;
 
+            if pending.activation_ability_index.is_some() {
+                // CR 602.2b + CR 601.2c: complete the target-declaration event
+                // before any distribution choice or activation cost.
+                super::casting::emit_targeting_events(
+                    state,
+                    &super::ability_utils::flatten_targets_in_chain(&ability),
+                    pending.object_id,
+                    controller,
+                    events,
+                );
+            }
+
             if let Some(waiting_for) =
-                maybe_pause_for_cast_distribution(state, controller, &pending, &ability)?
+                maybe_pause_for_cast_distribution(state, controller, &pending, &ability, events)?
             {
                 return Ok(waiting_for);
             }
@@ -427,13 +509,20 @@ pub(crate) fn handle_choose_target(
                 let mut pending = pending;
                 pending.ability = ability;
                 pending.activation_target_selection = ActivationTargetSelection::Settled;
-                if let Some(waiting_for) = pay_activation_costs_after_target_selection(
-                    state,
-                    controller,
+                if !target_first_activation_defers_interactive_costs_to_payment_boundary(
                     &pending,
-                    (*pending.ability).clone(),
-                )? {
-                    return Ok(waiting_for);
+                    TargetFirstPaymentHandoff::BeforeManaPayment,
+                ) {
+                    if let Some(waiting_for) =
+                        super::casting_costs::surface_next_unpaid_interactive_activation_cost(
+                            state,
+                            controller,
+                            &mut pending,
+                            events,
+                        )?
+                    {
+                        return Ok(waiting_for);
+                    }
                 }
 
                 let waiting_for =
@@ -453,86 +542,6 @@ pub(crate) fn handle_choose_target(
     }
 }
 
-fn pay_activation_costs_after_target_selection(
-    state: &mut GameState,
-    player: PlayerId,
-    pending: &PendingCast,
-    assigned_ability: ResolvedAbility,
-) -> Result<Option<WaitingFor>, EngineError> {
-    if let Some(ref activation_cost) = pending.activation_cost {
-        if let Some((count, zone, filter)) = super::casting::find_non_self_exile(activation_cost) {
-            let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
-                .expect("find_non_self_exile restricts zone to Hand or Graveyard");
-            let eligible = super::casting::find_eligible_exile_for_cost_targets(
-                state,
-                player,
-                pending.object_id,
-                narrow_zone,
-                filter,
-            );
-            if eligible.len() < count as usize {
-                return Err(EngineError::ActionNotAllowed(
-                    "Not enough eligible cards to exile".into(),
-                ));
-            }
-            let mut pending = pending.clone();
-            pending.ability = Box::new(assigned_ability);
-            return Ok(Some(WaitingFor::PayCost {
-                player,
-                kind: PayCostKind::ExileFromZone { zone: narrow_zone },
-                choices: eligible,
-                count: count as usize,
-                min_count: 0,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending),
-                },
-            }));
-        }
-
-        // CR 701.3d + CR 601.2c/601.2h: a targeted "unattach a matching
-        // attachment from ~" ability chooses its targets first, then surfaces the
-        // Unattach cost interactively (Captain America's Throw). The chosen
-        // Equipment's mana value drives the divided damage (CR 202.3 + CR 608.2k),
-        // so eligibility narrows to attachments whose mana value is at least the
-        // announced target count (CR 601.2c). Modeled on the non-self exile detour.
-        if let Some((count, filter)) = super::casting::find_unattach_from_cost(activation_cost) {
-            let n = distribution_targets(&assigned_ability).len() as u32;
-            let eligible = super::casting::find_eligible_unattach_for_cost_targets(
-                state,
-                player,
-                pending.object_id,
-                filter,
-                n,
-            );
-            if eligible.is_empty() {
-                // CR 733 / CR 601.2h: unpayable cost — nothing has been detached
-                // (pre-commit revert), so the activation is simply illegal.
-                return Err(EngineError::ActionNotAllowed(
-                    "No eligible Equipment to unattach with mana value >= target count".into(),
-                ));
-            }
-            let mut pending = pending.clone();
-            pending.ability = Box::new(assigned_ability);
-            // CR 601.2h: unattach-from is a required cost — no decline, exactly
-            // `count` selections.
-            return Ok(Some(WaitingFor::PayCost {
-                player,
-                kind: PayCostKind::UnattachFrom {
-                    filter: filter.clone(),
-                },
-                choices: eligible,
-                count: count as usize,
-                min_count: count as usize,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending),
-                },
-            }));
-        }
-    }
-
-    Ok(None)
-}
-
 /// CR 602.2b + CR 605.3b + CR 616.1: Resume an automatic activation mana leg
 /// through the same target-first cost suffix that owns chosen targets,
 /// distribution, and interactive non-mana costs. The mana payment is already
@@ -540,7 +549,7 @@ fn pay_activation_costs_after_target_selection(
 pub(crate) fn finish_activation_after_automatic_mana_payment(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if pending.activation_ability_index.is_none() {
@@ -551,10 +560,17 @@ pub(crate) fn finish_activation_after_automatic_mana_payment(
     if matches!(
         pending.activation_target_selection,
         ActivationTargetSelection::Settled
+    ) && !target_first_activation_defers_interactive_costs_to_payment_boundary(
+        &pending,
+        TargetFirstPaymentHandoff::AfterManaPayment,
     ) {
-        let ability = (*pending.ability).clone();
         if let Some(waiting) =
-            pay_activation_costs_after_target_selection(state, player, &pending, ability)?
+            super::casting_costs::surface_next_unpaid_interactive_activation_cost(
+                state,
+                player,
+                &mut pending,
+                events,
+            )?
         {
             return Ok(waiting);
         }

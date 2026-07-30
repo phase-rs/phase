@@ -3447,7 +3447,7 @@ fn legacy_guess_subject(subject: &GuessSubject) -> bool {
 
 fn legacy_choice_type(choice_type: &crate::types::ability::ChoiceType) -> bool {
     match choice_type {
-        crate::types::ability::ChoiceType::Opponent { restriction } => {
+        crate::types::ability::ChoiceType::Opponent { restriction, .. } => {
             restriction.as_deref().is_some_and(legacy_player_filter)
         }
         crate::types::ability::ChoiceType::CreatureType { .. }
@@ -3461,7 +3461,7 @@ fn legacy_choice_type(choice_type: &crate::types::ability::ChoiceType) -> bool {
         | crate::types::ability::ChoiceType::LandType
         | crate::types::ability::ChoiceType::CardPredicate { .. }
         | crate::types::ability::ChoiceType::CardPredicateGuess { .. }
-        | crate::types::ability::ChoiceType::Player
+        | crate::types::ability::ChoiceType::Player { .. }
         | crate::types::ability::ChoiceType::TwoColors
         | crate::types::ability::ChoiceType::Word
         | crate::types::ability::ChoiceType::Artist
@@ -5740,7 +5740,7 @@ fn rw_guess_subject(subject: &GuessSubject) -> RwProfile {
 
 fn rw_choice_type(choice_type: &crate::types::ability::ChoiceType) -> RwProfile {
     match choice_type {
-        crate::types::ability::ChoiceType::Opponent { restriction } => match restriction {
+        crate::types::ability::ChoiceType::Opponent { restriction, .. } => match restriction {
             Some(filter) => rw_player_filter(filter),
             None => RwProfile::empty(),
         },
@@ -5755,7 +5755,7 @@ fn rw_choice_type(choice_type: &crate::types::ability::ChoiceType) -> RwProfile 
         | crate::types::ability::ChoiceType::LandType
         | crate::types::ability::ChoiceType::CardPredicate { .. }
         | crate::types::ability::ChoiceType::CardPredicateGuess { .. }
-        | crate::types::ability::ChoiceType::Player
+        | crate::types::ability::ChoiceType::Player { .. }
         | crate::types::ability::ChoiceType::TwoColors
         | crate::types::ability::ChoiceType::Word
         | crate::types::ability::ChoiceType::Artist
@@ -6890,7 +6890,7 @@ mod tests {
     #[test]
     fn b7_choose_persist_member_bound() {
         let choose = |persist: bool| Effect::Choose {
-            choice_type: ChoiceType::Opponent { restriction: None },
+            choice_type: ChoiceType::opponent(),
             persist,
             selection: TargetSelectionMode::default(),
         };

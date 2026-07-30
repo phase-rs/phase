@@ -9,7 +9,7 @@ import type {
   ObjectId,
   ObjectAction,
 } from "../adapter/types";
-import type { ViewerInteraction } from "../adapter/generated/interaction";
+import type { InteractionSubmission, ViewerInteraction } from "../adapter/generated/interaction";
 import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
 
 /**
@@ -68,6 +68,12 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * of silently corrupting state.
  *
  * Bumps to date:
+ *  16 — PayableResource::ManaGeneric changed from { per_x } to
+ *       { base_cost: ManaCost } (#6410) — a GameState payload field type
+ *       change, and base_cost intentionally carries no serde default (a
+ *       missing base_cost must fail deserialization, not silently resolve
+ *       to a zero-cost payment), so old and new peers can't parse each
+ *       other's serialized snapshots.
  *   1 — pre-compression JSON-serialization era (no longer in production)
  *   2 — gzip + version-prefixed binary wire format
  *   3 — Planechase state and action payloads in game_setup/reconnect snapshots
@@ -85,7 +91,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 15 as const;
+export const WIRE_PROTOCOL_VERSION = 16 as const;
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
@@ -99,6 +105,7 @@ export type P2PMessage =
       playerNames?: Record<number, string>;
     } & LegalActionsWire)
   | { type: "action"; senderPlayerId: number; action: GameAction }
+  | { type: "interaction"; senderPlayerId: number; submission: InteractionSubmission }
   | { type: "preview_mana_payment"; requestId: number; action: GameAction }
   | ({
       type: "state_update";
@@ -156,6 +163,7 @@ const VALID_TYPES = new Set([
   "guest_deck",
   "game_setup",
   "action",
+  "interaction",
   "preview_mana_payment",
   "state_update",
   "action_rejected",

@@ -1,0 +1,168 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": {
+          "type": "ChoiceAmongCombinations",
+          "options": [
+            [
+              "White",
+              "Blue"
+            ],
+            [
+              "White",
+              "Black"
+            ],
+            [
+              "White",
+              "Red"
+            ],
+            [
+              "White",
+              "Green"
+            ],
+            [
+              "Blue",
+              "Black"
+            ],
+            [
+              "Blue",
+              "Red"
+            ],
+            [
+              "Blue",
+              "Green"
+            ],
+            [
+              "Black",
+              "Red"
+            ],
+            [
+              "Black",
+              "Green"
+            ],
+            [
+              "Red",
+              "Green"
+            ]
+          ]
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "RemoveCounter",
+            "count": 1,
+            "counter_type": {
+              "type": "OfType",
+              "data": "component"
+            },
+            "target": null,
+            "selection": "SingleObject"
+          }
+        ]
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{T}, Remove a component counter from ~: Add two mana of different colors.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false,
+      "is_mana_ability": true
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "RollDie",
+        "count": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "sides": 20,
+        "results": [
+          {
+            "min": 1,
+            "max": 9,
+            "effect": {
+              "kind": "Spell",
+              "effect": {
+                "type": "PutCounter",
+                "counter_type": "component",
+                "count": {
+                  "type": "Fixed",
+                  "value": 1
+                },
+                "target": {
+                  "type": "SelfRef"
+                }
+              },
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
+            }
+          },
+          {
+            "min": 10,
+            "max": 20,
+            "effect": {
+              "kind": "Spell",
+              "effect": {
+                "type": "PutCounter",
+                "counter_type": "component",
+                "count": {
+                  "type": "Fixed",
+                  "value": 2
+                },
+                "target": {
+                  "type": "SelfRef"
+                }
+              },
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
+            }
+          }
+        ]
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{T}: Roll a d20.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

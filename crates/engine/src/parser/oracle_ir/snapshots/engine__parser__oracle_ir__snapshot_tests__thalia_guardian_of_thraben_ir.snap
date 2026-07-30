@@ -22,22 +22,13 @@ expression: "&ir"
         "fragment": "First strike"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "First strike",
             "description": "First strike"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "First strike",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },

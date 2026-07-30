@@ -7,6 +7,22 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
+use crate::parser::oracle_ir::trigger::TriggerNodeIr;
+use crate::types::ability::MultiTargetSpec;
+use crate::types::ability::{Effect, TargetChoiceTiming, TriggerCondition};
+use crate::types::game_state::DistributionUnit;
+
+fn ability_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
+    matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_has_unimplemented)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_has_unimplemented)
+}
 
 /// Parse Oracle text through both IR and lowering layers.
 fn parse_two_layer(
@@ -31,6 +47,480 @@ fn parse_two_layer_with_keywords(
     let mut ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
     let lowered = lower_oracle_ir(&mut ir);
     (ir, lowered)
+}
+
+/// CR 707.9a + CR 602.1a: generic activated abilities are emitted as native
+/// spell IR, so the source-ordered lowerer can stamp the second printed ability
+/// before its self-retention copy effect is finalized.
+#[test]
+fn thespians_stage_generic_activated_router_is_ir_native() {
+    let (ir, lowered) = parse_two_layer(
+        "{T}: Add {C}.\n{2}, {T}: This land becomes a copy of target land, except it has this ability.",
+        "Thespian's Stage",
+        &["Land"],
+        &[],
+    );
+
+    assert_eq!(ir.items.len(), 2);
+    assert!(matches!(&ir.items[0].node, OracleNodeIr::Spell(_)));
+    assert!(matches!(&ir.items[1].node, OracleNodeIr::Spell(_)));
+    assert_eq!(lowered.abilities.len(), 2);
+    assert!(
+        !ability_has_unimplemented(&lowered.abilities[1]),
+        "the copy ability must lower without a residual fallback: {:?}",
+        lowered.abilities[1]
+    );
+    assert!(matches!(
+        lowered.abilities[1].effect.as_ref(),
+        Effect::BecomeCopy { additional_modifications, .. }
+            if additional_modifications.iter().any(|modification| matches!(
+                modification,
+                crate::types::ability::ContinuousModification::RetainPrintedAbilityFromSource {
+                    source_ability_index: 1
+                }
+            ))
+    ));
+
+    insta::assert_json_snapshot!("thespians_stage_generic_activated_ir", &ir);
+    insta::assert_json_snapshot!("thespians_stage_generic_activated_lowered", &lowered);
+}
+
+/// CR 207.2c + CR 602.1: an ability-word label on an activated ability does
+/// not impose a condition; the generic activation envelope is retained in IR.
+#[test]
+fn barbarian_ring_ability_word_activated_router_is_ir_native() {
+    let (ir, lowered) = parse_two_layer(
+        "{T}: Add {R}. This land deals 1 damage to you.\nThreshold — {R}, {T}, Sacrifice this land: It deals 2 damage to any target. Activate only if there are seven or more cards in your graveyard.",
+        "Barbarian Ring",
+        &["Land"],
+        &[],
+    );
+
+    assert_eq!(ir.items.len(), 2);
+    let OracleNodeIr::Spell(activated) = &ir.items[1].node else {
+        panic!(
+            "expected native activated spell IR, got {:?}",
+            ir.items[1].node
+        );
+    };
+    assert!(!activated.shell.activation_restrictions.is_empty());
+    assert_eq!(lowered.abilities.len(), 2);
+    let ability = &lowered.abilities[1];
+    assert!(
+        !ability_has_unimplemented(ability),
+        "ability-word activated route must not fall back: {ability:?}"
+    );
+    assert!(
+        ability.condition.is_none(),
+        "Threshold has no rules meaning here"
+    );
+    assert!(matches!(
+        ability.cost.as_ref(),
+        Some(crate::types::ability::AbilityCost::Composite { .. })
+    ));
+    assert!(matches!(ability.effect.as_ref(), Effect::DealDamage { .. }));
+    assert!(
+        !ability.activation_restrictions.is_empty(),
+        "explicit Activate only restriction must survive"
+    );
+
+    insta::assert_json_snapshot!("barbarian_ring_activated_ir", &ir);
+    insta::assert_json_snapshot!("barbarian_ring_activated_lowered", &lowered);
+}
+
+/// CR 706.3b: an activated terminal die roll owns only its contiguous result
+/// rows and preserves them as native branch IR until final lowering.
+#[test]
+fn component_pouch_activated_die_table_is_ir_native() {
+    let (ir, lowered) = parse_two_layer(
+        "{T}, Remove a component counter from this artifact: Add two mana of different colors.\n{T}: Roll a d20.\n1—9 | Put a component counter on this artifact.\n10—20 | Put two component counters on this artifact.",
+        "Component Pouch",
+        &["Artifact"],
+        &[],
+    );
+
+    assert_eq!(ir.items.len(), 2, "result rows must not become items");
+    let OracleNodeIr::Spell(roll) = &ir.items[1].node else {
+        panic!(
+            "expected native roll ability IR, got {:?}",
+            ir.items[1].node
+        );
+    };
+    assert_eq!(
+        roll.die_results
+            .iter()
+            .map(|branch| (branch.min, branch.max))
+            .collect::<Vec<_>>(),
+        vec![(1, 9), (10, 20)]
+    );
+    assert!(matches!(
+        lowered.abilities[1].effect.as_ref(),
+        Effect::RollDie { results, .. } if results.len() == 2
+    ));
+
+    insta::assert_json_snapshot!("component_pouch_activated_ir", &ir);
+    insta::assert_json_snapshot!("component_pouch_activated_lowered", &lowered);
+}
+
+/// CR 706.3b: the typed terminal-roll guard must leave the next line to the
+/// ordinary router when a die roll has a following non-roll instruction.
+#[test]
+fn nonterminal_activated_die_roll_does_not_consume_following_ability() {
+    let (ir, lowered) = parse_two_layer(
+        "{T}: Roll a d20, then draw a card.\n{T}: Add {C}.",
+        "Nonterminal Activated Die Fixture",
+        &["Artifact"],
+        &[],
+    );
+
+    assert_eq!(
+        ir.items.len(),
+        2,
+        "the following activation must remain routable"
+    );
+    assert!(matches!(&ir.items[0].node, OracleNodeIr::Spell(_)));
+    assert!(matches!(&ir.items[1].node, OracleNodeIr::Spell(_)));
+    assert_eq!(lowered.abilities.len(), 2);
+    let first = &lowered.abilities[0];
+    assert!(matches!(first.effect.as_ref(), Effect::RollDie { .. }));
+    assert!(matches!(
+        first.sub_ability.as_deref().map(|sub| sub.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+    assert!(
+        lowered
+            .abilities
+            .iter()
+            .all(|ability| !ability_has_unimplemented(ability)),
+        "both ordinary activations must parse after the nonterminal roll: {:?}",
+        lowered.abilities
+    );
+    assert!(matches!(
+        lowered.abilities[1].effect.as_ref(),
+        Effect::Mana { .. }
+    ));
+}
+
+/// CR 700.3 + CR 701.38: Priority 9 keeps its pile and vote roots native until
+/// document lowering; their nested per-choice and chosen-pile payloads remain
+/// deliberately pre-lowered effect internals.
+#[test]
+fn priority_nine_spell_router_keeps_vote_and_pile_roots_native() {
+    let (vote_ir, vote_lowered) = parse_two_layer(
+        "Starting with you, each player votes for evidence or bribery. For each evidence vote, investigate. For each bribery vote, create a Treasure token.",
+        "Vote Spell Fixture",
+        &["Sorcery"],
+        &[],
+    );
+    assert!(matches!(vote_ir.items[0].node, OracleNodeIr::Spell(_)));
+    assert!(matches!(
+        vote_lowered.abilities[0].effect.as_ref(),
+        Effect::Vote { .. }
+    ));
+
+    let (pile_ir, pile_lowered) = parse_two_layer(
+        "Reveal the top five cards of your library. An opponent separates those cards into two piles. Put one pile into your hand and the other into your graveyard.",
+        "Fact or Fiction",
+        &["Instant"],
+        &[],
+    );
+    assert!(matches!(pile_ir.items[0].node, OracleNodeIr::Spell(_)));
+    assert!(matches!(
+        pile_lowered.abilities[0].effect.as_ref(),
+        Effect::SeparateIntoPiles { .. }
+    ));
+}
+
+/// CR 601.2b: Priority 9 keeps all aggregate source text and the X floor on
+/// the native node until document lowering.
+#[test]
+fn priority_nine_multiline_spell_keeps_description_and_x_floor_in_ir() {
+    let oracle_text = "Draw a card.\nThen draw a card.\nX can't be 0.";
+    let (ir, lowered) = parse_two_layer(oracle_text, "Multiline Spell Fixture", &["Sorcery"], &[]);
+    let OracleNodeIr::Spell(ability) = &ir.items[0].node else {
+        panic!("multiline spell must remain native IR");
+    };
+    assert!(ability.root_transforms.iter().any(|transform| matches!(
+        transform,
+        crate::parser::oracle_ir::effect_chain::AbilityRootTransform::SetMinXValue(1)
+    )));
+    assert!(ability.root_transforms.iter().any(|transform| matches!(
+        transform,
+        crate::parser::oracle_ir::effect_chain::AbilityRootTransform::SetDescription(description)
+            if description == "Draw a card.\nThen draw a card."
+    )));
+    assert_eq!(lowered.abilities.len(), 1);
+    assert_eq!(lowered.abilities[0].min_x_value, 1);
+    assert_eq!(
+        lowered.abilities[0].description.as_deref(),
+        Some("Draw a card.\nThen draw a card.")
+    );
+}
+
+/// CR 706.3b: ordinary trigger dispatch retains a die-result table in native
+/// trigger IR and attaches it to the terminal roll before finalization.
+#[test]
+fn direct_trigger_die_table_is_ir_native_and_lowers_as_one_ability() {
+    let (ir, lowered) = parse_two_layer(
+        "Whenever this creature attacks, roll a d20.\n1—9 | Create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")\n10—19 | Create two Treasure tokens.\n20 | Create three Treasure tokens.",
+        "Hoarding Ogre",
+        &["Creature"],
+        &["Giant"],
+    );
+
+    assert_eq!(
+        ir.items.len(),
+        1,
+        "result rows must not become document items"
+    );
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &ir.items[0].node else {
+        panic!(
+            "expected a native parsed trigger, got {:?}",
+            ir.items[0].node
+        );
+    };
+    assert_eq!(trigger.die_results.len(), 3);
+    assert_eq!(
+        trigger
+            .die_results
+            .iter()
+            .map(|branch| (branch.min, branch.max))
+            .collect::<Vec<_>>(),
+        vec![(1, 9), (10, 19), (20, 20)]
+    );
+
+    let execute = lowered.triggers[0]
+        .execute
+        .as_deref()
+        .expect("Hoarding Ogre trigger must have an execute ability");
+    let Effect::RollDie { results, .. } = execute.effect.as_ref() else {
+        panic!(
+            "expected terminal roll-die effect, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(results.len(), 3);
+    assert!(
+        results
+            .iter()
+            .all(|branch| !matches!(branch.effect.effect.as_ref(), Effect::Unimplemented { .. })),
+        "table branches must be lowered through the ordinary ability authority: {results:?}"
+    );
+}
+
+/// CR 603.2 + CR 706.3b: Each trigger produced by a compound trigger line owns
+/// the following die-result table when its body ends in that line's die roll.
+#[test]
+fn compound_trigger_die_table_attaches_to_every_terminal_roll() {
+    let (ir, lowered) = parse_two_layer(
+        "Whenever this creature attacks and whenever this creature blocks, roll a d20.\n1—9 | Draw a card.\n10—20 | Create a Treasure token.",
+        "Compound Die Fixture",
+        &["Creature"],
+        &[],
+    );
+
+    assert_eq!(
+        ir.items.len(),
+        2,
+        "result rows must not become document items"
+    );
+    for item in &ir.items {
+        let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &item.node else {
+            panic!(
+                "expected native parsed compound triggers, got {:?}",
+                item.node
+            );
+        };
+        assert_eq!(trigger.die_results.len(), 2);
+    }
+
+    assert_eq!(lowered.triggers.len(), 2);
+    for trigger in &lowered.triggers {
+        assert!(matches!(
+            trigger.execute.as_deref().map(|execute| execute.effect.as_ref()),
+            Some(Effect::RollDie { results, .. }) if results.len() == 2
+        ));
+    }
+
+    let (shared_subject_ir, shared_subject_lowered) = parse_two_layer(
+        "Whenever this creature attacks, blocks, or becomes the target of a spell, roll a d20.\n1—9 | Draw a card.\n10—20 | Create a Treasure token.",
+        "Shared Subject Die Fixture",
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(shared_subject_ir.items.len(), 3);
+    assert_eq!(shared_subject_lowered.triggers.len(), 3);
+    for (item, trigger) in shared_subject_ir
+        .items
+        .iter()
+        .zip(&shared_subject_lowered.triggers)
+    {
+        let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(parsed)) = &item.node else {
+            panic!("expected a native parsed shared-subject trigger");
+        };
+        assert_eq!(parsed.die_results.len(), 2);
+        assert!(matches!(
+            trigger.execute.as_deref().map(|execute| execute.effect.as_ref()),
+            Some(Effect::RollDie { results, .. }) if results.len() == 2
+        ));
+    }
+}
+
+/// CR 118.12 + CR 603.12 + CR 706.3b: A reflexive payment owns its nested
+/// terminal die roll, so the parent trigger's result rows lower into that
+/// `When you do` sub-ability.
+#[test]
+fn reflexive_payment_trigger_retains_die_table_on_nested_roll() {
+    let (ir, lowered) = parse_two_layer(
+        "Whenever this creature attacks, you may pay {1}. When you do, roll a d20.\n1—9 | Draw a card.\n10—20 | Create a Treasure token.",
+        "Reflexive Die Fixture",
+        &["Creature"],
+        &[],
+    );
+
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &ir.items[0].node else {
+        panic!("expected a native parsed trigger");
+    };
+    assert!(trigger.has_terminal_roll_die());
+    assert_eq!(trigger.die_results.len(), 2);
+
+    let pay = lowered.triggers[0]
+        .execute
+        .as_deref()
+        .expect("trigger must have an execute ability");
+    let Effect::PayCost { .. } = pay.effect.as_ref() else {
+        panic!("expected reflexive payment root, got {:?}", pay.effect);
+    };
+    let reflexive_roll = pay
+        .sub_ability
+        .as_deref()
+        .expect("payment must retain its reflexive sub-ability");
+    assert!(matches!(
+        reflexive_roll.effect.as_ref(),
+        Effect::RollDie { results, .. } if results.len() == 2
+    ));
+}
+
+/// The ability-word trigger route is likewise native IR. Its existing fallback
+/// condition is applied only when trigger parsing did not already find one.
+#[test]
+fn ability_word_trigger_table_is_ir_native_and_preserves_condition_fallback() {
+    let (ir, lowered) = parse_two_layer(
+        "Wild Magic Surge — Whenever this creature attacks, roll a d20.\n1—9 | Exile the top card of your library. You may play it this turn.\n10—19 | Exile the top two cards of your library. You may play them this turn.\n20 | Exile the top three cards of your library. You may play them this turn.",
+        "Chaos Channeler",
+        &["Creature"],
+        &["Human", "Shaman"],
+    );
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &ir.items[0].node else {
+        panic!("expected a native parsed ability-word trigger");
+    };
+    assert_eq!(trigger.die_results.len(), 3);
+    assert!(matches!(
+        lowered.triggers[0].execute.as_deref().map(|execute| execute.effect.as_ref()),
+        Some(Effect::RollDie { results, .. }) if results.len() == 3
+    ));
+
+    let (threshold_ir, threshold_lowered) = parse_two_layer(
+        "Threshold — Whenever this creature attacks, draw a card.",
+        "Threshold Fixture",
+        &["Creature"],
+        &[],
+    );
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(threshold)) = &threshold_ir.items[0].node
+    else {
+        panic!("expected a native parsed threshold trigger");
+    };
+    assert!(
+        threshold.modifiers.intervening_if.is_none(),
+        "fixture must exercise the ability-word fallback rather than an explicit if clause"
+    );
+    assert!(matches!(
+        threshold_lowered.triggers[0].condition,
+        Some(TriggerCondition::QuantityComparison { .. })
+    ));
+
+    let (shoreline_ir, shoreline_lowered) = parse_two_layer(
+        "Delirium — Whenever this creature deals combat damage to a player, draw a card. Then discard a card unless there are seven or more cards in your graveyard.",
+        "Shoreline Looter",
+        &["Creature"],
+        &["Rat", "Rogue"],
+    );
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(shoreline)) = &shoreline_ir.items[0].node
+    else {
+        panic!("expected a native parsed Shoreline Looter trigger");
+    };
+    assert!(shoreline.partial_def.condition.is_none());
+    assert!(
+        shoreline.modifiers.intervening_if.is_some(),
+        "parsed intervening-if must suppress the ability-word fallback"
+    );
+    assert!(matches!(
+        shoreline_lowered.triggers[0].condition,
+        Some(TriggerCondition::Not { .. })
+    ));
+}
+
+/// The table scanner consumes only actual rows. A following ordinary line stays
+/// available to document dispatch, while unsupported table text remains honest.
+#[test]
+fn trigger_die_table_scanner_preserves_non_table_and_unsupported_rows() {
+    let (non_table_ir, non_table_lowered) = parse_two_layer(
+        "Whenever this creature attacks, roll a d20.\nDraw a card.",
+        "Non-table Fixture",
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(
+        non_table_ir.items.len(),
+        2,
+        "ordinary next line must remain dispatched"
+    );
+    assert!(matches!(
+        non_table_ir.items[0].node,
+        OracleNodeIr::Trigger(_)
+    ));
+    assert!(matches!(non_table_ir.items[1].node, OracleNodeIr::Spell(_)));
+    assert!(matches!(
+        non_table_lowered.abilities[0].effect.as_ref(),
+        Effect::Draw { .. }
+    ));
+
+    let (_, unsupported_lowered) = parse_two_layer(
+        "Whenever this creature attacks, roll a d20.\n1—20 | Frobnicate target creature.",
+        "Unsupported Table Fixture",
+        &["Creature"],
+        &[],
+    );
+    let execute = unsupported_lowered.triggers[0]
+        .execute
+        .as_deref()
+        .expect("trigger must still lower");
+    let Effect::RollDie { results, .. } = execute.effect.as_ref() else {
+        panic!("expected roll die");
+    };
+    assert!(matches!(
+        results[0].effect.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+
+    let (mastiff_ir, mastiff_lowered) = parse_two_layer(
+        "Whenever this creature attacks, roll a d20 for each player being attacked and ignore all but the highest roll.\n1—9 | This creature deals damage equal to its power to you.\n10—19 | This creature deals damage equal to its power to defending player.\n20 | This creature deals damage equal to its power to each opponent.",
+        "Iron Mastiff",
+        &["Artifact", "Creature"],
+        &["Dog"],
+    );
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(mastiff)) = &mastiff_ir.items[0].node else {
+        panic!("expected a native parsed Iron Mastiff trigger");
+    };
+    assert!(
+        !mastiff.has_terminal_roll_die(),
+        "unsupported multi-player roll must not consume a result table"
+    );
+    assert_eq!(mastiff_ir.items.len(), 4);
+    assert!(mastiff_ir.items[1..]
+        .iter()
+        .all(|item| matches!(item.node, OracleNodeIr::Unsupported { .. })));
+    assert_eq!(mastiff_lowered.abilities.len(), 3);
 }
 
 /// ISSUES #17: the swallow audit's findings must live in the doc IR's diagnostics
@@ -82,6 +572,32 @@ fn swallow_diagnostics_are_homed_in_the_doc_ir_channel() {
     assert_eq!(
         lowered.parse_warnings, ir.diagnostics,
         "parse_warnings must be a copy of OracleDocIr.diagnostics, not a separate sink"
+    );
+}
+
+#[test]
+fn forked_bolt_preserves_distribution_metadata_after_parse() {
+    let (_, lowered) = parse_two_layer(
+        "Forked Bolt deals 2 damage divided as you choose among one or two targets.",
+        "Forked Bolt",
+        &["Instant"],
+        &[],
+    );
+
+    assert_eq!(
+        lowered.abilities.len(),
+        1,
+        "Forked Bolt must lower one spell"
+    );
+    assert_eq!(
+        lowered.abilities[0].distribute,
+        Some(DistributionUnit::Damage),
+        "Forked Bolt distribution metadata lost during document lowering"
+    );
+    assert_eq!(
+        lowered.abilities[0].multi_target,
+        Some(MultiTargetSpec::fixed(1, 2)),
+        "Forked Bolt target-count metadata lost during document lowering"
     );
 }
 
@@ -1052,8 +1568,190 @@ fn follow_the_lumarets() {
         &["Sorcery"],
         &[],
     );
+    assert!(matches!(ir.items[0].node, OracleNodeIr::Spell(_)));
+    assert_eq!(
+        lowered.abilities.len(),
+        1,
+        "the Dig override must bind through the document relation"
+    );
+    assert!(lowered.abilities[0].else_ability.is_some());
     insta::assert_json_snapshot!("follow_the_lumarets_ir", &ir);
     insta::assert_json_snapshot!("follow_the_lumarets_lowered", &lowered);
+}
+
+/// CR 614.6 + CR 614.15: an override whose condition cannot lower stays on the
+/// `instead_override` floor; it must never become an independent second spell.
+#[test]
+fn priority_nine_unbindable_conditioned_replacement_stays_honest() {
+    let (ir, lowered) = parse_two_layer(
+        "Draw a card.\nMystery — Draw two cards instead if the cracks in this artifact's art are completely covered.",
+        "Unbindable Override Fixture",
+        &["Sorcery"],
+        &[],
+    );
+    assert!(matches!(ir.items[0].node, OracleNodeIr::Spell(_)));
+    assert!(matches!(ir.items[1].node, OracleNodeIr::Spell(_)));
+    assert_eq!(lowered.abilities.len(), 2);
+    assert!(matches!(
+        lowered.abilities[1].effect.as_ref(),
+        Effect::Unimplemented { name, .. } if name == "instead_override"
+    ));
+    assert!(lowered.abilities[1].condition.is_none());
+}
+
+fn assert_unbindable_override(def: &crate::types::ability::AbilityDefinition) {
+    assert!(matches!(
+        def.effect.as_ref(),
+        Effect::Unimplemented { name, .. } if name == "instead_override"
+    ));
+    assert!(def.sub_ability.is_none());
+    assert!(def.else_ability.is_none());
+}
+
+fn roll_die_result_count(def: &crate::types::ability::AbilityDefinition) -> Option<usize> {
+    match def.effect.as_ref() {
+        Effect::RollDie { results, .. } => Some(results.len()),
+        _ => def
+            .sub_ability
+            .as_deref()
+            .and_then(roll_die_result_count)
+            .or_else(|| def.else_ability.as_deref().and_then(roll_die_result_count)),
+    }
+}
+
+/// CR 706.3b: recognized contiguous result branches stay with an inline roll
+/// even when the ability's paragraph has instructions both before and after it.
+fn assert_inline_die_table(
+    oracle_text: &str,
+    card_name: &str,
+    types: &[&str],
+    expected_recognized_results: usize,
+) {
+    let (_, lowered) = parse_two_layer(oracle_text, card_name, types, &[]);
+    assert_eq!(
+        lowered.abilities.len(),
+        1,
+        "{card_name} must retain its result rows on the printed ability"
+    );
+    assert_eq!(
+        roll_die_result_count(&lowered.abilities[0]),
+        Some(expected_recognized_results),
+        "{card_name} must retain its recognized result branches on the inline roll"
+    );
+}
+
+#[test]
+fn laezels_acrobatics_inline_die_table_is_owned_by_nonterminal_roll() {
+    assert_inline_die_table(
+        "Exile all nontoken creatures you control, then roll a d20.\n1—9 | Return those cards to the battlefield under their owner's control at the beginning of the next end step.\n10—20 | Return those cards to the battlefield under their owner's control, then exile them again. Return those cards to the battlefield under their owner's control at the beginning of the next end step.",
+        "Lae'zel's Acrobatics",
+        &["Instant"],
+        1,
+    );
+}
+
+#[test]
+fn overwhelming_encounter_inline_die_table_is_owned_by_nonterminal_roll() {
+    assert_inline_die_table(
+        "Creatures you control gain vigilance and trample until end of turn. Roll a d20.\n1—9 | Creatures you control get +2/+2 until end of turn.\n10—19 | Put two +1/+1 counters on each creature you control.\n20 | Put four +1/+1 counters on each creature you control.",
+        "Overwhelming Encounter",
+        &["Sorcery"],
+        2,
+    );
+}
+
+#[test]
+fn deck_of_many_things_inline_die_table_is_owned_by_modified_roll() {
+    assert_inline_die_table(
+        "{2}, {T}: Roll a d20 and subtract the number of cards in your hand. If the result is 0 or less, discard your hand.\n1—9 | Return a card at random from your graveyard to your hand.\n10—19 | Draw two cards.\n20 | Put a creature card from any graveyard onto the battlefield under your control. When that creature dies, its owner loses the game.",
+        "The Deck of Many Things",
+        &["Artifact"],
+        3,
+    );
+}
+
+#[test]
+fn wand_of_wonder_inline_die_table_is_owned_by_roll_with_later_instructions() {
+    assert_inline_die_table(
+        "{4}, {T}: Roll a d20. Each opponent exiles cards from the top of their library until they exile an instant or sorcery card, then shuffles the rest into their library. You may cast up to X instant and/or sorcery spells from among cards exiled this way without paying their mana costs.\n1—9 | X is one.\n10—19 | X is two.\n20 | X is three.",
+        "Wand of Wonder",
+        &["Artifact"],
+        3,
+    );
+}
+
+#[test]
+fn inline_roll_without_immediate_result_row_does_not_consume_following_text() {
+    let (ir, lowered) = parse_two_layer(
+        "Draw a card, then roll a d20.\nFlying\n1—20 | Draw two cards.",
+        "Inline Roll Without Table Fixture",
+        &["Sorcery"],
+        &[],
+    );
+    assert!(!ir.items.is_empty());
+    assert!(!lowered.abilities.is_empty());
+    assert_eq!(roll_die_result_count(&lowered.abilities[0]), Some(0));
+}
+
+#[test]
+fn roll_text_without_typed_roll_die_does_not_consume_result_rows() {
+    let (ir, lowered) = parse_two_layer(
+        "Draw a card, then roll a dword.\n1—20 | Draw two cards.",
+        "Unparsed Roll Text Fixture",
+        &["Sorcery"],
+        &[],
+    );
+    assert_eq!(ir.items.len(), 2);
+    assert_eq!(lowered.abilities.len(), 2);
+    assert_eq!(roll_die_result_count(&lowered.abilities[0]), None);
+}
+
+/// CR 614.6 + CR 614.15: the native override floor retains the root clause's
+/// resolution metadata while making the unsupported replacement explicit.
+#[test]
+fn caravan_vigil_unbindable_override_retains_optional() {
+    let (_, lowered) = parse_two_layer(
+        "Search your library for a basic land card, reveal it, put it into your hand, then shuffle.\nMorbid — You may put that card onto the battlefield instead of putting it into your hand if a creature died this turn.",
+        "Caravan Vigil",
+        &["Sorcery"],
+        &[],
+    );
+    let override_def = &lowered.abilities[1];
+    assert_unbindable_override(override_def);
+    assert!(override_def.optional);
+}
+
+/// CR 614.6 + CR 614.15: partial cross-line replacements preserve a parsed
+/// optional root even when the replacement cannot bind safely.
+#[test]
+fn talent_of_the_telepath_unbindable_override_retains_optional() {
+    let (_, lowered) = parse_two_layer(
+        "Target opponent reveals the top seven cards of their library. You may cast an instant or sorcery spell from among them without paying its mana cost. Then that player puts the rest into their graveyard.\nSpell mastery — If there are two or more instant and/or sorcery cards in your graveyard, you may cast up to two instant and/or sorcery spells from among the revealed cards instead of one.",
+        "Talent of the Telepath",
+        &["Sorcery"],
+        &[],
+    );
+    let override_def = &lowered.abilities[1];
+    assert_unbindable_override(override_def);
+    assert!(override_def.optional);
+}
+
+/// CR 614.6 + CR 614.15: an unbindable partial replacement keeps the original
+/// root's resolution-time selection stamp instead of inferring it from the floor.
+#[test]
+fn see_the_unwritten_unbindable_override_retains_target_choice_timing() {
+    let (_, lowered) = parse_two_layer(
+        "Reveal the top eight cards of your library. You may put a creature card from among them onto the battlefield. Put the rest into your graveyard.\nFerocious — If you control a creature with power 4 or greater, you may put two creature cards onto the battlefield instead of one.",
+        "See the Unwritten",
+        &["Sorcery"],
+        &[],
+    );
+    let override_def = &lowered.abilities[1];
+    assert_unbindable_override(override_def);
+    assert_eq!(
+        override_def.target_choice_timing,
+        TargetChoiceTiming::Resolution
+    );
 }
 
 // CR 614.1a + CR 608.2c: Instead — the multi-clause Cow-swap. Clause 1 ("gain

@@ -14,6 +14,14 @@ use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::features::DeckFeatures;
 
+/// Floor under the vehicles-commitment scale. A crew activation the AI is
+/// already looking at is worth judging even in a deck the axis rates low — and
+/// even at commitment 0.0, because the deck-time bench detection is deliberately
+/// conservative and cannot see tokens or variable-power creatures. The weight is
+/// damped rather than zeroed, unlike the payoff policies which opt out entirely
+/// below their floor.
+const MIN_CREW_ACTIVATION: f32 = 0.25;
+
 pub struct CrewTimingPolicy;
 
 impl TacticalPolicy for CrewTimingPolicy {
@@ -27,11 +35,30 @@ impl TacticalPolicy for CrewTimingPolicy {
 
     fn activation(
         &self,
-        _features: &DeckFeatures,
+        features: &DeckFeatures,
         _state: &GameState,
         _player: PlayerId,
     ) -> Option<f32> {
-        Some(1.0) // activation-constant: exact initial-Crew action self-gates in verdict.
+        // CR 702.122: previously `activation-constant Some(1.0)` — the exact
+        // initial-Crew action self-gates in `verdict`, so a constant was safe,
+        // but it applied identical weight in a dedicated Vehicles shell and in a
+        // deck running one incidental Copter. `features::vehicles` now supplies
+        // that deck signal.
+        //
+        // This NEVER opts out, including at commitment 0.0, and that is
+        // deliberate rather than an oversight. `features::vehicles` is
+        // conservative by design: `crew_capable_power` excludes non-fixed
+        // printed power (`PtValue::Variable`), and a decklist cannot see tokens
+        // at all. So a zero commitment means "no bench I could prove at
+        // deck-build time", NOT "cannot crew". A Vehicles deck whose bench is
+        // tokens, or `*`-power creatures, scores 0.0 and can still reach a legal
+        // `CrewVehicle` action — and dropping the timing safeguard exactly there
+        // would be worst in the case that needs it most.
+        //
+        // The weight is therefore DAMPED, never zeroed: `MIN_CREW_ACTIVATION`
+        // floors it so the policy keeps judging a crew action the AI is already
+        // looking at, while a dedicated shell still outweighs an incidental one.
+        Some(features.vehicles.commitment.max(MIN_CREW_ACTIVATION))
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
@@ -141,6 +168,12 @@ mod tests {
     use engine::types::keywords::Keyword;
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
+
+    use crate::features::vehicles::VehiclesFeature;
+    use crate::features::DeckFeatures;
+    use crate::policies::registry::{PolicyId, PolicyRegistry};
+    use crate::session::AiSession;
+    use std::sync::Arc;
 
     const AI: PlayerId = PlayerId(0);
 
@@ -293,5 +326,88 @@ mod tests {
         };
 
         assert!(crew_has_exact_combat_use(&state, AI, vehicle, &activation));
+    }
+
+    // ─── review #6790: zero cached commitment must NOT silence the safeguard ──
+
+    #[test]
+    fn activation_never_opts_out_even_at_zero_commitment() {
+        // `features::vehicles` is conservative: it excludes variable printed
+        // power and cannot see tokens, so 0.0 means "no bench provable at
+        // deck-build time", not "cannot crew".
+        let zero = DeckFeatures {
+            vehicles: VehiclesFeature::default(),
+            ..Default::default()
+        };
+        assert_eq!(zero.vehicles.commitment, 0.0);
+        assert_eq!(
+            CrewTimingPolicy.activation(&zero, &GameState::new_two_player(42), AI),
+            Some(MIN_CREW_ACTIVATION),
+            "a zero-commitment deck can still reach a legal crew action"
+        );
+    }
+
+    #[test]
+    fn activation_scales_above_the_floor() {
+        let committed = DeckFeatures {
+            vehicles: VehiclesFeature {
+                commitment: 0.8,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            CrewTimingPolicy.activation(&committed, &GameState::new_two_player(42), AI),
+            Some(0.8),
+            "a dedicated shell must outweigh an incidental one"
+        );
+    }
+
+    #[test]
+    fn registry_emits_a_crew_verdict_at_zero_commitment() {
+        // The production seam: a live `CrewVehicle` candidate must still reach
+        // `CrewTimingPolicy` through the registry when cached commitment is 0.0.
+        // This is the regression the opt-out would have introduced — the deck
+        // whose bench is tokens scores 0.0 and needs the safeguard most.
+        let (state, vehicle, _) = crew_fixture();
+        let candidate = CandidateAction {
+            action: GameAction::CrewVehicle {
+                vehicle_id: vehicle,
+                creature_ids: Vec::new(),
+            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Utility),
+        };
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority { player: AI },
+            candidates: vec![candidate.clone()],
+        };
+        let config = AiConfig::default();
+        let mut session = AiSession::empty();
+        session.features.insert(
+            AI,
+            DeckFeatures {
+                vehicles: VehiclesFeature::default(),
+                ..Default::default()
+            },
+        );
+        let mut context = AiContext::empty(&config.weights);
+        context.session = Arc::new(session);
+        context.player = AI;
+
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let verdicts = PolicyRegistry::default().verdicts(&ctx);
+        assert!(
+            verdicts.iter().any(|(id, _)| *id == PolicyId::CrewTiming),
+            "CrewTimingPolicy must still be routed at commitment 0.0"
+        );
     }
 }

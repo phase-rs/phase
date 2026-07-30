@@ -2450,12 +2450,41 @@ fn apply_parent_chain_context(
 /// NOT inherit an earlier instruction's already-chosen recipient, or every
 /// replicated instruction in a chain collapses onto whichever single object
 /// the first one picked (Kathril, Aspect Warper, issue #6321 / PR #6533).
+///
+/// CR 406.6 + CR 607.2a (issue #6437, Fight Rigging / Collector's Cage): a sub
+/// whose own effect targets a BARE `TargetFilter::ExiledBySource` resolves
+/// that reference itself, at its own resolution, against this source's
+/// durable `exile_links` (`cast_from_zone::resolve`'s no-target
+/// `ExiledBySource` branch) — it never needs a pre-chosen object. "Put a
+/// +1/+1 counter on target creature you control. Then ... you may play the
+/// exiled card" chains a targeted clause before the linked-exile clause in
+/// the SAME resolution; without this guard the counter's targeted creature
+/// propagates into the exiled-card sub as if IT were the card to play, and
+/// `CastFromZone` proceeds to grant a cast permission (and, for a
+/// battlefield object, an exile-delivery move) on the targeted creature
+/// instead of the hidden card.
+///
+/// Gated on `!effect_refs_parent_target`: a COMPOSED filter like Jodah's
+/// cleanup rider (`And { ExiledBySource, Typed(DistinctFrom { ParentTarget })
+/// }`, sweeping the "misses" while excluding the cast hit) also references
+/// `ExiledBySource`, but STILL needs the propagated parent target so
+/// `ParentTarget` can resolve to the hit and exclude it from the sweep — the
+/// declined-branch dispatcher (this function's `Chaos-Wand cleanup` caller)
+/// already ANDs this predicate with its own `effect_refs_parent_target`
+/// check for exactly that reason, so excluding the composed case here too
+/// would strand the exclusion and sweep the hit itself onto the library
+/// bottom alongside the misses.
 /// Every other sub keeps today's behavior: parent targets propagate when the
 /// sub declares none of its own.
 fn should_propagate_parent_targets(ability: &ResolvedAbility, sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
         && !ability.targets.is_empty()
         && sub.target_choice_timing != TargetChoiceTiming::Resolution
+        && !(sub
+            .effect
+            .target_filter()
+            .is_some_and(TargetFilter::references_exiled_by_source)
+            && !effect_refs_parent_target(&sub.effect))
 }
 
 fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
@@ -4810,25 +4839,41 @@ fn affected_objects_from_events(
 ) -> Vec<ObjectId> {
     let fallback_targets = ability.targets.as_slice();
     match effect {
-        // CR 508.1a + CR 608.2c + CR 603.7c: A mass "attack this turn if able"
-        // coercion (Maddening Imp's `{T}` `GenericEffect{MustAttack}`) moves no
-        // objects and emits NO object-affecting event, so — unlike every other arm
-        // here — its affected population is FILTER-driven: re-enumerate the
-        // battlefield by the governing filter at resolution time. The publish site
-        // runs on the identical post-resolution board state, so this yields exactly
-        // the resolution-time population that "those creatures" freezes. Mirrors
-        // the broadcast-static binding in `effect.rs` (`Some(filter)` arm).
+        // CR 508.1a + CR 608.2c + CR 603.7c + CR 611.2c + CR 615.11 (issue
+        // #6682): A mass "attack this turn if able" coercion (Maddening Imp's
+        // `{T}` `GenericEffect{MustAttack}`) or a Continuous-mode broadcast
+        // keyword/P-T grant (Mutational Advantage's "permanents you control
+        // with counters on them gain hexproof and indestructible") moves no
+        // objects and emits NO object-affecting event, so — unlike every other
+        // arm here — its affected population is FILTER-driven: re-enumerate
+        // the battlefield by the governing filter at resolution time. The
+        // publish site runs on the identical post-resolution board state, so
+        // this yields exactly the resolution-time population that "those
+        // creatures"/"those permanents" freezes — verified against Mutational
+        // Advantage's official ruling: "The set of permanents affected by
+        // Mutational Advantage is determined at the time Mutational Advantage
+        // resolves. Permanents that gain counters later in the turn won't
+        // become affected by this effect, and permanents that lose all of
+        // their counters later in the turn won't stop being affected."
+        // Mirrors the broadcast-static binding in `effect.rs` (`Some(filter)`
+        // arm). Broader than the parser-side `is_mass_coerce_static`
+        // (oracle_effect/mod.rs), which still gates only the MustAttack/
+        // MustAttackPlayer coercion pair for its own (unrelated)
+        // ParentTarget-rewrite purpose.
         Effect::GenericEffect {
             static_abilities,
             target,
             ..
         } => {
-            // Select the first coercion static (matching `is_mass_coerce_static`).
+            // Select the first static whose population is meant to be frozen
+            // at resolution rather than re-evaluated live at each future
+            // check — a coercion requirement or a Continuous grant.
             let Some(static_def) = static_abilities.iter().find(|sd| {
                 matches!(
                     sd.mode,
                     crate::types::statics::StaticMode::MustAttack
                         | crate::types::statics::StaticMode::MustAttackPlayer { .. }
+                        | crate::types::statics::StaticMode::Continuous
                 )
             }) else {
                 return Vec::new();
@@ -5742,12 +5787,10 @@ fn is_synchronous_mana_pay_cost(effect: &Effect) -> bool {
     )
 }
 
-/// CR 603.12a: Fire the first per-iteration payment prompt for a
-/// repeated-optional-payment process and stash the continuation. Each
-/// subsequent prompt + the once-after-loop reflexive are driven by
-/// `resolve_repeated_optional_payment_choice` as the player answers each
-/// `DecideOptionalEffect`. Returns having set `WaitingFor::OptionalEffectChoice`
-/// (or, for an "up to 0 times" bound, a no-op resolution with K = 0).
+/// CR 603.12a: Fire the repeated-optional-payment process and stash the
+/// continuation. Each payment is offered through `OptionalEffectChoice`; once
+/// payment has completed, the reflexive trigger follows the normal triggered
+/// modal placement and targeting flow.
 fn drive_repeated_optional_payment(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -5765,6 +5808,18 @@ fn drive_repeated_optional_payment(
         // never triggers and the modal is never offered.
         return Ok(());
     }
+
+    drive_sequential_repeated_optional_payment(state, ability, reflexive, n)
+}
+
+/// CR 603.12a: Per-iteration `OptionalEffectChoice` driver for repeated
+/// optional-payment processes.
+fn drive_sequential_repeated_optional_payment(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    reflexive: &ResolvedAbility,
+    n: i32,
+) -> Result<(), EffectError> {
     // The PayCost-only unit prompted/paid each iteration: clear `repeat_for` and
     // `sub_ability` so resolving it neither re-enters this driver nor
     // re-resolves the reflexive, and clear `optional` (the prompt itself is the
@@ -5781,7 +5836,7 @@ fn drive_repeated_optional_payment(
     state.push_repeated_optional_payment_frame(RepeatedOptionalPaymentFrame {
         pending: Some(Box::new(PendingRepeatedOptionalPayment {
             payment_unit: Box::new(payment_unit),
-            reflexive: Box::new((**reflexive).clone()),
+            reflexive: Box::new(reflexive.clone()),
             remaining: (n - 1) as u32,
         })),
         optional_cost_payments_this_resolution: 0,
@@ -10425,10 +10480,39 @@ fn resolve_chain_body(
             // gated subs ("When you discard a card this way, put a counter on target
             // Faerie") keep inheriting their selected target through the parent
             // chain; their condition decides whether the sub fires.
+            //
+            // CR 406.6 + CR 607.2a (issue #6437, Fight Rigging / Collector's
+            // Cage): a sub targeting a BARE `TargetFilter::ExiledBySource`
+            // ("the exiled card") is ALSO independent — it resolves its own
+            // object at its own resolution against this source's durable
+            // `exile_links` (`cast_from_zone::resolve`'s no-target
+            // `ExiledBySource` branch), never from an inherited object target.
+            // `extract_target_filter_from_effect` returns `None` for it (its
+            // `is_context_ref` guard), so without this arm it fell through to
+            // the default "no independent slot" case and inherited whatever
+            // object the PARENT clause targeted ("put a +1/+1 counter on
+            // target creature you control. Then ... you may play the exiled
+            // card") — treating the targeted creature as the card to license,
+            // which `grant_lingering_permissions` then routed through the
+            // exile-delivery batch instead of the hidden card.
+            //
+            // Gated on `!effect_refs_parent_target`: a COMPOSED filter like
+            // Jodah's cleanup rider (`And { ExiledBySource, DistinctFrom {
+            // ParentTarget } }`, sweeping the "misses" while excluding the
+            // cast hit) also references `ExiledBySource` but STILL needs the
+            // propagated parent target so `ParentTarget` can resolve to the
+            // hit and exclude it — treating it as independent here stranded
+            // that exclusion, sweeping the hit itself to the library bottom
+            // alongside the misses.
             let has_independent_target_slot =
-                crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
+                (crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
                     && !effect_refs_parent_target(&sub.effect)
-                    && !sub_ability_target_belongs_to_reflexive_context(sub);
+                    && !sub_ability_target_belongs_to_reflexive_context(sub))
+                    || (sub
+                        .effect
+                        .target_filter()
+                        .is_some_and(TargetFilter::references_exiled_by_source)
+                        && !effect_refs_parent_target(&sub.effect));
             sub_with_targets.targets = ability
                 .targets
                 .iter()

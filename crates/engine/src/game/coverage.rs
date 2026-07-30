@@ -2030,7 +2030,7 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::CardPredicate { .. } => "card predicate",
         ChoiceType::CardPredicateGuess { .. } => "card predicate guess",
         ChoiceType::Opponent { .. } => "opponent",
-        ChoiceType::Player => "player",
+        ChoiceType::Player { .. } => "player",
         ChoiceType::TwoColors => "two colors",
         ChoiceType::Word => "word",
         ChoiceType::Artist => "artist",
