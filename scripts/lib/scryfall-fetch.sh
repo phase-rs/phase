@@ -35,6 +35,26 @@ scryfall_validate_json() {
   jq -e 'type' "$1" >/dev/null 2>&1
 }
 
+# scryfall_finalize_download TMP FILE VALIDATOR — atomically install TMP, or
+# accept an existing valid FILE when a concurrent writer wins a Windows rename
+# race. On an actual failure, preserve the move diagnostic for the caller.
+scryfall_finalize_download() {
+  local tmp="$1" file="$2" validator="$3" move_error
+  move_error=$(mktemp "${file}.mv-error.XXXXXX")
+  if mv -f "$tmp" "$file" 2>"$move_error"; then
+    rm -f "$move_error"
+    return 0
+  fi
+  if [ -f "$file" ] && ( "$validator" "$file" ); then
+    rm -f "$tmp" "$move_error"
+    return 0
+  fi
+  echo "scryfall: could not rename $tmp into $file:" >&2
+  cat "$move_error" >&2
+  rm -f "$tmp" "$move_error"
+  return 1
+}
+
 # scryfall_download URL FILE [VALIDATOR] — download URL with retries to a
 # unique temp, validate it, then atomically rename into place. The temp+rename
 # keeps concurrent writers (setup.sh fetches default-cards.json from two
@@ -74,26 +94,10 @@ scryfall_download() {
     rm -f "$tmp"
     return 1
   fi
-  if ! mv -f "$tmp" "$file" 2>/dev/null; then
-    # POSIX rename silently replaces FILE even if another process has it open
-    # -- the concurrent-writer safety this function is designed around (see
-    # header comment). Windows cannot rename onto a file another process has
-    # open, so the losing side of a race hard-fails here instead of just
-    # losing harmlessly. If a concurrent invocation already produced a valid
-    # FILE, our own download is redundant: drop it and let the winner stand.
-    #
-    # Run VALIDATOR in a subshell: scripts/lib/scryfall-fetch.sh callers pass
-    # in a function name defined in their own scope, and isolating it here
-    # keeps this recovery check from being able to leak variables back into
-    # the caller's shell.
-    if [ -f "$file" ] && ( "$validator" "$file" ); then
-      rm -f "$tmp"
-      return 0
-    else
-      rm -f "$tmp"
-      return 1
-    fi
-  fi
+  # POSIX rename silently replaces FILE even if another process has it open,
+  # while Windows can reject the losing writer. The shared finalizer preserves
+  # that concurrent-writer recovery for both JSON and JSONL bulk downloads.
+  scryfall_finalize_download "$tmp" "$file" "$validator"
 }
 
 # jq prelude shared by the gen-scryfall-*.sh transforms. Prepend it to a jq
@@ -143,15 +147,7 @@ scryfall_download_jsonl_gzip() {
     return 1
   fi
   rm -f "$archive"
-  if ! mv -f "$tmp" "$file" 2>/dev/null; then
-    if [ -f "$file" ] && ( "$validator" "$file" ); then
-      rm -f "$tmp"
-      return 0
-    else
-      rm -f "$tmp"
-      return 1
-    fi
-  fi
+  scryfall_finalize_download "$tmp" "$file" "$validator"
 }
 
 # scryfall_fetch_bulk TYPE FILE [VALIDATOR] — resolve and download a bulk-data export by

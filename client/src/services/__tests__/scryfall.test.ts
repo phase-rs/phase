@@ -18,6 +18,15 @@ const REPO_ROOT = path.resolve(
   "../../../..",
 );
 
+function withTempDir(run: (dir: string) => void, prefix = "scryfall-") {
+  const dir = mkdtempSync(path.join(tmpdir(), prefix));
+  try {
+    run(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function makeLocalDataMap(
   cards: Record<string, { name: string; mana_cost?: string; cmc?: number; type_line?: string; oracle_id?: string }>,
 ): Response {
@@ -492,15 +501,6 @@ describe("fetchCardImageAssetByOracleId — reversible cards (issue #2031)", () 
 
 describe("Scryfall generation scripts — reversible cards (issue #2031)", () => {
   const oracleId = "ea9709b6-4c37-4d5a-b04d-cd4c42e4f9dd";
-
-  function withTempDir(run: (dir: string) => void) {
-    const dir = mkdtempSync(path.join(tmpdir(), "scryfall-gen-"));
-    try {
-      run(dir);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
 
   it("keys image data by face oracle_id when reversible cards omit root oracle_id", () => {
     withTempDir((dir) => {
@@ -1028,7 +1028,7 @@ describe("scryfall-fetch mv-failure recovery (PR #6775 review)", () => {
       curlPayload?: string;
       mvSucceeds?: boolean;
     },
-  ): { out: string; dest: string; validatorCalled: boolean } {
+  ): { out: string; dest: string; validatorCalls: number } {
     const dest = path.join(dir, "dest.json").replace(/\\/g, "/");
     const payload = path.join(dir, "fixture-payload.json").replace(/\\/g, "/");
     const marker = path.join(dir, "validator-called").replace(/\\/g, "/");
@@ -1042,7 +1042,7 @@ describe("scryfall-fetch mv-failure recovery (PR #6775 review)", () => {
     // proves the caller-supplied validator was actually invoked, not just
     // that a validator arg was passed: a stub that hardcodes "validator arg
     // present -> fail" without ever calling through would leave no marker
-    // behind, and `validatorCalled` below would read false.
+    // behind, and the invocation count below would remain zero.
     const validatorDef = opts.validator
       ? `${opts.validator}() { echo 1 >> "${marker}"; jq -e '.data' "$1" >/dev/null 2>&1; }\n`
       : "";
@@ -1075,17 +1075,10 @@ echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l)"
       stdio: "pipe",
       timeout: 20_000,
     }).toString();
-    const validatorCalled = existsSync(marker);
-    return { out, dest, validatorCalled };
-  }
-
-  function withTempDir(run: (dir: string) => void) {
-    const dir = mkdtempSync(path.join(tmpdir(), "scryfall-mv-"));
-    try {
-      run(dir);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const validatorCalls = existsSync(marker)
+      ? readFileSync(marker, "utf8").trim().split("\n").length
+      : 0;
+    return { out, dest, validatorCalls };
   }
 
   it("case 1: mv fails, destination exists and passes the default validator -> rc 0, tmp cleaned, destination byte-identical to before", () => {
@@ -1131,7 +1124,7 @@ echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l)"
       // caller-supplied validator requires — must NOT be accepted merely
       // because it parses.
       const before = JSON.stringify({ foo: "bar" });
-      const { out, validatorCalled } = runMvFailureScript(dir, {
+      const { out, validatorCalls } = runMvFailureScript(dir, {
         destContent: before,
         // The download itself must PASS the caller validator (it is checked
         // on the tmp file before the mv) so this case reaches the mv-failure
@@ -1142,19 +1135,17 @@ echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l)"
 
       expect(out).toContain("MV_CALLED=1");
       expect(out).toContain("RC=1");
-      // Marker-file based (see class comment above): proves the
-      // caller-supplied validator actually ran inside scryfall_download's
-      // isolating subshell, not just that a validator arg was accepted —
-      // otherwise a stub that hardcodes "validator arg present -> fail"
-      // would satisfy this test's other assertions vacuously.
-      expect(validatorCalled).toBe(true);
+      // The tmp gate and the failed-rename recovery check both run the
+      // caller-supplied validator. Pinning two calls proves this failed on
+      // the destination's shape rather than merely at the pre-mv gate.
+      expect(validatorCalls).toBe(2);
     });
   });
 
   it("case 4b (positive control for case 4): mv fails, destination is valid JSON and PASSES the caller-supplied validator -> rc 0, destination unchanged", () => {
     withTempDir((dir) => {
       const before = JSON.stringify({ data: [{ foo: "bar" }] });
-      const { out, dest, validatorCalled } = runMvFailureScript(dir, {
+      const { out, dest, validatorCalls } = runMvFailureScript(dir, {
         destContent: before,
         // Same pre-mv gate consideration as case 4: the download must pass
         // the caller validator for the recovery branch to be reached at all.
@@ -1165,10 +1156,8 @@ echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l)"
       expect(out).toContain("MV_CALLED=1");
       expect(out).toContain("RC=0");
       expect(readFileSync(dest, "utf8")).toBe(before);
-      // Pins that this is green because the caller-supplied validator ran
-      // and passed — not merely because the default validator (bare
-      // JSON-type check) happens to accept this fixture too.
-      expect(validatorCalled).toBe(true);
+      // Both acceptance points must use the caller-supplied validator.
+      expect(validatorCalls).toBe(2);
     });
   });
 
@@ -1195,14 +1184,14 @@ echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l)"
       // never land at the destination where a later non-validating reader
       // (scryfall_fetch_bulk's other callers) would trust it.
       const payload = JSON.stringify({ ok: true, fresh: true });
-      const { out, dest, validatorCalled } = runMvFailureScript(dir, {
+      const { out, dest, validatorCalls } = runMvFailureScript(dir, {
         mvSucceeds: true,
         curlPayload: payload,
         validator: "scryfall_test_validate_has_data",
       });
 
       expect(out).not.toContain("MV_CALLED=1");
-      expect(validatorCalled).toBe(true);
+      expect(validatorCalls).toBe(1);
       expect(out).toContain("RC=1");
       expect(existsSync(dest)).toBe(false);
       // No orphaned tmp file either.
