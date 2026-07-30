@@ -11,7 +11,7 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, AdditionalCostOrigin, AdditionalCostPaymentSource, ChoiceType,
     ControllerRef, Effect, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
     PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, StaticCondition, TargetFilter,
-    TargetSelectionMode, TriggerCondition,
+    TargetSelectionMode, TriggerCondition, TypedFilter,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
@@ -1052,29 +1052,35 @@ pub(crate) enum AnchorModeIr {
     Unsupported(Box<AbilityIr>),
 }
 
-/// CR 603.2c + CR 608.2c: A self-source combat-damage trigger establishes the
+/// CR 603.2c + CR 608.2c: A self-source damage trigger establishes the
 /// damaged player as the referent for a nested modal mode's "that player".
 /// The ordinary trigger classifier retains its historical `TargetPlayer`
-/// treatment of this normalized `~` surface; modal modes instead require the
+/// treatment of the normalized `~` surface; modal modes instead require the
 /// event-player context to parse their independent effect chains correctly.
-fn modal_relative_player_scope_for_condition(condition: &str) -> Option<ControllerRef> {
-    let lower = condition.to_lowercase();
-    let self_damage_to_player = value(
-        ControllerRef::TriggeringPlayer,
+///
+/// This consumes the trigger parser's typed output instead of recognizing a
+/// second, narrower Oracle grammar here. In particular, the trigger parser
+/// already accounts for combat/noncombat, plural damage verbs, and thresholds.
+fn modal_relative_player_scope_for_trigger(trigger: &TriggerIr) -> Option<ControllerRef> {
+    matches!(
         (
-            alt((tag::<_, _, OracleError<'_>>("when "), tag("whenever "))),
-            tag("~ deals "),
-            opt(tag("combat ")),
-            tag("damage to "),
-            alt((tag("a player"), tag("an opponent"))),
+            &trigger.condition,
+            &trigger.partial_def.valid_source,
+            &trigger.partial_def.valid_target
         ),
+        (
+            TriggerMode::DamageDone,
+            Some(TargetFilter::SelfRef),
+            Some(
+                TargetFilter::Player
+                    | TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::Opponent),
+                        ..
+                    }),
+            ),
+        )
     )
-    .parse(lower.as_str())
-    .ok()
-    .and_then(|(rest, scope)| rest.trim().is_empty().then_some(scope));
-
-    self_damage_to_player
-        .or_else(|| super::oracle_trigger::relative_player_scope_for_condition(&lower))
+    .then_some(ControllerRef::TriggeringPlayer)
 }
 
 pub(crate) fn lower_oracle_block_ir(
@@ -1124,7 +1130,7 @@ pub(crate) fn lower_oracle_block_ir(
                 // facts, but no mode can leak chain-local state into another.
                 let mut mode_ctx = trigger.body_context.clone();
                 mode_ctx.diagnostics.clear();
-                if let Some(scope) = modal_relative_player_scope_for_condition(&trigger_line) {
+                if let Some(scope) = modal_relative_player_scope_for_trigger(trigger) {
                     mode_ctx.relative_player_scope = Some(scope);
                 }
                 let payload = ModalIr {
@@ -3762,6 +3768,85 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
                 .execute
                 .as_ref()
                 .expect("damage modal execute")
+                .mode_abilities[1]
+                .effect
+                .as_ref(),
+            Effect::Destroy {
+                target: TargetFilter::Typed(filter),
+                ..
+            } if filter.controller == Some(ControllerRef::TriggeringPlayer)
+        ));
+
+        const NONCOMBAT_DAMAGE_ORACLE: &str =
+            "Whenever Context Witness deals noncombat damage to an opponent, choose one —\n\
+• Draw a card.\n\
+• Destroy target creature that player controls.";
+        const THRESHOLD_DAMAGE_ORACLE: &str =
+            "Whenever Context Witness deals combat 3 or more damage to a player, choose one —\n\
+• Draw a card.\n\
+• Destroy target creature that player controls.";
+        for oracle in [NONCOMBAT_DAMAGE_ORACLE, THRESHOLD_DAMAGE_ORACLE] {
+            let mut ir = parse_oracle_ir(oracle, "Context Witness", &[], &[], &[]);
+            let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &ir.items[0].node else {
+                panic!("damage modal sibling must retain parsed trigger IR");
+            };
+            let Some(TriggerBody::Modal(modal)) = trigger.body.as_ref() else {
+                panic!("damage modal sibling must retain nested mode payload");
+            };
+            assert!(matches!(
+                &modal.modes[1].ability.body.clauses[0].parsed.effect,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(filter),
+                    ..
+                } if filter.controller == Some(ControllerRef::TriggeringPlayer)
+            ));
+            let lowered = lower_oracle_ir(&mut ir);
+            assert!(matches!(
+                lowered.triggers[0]
+                    .execute
+                    .as_ref()
+                    .expect("damage modal sibling execute")
+                    .mode_abilities[1]
+                    .effect
+                    .as_ref(),
+                Effect::Destroy {
+                    target: TargetFilter::Typed(filter),
+                    ..
+                } if filter.controller == Some(ControllerRef::TriggeringPlayer)
+            ));
+        }
+
+        const NON_SELF_DAMAGE_ORACLE: &str =
+            "Whenever a creature deals combat damage to a player, choose one —\n\
+• Draw a card.\n\
+• Destroy target creature that player controls.";
+        let mut non_self_damage_ir =
+            parse_oracle_ir(NON_SELF_DAMAGE_ORACLE, "Context Witness", &[], &[], &[]);
+        let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(non_self_trigger)) =
+            &non_self_damage_ir.items[0].node
+        else {
+            panic!("non-self damage modal must retain parsed trigger IR");
+        };
+        assert!(matches!(
+            &non_self_trigger.partial_def.valid_source,
+            Some(TargetFilter::Typed(_))
+        ));
+        let Some(TriggerBody::Modal(non_self_modal)) = non_self_trigger.body.as_ref() else {
+            panic!("non-self damage modal must retain nested mode payload");
+        };
+        assert!(matches!(
+            &non_self_modal.modes[1].ability.body.clauses[0].parsed.effect,
+            Effect::Destroy {
+                target: TargetFilter::Typed(filter),
+                ..
+            } if filter.controller == Some(ControllerRef::TriggeringPlayer)
+        ));
+        let non_self_lowered = lower_oracle_ir(&mut non_self_damage_ir);
+        assert!(matches!(
+            non_self_lowered.triggers[0]
+                .execute
+                .as_ref()
+                .expect("non-self damage modal execute")
                 .mode_abilities[1]
                 .effect
                 .as_ref(),
