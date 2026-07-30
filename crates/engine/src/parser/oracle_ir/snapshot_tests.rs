@@ -949,6 +949,18 @@ fn short_sword() {
 }
 
 #[test]
+fn abraxas_named_equip() {
+    let (ir, lowered) = parse_two_layer(
+        "Abraxas — Equip {3}",
+        "Named Equip",
+        &["Artifact"],
+        &["Equipment"],
+    );
+    insta::assert_json_snapshot!("abraxas_named_equip_ir", &ir);
+    insta::assert_json_snapshot!("abraxas_named_equip_lowered", &lowered);
+}
+
+#[test]
 fn smugglers_copter() {
     let (ir, lowered) = parse_two_layer(
         "Flying\nWhenever this Vehicle attacks or blocks, you may draw a card. If you do, discard a card.\nCrew 1 (Tap any number of creatures you control with total power 1 or more: This Vehicle becomes an artifact creature until end of turn.)",
