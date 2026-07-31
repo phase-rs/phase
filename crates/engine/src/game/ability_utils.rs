@@ -4822,7 +4822,7 @@ fn attach_host_enchant_filter(
     Some((filter, attachment_id, controller))
 }
 
-fn is_per_opponent_target_fanout(ability: &ResolvedAbility) -> bool {
+pub(crate) fn is_per_opponent_target_fanout(ability: &ResolvedAbility) -> bool {
     if ability.target_choice_timing != TargetChoiceTiming::Stack {
         return false;
     }

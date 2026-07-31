@@ -178,6 +178,21 @@ pub fn resolve(
         expected
     };
 
+    // CR 601.2c + CR 401.4 (issue #6565 / #6836): A per-opponent target fanout
+    // ("for each opponent, put up to one target ... that player controls ...")
+    // pre-selects one target PER opponent at stack time — `multi_target.max =
+    // PlayerCount { Opponent }`, so `collected_targets` already holds every
+    // chosen permanent (one per opponent). The effect's `count` (`Fixed(1)`) is
+    // the PER-OPPONENT cap, NOT the total, so it must never gate a further
+    // "choose `count` of them" prompt over the already-targeted permanents
+    // (which would loop forever and place at most one). Each pre-chosen target
+    // is placed into its own owner's library (CR 400.7, routed by the move).
+    let expected = if crate::game::ability_utils::is_per_opponent_target_fanout(ability) {
+        collected_targets.len()
+    } else {
+        expected
+    };
+
     if collected_targets.is_empty() {
         if expected == 0 {
             events.push(GameEvent::EffectResolved {
