@@ -6,8 +6,7 @@ use rand_chacha::ChaCha20Rng;
 
 use engine::ai_support::{
     build_decision_context_for_semantic_owner, targeted_exchange_verdict,
-    validated_candidate_actions_for_semantic_owner, TargetedExchangeVerdict,
-    AiDecisionContract,
+    validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
 };
 use engine::types::ability::{
     AbilityDefinition, ContinuousModification, Duration, Effect, StaticDefinition, TargetFilter,
@@ -3734,6 +3733,10 @@ mod tests {
 
         fn decision_kinds(&self) -> &'static [DecisionKind] {
             &[DecisionKind::CastSpell]
+        }
+
+        fn activation(&self, _: &DeckFeatures, _: &GameState, _: PlayerId) -> Option<f32> {
+            Some(1.0)
         }
 
         fn verdict(&self, _: &PolicyContext<'_>) -> PolicyVerdict {

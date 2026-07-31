@@ -560,9 +560,10 @@ mod tests {
             .get_mut(&friendly_recipient)
             .unwrap()
             .toughness = Some(3);
+        let card_id = CardId(state.next_object_id);
         let spell = create_object(
             &mut state,
-            CardId(state.next_object_id),
+            card_id,
             PlayerId(0),
             "Exchange Replay Test".to_string(),
             Zone::Hand,
