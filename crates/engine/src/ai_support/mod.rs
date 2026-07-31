@@ -4,6 +4,7 @@ mod context;
 mod copy;
 pub mod filter;
 mod payment_continuation;
+mod targeted_exchange;
 
 use std::collections::{HashMap, HashSet};
 
@@ -38,7 +39,10 @@ pub use candidates::{
 pub use combat_withdrawal::{
     combat_withdrawal_fact_for_current_target, CombatWithdrawalFact, CombatWithdrawalTargetRole,
 };
-pub use context::{build_decision_context, AiDecisionContext};
+pub use context::{
+    build_decision_context, build_decision_context_for_semantic_owner, AiDecisionContext,
+    AiDecisionContract,
+};
 pub use copy::{
     copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling,
     project_copy_mana_spent_for_x,
@@ -51,6 +55,7 @@ pub use payment_continuation::{
     PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationUnsupported,
     PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
 };
+pub use targeted_exchange::{targeted_exchange_verdict, TargetedExchangeVerdict};
 
 /// Filter `candidate_actions` down to the actions that are actually legal now.
 ///

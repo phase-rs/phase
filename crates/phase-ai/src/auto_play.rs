@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use engine::game::engine::{apply, EngineError};
+use engine::ai_support::AiDecisionContract;
+use engine::game::engine::{apply_interaction, EngineError};
 use engine::game::turn_control;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -176,14 +177,18 @@ pub fn run_ai_actions_bounded(
         // submitter is the controller — not the active player. Only run AI when
         // that submitter is an AI seat; otherwise wait for the human controller
         // (issue #1189).
-        let actor = state
+        let decision = state
             .waiting_for
             .acting_players()
             .into_iter()
-            .map(|player| turn_control::authorized_submitter_for_player(state, player))
-            .find(|player| ai_players.contains(player));
+            .find_map(|semantic_owner| {
+                let actor = turn_control::authorized_submitter_for_player(state, semantic_owner);
+                ai_players
+                    .contains(&actor)
+                    .then_some((semantic_owner, actor))
+            });
 
-        let Some(actor) = actor else {
+        let Some((semantic_owner, actor)) = decision else {
             break_reason = Some(AiActionsBreakReason::NoActor);
             break;
         };
@@ -197,7 +202,8 @@ pub fn run_ai_actions_bounded(
             }
         };
 
-        let action = match choose_action_with_session(state, actor, config, rng, session) {
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+        let action = match choose_action_with_session(state, semantic_owner, config, rng, session) {
             Some(a) => a,
             None => {
                 tracing::warn!(player = ?actor, "choose_action returned None — stopping AI loop");
@@ -206,10 +212,27 @@ pub fn run_ai_actions_bounded(
             }
         };
 
-        // `actor` is the AI's authenticated PlayerId — we selected the action
-        // for this seat and the engine's guard will reject if turn-decision
-        // control has shifted in the meantime.
-        match apply(state, actor, action.clone()) {
+        if !contract.permits(state, actor, &action) {
+            let error = EngineError::InvalidAction(
+                "AI chose an action outside its issued decision contract".to_string(),
+            );
+            tracing::error!(
+                ?semantic_owner,
+                ?actor,
+                "AI action violated decision contract"
+            );
+            break_reason = Some(AiActionsBreakReason::ApplyFailed {
+                player: actor,
+                action: Box::new(action),
+                error,
+            });
+            break;
+        }
+
+        // The decision owner and authenticated AI actor are intentionally
+        // separate: control effects can make one player submit another
+        // player's pending choice.
+        match apply_interaction(state, actor, semantic_owner, action.clone()) {
             Ok(result) => {
                 results.push(AiActionResult {
                     action,

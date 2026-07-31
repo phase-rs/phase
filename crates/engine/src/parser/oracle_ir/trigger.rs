@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::ast::parsed_clause;
 use super::context::ParseContext;
-use super::effect_chain::{DieResultBranchIr, EffectChainIr};
+use super::effect_chain::{DieResultBranchIr, EffectChainIr, ModalModeIr};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, ModalChoice,
     TargetFilter, TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
@@ -85,6 +85,11 @@ pub(crate) struct TriggerIr {
     /// CR 706.3b result-table rows for the terminal die roll in this trigger.
     /// They remain IR until trigger-body lowering attaches them before finalization.
     pub(crate) die_results: Vec<DieResultBranchIr>,
+    /// Complete context established from the trigger condition before its body
+    /// is parsed. Nested modal modes must start from this same seed so event
+    /// anaphora (notably spell-cast "it") keep their trigger-body meaning.
+    #[serde(skip)]
+    pub(crate) body_context: ParseContext,
 }
 
 impl TriggerIr {
@@ -129,6 +134,8 @@ pub(crate) enum TriggerBody {
 pub(crate) struct ReflexivePaymentIr {
     pub(crate) cost: AbilityCost,
     pub(crate) effect_chain: EffectChainIr,
+    pub(crate) payment_chain: Option<EffectChainIr>,
+    pub(crate) modal: Option<ModalIr>,
 }
 
 /// CR 700.2: Typed inline-modal trigger body.
@@ -141,7 +148,7 @@ pub(crate) struct ReflexivePaymentIr {
 pub(crate) struct ModalIr {
     pub(crate) marker: EffectChainIr,
     pub(crate) choice: ModalChoice,
-    pub(crate) mode_abilities: Vec<AbilityDefinition>,
+    pub(crate) modes: Vec<ModalModeIr>,
 }
 
 /// CR 701.38: Typed vote trigger body.

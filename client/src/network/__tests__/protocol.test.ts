@@ -36,7 +36,7 @@ const viewerInteractionWithProducedMana = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v16", () => {
+  it("pins the P2P wire protocol to v17", () => {
     expect(WIRE_PROTOCOL_VERSION).toBe(17);
   });
 
@@ -75,6 +75,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     { type: "ping", timestamp: 12345 },
     { type: "pong", timestamp: 12345 },
     { type: "concede" },
+    { type: "match_concede" },
     { type: "disconnect", reason: "Page closed" },
     { type: "kick", reason: "Removed" },
     { type: "host_left", reason: "Host left" },
@@ -250,5 +251,9 @@ describe("validateMessage", () => {
   });
   it("rejects unknown type", () => {
     expect(() => validateMessage({ type: "nope" })).toThrow(/Invalid message type/);
+  });
+
+  it("rejects raw unbound match concessions", () => {
+    expect(() => validateMessage({ type: "concede_match" })).toThrow(/Invalid message type/);
   });
 });

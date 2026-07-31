@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use engine::types::player::PlayerId;
@@ -74,12 +74,24 @@ impl ReconnectManager {
         }
     }
 
-    /// Return game codes with expired grace periods (for forfeit processing).
+    /// Return the distinct game codes with expired grace periods (for forfeit
+    /// processing), in the order they were observed.
+    ///
+    /// Entries are keyed per `(game, seat)`, so a game whose seats lapse
+    /// together produced one element each. Callers treat a code as "one game to
+    /// tear down" — emitting it twice sends the terminal `GameOver` to every
+    /// player once per lapsed seat and repeats the session delete. Forfeit is a
+    /// per-game event, so collapse here rather than at each call site.
+    /// [`Self::check_expired_with_players`] stays per-seat: its entries are
+    /// already distinct, and draft auto-pick acts on each seat individually.
     pub fn check_expired(&mut self) -> Vec<String> {
         let mut expired = Vec::new();
+        let mut expired_game_codes = HashSet::new();
         self.disconnected.retain(|_key, info| {
             if info.disconnect_time.elapsed() > info.grace_period {
-                expired.push(info.game_code.clone());
+                if expired_game_codes.insert(info.game_code.clone()) {
+                    expired.push(info.game_code.clone());
+                }
                 false
             } else {
                 true
@@ -194,6 +206,44 @@ mod tests {
         assert_eq!(expired.len(), 2);
         assert!(expired.contains(&"GAME01".to_string()));
         assert!(expired.contains(&"GAME02".to_string()));
+    }
+
+    #[test]
+    fn check_expired_reports_a_multi_seat_game_once() {
+        // Records are keyed per (game, seat), so a pod whose seats lapse
+        // together yielded the same code once per seat. The forfeit sweep
+        // treats each element as a whole game to tear down, so duplicates sent
+        // GameOver to every player once per lapsed seat and repeated the
+        // session delete.
+        let mut mgr = ReconnectManager::new(Duration::from_millis(0));
+        for seat in 0..3 {
+            mgr.record_disconnect("GAME01", PlayerId(seat), Duration::from_millis(0));
+        }
+        mgr.record_disconnect("GAME02", PlayerId(0), Duration::from_millis(0));
+        std::thread::sleep(Duration::from_millis(2));
+
+        let expired = mgr.check_expired();
+
+        assert_eq!(expired.len(), 2, "one entry per game, got {expired:?}");
+        assert!(expired.contains(&"GAME01".to_string()));
+        assert!(expired.contains(&"GAME02".to_string()));
+        // Every record is still consumed, whether or not it was reported.
+        assert!(!mgr.is_disconnected("GAME01", PlayerId(1)));
+    }
+
+    #[test]
+    fn check_expired_with_players_stays_per_seat() {
+        // The per-seat sibling must keep one entry per lapsed seat — draft
+        // auto-pick acts on each seat individually.
+        let mut mgr = ReconnectManager::new(Duration::from_millis(0));
+        for seat in 0..3 {
+            mgr.record_disconnect("DRAFT1", PlayerId(seat), Duration::from_millis(0));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+
+        let expired = mgr.check_expired_with_players();
+
+        assert_eq!(expired.len(), 3, "got {expired:?}");
     }
 
     #[test]

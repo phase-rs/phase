@@ -4,7 +4,9 @@ use crate::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload, Pl
 use crate::types::events::GameEvent;
 use crate::types::format::SideboardPolicy;
 use crate::types::game_state::{GameState, PlayerDeckPool, WaitingFor};
-use crate::types::match_config::{DeckCardCount, MatchPhase, MatchType};
+use crate::types::match_config::{
+    DeckCardCount, MatchForfeitCause, MatchForfeitResult, MatchPhase, MatchType,
+};
 use crate::types::player::PlayerId;
 
 fn opponent(player: PlayerId) -> PlayerId {
@@ -264,6 +266,55 @@ pub fn handle_game_over_transition(state: &mut GameState) {
         }
     };
     state.waiting_for = between_games_sideboard_prompt(state, PlayerId(0));
+}
+
+/// Completes an unfinished two-seat best-of-three through a transport-trusted
+/// match forfeit. This is intentionally not a `GameAction`: callers must bind
+/// the forfeiting seat to authenticated transport identity before selecting the
+/// closed cause.
+pub fn apply_trusted_match_forfeit(
+    state: &mut GameState,
+    forfeiting_player: PlayerId,
+    cause: MatchForfeitCause,
+) -> Result<Vec<GameEvent>, String> {
+    if state.match_config.match_type != MatchType::Bo3 {
+        return Err("Match forfeits require a best-of-three match".to_string());
+    }
+    if state.players.len() != 2 {
+        return Err("Match forfeits require exactly two players".to_string());
+    }
+    if state.match_phase == MatchPhase::Completed {
+        return Err("Match is already complete".to_string());
+    }
+    let winner = match forfeiting_player {
+        PlayerId(0) => PlayerId(1),
+        PlayerId(1) => PlayerId(0),
+        _ => return Err("Forfeiting player is not a match seat".to_string()),
+    };
+
+    // A match forfeit ends the match rather than manufacturing a current-game
+    // elimination. Retain already-earned games and make the winner's clinch
+    // explicit in the frozen score used by terminal presentation.
+    if winner == PlayerId(0) {
+        state.match_score.p0_wins = state.match_score.p0_wins.max(2);
+    } else {
+        state.match_score.p1_wins = state.match_score.p1_wins.max(2);
+    }
+    state.match_phase = MatchPhase::Completed;
+    state.match_forfeit_result = Some(MatchForfeitResult {
+        winner,
+        forfeiting_player,
+        cause,
+    });
+    state.sideboard_submitted.clear();
+    state.next_game_chooser = None;
+    state.waiting_for = WaitingFor::GameOver {
+        winner: Some(winner),
+    };
+
+    Ok(vec![GameEvent::GameOver {
+        winner: Some(winner),
+    }])
 }
 
 /// CR 100.2a / CR 100.4a / CR 100.5: the size bounds a between-games
@@ -601,6 +652,67 @@ mod tests {
         assert_eq!(state.match_phase, MatchPhase::Completed);
         assert_eq!(state.match_score.p0_wins, 2);
         assert_eq!(state.match_score.p1_wins, 1);
+    }
+
+    #[test]
+    fn trusted_match_concede_completes_bo3_without_entering_sideboarding() {
+        let mut state = GameState::new_two_player(7);
+        state.match_config.match_type = MatchType::Bo3;
+        state.match_score.p0_wins = 1;
+        state.sideboard_submitted = vec![PlayerId(0)];
+
+        let events =
+            apply_trusted_match_forfeit(&mut state, PlayerId(0), MatchForfeitCause::MatchConcede)
+                .expect("two-seat Bo3 match concede is trusted");
+
+        assert_eq!(state.match_phase, MatchPhase::Completed);
+        assert_eq!(state.match_score.p0_wins, 1);
+        assert_eq!(state.match_score.p1_wins, 2);
+        assert!(state.sideboard_submitted.is_empty());
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        );
+        assert_eq!(
+            state.match_forfeit_result,
+            Some(MatchForfeitResult {
+                winner: PlayerId(1),
+                forfeiting_player: PlayerId(0),
+                cause: MatchForfeitCause::MatchConcede,
+            })
+        );
+        assert_eq!(
+            events,
+            vec![GameEvent::GameOver {
+                winner: Some(PlayerId(1))
+            }]
+        );
+    }
+
+    #[test]
+    fn trusted_match_forfeit_rejects_non_bo3_and_completed_matches_without_mutation() {
+        let mut state = GameState::new_two_player(7);
+        let before = state.clone();
+        assert!(apply_trusted_match_forfeit(
+            &mut state,
+            PlayerId(0),
+            MatchForfeitCause::MatchConcede,
+        )
+        .is_err());
+        assert_eq!(state, before);
+
+        state.match_config.match_type = MatchType::Bo3;
+        state.match_phase = MatchPhase::Completed;
+        let before = state.clone();
+        assert!(apply_trusted_match_forfeit(
+            &mut state,
+            PlayerId(0),
+            MatchForfeitCause::MatchConcede,
+        )
+        .is_err());
+        assert_eq!(state, before);
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub(crate) enum TokenPtFollowup {
 /// pronoun/reference resolution ("it", "that creature", "that many").
 ///
 /// Callers set only the fields they need; all fields are Default-able (D-02).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParseContext {
     /// The current subject (resolved target — "it", "that creature").
     pub subject: Option<TargetFilter>,

@@ -22,7 +22,7 @@
 //! whole choice axis is one parameterized variant).
 
 use super::doc::OracleItemId;
-use crate::types::ability::ChosenSubtypeKind;
+use crate::types::ability::{ChosenSubtypeKind, TargetFilter};
 
 /// A cross-item relation between parsed document items, recovered at parse time
 /// and applied by id during lowering. Closed set.
@@ -146,8 +146,10 @@ pub(crate) enum LinkedChoiceKind {
     /// CR 607.2d + CR 707.2c + CR 614.12a: An as-enters permanent-object choice
     /// gap (`chooser` — an Unimplemented ability whose Oracle text is
     /// "As … enters, choose <permanent>") linked to a
-    /// `ContinuousModification::CopyChosen` static (`copy_static`). Applying
-    /// removes the gap ability and injects `Effect::ChoosePermanent` —
+    /// `ContinuousModification::CopyChosen` static (`copy_static`). Discovery
+    /// captures the chooser's typed filter and original description before
+    /// lowering; finalization replaces that same source item in place with a
+    /// relation-synthesis payload that injects `Effect::ChoosePermanent` —
     /// Metamorphic Alteration's Aura-host copy. Without this consumer relation
     /// the choose line stays an ordinary Unimplemented ability (no Moved claim),
     /// so non-CopyChosen cards (Dauntless Bodyguard, Scheming Fence) keep their
@@ -155,5 +157,7 @@ pub(crate) enum LinkedChoiceKind {
     CopyChosenHost {
         chooser: OracleItemId,
         copy_static: OracleItemId,
+        filter: TargetFilter,
+        description: String,
     },
 }

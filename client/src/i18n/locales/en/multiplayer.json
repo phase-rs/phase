@@ -1,8 +1,15 @@
 {
   "concedeDialog": {
     "title": "Concede Game?",
-    "message": "Your opponent will be declared the winner.",
-    "concede": "Concede"
+    "game": {
+      "label": "Concede this game",
+      "ordinaryMessage": "Your opponent wins this game.",
+      "matchMessage": "You concede only the current game. If the match is not decided, sideboarding or the next game follows."
+    },
+    "match": {
+      "label": "Concede entire match",
+      "message": "You concede the match. Your opponent wins the match and no further games will be played."
+    }
   },
   "takebackDialog": {
     "requestedTitle": "{{name}} requests a takeback",

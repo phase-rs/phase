@@ -98,6 +98,33 @@ fn is_multi_target_player_subject_definition(def: &AbilityDefinition) -> bool {
             })
 }
 
+/// CR 701.3a + CR 303.4f: Stamp `forward_result` on a ChangeZone→Battlefield that
+/// nests Attach, including when that return sits under TargetOnly (Necrotic Plague).
+fn stamp_forward_result_on_battlefield_attach_return(def: &mut AbilityDefinition) {
+    let nests_attach = matches!(
+        def.sub_ability.as_deref().map(|s| &*s.effect),
+        Some(Effect::Attach { .. })
+    );
+    if nests_attach
+        && matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        )
+    {
+        def.forward_result = true;
+        return;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        stamp_forward_result_on_battlefield_attach_return(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        stamp_forward_result_on_battlefield_attach_return(else_ability);
+    }
+}
+
 /// CR 608.2c: A bare verb after a multi-target player subject continues that
 /// subject. A printed player subject (especially `you`) starts an independent
 /// actor-relative instruction instead.
@@ -1893,7 +1920,36 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // `parse_target_with_ctx` during chunk parse, so a targeted "of their
         // choice" routes target selection to the scoped (upkeep) player.
         def.target_chooser = clause_ir.target_chooser.clone();
+        // CR 701.3a + CR 303.4f: ChangeZone→Battlefield with an Attach sub
+        // (Gift of Immortality delayed reattach) must nest Attach on the
+        // ChangeZone with `forward_result` BEFORE delayed wrapping. Sibling-
+        // pushing then wrapping each unit would yield CDT{ChangeZone} +
+        // CDT{Attach} instead of CDT{ChangeZone[+Attach]}. TargetOnly already
+        // nests before wrap; mirror that for this attach-on-return shape.
         let clause_sub = if is_target_only {
+            def.sub_ability = clause_ir.parsed.sub_ability.clone();
+            // CR 701.3a + CR 303.4f: TargetOnly → ChangeZone[+Attach] (Necrotic
+            // Plague) must stamp `forward_result` on the nested return so the
+            // chosen host propagates into Attach (see
+            // `change_zone_forwards_chosen_attach_host`).
+            if let Some(sub) = def.sub_ability.as_mut() {
+                stamp_forward_result_on_battlefield_attach_return(sub);
+            }
+            None
+        } else if matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ) && matches!(
+            clause_ir.parsed.sub_ability.as_deref().map(|s| &*s.effect),
+            Some(Effect::Attach { .. })
+        ) {
+            // CR 303.4f + CR 608.2c: forward the moved Aura into Attach so
+            // `resolve_forward_result_search_attach_host` stamps `attach_to`
+            // and skips the CR 303.4f host-choice consult.
+            def.forward_result = true;
             def.sub_ability = clause_ir.parsed.sub_ability.clone();
             None
         } else {
@@ -2252,12 +2308,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         },
                     ),
                 );
-                // CR 608.2c: Lift condition/optional/repeat/player_scope to outer wrapper.
-                let lifted_condition = inner.condition.clone();
-                let lifted_optional = inner.optional;
-                let lifted_optional_for = inner.optional_for;
-                let lifted_repeat_for = inner.repeat_for.clone();
-                let lifted_player_scope = inner.player_scope.clone();
+                // CR 608.2c: Lift condition/optional/repeat/player_scope to the
+                // outer wrapper — move, don't clone. Leaving
+                // `OptionalEffectPerformed` on the delayed payload (Next of Kin
+                // #4956) would re-check that creation-time "if you do" signal when
+                // the delayed trigger fires at end step and skip the return.
+                let lifted_condition = std::mem::take(&mut inner.condition);
+                let lifted_optional = std::mem::replace(&mut inner.optional, false);
+                let lifted_optional_for = std::mem::take(&mut inner.optional_for);
+                let lifted_repeat_for = std::mem::take(&mut inner.repeat_for);
+                let lifted_player_scope = std::mem::take(&mut inner.player_scope);
                 // CR 608.2c: The `CreateDelayedTrigger` wrapper — not its payload —
                 // is the node that occupies this clause's slot in the parent's
                 // `sub_ability` chain, so it must carry the clause's `sub_link`

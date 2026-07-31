@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::ai_support::AiDecisionContract;
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -32,8 +33,18 @@ pub struct ResolveAllFastForwardResult {
     pub recorded_actions: Vec<(PlayerId, GameAction)>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum ResolveAllCallbackDecision {
+    /// A non-requester AI decision verified against the exact current
+    /// engine-issued candidate domain. Raw non-pass actions are deliberately
+    /// not accepted by Resolve All.
+    Proposal {
+        contract: AiDecisionContract,
+        action: GameAction,
+    },
+    /// Narrow internal shortcut for priority passing. This remains raw because
+    /// seeded passes represent future seats and are never individually
+    /// dispatched as a current prompt.
     Action(GameAction),
     Stop,
 }
@@ -84,9 +95,10 @@ where
         }
 
         let actor = turn_control::authorized_submitter_for_player(state, semantic_priority_seat);
-        let (action, mode, stop_after_boundary) = if actor == requester {
+        let (action, semantic_owner, mode, stop_after_boundary) = if actor == requester {
             (
                 GameAction::PassPriority,
+                semantic_priority_seat,
                 PublicFinalizeMode::DeferredDisplay,
                 false,
             )
@@ -98,12 +110,25 @@ where
             match choose_non_requester_action(state, actor) {
                 ResolveAllCallbackDecision::Action(GameAction::PassPriority) => (
                     GameAction::PassPriority,
+                    semantic_priority_seat,
                     PublicFinalizeMode::DeferredDisplay,
                     false,
                 ),
-                ResolveAllCallbackDecision::Action(action) => {
-                    (action, PublicFinalizeMode::Immediate, true)
+                ResolveAllCallbackDecision::Proposal { contract, action }
+                    if contract.permits(state, actor, &action) =>
+                {
+                    (
+                        action,
+                        contract.semantic_owner,
+                        PublicFinalizeMode::Immediate,
+                        true,
+                    )
                 }
+                // Raw non-pass values and stale/nonmember proposals must stop
+                // the batch rather than escaping Resolve All's action-boundary
+                // contract.
+                ResolveAllCallbackDecision::Action(_)
+                | ResolveAllCallbackDecision::Proposal { .. } => break,
                 ResolveAllCallbackDecision::Stop => break,
             }
         };
@@ -129,7 +154,7 @@ where
         let Ok(boundary) = apply_action_boundary_with_stack_limit(
             state,
             actor,
-            actor,
+            semantic_owner,
             action,
             mode,
             stack_resolution_limit,
@@ -210,7 +235,8 @@ where
             if actor != requester {
                 match choose_non_requester_action(state, actor) {
                     ResolveAllCallbackDecision::Action(GameAction::PassPriority) => {}
-                    ResolveAllCallbackDecision::Action(_) => {
+                    ResolveAllCallbackDecision::Action(_)
+                    | ResolveAllCallbackDecision::Proposal { .. } => {
                         return PriorityCycleFastForward::CannotSeed;
                     }
                     ResolveAllCallbackDecision::Stop => return PriorityCycleFastForward::Stop,
@@ -472,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn future_non_pass_callback_prevents_priority_cycle_seeding() {
+    fn raw_future_non_pass_callback_prevents_priority_cycle_seeding_without_applying() {
         let mut state = priority_state(PlayerId(0), vec![no_op_entry(1, PlayerId(0))]);
         let calls = Cell::new(0);
 
@@ -489,13 +515,7 @@ mod tests {
         assert_eq!(calls.get(), 2);
         assert_eq!(result.items_resolved, 0);
         assert_eq!(state.stack.len(), 1);
-        assert_eq!(
-            state.phase_stops.get(&PlayerId(1)),
-            Some(&vec![PhaseStop {
-                phase: Phase::PreCombatMain,
-                scope: PhaseStopScope::AllTurns,
-            }])
-        );
+        assert!(!state.phase_stops.contains_key(&PlayerId(1)));
     }
 
     #[test]
@@ -544,7 +564,24 @@ mod tests {
     }
 
     #[test]
-    fn non_pass_callback_action_applies_once_and_stops() {
+    fn current_contract_proposal_is_applied_for_non_requester_priority() {
+        let mut state = priority_state(PlayerId(1), vec![no_op_entry(1, PlayerId(1))]);
+
+        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |state, actor| {
+            let contract = AiDecisionContract::issue(state, PlayerId(1));
+            assert_eq!(actor, contract.authorized_actor);
+            ResolveAllCallbackDecision::Proposal {
+                contract,
+                action: GameAction::PassPriority,
+            }
+        });
+
+        assert_eq!(result.items_resolved, 1);
+        assert!(state.stack.is_empty());
+    }
+
+    #[test]
+    fn raw_non_pass_callback_action_is_rejected_without_applying() {
         let mut state = priority_state(PlayerId(1), vec![no_op_entry(1, PlayerId(1))]);
         let calls = Cell::new(0);
 
@@ -561,13 +598,7 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert_eq!(result.items_resolved, 0);
         assert_eq!(state.stack.len(), 1);
-        assert_eq!(
-            state.phase_stops.get(&PlayerId(1)),
-            Some(&vec![PhaseStop {
-                phase: Phase::PreCombatMain,
-                scope: PhaseStopScope::AllTurns,
-            }])
-        );
+        assert!(!state.phase_stops.contains_key(&PlayerId(1)));
     }
 
     #[test]

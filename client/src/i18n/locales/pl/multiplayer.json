@@ -1,8 +1,15 @@
 {
   "concedeDialog": {
     "title": "Poddać grę?",
-    "message": "Twój przeciwnik zostanie ogłoszony zwycięzcą.",
-    "concede": "Poddaj się"
+    "game": {
+      "label": "Poddaj tę grę",
+      "ordinaryMessage": "Twój przeciwnik wygrywa tę grę.",
+      "matchMessage": "Poddajesz tylko bieżącą grę. Jeśli mecz nie jest rozstrzygnięty, nastąpi sideboard lub kolejna gra."
+    },
+    "match": {
+      "label": "Poddaj cały mecz",
+      "message": "Poddajesz mecz. Twój przeciwnik wygrywa mecz i nie zostaną rozegrane dalsze gry."
+    }
   },
   "takebackDialog": {
     "requestedTitle": "{{name}} prosi o wycofanie ruchu",

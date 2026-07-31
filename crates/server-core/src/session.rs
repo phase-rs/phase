@@ -9,6 +9,7 @@ use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
 use engine::game::finalize_public_state;
 use engine::game::interaction::bind_interaction_authority;
+use engine::game::match_flow::apply_trusted_match_forfeit;
 use engine::game::preview::preview_auto_payment_sources;
 use engine::game::{load_and_hydrate_decks, rehydrate_game_from_card_db};
 use engine::types::actions::GameAction;
@@ -20,11 +21,13 @@ use engine::types::interaction::InteractionSessionId;
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
+use engine::types::match_config::MatchForfeitCause;
 use engine::types::player::PlayerId;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use phase_ai::session::AiSession;
 use rand::{Rng, SeedableRng};
 use seat_reducer::types::{seat_team_info, DeckChoice, SeatDelta, SeatKind, SeatState};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::filter::filter_state_for_player;
@@ -84,6 +87,47 @@ pub type ActionResult = (
 /// allocated while the session lock was held. The transport must keep this
 /// pairing intact when it fans a snapshot out to multiple viewers.
 pub type RevisionedActionResult = (u64, ActionResult);
+
+/// Stable identity for one lifetime of a Full authoritative session.
+///
+/// A game code can be retired and later reused. Persisting the generation
+/// alongside it prevents delayed saves from an earlier lifetime from
+/// overwriting the newer session.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FullSessionKey {
+    pub game_code: String,
+    pub generation: u64,
+}
+
+/// A durable Full-server snapshot fenced by both session generation and the
+/// session-local mutation revision. `activation_epoch` is populated only by a
+/// single-user activation; shared-server sessions intentionally have none.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FullPersistSnapshot {
+    pub key: FullSessionKey,
+    pub mutation_revision: u64,
+    pub activation_epoch: Option<u64>,
+    pub persisted: PersistedSession,
+}
+
+/// Runtime-only persistence authority for one lifetime of a Full session.
+///
+/// The key fences delayed writes from a recycled game code. The optional
+/// activation epoch is the single-user singleton fence and is stamped only by
+/// the persistence owner; neither value is trusted from a game snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullRuntime {
+    pub key: FullSessionKey,
+    pub activation_epoch: Option<u64>,
+}
+
+/// Outcome of a generation-fenced Full-server persistence operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FullPersistDisposition {
+    Applied,
+    SupersededOrRetired,
+    NotCurrentActivation,
+}
 
 /// Broadcast-ready fields for a state snapshot taken outside the normal
 /// `handle_action` flow (e.g. an approved takeback rollback): the raw state,
@@ -160,6 +204,10 @@ pub enum HostingMode {
 
 pub struct GameSession {
     pub game_code: String,
+    /// Server-issued durable identity for a Full session lifetime. This is
+    /// stamped by phase-server after persistence binds the newly-created
+    /// session; it is not trusted from the serialized game blob.
+    pub full_runtime: Option<FullRuntime>,
     /// Monotonic server-authored revision of the current authoritative state.
     /// Read-only snapshots reuse this value; mutators advance it before their
     /// per-viewer views are captured for transport.
@@ -240,6 +288,19 @@ impl GameSession {
     pub fn advance_state_revision(&mut self) -> u64 {
         self.state_revision = self.state_revision.saturating_add(1);
         self.state_revision
+    }
+
+    /// Builds the only persistence payload for an active Full runtime.
+    /// Snapshot generation and revision therefore cannot be supplied by a
+    /// transport caller independently of the authoritative session.
+    pub fn full_persist_snapshot(&self) -> Option<FullPersistSnapshot> {
+        let runtime = self.full_runtime.as_ref()?;
+        Some(FullPersistSnapshot {
+            key: runtime.key.clone(),
+            mutation_revision: self.state_revision,
+            activation_epoch: runtime.activation_epoch,
+            persisted: self.to_persisted(),
+        })
     }
 
     /// Returns the player index for the given token, if valid.
@@ -850,6 +911,7 @@ impl GameSession {
 
         GameSession {
             game_code: ps.game_code,
+            full_runtime: None,
             state_revision: ps.state_revision,
             state,
             player_tokens: ps.player_tokens,
@@ -987,6 +1049,7 @@ impl SessionManager {
 
         let session = GameSession {
             game_code: game_code.clone(),
+            full_runtime: None,
             state_revision: 0,
             state,
             player_tokens,
@@ -1337,6 +1400,49 @@ impl SessionManager {
         ))
     }
 
+    /// Applies the payload-free match-concede intent after binding its
+    /// requester to an authenticated player token. The closed cause is chosen
+    /// here, never by the wire payload or a game action.
+    pub fn handle_match_concede(
+        &mut self,
+        game_code: &str,
+        player_token: &str,
+    ) -> Result<RevisionedActionResult, String> {
+        let session = self
+            .sessions
+            .get_mut(game_code)
+            .ok_or_else(|| format!("Game not found: {game_code}"))?;
+        let player = session
+            .player_for_token(player_token)
+            .ok_or_else(|| "Invalid player token".to_string())?;
+        if session.pending_takeback.is_some() {
+            return Err(
+                "A takeback request is pending — resolve it before conceding the match".to_string(),
+            );
+        }
+
+        let events = apply_trusted_match_forfeit(
+            &mut session.state,
+            player,
+            MatchForfeitCause::MatchConcede,
+        )?;
+        let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);
+        let auto_pass = auto_pass_recommended(&session.state, &legal_actions);
+        let revision = session.advance_state_revision();
+        Ok((
+            revision,
+            (
+                session.state.clone(),
+                events,
+                legal_actions,
+                Vec::new(),
+                auto_pass,
+                spell_costs,
+                by_object,
+            ),
+        ))
+    }
+
     /// Mark a player as disconnected.
     pub fn handle_disconnect(&mut self, game_code: &str, player: PlayerId) {
         if let Some(session) = self.sessions.get_mut(game_code) {
@@ -1552,6 +1658,26 @@ mod tests {
         let (code, token) = mgr.create_game(make_deck());
         assert_eq!(code.len(), 6);
         assert_eq!(token.len(), 32);
+    }
+
+    #[test]
+    fn full_persist_snapshot_roundtrips_exact_generation_and_revision() {
+        let mut manager = SessionManager::new();
+        let (game_code, _) = manager.create_game(make_deck());
+        let snapshot = FullPersistSnapshot {
+            key: FullSessionKey {
+                game_code,
+                generation: 7,
+            },
+            mutation_revision: 11,
+            activation_epoch: Some(3),
+            persisted: manager.sessions.values().next().unwrap().to_persisted(),
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let restored: FullPersistSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.key, snapshot.key);
+        assert_eq!(restored.mutation_revision, 11);
+        assert_eq!(restored.activation_epoch, Some(3));
     }
 
     #[test]
@@ -3451,6 +3577,7 @@ mod tests {
 
         let mut session = GameSession {
             game_code: "TEST01".to_string(),
+            full_runtime: None,
             state_revision: 0,
             state,
             player_tokens: vec!["host_token".to_string(), String::new()],

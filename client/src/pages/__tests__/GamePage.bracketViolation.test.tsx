@@ -35,7 +35,7 @@ const { mockClearPromptOverlayState, mockSetGameState, storeOverrides } = vi.hoi
   // Mutable slice of the mocked game store. Defaults match the previous
   // hardcoded values, so every pre-existing test is unaffected; tests that
   // need a live adapter assign here and `beforeEach` resets.
-  storeOverrides: { adapter: null as unknown },
+  storeOverrides: { adapter: null as unknown, gameState: null as unknown, waitingFor: null as unknown },
 }));
 
 // Captures the props GameMenu was rendered with, so tests can assert which
@@ -126,8 +126,8 @@ vi.mock("../../stores/gameStore", () => ({
   useGameStore: Object.assign(
     vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
       selector({
-        gameState: null,
-        waitingFor: null,
+        gameState: storeOverrides.gameState,
+        waitingFor: storeOverrides.waitingFor,
         legalActions: [],
         autoPassRecommended: false,
         spellCosts: {},
@@ -243,6 +243,14 @@ vi.mock("../../components/chrome/GameMenu", () => ({
   },
 }));
 
+let capturedConcedeDialogProps: Record<string, unknown> | undefined;
+vi.mock("../../components/multiplayer/ConcedeDialog", () => ({
+  ConcedeDialog: (props: Record<string, unknown>) => {
+    capturedConcedeDialogProps = props;
+    return null;
+  },
+}));
+
 vi.mock("../../hooks/useCardDataMeta", () => ({
   useCardDataMeta: () => null,
   formatRelativeDate: () => "",
@@ -271,6 +279,9 @@ beforeEach(() => {
   capturedOnP2PEvent = undefined;
   capturedGameMenuProps = undefined;
   storeOverrides.adapter = null;
+  storeOverrides.gameState = null;
+  storeOverrides.waitingFor = null;
+  capturedConcedeDialogProps = undefined;
   vi.clearAllMocks();
 });
 
@@ -632,5 +643,56 @@ describe("GamePage — takeback is a transport capability", () => {
     renderGamePage("/game/test-game-123?mode=host");
 
     expect(capturedGameMenuProps?.onRequestTakeback).toBeTypeOf("function");
+  });
+});
+
+describe("GamePage — bound whole-match concession", () => {
+  class FakeWebSocketAdapter extends WebSocketAdapter {
+    sendMatchConcede = vi.fn();
+
+    constructor() {
+      super("ws://test/ws", "host", { main_deck: [], sideboard: [] });
+    }
+  }
+
+  it("offers and invokes the WebSocket whole-match capability for a Bo3", () => {
+    const sendMatchConcede = vi.fn();
+    const adapter = new FakeWebSocketAdapter();
+    adapter.sendMatchConcede = sendMatchConcede;
+    storeOverrides.adapter = adapter;
+    storeOverrides.gameState = {
+      match_config: { match_type: "Bo3" },
+      waiting_for: {
+        type: "BetweenGamesChoosePlayDraw",
+        data: {
+          player: 0,
+          game_number: 2,
+          score: { p0_wins: 1, p1_wins: 0, draws: 0 },
+        },
+      },
+      players: [],
+      objects: {},
+      battlefield: [],
+      stack: [],
+      exile: [],
+    };
+    storeOverrides.waitingFor = {
+      type: "BetweenGamesChoosePlayDraw",
+      data: {
+        player: 0,
+        game_number: 2,
+        score: { p0_wins: 1, p1_wins: 0, draws: 0 },
+      },
+    };
+
+    renderGamePage("/game/test-game-123?mode=host");
+    act(() => (capturedGameMenuProps?.onConcede as () => void)());
+
+    const matchAction = capturedConcedeDialogProps?.matchAction as
+      | { onConfirm: () => void }
+      | undefined;
+    expect(matchAction?.onConfirm).toBeTypeOf("function");
+    act(() => matchAction?.onConfirm());
+    expect(sendMatchConcede).toHaveBeenCalledOnce();
   });
 });

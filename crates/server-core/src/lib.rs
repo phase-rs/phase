@@ -56,14 +56,16 @@ pub use p2p_backup_guard::{
 };
 pub use persist::{restored_draft_lobby_register_request, PersistedLobbyMeta, PersistedSession};
 pub use protocol::{
-    AiSeatRequest, ClientMessage, DeckChoice, DeckData, LobbyGame, PlayerSlotInfo, SeatKind,
-    SeatMutation, SeatView, ServerMessage,
+    AiSeatRequest, ClientMessage, CurrentTerminalDelivery, DeckChoice, DeckData, LobbyGame,
+    PlayerSlotInfo, SeatKind, SeatMutation, SeatView, ServerMessage, TerminalBootstrapRequest,
+    TerminalCredential, TerminalDeliveryId, TerminalMatchDisplay,
 };
 pub use reconnect::ReconnectManager;
 pub use seat_mutation_wire_guard::guard_seat_mutation;
 pub use session::{
     acting_player, acting_players, generate_game_code, generate_player_token, is_acting,
-    BroadcastSnapshot, RevisionedActionResult, SessionManager,
+    BroadcastSnapshot, FullPersistDisposition, FullPersistSnapshot, FullRuntime, FullSessionKey,
+    RevisionedActionResult, SessionManager,
 };
 pub use spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,

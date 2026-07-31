@@ -1,11 +1,11 @@
 import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
-import type { GameAction, GameState, WaitingFor } from "../../adapter/types";
+import type { AiActionProposal, GameAction, GameState, WaitingFor } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { pressureMultiplier } from "../../utils/stackPressure";
 import { effectiveStackPressure } from "../../utils/stackThroughput";
 import { debugLog } from "../debugLog";
-import { dispatchAction } from "../dispatch";
+import { dispatchAiActionProposal } from "../dispatch";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "../engineRecovery";
 import type { OpponentController } from "./types";
 
@@ -263,97 +263,15 @@ export function createAIController(config: AIControllerConfig): AIController {
 
     if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
       debugLog(
-        `AI stuck: ${MAX_CONSECUTIVE_FAILURES} consecutive failures on ${waitingFor.type}, dispatching fallback`,
-        "warn",
+        `AI controller halted after ${MAX_CONSECUTIVE_FAILURES} failed proposals on ${waitingFor.type}`,
+        "error",
       );
-      const attempt = beginAttempt(waitingFor, waitingPlayerId);
-      runEscapeFallback(waitingFor, waitingPlayerId, attempt).finally(() => {
-        if (finishAttempt(attempt) && active) checkAndSchedule();
-      });
+      notifyEngineLost(`ai-controller-stuck:${waitingFor.type}`);
+      stop();
       return;
     }
 
     scheduleAction(waitingPlayerId);
-  }
-
-  function pickEscapeAction(
-    waitingFor: WaitingFor,
-    state: GameState,
-  ): Promise<GameAction | null> {
-    if (waitingFor.type === "ManaSourceSelection") {
-      const { adapter } = useGameStore.getState();
-      if (!adapter) return Promise.resolve(null);
-      return adapter.getLegalActions().then((result) => {
-        return result.actions.find((action) => action.type === "ActivateManaSource")
-          ?? result.actions.find((action) => action.type === "BackToManaPayment")
-          ?? null;
-      });
-    }
-    if (state.has_pending_cast && state.allows_cancel_cast) {
-      return Promise.resolve({ type: "CancelCast" });
-    }
-    const { adapter } = useGameStore.getState();
-    // Priority may still fabricate PassPriority (the only legal Priority
-    // escape). Non-Priority must never invent PassPriority — the engine
-    // rejects it and the controller softlocks (#6393).
-    if (!adapter) {
-      if (waitingFor.type === "Priority") {
-        return Promise.resolve({ type: "PassPriority" });
-      }
-      return Promise.resolve(null);
-    }
-    if (waitingFor.type === "Priority") {
-      return adapter.getLegalActions().then((result) => {
-        return (
-          result.actions.find((a) => a.type === "PassPriority") ??
-          { type: "PassPriority" }
-        );
-      });
-    }
-    // Non-Priority: engine owns escape selection via fallback_action. Legal-
-    // action list order is not a decision contract (#6393 review).
-    if (!adapter.getAiFallbackAction) {
-      return Promise.resolve(null);
-    }
-    return Promise.resolve(adapter.getAiFallbackAction());
-  }
-
-  async function runEscapeFallback(
-    waitingFor: WaitingFor,
-    waitingPlayerId: number,
-    attempt: AIAttempt,
-  ): Promise<void> {
-    const state = useGameStore.getState().gameState;
-    if (!state || !isAttemptCurrent(attempt)) return;
-    try {
-      const fallback = await pickEscapeAction(waitingFor, state);
-      if (!isAttemptCurrent(attempt)) return;
-      // Empty non-Priority legal set: halt immediately rather than dispatching
-      // a fabricated PassPriority that the engine rejects in a loop (#6393).
-      if (fallback == null) {
-        debugLog(
-          `AI controller halting: no legal escape for ${waitingFor.type}`,
-          "error",
-        );
-        notifyEngineLost(`ai-controller-stuck:${waitingFor.type}`);
-        stop();
-        return;
-      }
-      await dispatchAction(fallback, waitingPlayerId);
-      if (!isAttemptCurrent(attempt)) return;
-      consecutiveFailures = 0;
-      totalFailures = 0;
-      lastDispatchError = null;
-    } catch (e) {
-      if (!isAttemptCurrent(attempt)) return;
-      consecutiveFailures++;
-      totalFailures++;
-      lastDispatchError = e instanceof Error ? e.message : String(e);
-      debugLog(
-        `AI fallback also failed (${consecutiveFailures}/${totalFailures}): ${lastDispatchError}`,
-        "warn",
-      );
-    }
   }
 
   function scheduleAction(playerId: number) {
@@ -361,7 +279,7 @@ export function createAIController(config: AIControllerConfig): AIController {
 
     // Start computing immediately — in parallel with the artificial delay.
     // This turns additive latency (delay + compute) into max(delay, compute),
-    // which matters most for VeryHard where the pool search takes 1-2 seconds.
+    // which matters most for deeper engine-owned searches.
     const { adapter, gameState } = useGameStore.getState();
     // Each seat has its own difficulty — a controller driving three AI players
     // can simultaneously run Easy, Medium, and VeryHard policies.
@@ -369,13 +287,15 @@ export function createAIController(config: AIControllerConfig): AIController {
     const waitingForType = gameState?.waiting_for?.type;
     const scheduledWaitingFor = gameState?.waiting_for ?? null;
     if (!scheduledWaitingFor) return;
+    const getProposal = adapter?.getAiActionProposal;
+    if (!getProposal) return;
     const attempt = beginAttempt(scheduledWaitingFor, playerId);
-    const actionPromise: Promise<GameAction | null> = Promise.resolve(
-      adapter?.getAiAction(difficulty, playerId, waitingForType) ?? null,
+    const proposalPromise: Promise<AiActionProposal | null> = Promise.resolve(
+      getProposal.call(adapter, difficulty, playerId),
     );
     // Suppress unhandled-rejection warnings if stop() cancels the timeout
     // before it fires and nothing else awaits this promise.
-    actionPromise.catch(() => {});
+    proposalPromise.catch(() => {});
 
     // Mulligan is a binary keep/mulligan decision with no strategic complexity to
     // humanize — skip the artificial delay so the decision resolves as soon as the
@@ -394,14 +314,14 @@ export function createAIController(config: AIControllerConfig): AIController {
       timeoutId = null;
       let failed = false;
       try {
-        let action: GameAction | null;
+        let proposal: AiActionProposal | null;
         try {
-          action = await actionPromise;
+          proposal = await proposalPromise;
         } catch (err) {
           if (!isAttemptCurrent(attempt)) return;
           // Engine panic: re-running the same AI search against the same
           // (deterministic) state will re-panic. This is the path the
-          // user-reported "ai-getAction-retry" came from — short-circuit
+            // user-reported AI retry came from — short-circuit
           // with the captured panic so the modal can show the real cause.
           if (isEnginePanic(err)) {
             await routePanic("ai-getAction-panic", err.panic);
@@ -414,7 +334,7 @@ export function createAIController(config: AIControllerConfig): AIController {
           // action once. If recovery fails (or the retry still throws because
           // restoreState silently failed in the worker), escalate to the
           // user-prompt path.
-          debugLog("AI getAiAction hit STATE_LOST; attempting rehydrate", "warn");
+          debugLog("AI proposal lookup hit STATE_LOST; attempting rehydrate", "warn");
           if (!isAttemptCurrent(attempt)) return;
           const recovered = await attemptStateRehydrate();
           if (!isAttemptCurrent(attempt)) return;
@@ -424,7 +344,10 @@ export function createAIController(config: AIControllerConfig): AIController {
           }
           try {
             if (!isAttemptCurrent(attempt)) return;
-            action = await adapter!.getAiAction(difficulty, playerId, waitingForType);
+            const retryAdapter = useGameStore.getState().adapter;
+            const retryGetProposal = retryAdapter?.getAiActionProposal;
+            if (!retryGetProposal) return;
+            proposal = await retryGetProposal.call(retryAdapter, difficulty, playerId);
           } catch (retryErr) {
             if (!isAttemptCurrent(attempt)) return;
             if (isEnginePanic(retryErr)) {
@@ -442,42 +365,40 @@ export function createAIController(config: AIControllerConfig): AIController {
         if (!isAttemptCurrent(attempt)) {
           const currentWaitingFor = useGameStore.getState().gameState?.waiting_for ?? null;
           debugLog(
-            `AI ignored stale ${action?.type ?? "action"} for player ${playerId + 1}: waitingFor changed from ${waitingForDebugLabel(scheduledWaitingFor)} to ${waitingForDebugLabel(currentWaitingFor)}`,
+            `AI ignored stale ${proposal?.action.type ?? "proposal"} for player ${playerId + 1}: waitingFor changed from ${waitingForDebugLabel(scheduledWaitingFor)} to ${waitingForDebugLabel(currentWaitingFor)}`,
             "info",
           );
           return;
         }
         const currentGameState = useGameStore.getState().gameState;
         const currentWaitingFor = currentGameState?.waiting_for ?? null;
-        if (action == null) {
+        if (proposal == null) {
           debugLog(
-            `AI getAiAction returned null for player ${playerId} (waitingFor: ${currentWaitingFor?.type ?? "none"}), dispatching legal-action fallback`,
+            `AI returned no engine-bounded proposal for player ${playerId} (waitingFor: ${currentWaitingFor?.type ?? "none"})`,
             "warn",
           );
-          const waitingFor = currentWaitingFor;
-          if (waitingFor != null) {
-            await runEscapeFallback(waitingFor, playerId, attempt);
-          } else {
-            failed = true;
-          }
+          failed = true;
           return;
         }
-        const guess = describeAiCardPredicateGuess(action, currentWaitingFor, currentGameState);
+        const guess = describeAiCardPredicateGuess(proposal.action, currentWaitingFor, currentGameState);
         if (guess != null) {
           debugLog(`AI player ${playerId + 1} randomly ${guess}`, "info");
         }
-        // Pass `playerId` (the AI seat we're driving) as actor. The engine
-        // guard in `apply` verifies actor matches the authorized submitter;
-        // dispatching as the human here would be rejected.
-        // dispatch.ts has its own STATE_LOST recovery; any error that reaches
-        // here after that retry is genuinely unrecoverable for this attempt.
+        // The proposal carries the engine-derived authorized actor. The UI
+        // never substitutes `playerId` or reconstructs an action from the
+        // prompt, which keeps controlled turns and simultaneous decisions in
+        // the authority boundary.
         if (!isAttemptCurrent(attempt)) return;
-        await dispatchAction(action, playerId);
+        const submission = await dispatchAiActionProposal(proposal);
         if (!isAttemptCurrent(attempt)) return;
-        // Successful dispatch — reset both failure counters
-        consecutiveFailures = 0;
-        totalFailures = 0;
-        lastDispatchError = null;
+        // The proposal boundary returns a tagged stale result without mutating
+        // the store. That is a normal race, not a failed AI decision: leave
+        // the counters untouched and let the final scheduler re-query the
+        // engine's newly issued finite domain.
+        if (submission.status === "stale") {
+          debugLog(`AI proposal was stale for player ${playerId + 1}; re-querying`, "info");
+          return;
+        }
       } catch (e) {
         if (!isAttemptCurrent(attempt)) return;
         lastDispatchError = e instanceof Error ? e.message : String(e);
@@ -507,7 +428,7 @@ export function createAIController(config: AIControllerConfig): AIController {
     // is implicit — whichever seat holds priority after a reconnect
     // triggers `checkAndSchedule`, regardless of how many AI seats the
     // controller supervises. No per-seat iteration needed; the bug that
-    // previously stalled P3/P4 was caused by `getAiAction` accepting a
+    // previously stalled P3/P4 was caused by an action-only API accepting a
     // default `playerId` elsewhere, not by this loop.
     let observedWaitingFor = useGameStore.getState().waitingFor;
     let observedSessionGeneration = useGameStore.getState().gameSessionGeneration;

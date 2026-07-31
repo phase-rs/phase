@@ -554,13 +554,15 @@ function resetServerHostSession(set: MultiplayerSet): void {
 
 function savePregameHostSession(
   get: MultiplayerGet,
-  data: { game_code: string; player_token: string },
+  data: { game_code: string; player_token: string; full_key?: { game_code: string; generation: number } },
 ): void {
+  if (!data.full_key || data.full_key.game_code !== data.game_code) return;
   const existing = loadWsSession();
   const hostSession = get().hostSession ?? existing?.hostSession;
   saveWsSession({
     gameCode: data.game_code,
     playerToken: data.player_token,
+    fullKey: data.full_key,
     serverUrl: get().serverAddress,
     timestamp: Date.now(),
     ...(hostSession ? { hostSession } : {}),
@@ -574,6 +576,7 @@ function clearPregameHostMetadataFromWsSession(): void {
   saveWsSession({
     gameCode: session.gameCode,
     playerToken: session.playerToken,
+    fullKey: session.fullKey,
     serverUrl: session.serverUrl,
     timestamp: Date.now(),
   });
@@ -586,7 +589,11 @@ function handleServerHostMessage(
   msg: { type: string; data?: unknown },
 ): void {
   if (msg.type === "GameCreated") {
-    const data = msg.data as { game_code: string; player_token: string };
+    const data = msg.data as {
+      game_code: string;
+      player_token: string;
+      full_key?: { game_code: string; generation: number };
+    };
     savePregameHostSession(get, data);
     // Reset reconnect counter on successful (re)connection.
     hostReconnectAttempt = 0;
@@ -715,6 +722,7 @@ function attemptServerHostReconnect(
         data: {
           game_code: session.gameCode,
           player_token: session.playerToken,
+          full_key: session.fullKey,
         },
       }),
       () => attemptServerHostReconnect(set, get),
@@ -922,6 +930,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             data: {
               game_code: session.gameCode,
               player_token: session.playerToken,
+              full_key: session.fullKey,
             },
           }),
           () => attemptServerHostReconnect(set, get),

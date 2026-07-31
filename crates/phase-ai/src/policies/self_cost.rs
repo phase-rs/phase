@@ -32,9 +32,10 @@
 //! both a non-trivial effect with no confident price and an unmodeled rider
 //! sitting beside a priced effect — in either case no directional conclusion
 //! about the trade is sound, so the comparison stands down. Off-ability
-//! synergy (an aristocrats board that turns each death into value, a
-//! lifegain/reanimator shell that wants the resource spent) stands the gate
-//! down entirely.
+//! synergy for a resource that is actually spent (a lifegain/reanimator shell)
+//! stands the gate down entirely. A sacrifice is never a generic discount:
+//! death-trigger value must be represented by the activated ability's real
+//! payoff before it can outweigh that cost.
 //!
 //! Cost-vs-benefit for a self-cost activation is answered **here and only
 //! here**: `FreeOutletActivationPolicy` scores aristocrats death-trigger
@@ -44,14 +45,15 @@
 //! (`self_cost_value.rs`) fetches the activated ability and turns these
 //! predicates into a `PolicyVerdict`.
 
-use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::game::effects::counters::{preview_counter_addition, CounterAdditionPreview};
 use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::players;
 use engine::game::quantity::resolve_quantity;
-use engine::types::ability::{AbilityCost, AbilityDefinition, Effect, QuantityExpr, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, CostCategory, Effect, QuantityExpr, TargetFilter,
+};
 use engine::types::card_type::CoreType;
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::GameState;
@@ -766,45 +768,31 @@ fn pay_life_criticality_mult(state: &GameState, ai_player: PlayerId) -> f64 {
 
 /// Whether off-ability deck synergy justifies paying this self-cost even though
 /// the ability's own effect is trivial. Complements the intrinsic-payoff check
-/// in [`appraise_benefit`] — it covers value that lands elsewhere (aristocrats
-/// death triggers, a lifegain/reanimator engine fed by the resource spent).
+/// in [`appraise_benefit`] — it covers value that lands elsewhere in a
+/// lifegain/reanimator engine fed by the resource spent.
 pub(crate) fn synergy_justifies_self_cost(
     features: &DeckFeatures,
-    state: &GameState,
-    ai_player: PlayerId,
     ability: &AbilityDefinition,
 ) -> bool {
-    // cEDH lists run tight combo/engine lines where routine self-costs are the
-    // intended fuel; never veto self-costs for a Cedh-bracket deck.
-    if features.bracket_tier == CommanderBracketTier::Cedh {
-        return true;
-    }
-    ability
-        .cost
-        .as_ref()
-        .is_some_and(|cost| synergy_justifies_cost(features, state, ai_player, cost))
+    ability.cost.as_ref().is_some_and(|cost| {
+        !contains_sacrifice_cost(cost) && synergy_justifies_cost(features, cost)
+    })
 }
 
-fn synergy_justifies_cost(
-    features: &DeckFeatures,
-    state: &GameState,
-    ai_player: PlayerId,
-    cost: &AbilityCost,
-) -> bool {
+/// A sacrifice leaf remains a real cost even when nested in a composite or a
+/// choice of costs.  Treating a sibling lifegain/reanimator cost as a reason to
+/// waive the whole tree would reintroduce the aristocrats exception indirectly.
+fn contains_sacrifice_cost(cost: &AbilityCost) -> bool {
+    cost.categories()
+        .contains(&CostCategory::SacrificesPermanent)
+}
+
+fn synergy_justifies_cost(features: &DeckFeatures, cost: &AbilityCost) -> bool {
     match cost {
-        // Board-gated aristocrats payoff only. NO landfall stand-down: landfall
-        // triggers when a land ENTERS the battlefield, never when one is
-        // sacrificed, so "sacrifice a land" yields zero landfall value —
-        // including it would reopen Zuran Orb in landfall decks. Genuine
-        // sacrifice-a-land ramp is already non-trivial via the mana / land-search
-        // classification arms `appraise_benefit` walks.
-        AbilityCost::Sacrifice(_) => {
-            count_death_triggers_on_board(
-                state,
-                ai_player,
-                &features.aristocrats.death_trigger_names,
-            ) > 0
-        }
+        // Sacrificing the source is a concrete cost, not a generic aristocrats
+        // discount.  Death triggers remain part of an ability's actual payoff
+        // appraisal; they must not make an otherwise trivial activation free.
+        AbilityCost::Sacrifice(_) => false,
         AbilityCost::PayLife { .. } => features.lifegain.commitment >= SYNERGY_COMMITMENT_FLOOR,
         AbilityCost::Discard { .. } => features.reanimator.commitment >= SYNERGY_COMMITMENT_FLOOR,
         // Exile from the AI's own hand/graveyard: no synergy stand-down. Graveyard
@@ -813,7 +801,7 @@ fn synergy_justifies_cost(
         AbilityCost::Exile { .. } => false,
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => costs
             .iter()
-            .any(|c| synergy_justifies_cost(features, state, ai_player, c)),
+            .any(|cost| synergy_justifies_cost(features, cost)),
         _ => false,
     }
 }

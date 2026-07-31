@@ -141,6 +141,15 @@ fn resolve_effect_recipients(
     if let Some(target) = player_context_target(state, ability, target_filter) {
         return vec![target];
     }
+    // CR 608.2c: An inherited target-slot anaphor belongs to the flattened
+    // resolving root, not this local damage node.  Resolve it before the local
+    // target fallback because a chained node can carry propagated recipient
+    // targets while still referring to an earlier slot (Self-Destruct class).
+    if let TargetFilter::ParentTargetSlot { index } = target_filter {
+        return crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+            .into_iter()
+            .collect();
+    }
     if !ability.targets.is_empty() {
         if skip_first_target && ability.targets.len() > 1 {
             return ability.targets[1..].to_vec();

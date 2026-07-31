@@ -112,7 +112,7 @@ impl TacticalPolicy for SelfCostValuePolicy {
             .cloned()
             .unwrap_or_default();
 
-        if synergy_justifies_self_cost(&features, ctx.state, ctx.ai_player, &ability) {
+        if synergy_justifies_self_cost(&features, &ability) {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_synergy_justified"));
         }
 
@@ -950,22 +950,80 @@ mod tests {
     }
 
     #[test]
-    fn cedh_bracket_stands_down_self_cost() {
-        // Same trivial sac-for-lifegain that rejects in a Core deck is stood
-        // down at the Cedh bracket.
+    fn cedh_bracket_does_not_waive_a_trivial_sacrifice_cost() {
+        // Bracket classification is deck metadata, not a payment exemption:
+        // a trivial sacrifice activation remains a real loss in CEDH too.
         let mut state = GameState::new_two_player(42);
         creature(&mut state, AI, "Bear", 2, 2);
+        creature(&mut state, AI, "Diregraf Captain", 2, 2);
         let source = source_with(
             &mut state,
-            "High Market",
-            &[CoreType::Land],
+            "Spark Reaper",
+            &[CoreType::Creature],
             activated(gain_life(1), sac_creature_cost()),
         );
-        let features = features_with(0.0, 0.0, 0.0, Vec::new(), CommanderBracketTier::Cedh);
-        assert_neutral(
-            &verdict_for(&state, source, features),
-            "self_cost_synergy_justified",
+        let source_object = state
+            .objects
+            .get_mut(&source)
+            .expect("Spark Reaper source exists");
+        source_object.power = Some(1);
+        source_object.toughness = Some(1);
+        let features = features_with(
+            0.0,
+            0.0,
+            0.0,
+            vec!["Diregraf Captain".to_string()],
+            CommanderBracketTier::Cedh,
         );
+        assert_reject(
+            &verdict_for(&state, source, features),
+            "self_cost_trivial_benefit",
+        );
+    }
+
+    #[test]
+    fn cedh_aristocrats_never_waives_a_sacrifice_leaf_direct_or_nested() {
+        let features = features_with(
+            0.0,
+            1.0,
+            0.0,
+            vec!["Diregraf Captain".to_string()],
+            CommanderBracketTier::Cedh,
+        );
+        let costs = [
+            sac_creature_cost(),
+            AbilityCost::Composite {
+                costs: vec![AbilityCost::Tap, sac_creature_cost()],
+            },
+            AbilityCost::OneOf {
+                costs: vec![
+                    sac_creature_cost(),
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            },
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::PerCounter {
+                        counter: CounterType::Age,
+                        target: TargetFilter::SelfRef,
+                        base: Box::new(sac_creature_cost()),
+                    },
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            },
+        ];
+
+        for cost in costs {
+            let ability = activated(gain_life(1), cost);
+            assert!(
+                !synergy_justifies_self_cost(&features, &ability),
+                "a sacrifice leaf must remain priced even in a CEDH aristocrats deck"
+            );
+        }
     }
 
     // --- Row 6: discard-to-grant no-threat rejected -----------------------

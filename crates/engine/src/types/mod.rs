@@ -67,7 +67,8 @@ pub use mana::{
     ManaSourcePenalty, ManaSourceSelection, ManaType, ManaUnit, SpellMeta, TapsForManaSelection,
 };
 pub use match_config::{
-    BetweenGamesPrompt, DeckCardCount, MatchConfig, MatchPhase, MatchScore, MatchType,
+    BetweenGamesPrompt, DeckCardCount, MatchConfig, MatchForfeitCause, MatchForfeitResult,
+    MatchPhase, MatchScore, MatchType,
 };
 pub use phase::Phase;
 pub use player::{Player, PlayerId};

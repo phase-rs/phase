@@ -4,7 +4,10 @@ use std::sync::Arc;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
-use engine::ai_support::build_decision_context;
+use engine::ai_support::{
+    build_decision_context_for_semantic_owner, targeted_exchange_verdict,
+    validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
+};
 use engine::types::ability::{
     AbilityDefinition, ContinuousModification, Duration, Effect, StaticDefinition, TargetFilter,
 };
@@ -152,6 +155,9 @@ pub fn choose_action_with_session(
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
 ) -> Option<GameAction> {
+    let contract = AiDecisionContract::issue(state, ai_player);
+    let exact_contract_action =
+        |action: GameAction| contract.contains_action(state, &action).then_some(action);
     // CR 103.5: For simultaneous mulligan states, the AI controller's only
     // job is to act on behalf of `ai_player`. If `ai_player` is not in the
     // pending set, there is nothing to choose — return None so the WASM
@@ -171,7 +177,7 @@ pub fn choose_action_with_session(
     }
 
     if let Some(action) = random_card_predicate_guess(state, ai_player, rng) {
-        return Some(action);
+        return exact_contract_action(action);
     }
 
     // CR 702.104a: Tribute prompt — the AI's pay/decline decision has a
@@ -179,7 +185,7 @@ pub fn choose_action_with_session(
     // policy registry. Punishment value vs counter value.
     if matches!(state.waiting_for, WaitingFor::TributeChoice { .. }) {
         if let Some(decision) = crate::tribute_eval::decide(state) {
-            return Some(GameAction::DecideOptionalEffect {
+            return exact_contract_action(GameAction::DecideOptionalEffect {
                 accept: decision.accept(),
             });
         }
@@ -196,7 +202,23 @@ pub fn choose_action_with_session(
     if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
         let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
         if let Some(action) = deterministic_choice(state, ai_player, config, &[], Some(&context)) {
-            return Some(action);
+            return exact_contract_action(action);
+        }
+    }
+
+    // CR 103.5 + TL:R 906.6: simultaneous opening-hand bottoming is resolved
+    // for one semantic owner at a time. Generic candidate validation applies
+    // actions as the first pending seat, so it cannot validate a later seat's
+    // independently sized selection. The deterministic branch uses that
+    // owner's bounded hand directly; the issued contract still verifies the
+    // selected card set before it can leave the AI.
+    if matches!(
+        state.waiting_for,
+        WaitingFor::MulliganDecision { .. } | WaitingFor::OpeningHandBottomCards { .. }
+    ) {
+        let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
+        if let Some(action) = deterministic_choice(state, ai_player, config, &[], Some(&context)) {
+            return exact_contract_action(action);
         }
     }
 
@@ -211,21 +233,22 @@ pub fn choose_action_with_session(
     if let WaitingFor::OpponentGuess { ref options, .. } = state.waiting_for {
         use rand::seq::IndexedRandom;
         if let Some(choice) = options.choose(rng) {
-            return Some(GameAction::ChooseOption {
+            return exact_contract_action(GameAction::ChooseOption {
                 choice: choice.clone(),
             });
         }
     }
 
     if let Some(action) = fast_priority_action(state, ai_player, config, session) {
-        return Some(action);
+        return exact_contract_action(action);
     }
 
     let mut scored = score_candidates_with_session(state, ai_player, config, session);
     if scored.is_empty() {
-        // No valid candidates from search — fall back to a safe escape action
-        // so the game never deadlocks waiting for the AI.
-        return fallback_action(state, config);
+        // so the game never deadlocks waiting for the AI. Root casts and
+        // activations were already rejected before scoring; applying that
+        // preference to the escape action can turn a legal recovery into None.
+        return fallback_action(state, config).and_then(exact_contract_action);
     }
     // Issue #4878: total order before softmax so equal scores never depend on
     // HashSet/HashMap allocation order.
@@ -238,7 +261,7 @@ pub fn choose_action_with_session(
     if let Some(action) = &chosen {
         emit_decision_trace(state, ai_player, config, action, session);
     }
-    chosen
+    chosen.and_then(exact_contract_action)
 }
 
 fn random_card_predicate_guess(
@@ -292,10 +315,37 @@ fn fast_priority_action(
         return Some(GameAction::PassPriority);
     }
 
-    let actions = engine::ai_support::flat_priority_actions(state);
+    let actions: Vec<_> = engine::ai_support::flat_priority_actions(state)
+        .into_iter()
+        .filter(|action| root_action_is_allowed(state, ai_player, action))
+        .collect();
     low_value_priority_pass_from_actions(state, ai_player, &actions).or_else(|| {
         large_board_main_phase_fast_action_from_actions(state, ai_player, &actions, config, session)
     })
+}
+
+/// Keep direct priority shortcuts under the same pre-cast exchange gate as the
+/// scored candidate pipeline.  The engine candidate is recovered by semantic
+/// owner so replay keeps its authenticated actor instead of fabricating one.
+fn root_action_is_allowed(state: &GameState, ai_player: PlayerId, action: &GameAction) -> bool {
+    if !matches!(
+        action,
+        GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
+    ) {
+        return true;
+    }
+    validated_candidate_actions_for_semantic_owner(state, ai_player)
+        .into_iter()
+        .find(|candidate| candidate.action.cmp_stable(action).is_eq())
+        .map(|candidate| {
+            !matches!(
+                targeted_exchange_verdict(state, &candidate),
+                TargetedExchangeVerdict::Reject
+            )
+        })
+        // No exact authority is fail-open; the engine preview never authorizes
+        // a rejection from a reconstructed actor/owner pair.
+        .unwrap_or(true)
 }
 
 fn large_board_main_phase_has_no_development_sources(
@@ -584,7 +634,7 @@ fn large_board_main_phase_fast_action_from_actions(
     // the tactical registry so land sequencing and other safety policies still
     // participate. Spell mana value remains the deterministic baseline that
     // this shortcut historically used; policies may adjust or reject it.
-    let decision = build_decision_context(state);
+    let decision = build_decision_context_for_semantic_owner(state, ai_player);
     let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
     let policies = PolicyRegistry::shared();
 
@@ -656,7 +706,7 @@ fn emit_decision_trace(
         return;
     }
 
-    let ctx = build_decision_context(state);
+    let ctx = build_decision_context_for_semantic_owner(state, ai_player);
     let candidate = ctx.candidates.iter().find(|c| c.action == *action);
     let Some(candidate) = candidate else {
         // The chosen action was produced by a deterministic path (combat AI,
@@ -2038,7 +2088,7 @@ fn score_candidates_core(
         return vec![(action, 1.0)];
     }
 
-    let ctx = build_decision_context(state);
+    let ctx = build_decision_context_for_semantic_owner(state, ai_player);
     #[cfg(test)]
     let policies = session
         .policy_registry_override
@@ -2078,6 +2128,15 @@ fn score_candidates_core(
             .map(|candidate| candidate.candidate.clone())
             .collect(),
     );
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .filter(|candidate| {
+            !matches!(
+                targeted_exchange_verdict(state, candidate),
+                TargetedExchangeVerdict::Reject
+            )
+        })
+        .collect();
     let gated = gate_candidates(
         state,
         &ctx,
@@ -3260,14 +3319,16 @@ pub fn softmax_select_pairs(
 
 #[cfg(test)]
 mod tests {
+    use engine::ai_support::build_decision_context;
+
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::scenario::{GameScenario, P0};
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification,
-        Duration, Effect, EffectKind, ManaProduction, QuantityExpr, ResolvedAbility,
-        StaticDefinition, TargetFilter, TargetRef, TypedFilter,
+        ControllerRef, Duration, Effect, EffectKind, ManaProduction, PtValue, QuantityExpr,
+        ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
     };
     use engine::types::ability::{ChoiceType, ChosenAttribute};
     use engine::types::card_type::CoreType;
@@ -3588,6 +3649,354 @@ mod tests {
             generic: generic_cost,
         };
         id
+    }
+
+    const SELF_DESTRUCT_ORACLE: &str =
+        "Target creature you control deals X damage to any other target and X damage to itself, where X is its power.";
+
+    fn self_destruct_state(source_power: i32, recipient_power: i32) -> (GameState, ObjectId) {
+        use engine::parser::oracle::parse_oracle_text;
+
+        let mut state = make_state();
+        add_mana(&mut state, P0, ManaType::Red, 1);
+        let spell = add_spell_to_hand(&mut state, P0, "Self-Destruct", 1);
+        let parsed = parse_oracle_text(
+            SELF_DESTRUCT_ORACLE,
+            "Self-Destruct",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        *Arc::make_mut(&mut state.objects.get_mut(&spell).unwrap().abilities) = parsed.abilities;
+        add_creature(&mut state, P0, source_power, source_power);
+        add_creature(&mut state, PlayerId(1), recipient_power, recipient_power);
+        (state, spell)
+    }
+
+    fn fight_spell_state(
+        first_controller: ControllerRef,
+        second_controller: ControllerRef,
+        first_fighter: (PlayerId, i32, i32),
+        second_fighter: (PlayerId, i32, i32),
+        destroy_second_fighter_after_fight: bool,
+    ) -> (GameState, ObjectId) {
+        let mut state = make_state();
+        add_mana(&mut state, P0, ManaType::Red, 1);
+        let spell = add_spell_to_hand(&mut state, P0, "Fight Test", 1);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Fight {
+                subject: TypedFilter::creature().controller(first_controller).into(),
+                target: TypedFilter::creature().controller(second_controller).into(),
+            },
+        );
+        if destroy_second_fighter_after_fight {
+            ability = ability.sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::ParentTargetSlot { index: 1 },
+                    cant_regenerate: false,
+                },
+            ));
+        }
+        Arc::make_mut(&mut state.objects.get_mut(&spell).unwrap().abilities).push(ability);
+        add_creature(
+            &mut state,
+            first_fighter.0,
+            first_fighter.1,
+            first_fighter.2,
+        );
+        add_creature(
+            &mut state,
+            second_fighter.0,
+            second_fighter.1,
+            second_fighter.2,
+        );
+        (state, spell)
+    }
+
+    fn root_cast_candidate(state: &GameState, spell: ObjectId) -> CandidateAction {
+        validated_candidate_actions_for_semantic_owner(state, P0)
+            .into_iter()
+            .find(|candidate| {
+                matches!(&candidate.action, GameAction::CastSpell { object_id, .. } if *object_id == spell)
+            })
+            .expect("the reducer must issue the test spell root cast")
+    }
+
+    struct RootScoringWitnessPolicy(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl TacticalPolicy for RootScoringWitnessPolicy {
+        fn id(&self) -> PolicyId {
+            PolicyId::PaymentSelection
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            &[DecisionKind::CastSpell]
+        }
+
+        fn activation(&self, _: &DeckFeatures, _: &GameState, _: PlayerId) -> Option<f32> {
+            Some(1.0)
+        }
+
+        fn verdict(&self, _: &PolicyContext<'_>) -> PolicyVerdict {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            PolicyVerdict::neutral(PolicyReason::new("root_scoring_witness"))
+        }
+    }
+
+    #[test]
+    fn choose_action_rejects_bad_self_destruct_before_cast_and_keeps_source_in_hand() {
+        let (state, spell) = self_destruct_state(2, 3);
+        let candidate = validated_candidate_actions_for_semantic_owner(&state, P0)
+            .into_iter()
+            .find(|candidate| {
+                matches!(&candidate.action, GameAction::CastSpell { object_id, .. } if *object_id == spell)
+            })
+            .expect("the reducer must issue the Self-Destruct root cast");
+        assert_eq!(
+            targeted_exchange_verdict(&state, &candidate),
+            TargetedExchangeVerdict::Reject,
+            "the authenticated auto-paid root path must reach the bound stack ability and reject the 2/2 into 3/3 exchange"
+        );
+        let config = create_config(AiDifficulty::Easy, Platform::Native);
+        let scored = score_candidates(&state, P0, &config);
+        assert!(
+            scored.iter().all(|(action, _)| {
+                !matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell)
+            }),
+            "the bad 2/2 into 3/3 root cast must be removed before scoring"
+        );
+
+        let mut rng = SmallRng::seed_from_u64(7);
+        let action = choose_action(&state, P0, &config, &mut rng).expect("AI has a pass action");
+        assert!(
+            !matches!(action, GameAction::CastSpell { object_id, .. } if object_id == spell),
+            "choose_action must not announce the bad Self-Destruct cast"
+        );
+        let mut applied = state.clone();
+        engine::game::engine::apply_as_current(&mut applied, action)
+            .expect("chosen action must remain reducer-legal");
+        assert_eq!(applied.objects[&spell].zone, Zone::Hand);
+    }
+
+    #[test]
+    fn normal_root_scoring_rejects_bad_targeted_exchange_before_tactical_policy() {
+        let (mut state, rejected_spell) = self_destruct_state(2, 3);
+        let benign_spell = add_spell_to_hand(&mut state, P0, "Benign Life Gain", 1);
+        Arc::make_mut(&mut state.objects.get_mut(&benign_spell).unwrap().abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ),
+        );
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut session = AiSession::from_game(&state);
+        session.policy_registry_override =
+            Some(Arc::new(PolicyRegistry::for_tests(vec![Box::new(
+                RootScoringWitnessPolicy(Arc::clone(&calls)),
+            )])));
+        let session = Arc::new(session);
+        let mut config = create_config(AiDifficulty::Easy, Platform::Native);
+        config.search.enabled = false;
+
+        assert_eq!(
+            fast_priority_action(&state, P0, &config, &session),
+            None,
+            "the additional legal cast must keep this decision on the normal scoring path"
+        );
+        assert_eq!(
+            targeted_exchange_verdict(&state, &root_cast_candidate(&state, rejected_spell)),
+            TargetedExchangeVerdict::Reject,
+            "the 2/2 source into the opposing 3/3 is the root candidate the scoring gateway must veto"
+        );
+
+        let scored = score_candidates_core(&state, P0, &config, &session, None);
+        assert!(
+            scored.iter().any(|(action, _)| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == benign_spell)
+            }),
+            "the benign cast reaches normal scoring"
+        );
+        assert!(
+            scored.iter().all(|(action, _)| {
+                !matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == rejected_spell)
+            }),
+            "the rejected targeted exchange must be absent from normal scoring"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "only the benign cast reaches tactical policy scoring after root validation"
+        );
+    }
+
+    #[test]
+    fn rejected_targeted_exchange_still_uses_legal_fallback_when_scoring_is_empty() {
+        let (state, _) = self_destruct_state(2, 3);
+        let mut config = create_config(AiDifficulty::Easy, Platform::Native);
+        config.search.enabled = false;
+        let session = Arc::new(AiSession::from_game(&state));
+        let mut rng = SmallRng::seed_from_u64(7);
+
+        let scored = score_candidates_core(&state, P0, &config, &session, None);
+        assert!(
+            scored
+                .iter()
+                .all(|(action, _)| !matches!(action, GameAction::CastSpell { .. })),
+            "the adverse cast must be removed before scoring, got {scored:#?}"
+        );
+
+        let action = choose_action_with_session(&state, P0, &config, &mut rng, &session)
+            .expect("a legal fallback must prevent the AI from deadlocking");
+        assert_eq!(action, GameAction::PassPriority);
+    }
+
+    #[test]
+    fn self_destruct_trade_remains_a_root_candidate() {
+        let (state, spell) = self_destruct_state(3, 3);
+        let config = create_config(AiDifficulty::Easy, Platform::Native);
+        let scored = score_candidates(&state, P0, &config);
+        assert!(
+            scored.iter().any(|(action, _)| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell)
+            }),
+            "the 3/3 trade must stay available; the veto only removes a source-loss whiff"
+        );
+    }
+
+    #[test]
+    fn self_destruct_lethal_player_target_keeps_root_candidate() {
+        let (mut state, spell) = self_destruct_state(2, 3);
+        state.players[PlayerId(1).0 as usize].life = 2;
+        let candidate = validated_candidate_actions_for_semantic_owner(&state, P0)
+            .into_iter()
+            .find(|candidate| {
+                matches!(&candidate.action, GameAction::CastSpell { object_id, .. } if *object_id == spell)
+            })
+            .expect("the reducer must issue the Self-Destruct root cast");
+
+        assert_eq!(
+            targeted_exchange_verdict(&state, &candidate),
+            TargetedExchangeVerdict::Allow,
+            "a legal lethal player target must keep the root cast available"
+        );
+    }
+
+    #[test]
+    fn targeted_exchange_rejects_fight_when_ai_two_two_loses_to_enemy_three_three() {
+        let (state, spell) = fight_spell_state(
+            ControllerRef::You,
+            ControllerRef::Opponent,
+            (P0, 2, 2),
+            (PlayerId(1), 3, 3),
+            false,
+        );
+        let candidate = root_cast_candidate(&state, spell);
+
+        assert_eq!(
+            targeted_exchange_verdict(&state, &candidate),
+            TargetedExchangeVerdict::Reject,
+            "the root gate must reject a fight where the AI creature dies and the enemy survives"
+        );
+        let config = create_config(AiDifficulty::Easy, Platform::Native);
+        assert!(
+            score_candidates(&state, P0, &config).iter().all(|(action, _)| {
+                !matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell)
+            }),
+            "the rejected fight root must not reach policy scoring"
+        );
+    }
+
+    #[test]
+    fn targeted_exchange_allows_fight_trade() {
+        let (state, spell) = fight_spell_state(
+            ControllerRef::You,
+            ControllerRef::Opponent,
+            (P0, 3, 3),
+            (PlayerId(1), 3, 3),
+            false,
+        );
+
+        assert_eq!(
+            targeted_exchange_verdict(&state, &root_cast_candidate(&state, spell)),
+            TargetedExchangeVerdict::Allow,
+            "a fight trade is not the one-sided loss that this safety gate owns"
+        );
+    }
+
+    #[test]
+    fn targeted_exchange_allows_reversed_fight_target_order_when_ai_fighter_wins() {
+        let (state, spell) = fight_spell_state(
+            ControllerRef::Opponent,
+            ControllerRef::You,
+            (PlayerId(1), 2, 2),
+            (P0, 3, 3),
+            false,
+        );
+
+        assert_eq!(
+            targeted_exchange_verdict(&state, &root_cast_candidate(&state, spell)),
+            TargetedExchangeVerdict::Allow,
+            "control ownership, rather than target order, must identify the AI fighter"
+        );
+    }
+
+    #[test]
+    fn targeted_exchange_judges_fight_before_later_removal_effect() {
+        let (state, spell) = fight_spell_state(
+            ControllerRef::You,
+            ControllerRef::Opponent,
+            (P0, 2, 2),
+            (PlayerId(1), 3, 3),
+            true,
+        );
+
+        assert_eq!(
+            targeted_exchange_verdict(&state, &root_cast_candidate(&state, spell)),
+            TargetedExchangeVerdict::Reject,
+            "a later removal instruction must not turn an otherwise losing fight into an allowed exchange"
+        );
+    }
+
+    #[test]
+    fn targeted_exchange_replays_prefix_pump_before_judging_fight() {
+        let mut state = make_state();
+        add_mana(&mut state, P0, ManaType::Red, 1);
+        let spell = add_spell_to_hand(&mut state, P0, "Pump Then Fight", 1);
+        let fight = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Fight {
+                subject: TargetFilter::ParentTarget,
+                target: TypedFilter::creature()
+                    .controller(ControllerRef::Opponent)
+                    .into(),
+            },
+        );
+        let ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Pump {
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
+                target: TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .into(),
+            },
+        )
+        .sub_ability(fight);
+        Arc::make_mut(&mut state.objects.get_mut(&spell).unwrap().abilities).push(ability);
+        add_creature(&mut state, P0, 2, 2);
+        add_creature(&mut state, PlayerId(1), 3, 3);
+
+        assert_eq!(
+            targeted_exchange_verdict(&state, &root_cast_candidate(&state, spell)),
+            TargetedExchangeVerdict::Allow,
+            "the prefix +2/+2 makes the AI 2/2 survive its subsequent fight with a 3/3"
+        );
     }
 
     fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
