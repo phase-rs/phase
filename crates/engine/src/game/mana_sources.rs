@@ -2348,7 +2348,7 @@ fn land_mana_options(
         gates,
     );
 
-    // CR 602.5: Legacy fallback for basic-land subtype-only objects that
+    // CR 305.6 + CR 602.5: Legacy fallback for basic-land subtype-only objects that
     // carry NO EXPLICIT mana ability at all (a nonbasic granted a basic land
     // type by Urborg/Blood Moon-class effects with no accompanying
     // `Effect::Mana` grant). This must NOT fire merely because
