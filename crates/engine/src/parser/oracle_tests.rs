@@ -1,6 +1,10 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
-use crate::parser::oracle_ir::doc::{UnsupportedAbilityCategory, UnsupportedAbilityIr};
+use crate::parser::oracle_ir::doc::{
+    OracleDocBuilder, OracleNodeIr, OracleSourceSpan, RelationSynthesisIr,
+    UnsupportedAbilityCategory, UnsupportedAbilityIr,
+};
+use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment, DoorLockOp,
 };
@@ -34,6 +38,239 @@ fn unsupported_ability_ir_lowering_preserves_generic_and_structural_payloads() {
         Some("Effect sentence candidate but line failed effect parser: unsupported line")
     );
     assert_eq!(structural.description.as_deref(), Some("unsupported line"));
+}
+
+/// A forced diagonal for CopyChosenHost provenance. Two eligible chooser gaps
+/// and two CopyChosen statics prove the document relation binds the first
+/// source-order pair exactly once; the later copy ability proves the transformed
+/// first chooser still consumes printed ability slot 0.
+#[test]
+fn copy_chosen_host_relation_synthesizes_only_the_selected_source_and_preserves_slots() {
+    const FIRST_CHOOSER: &str = "As this Aura enters, choose a creature.";
+    const FIRST_CHOOSER_DISPLAY: &str = "structured chooser display description";
+    const SECOND_CHOOSER: &str = "As this Aura enters, choose a nonland permanent.";
+    const LATER_ABILITY: &str =
+        "{2}, {T}: This permanent becomes a copy of target creature, except it has this ability.";
+    let oracle = format!(
+        "{FIRST_CHOOSER}\n{SECOND_CHOOSER}\ncopy static one\ncopy static two\n{LATER_ABILITY}"
+    );
+    assert_ne!(
+        FIRST_CHOOSER, FIRST_CHOOSER_DISPLAY,
+        "the fixture must distinguish legacy fragment from display description"
+    );
+    let mut builder = OracleDocBuilder::new();
+    let first = builder.begin_item(
+        OracleSourceSpan::exact(0, 0, 0, FIRST_CHOOSER.len(), 0),
+        Some(FIRST_CHOOSER),
+    );
+    let first_id = first.id();
+    builder
+        .emit(
+            first,
+            OracleNodeIr::Unsupported {
+                // Structured residuals intentionally keep a display description
+                // distinct from the legacy `Effect::Unimplemented` fragment.
+                // CopyChosenHost must retain the latter, matching the removed
+                // post-fold lowering path exactly.
+                unsupported: UnsupportedAbilityIr::new(
+                    UnsupportedAbilityCategory::EffectStructure,
+                    FIRST_CHOOSER,
+                    FIRST_CHOOSER_DISPLAY,
+                ),
+                min_x_value: 0,
+            },
+        )
+        .unwrap();
+    let second_start = FIRST_CHOOSER.len() + 1;
+    let second = builder.begin_item(
+        OracleSourceSpan::exact(1, 1, second_start, second_start + SECOND_CHOOSER.len(), 0),
+        Some(SECOND_CHOOSER),
+    );
+    let second_id = second.id();
+    builder
+        .emit(
+            second,
+            OracleNodeIr::Unsupported {
+                unsupported: UnsupportedAbilityIr::unknown(SECOND_CHOOSER),
+                min_x_value: 0,
+            },
+        )
+        .unwrap();
+    let first_static_start = second_start + SECOND_CHOOSER.len() + 1;
+    let first_static = builder.begin_item(
+        OracleSourceSpan::exact(2, 2, first_static_start, first_static_start + 15, 0),
+        Some("copy static one"),
+    );
+    let first_static_id = first_static.id();
+    builder
+        .emit(
+            first_static,
+            OracleNodeIr::Static(StaticIr::from_definition(
+                "copy static one",
+                StaticDefinition::continuous()
+                    .modifications(vec![ContinuousModification::CopyChosen]),
+            )),
+        )
+        .unwrap();
+    let second_static_start = first_static_start + 16;
+    let second_static = builder.begin_item(
+        OracleSourceSpan::exact(3, 3, second_static_start, second_static_start + 15, 0),
+        Some("copy static two"),
+    );
+    let second_static_id = second_static.id();
+    builder
+        .emit(
+            second_static,
+            OracleNodeIr::Static(StaticIr::from_definition(
+                "copy static two",
+                StaticDefinition::continuous()
+                    .modifications(vec![ContinuousModification::CopyChosen]),
+            )),
+        )
+        .unwrap();
+    let later_start = second_static_start + 16;
+    let later = builder.begin_item(
+        OracleSourceSpan::exact(4, 4, later_start, later_start + LATER_ABILITY.len(), 0),
+        Some(LATER_ABILITY),
+    );
+    builder
+        .emit(
+            later,
+            OracleNodeIr::PreLoweredSpell(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::BecomeCopy {
+                    target: TargetFilter::Any,
+                    recipient: TargetFilter::SelfRef,
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: vec![
+                        ContinuousModification::RetainPrintedAbilityFromSource {
+                            source_ability_index: 0,
+                        },
+                    ],
+                },
+            )),
+        )
+        .unwrap();
+
+    let document = builder.finish(&oracle, "Probe", vec![]);
+    let selected_source = document
+        .items
+        .iter()
+        .find(|item| item.id == first_id)
+        .expect("selected chooser source item before finalization")
+        .source
+        .clone();
+    let mut document = finalize_document_relations(document, &[]);
+    assert_eq!(
+        document.relations.len(),
+        1,
+        "only the first chooser/static pair binds"
+    );
+    assert!(matches!(
+        document.relations.as_slice(),
+        [DocumentRelationIr::LinkedChoice(LinkedChoiceKind::CopyChosenHost {
+            chooser,
+            copy_static,
+            filter: TargetFilter::Typed(filter),
+            description,
+        })] if *chooser == first_id
+            && *copy_static == first_static_id
+            && filter == &TypedFilter::creature()
+            && description == FIRST_CHOOSER
+    ));
+    let selected = document
+        .items
+        .iter()
+        .find(|item| item.id == first_id)
+        .expect("selected chooser source item");
+    assert!(matches!(
+        &selected.node,
+        OracleNodeIr::RelationSynthesis(RelationSynthesisIr {
+            filter: TargetFilter::Typed(filter),
+            description,
+            copy_static,
+        }) if filter == &TypedFilter::creature()
+            && description == FIRST_CHOOSER
+            && *copy_static == first_static_id
+    ));
+    assert_eq!(
+        selected.source, selected_source,
+        "finalization changes only the node; source identity, span, fragment, and order remain exact"
+    );
+    let unselected = document
+        .items
+        .iter()
+        .find(|item| item.id == second_id)
+        .expect("unselected chooser source item");
+    assert!(matches!(&unselected.node, OracleNodeIr::Unsupported { .. }));
+    let second_static = document
+        .items
+        .iter()
+        .find(|item| item.id == second_static_id)
+        .expect("second CopyChosen static source item");
+    assert!(matches!(&second_static.node, OracleNodeIr::Static(_)));
+
+    let parsed = lower_oracle_ir(&mut document);
+    assert!(
+        parsed.replacements.iter().any(|replacement| {
+            replacement.event == ReplacementEvent::Moved
+                && replacement.description.as_deref() == Some(FIRST_CHOOSER)
+                && matches!(
+                    replacement.execute.as_ref().map(|execute| execute.effect.as_ref()),
+                    Some(Effect::ChoosePermanent {
+                        filter: TargetFilter::Typed(filter),
+                    }) if filter == &TypedFilter::creature()
+                )
+        }),
+        "selected source must lower from the legacy fragment to Moved/ChoosePermanent with that exact description"
+    );
+    assert!(
+        parsed.abilities.iter().any(|ability| {
+            ability
+                .effect
+                .unimplemented_description()
+                .is_some_and(|description| description == SECOND_CHOOSER)
+        }),
+        "unselected chooser remains an explicit, auditable unsupported ability"
+    );
+    assert!(
+        document.diagnostics.iter().all(|diagnostic| {
+            !matches!(
+                diagnostic,
+                OracleDiagnostic::SwallowedClause { detector, items, .. }
+                    if detector == "Replacement" && items.contains(&first_id)
+            )
+        }),
+        "the selected source's lowered replacement must satisfy the post-lowering audit"
+    );
+    let retained_slots = parsed
+        .abilities
+        .iter()
+        .flat_map(|ability| match ability.effect.as_ref() {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => additional_modifications
+                .iter()
+                .filter_map(|modification| {
+                    let ContinuousModification::RetainPrintedAbilityFromSource {
+                        source_ability_index,
+                    } = modification
+                    else {
+                        return None;
+                    };
+                    Some(*source_ability_index)
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained_slots,
+        vec![2],
+        "the synthesized chooser is absent from result.abilities but still occupies printed slot 0"
+    );
 }
 
 #[test]

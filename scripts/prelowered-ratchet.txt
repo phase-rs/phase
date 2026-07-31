@@ -25,3 +25,7 @@ crates/engine/src/parser/oracle_ir/feature.rs   7
 
 # Prose references in the T1 witness-corpus comment.
 crates/engine/src/parser/oracle_ir/snapshot_tests.rs   2
+
+# Test-only fixture for relation synthesis: the later ability proves the
+# source item's historical printed slot remains occupied after synthesis.
+crates/engine/src/parser/oracle_tests.rs               1
