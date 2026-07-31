@@ -200,11 +200,14 @@ fn swarm_witness_inner(
     // CR 509.1a: The reducer may have submitted the unique empty declaration
     // while advancing from the attackers step. That is a complete defender
     // choice, not an unsupported prompt.
-    let blockers_auto_declared = after_attack.combat.as_ref().is_some_and(|combat| {
-        combat.blockers_declared_by.contains(&defending_player)
-    }) || (after_attack.phase == Phase::DeclareBlockers
-        && matches!(after_attack.waiting_for, WaitingFor::Priority { .. })
-        && combat::get_valid_block_targets_for_player(&after_attack, defending_player).is_empty());
+    let blockers_auto_declared = after_attack
+        .combat
+        .as_ref()
+        .is_some_and(|combat| combat.blockers_declared_by.contains(&defending_player))
+        || (after_attack.phase == Phase::DeclareBlockers
+            && matches!(after_attack.waiting_for, WaitingFor::Priority { .. })
+            && combat::get_valid_block_targets_for_player(&after_attack, defending_player)
+                .is_empty());
 
     let (valid_blockers, valid_targets) = match &after_attack.waiting_for {
         WaitingFor::DeclareBlockers {
