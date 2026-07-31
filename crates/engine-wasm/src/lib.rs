@@ -178,10 +178,12 @@ impl AiProposalRegistry {
 
     fn insert(&mut self, contract: AiDecisionContract) -> String {
         self.serial = self.serial.wrapping_add(1);
-        // A newer proposal supersedes every earlier token in this authority
-        // generation. Retaining old candidate domains would let stale retries
-        // grow this long-lived worker registry without bound.
-        self.proposals.clear();
+        // A newer proposal supersedes this pending player's earlier token, but
+        // concurrent decisions (such as simultaneous mulligans) each retain
+        // their own bounded capability. There can be at most one live token
+        // per semantic owner in this authority generation.
+        self.proposals
+            .retain(|_, proposal| proposal.contract.semantic_owner != contract.semantic_owner);
         let token = format!(
             "ai-{}-{}-{:016x}",
             self.generation,
@@ -2893,6 +2895,17 @@ mod tests {
         assert_eq!(
             proposal_outcome(&p0_token, PlayerId(1), &keep)["status"],
             "stale"
+        );
+
+        let p1_token = install_issued_candidate(state.clone(), PlayerId(1), &keep);
+        assert!(
+            AI_PROPOSALS.with(|registry| registry.borrow().proposal(&p1_token).is_some()),
+            "each simultaneous decision keeps one independently-live proposal"
+        );
+        assert_eq!(
+            proposal_outcome(&p0_token, PlayerId(0), &keep)["status"],
+            "applied",
+            "issuing a proposal for another simultaneous decision must not revoke this one"
         );
 
         let p1_token = install_issued_candidate(state, PlayerId(1), &keep);
