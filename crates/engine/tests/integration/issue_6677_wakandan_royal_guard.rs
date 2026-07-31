@@ -1,18 +1,22 @@
-//! Regression for issue #6677: Wakandan Royal Guard's conditional counter
-//! override must keep using the creature chosen for its ETB trigger.
+//! Regressions for issue #6677: conditional counter overrides must retain the
+//! object established by their antecedent instruction.
 //!
 //! The real Oracle text first targets a creature, then says "put two +1/+1
 //! counters on it instead" when that creature is another Hero. The override's
 //! bare pronoun must resolve to the original target, never Wakandan Royal Guard.
+//! Emiel the Blessed covers the parallel trigger-event anaphor path.
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
 const WAKANDAN_ROYAL_GUARD_ORACLE: &str = "Vigilance\n\
     When this creature enters, put a +1/+1 counter on target creature. If that creature is another Hero, put two +1/+1 counters on it instead.";
+
+const EMIEL_THE_BLESSED_ORACLE: &str = "{3}: Exile another target creature you control, then return it to the battlefield under its owner's control.\n\
+    Whenever another creature you control enters, you may pay {G/W}. If you do, put a +1/+1 counter on it. If it's a Unicorn, put two +1/+1 counters on it instead. ({G/W} can be paid with either {G} or {W}.)";
 
 fn p1p1_counters(state: &engine::types::game_state::GameState, object: ObjectId) -> u32 {
     state
@@ -100,5 +104,52 @@ fn wakandan_royal_guard_keeps_one_counter_on_a_nonhero_target() {
     assert_eq!(
         unrelated_hero, 0,
         "an unrelated Hero must not satisfy the selected-target condition"
+    );
+}
+
+/// CR 603.2 + CR 608.2c + CR 122.1: Emiel's first counter instruction and
+/// its Unicorn override both refer to the entering creature, represented by
+/// `TriggeringSource`. The unrelated Unicorn proves the event reference is
+/// preserved rather than widened to a battlefield filter.
+#[test]
+fn emiel_the_blessed_doubles_counters_on_the_entering_unicorn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let emiel = scenario
+        .add_creature_from_oracle(P0, "Emiel the Blessed", 4, 4, EMIEL_THE_BLESSED_ORACLE)
+        .with_subtypes(vec!["Angel"])
+        .id();
+    let unrelated_unicorn = scenario
+        .add_creature(P0, "Unrelated Unicorn", 2, 2)
+        .with_subtypes(vec!["Unicorn"])
+        .id();
+    let entering_unicorn = scenario
+        .add_creature_to_hand(P0, "Entering Unicorn", 2, 2)
+        .with_subtypes(vec!["Unicorn"])
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Green, emiel, false, vec![])],
+    );
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(entering_unicorn).accept_optional().resolve();
+
+    assert_eq!(
+        p1p1_counters(outcome.state(), entering_unicorn),
+        2,
+        "the entering Unicorn must receive Emiel's two +1/+1 counters"
+    );
+    assert_eq!(
+        p1p1_counters(outcome.state(), emiel),
+        0,
+        "Emiel must not receive the entering creature's counters"
+    );
+    assert_eq!(
+        p1p1_counters(outcome.state(), unrelated_unicorn),
+        0,
+        "an unrelated Unicorn must not satisfy the trigger-event anaphor"
     );
 }

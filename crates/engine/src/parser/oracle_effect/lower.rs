@@ -2412,11 +2412,18 @@ pub(super) fn rewrite_counter_instead_target_from_antecedent(
             *current_target = antecedent_target.clone();
             return true;
         }
-        if matches!(antecedent_target, TargetFilter::Typed(_)) {
-            *current_target = TargetFilter::ParentTarget;
-            return true;
+        match antecedent_target {
+            // A printed target is selected once for the root instruction; the
+            // override must inherit that selection rather than open a new slot.
+            TargetFilter::Typed(_) => *current_target = TargetFilter::ParentTarget,
+            // Event and parent anaphors already identify the antecedent object
+            // at resolution. Reuse the same reference for a bare "it" override.
+            TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::TriggeringSource => *current_target = antecedent_target.clone(),
+            _ => return false,
         }
-        return false;
+        return true;
     }
     // FIX A′ — CR 608.2c: an instead-override "Put a +1/+1 counter on it" whose antecedent
     // is a typed-targeted non-counter clause (Throw from the Saddle's "Target creature you
