@@ -15,10 +15,11 @@ use engine::types::ability::{
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastOfferKind, CompanionDeclaration, CostResume, GameState, ManaChoice, ManaChoicePrompt,
-    MulliganDecisionPhase, PendingMulliganAction, WaitingFor,
+    CastOfferKind, CompanionDeclaration, CostResume, GameState, ManaChoice, ManaChoiceContext,
+    ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction, WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
+use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -1715,35 +1716,13 @@ pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameActio
         }
 
         // Mana-related states: picking a color or paying mana.
-        WaitingFor::ChooseManaColor { choice, .. } => match choice {
-            ManaChoicePrompt::SingleColor { options } => {
-                options
-                    .first()
-                    .copied()
-                    .map(|color| GameAction::ChooseManaColor {
-                        choice: ManaChoice::SingleColor(color),
-                        count: 1,
-                    })
-            }
-            ManaChoicePrompt::Combination { options } => {
-                options.first().map(|combo| GameAction::ChooseManaColor {
-                    choice: ManaChoice::Combination(combo.clone()),
-                    count: 1,
-                })
-            }
-            ManaChoicePrompt::AnyCombination { count, options } => {
-                let combo = vec![
-                    options
-                        .first()
-                        .copied()
-                        .unwrap_or(engine::types::mana::ManaType::Colorless);
-                    *count
-                ];
-                Some(GameAction::ChooseManaColor {
-                    choice: ManaChoice::Combination(combo),
-                    count: 1,
-                })
-            }
+        WaitingFor::ChooseManaColor {
+            player,
+            choice,
+            context,
+        } => match context {
+            ManaChoiceContext::ResolvingEffect(_) => resolving_effect_mana_choice(state, *player),
+            ManaChoiceContext::ManaAbility(_) => canonical_mana_color_choice(choice),
         },
         WaitingFor::PayManaAbilityMana { options, .. } => {
             options.first().map(|plan| GameAction::PayManaAbilityMana {
@@ -2044,6 +2023,181 @@ fn priority_action_is_allowed_by_loop_guards(
     }
 }
 
+/// Rank an effect-produced mana prompt without taking over payment selection.
+///
+/// CR 106.3: The resolving effect, not the mana-payment path, produces this
+/// mana. Exact payment remains in the engine; this only ranks a legal color
+/// product from the complete prompt using known hand demand, then the AI
+/// player's known deck composition, then canonical `ManaType` order.
+fn resolving_effect_mana_choice(state: &GameState, ai_player: PlayerId) -> Option<GameAction> {
+    let WaitingFor::ChooseManaColor {
+        player,
+        choice,
+        context: ManaChoiceContext::ResolvingEffect(resume),
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    if *player != ai_player {
+        return None;
+    }
+
+    let hand_demand =
+        engine::game::mana_payment::compute_hand_color_demand(state, *player, resume.source_id);
+    let deck_demand = deck_color_demand(state, *player);
+    if !has_mana_demand(hand_demand, deck_demand) {
+        return canonical_mana_color_choice(choice);
+    }
+    match choice {
+        ManaChoicePrompt::SingleColor { options } => {
+            best_mana_type(options, hand_demand, deck_demand).map(|color| {
+                GameAction::ChooseManaColor {
+                    choice: ManaChoice::SingleColor(color),
+                    count: 1,
+                }
+            })
+        }
+        ManaChoicePrompt::Combination { options } => options
+            .iter()
+            .max_by_key(|colors| mana_product_rank(colors, hand_demand, deck_demand))
+            .map(|colors| GameAction::ChooseManaColor {
+                choice: ManaChoice::Combination(colors.clone()),
+                count: 1,
+            }),
+        ManaChoicePrompt::AnyCombination { count, options } => {
+            demand_saturating_mana_combination(options, *count, hand_demand, deck_demand).map(
+                |colors| GameAction::ChooseManaColor {
+                    choice: ManaChoice::Combination(colors),
+                    count: 1,
+                },
+            )
+        }
+    }
+}
+
+/// Preserve the engine-issued option order for a mana ability. Mana production
+/// is not payment planning: payment reachability remains the engine's
+/// responsibility when the ordinary candidate path is available.
+fn canonical_mana_color_choice(choice: &ManaChoicePrompt) -> Option<GameAction> {
+    let choice = match choice {
+        ManaChoicePrompt::SingleColor { options } => ManaChoice::SingleColor(*options.first()?),
+        ManaChoicePrompt::Combination { options } => {
+            ManaChoice::Combination(options.first()?.clone())
+        }
+        ManaChoicePrompt::AnyCombination { count, options } => {
+            ManaChoice::Combination(vec![*options.first()?; *count])
+        }
+    };
+    Some(GameAction::ChooseManaColor { choice, count: 1 })
+}
+
+fn has_mana_demand(hand_demand: [u32; 5], deck_demand: [u32; 5]) -> bool {
+    hand_demand.into_iter().any(|demand| demand > 0)
+        || deck_demand.into_iter().any(|demand| demand > 0)
+}
+
+/// Select a legal flexible-mana product without enumerating its exponential
+/// product space. Each unit maximizes marginal saturated hand demand, then
+/// marginal saturated deck demand, then canonical `ManaType` order.
+fn demand_saturating_mana_combination(
+    options: &[ManaType],
+    count: usize,
+    mut hand_demand: [u32; 5],
+    mut deck_demand: [u32; 5],
+) -> Option<Vec<ManaType>> {
+    (!options.is_empty()).then(|| {
+        let mut colors = Vec::with_capacity(count);
+        for _ in 0..count {
+            let color = best_mana_type(options, hand_demand, deck_demand)
+                .expect("non-empty prompt options always choose a mana type");
+            if let Some(index) = mana_type_index(color) {
+                hand_demand[index] = hand_demand[index].saturating_sub(1);
+                deck_demand[index] = deck_demand[index].saturating_sub(1);
+            }
+            colors.push(color);
+        }
+        colors.sort_unstable();
+        colors
+    })
+}
+
+fn deck_color_demand(state: &GameState, player: PlayerId) -> [u32; 5] {
+    let mut demand = [0; 5];
+    let Some(pool) = state.deck_pools.iter().find(|pool| pool.player == player) else {
+        return demand;
+    };
+    for entry in pool.current_main.iter() {
+        let card_demand =
+            engine::game::mana_payment::outer_cost_color_demand(&entry.card.mana_cost);
+        for (total, card) in demand.iter_mut().zip(card_demand) {
+            *total = total.saturating_add(card.saturating_mul(entry.count));
+        }
+    }
+    demand
+}
+
+fn best_mana_type(
+    options: &[ManaType],
+    hand_demand: [u32; 5],
+    deck_demand: [u32; 5],
+) -> Option<ManaType> {
+    options
+        .iter()
+        .copied()
+        .max_by_key(|color| mana_type_rank(*color, hand_demand, deck_demand))
+}
+
+fn mana_product_rank(
+    colors: &[ManaType],
+    hand_demand: [u32; 5],
+    deck_demand: [u32; 5],
+) -> (u32, u32, std::cmp::Reverse<Vec<ManaType>>) {
+    let mut produced = [0u32; 5];
+    for color in colors {
+        if let Some(index) = mana_type_index(*color) {
+            produced[index] = produced[index].saturating_add(1);
+        }
+    }
+    let hand = produced
+        .iter()
+        .zip(hand_demand)
+        .map(|(produced, demand)| (*produced).min(demand))
+        .sum();
+    let deck = produced
+        .iter()
+        .zip(deck_demand)
+        .map(|(produced, demand)| (*produced).min(demand))
+        .sum();
+    (hand, deck, std::cmp::Reverse(colors.to_vec()))
+}
+
+fn mana_type_rank(
+    color: ManaType,
+    hand_demand: [u32; 5],
+    deck_demand: [u32; 5],
+) -> (u32, u32, std::cmp::Reverse<ManaType>) {
+    let index = mana_type_index(color);
+    let (hand, deck) = index
+        .map(|index| (hand_demand[index], deck_demand[index]))
+        .unwrap_or_default();
+    (
+        u32::from(hand > 0),
+        u32::from(deck > 0),
+        std::cmp::Reverse(color),
+    )
+}
+
+fn mana_type_index(color: ManaType) -> Option<usize> {
+    match color {
+        ManaType::White => Some(0),
+        ManaType::Blue => Some(1),
+        ManaType::Black => Some(2),
+        ManaType::Red => Some(3),
+        ManaType::Green => Some(4),
+        ManaType::Colorless => None,
+    }
+}
+
 /// Choose Evoke only from an exact, still-live engine prompt descriptor.
 ///
 /// CR 702.74a: Evoke is an alternative cost. The engine authenticates the
@@ -2255,7 +2409,9 @@ fn score_candidates_core(
     session: &Arc<AiSession>,
     deadline_override: Option<engine::util::Deadline>,
 ) -> Vec<(GameAction, f64)> {
-    if let Some(action) = evoke_variant_choice(state, ai_player) {
+    if let Some(action) = resolving_effect_mana_choice(state, ai_player)
+        .or_else(|| evoke_variant_choice(state, ai_player))
+    {
         return vec![(action, 1.0)];
     }
     if let Some(action) = fast_priority_action(state, ai_player, config, session) {
@@ -2668,7 +2824,9 @@ pub(crate) fn deterministic_choice(
     actions: &[GameAction],
     context: Option<&AiContext>,
 ) -> Option<GameAction> {
-    if let Some(action) = evoke_variant_choice(state, ai_player) {
+    if let Some(action) = resolving_effect_mana_choice(state, ai_player)
+        .or_else(|| evoke_variant_choice(state, ai_player))
+    {
         return Some(action);
     }
 
@@ -5320,17 +5478,194 @@ mod tests {
         state
     }
 
+    fn resolving_effect_any_combination_state(options: Vec<ManaType>, count: usize) -> GameState {
+        use engine::types::ability::{QuantityExpr, ResolvedAbility, TargetFilter};
+        use engine::types::game_state::{ManaChoiceContext, ManaChoicePrompt};
+        let mut state = make_state();
+        let resume = ResolvedAbility::new(
+            engine::types::ability::Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        state.waiting_for = WaitingFor::ChooseManaColor {
+            player: PlayerId(0),
+            choice: ManaChoicePrompt::AnyCombination { count, options },
+            context: ManaChoiceContext::ResolvingEffect(Box::new(resume)),
+        };
+        state
+    }
+
     #[test]
-    fn non_affiliated_choose_mana_color_uses_first_option() {
+    fn resolving_effect_without_demand_uses_canonical_prompt_order_in_every_route() {
         let state = non_affiliated_choose_mana_color_state(vec![ManaType::Red, ManaType::Blue]);
         let config = create_config(AiDifficulty::Medium, Platform::Native);
-        let mut rng = SmallRng::seed_from_u64(1);
+        let expected = GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Red),
+            count: 1,
+        };
         assert_eq!(
-            choose_action(&state, PlayerId(0), &config, &mut rng),
-            Some(GameAction::ChooseManaColor {
-                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Red),
-                count: 1,
-            })
+            fallback_action(&state, &config),
+            Some(expected.clone()),
+            "the fallback consumes the same resolving-effect chooser"
+        );
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &[], None),
+            Some(expected.clone()),
+            "the direct deterministic route preserves engine option order without demand"
+        );
+        assert_eq!(
+            score_candidates(&state, P0, &config),
+            vec![(expected, 1.0)],
+            "the scored route shares the resolving-effect chooser"
+        );
+    }
+
+    #[test]
+    fn resolving_effect_mana_prefers_known_hand_demand_in_scored_and_direct_routes() {
+        let mut state = non_affiliated_choose_mana_color_state(vec![ManaType::Red, ManaType::Blue]);
+        let blue_spell = add_spell_to_hand(&mut state, P0, "Blue Demand", 0);
+        state.objects.get_mut(&blue_spell).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 0,
+        };
+        let expected = GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        };
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &[], None),
+            Some(expected.clone()),
+            "the direct deterministic route consumes the resolving-effect helper"
+        );
+        assert_eq!(
+            score_candidates(&state, P0, &config),
+            vec![(expected, 1.0)],
+            "the scored route uses the same prompt-context helper rather than policy/payment ranking"
+        );
+    }
+
+    #[test]
+    fn resolving_effect_any_combination_saturates_each_colour_demand_once() {
+        let mut state =
+            resolving_effect_any_combination_state(vec![ManaType::Blue, ManaType::Red], 2);
+        let blue_spell = add_spell_to_hand(&mut state, P0, "Blue Demand", 0);
+        state.objects.get_mut(&blue_spell).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        let red_spell = add_spell_to_hand(&mut state, P0, "Red Demand", 0);
+        state.objects.get_mut(&red_spell).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        };
+        let expected = GameAction::ChooseManaColor {
+            choice: ManaChoice::Combination(vec![ManaType::Blue, ManaType::Red]),
+            count: 1,
+        };
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &[], None),
+            Some(expected.clone()),
+            "the direct route keeps both colour demands funded"
+        );
+        assert_eq!(
+            score_candidates(&state, P0, &config),
+            vec![(expected, 1.0)],
+            "the scored route consumes the same full-product rank"
+        );
+    }
+
+    #[test]
+    fn resolving_effect_any_combination_uses_marginal_saturated_demand() {
+        let mut state =
+            resolving_effect_any_combination_state(vec![ManaType::White, ManaType::Black], 2);
+        let white_spell = add_spell_to_hand(&mut state, P0, "White Demand", 0);
+        state.objects.get_mut(&white_spell).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        };
+        for index in 0..10 {
+            let black_spell =
+                add_spell_to_hand(&mut state, P0, &format!("Black Demand {index}"), 0);
+            state.objects.get_mut(&black_spell).unwrap().mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 0,
+            };
+        }
+        state
+            .deck_pools
+            .push(engine::types::game_state::PlayerDeckPool {
+                player: P0,
+                current_main: Arc::new(vec![engine::game::deck_loading::DeckEntry {
+                    card: engine::types::card::CardFace {
+                        name: "White Deck Demand".to_string(),
+                        mana_cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::White],
+                            generic: 0,
+                        },
+                        ..Default::default()
+                    },
+                    count: 1,
+                }]),
+                ..Default::default()
+            });
+        let expected = GameAction::ChooseManaColor {
+            choice: ManaChoice::Combination(vec![ManaType::White, ManaType::Black]),
+            count: 1,
+        };
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+
+        assert_eq!(
+            fallback_action(&state, &config),
+            Some(expected.clone()),
+            "the direct fallback selects WB, rather than repeating the higher raw black demand"
+        );
+        assert_eq!(
+            score_candidates(&state, P0, &config),
+            vec![(expected, 1.0)],
+            "the scored route selects the same saturated-demand product"
+        );
+    }
+
+    #[test]
+    fn resolving_effect_any_combination_uses_the_full_prompt_demand() {
+        let mut state = resolving_effect_any_combination_state(
+            vec![
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ],
+            3,
+        );
+        let red_spell = add_spell_to_hand(&mut state, P0, "Triple Red Demand", 0);
+        state.objects.get_mut(&red_spell).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red, ManaCostShard::Red],
+            generic: 0,
+        };
+        let expected = GameAction::ChooseManaColor {
+            choice: ManaChoice::Combination(vec![ManaType::Red; 3]),
+            count: 1,
+        };
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &[], None),
+            Some(expected.clone()),
+            "the direct route reads the complete prompt options"
+        );
+        assert_eq!(
+            score_candidates(&state, P0, &config),
+            vec![(expected, 1.0)],
+            "the scored route retains the full-prompt demand-saturating choice"
         );
     }
 
@@ -6450,6 +6785,23 @@ mod tests {
         assert!(
             engine::ai_support::witness_payment_continuation(&generic, &red).is_some(),
             "red remains a valid final allocation when no mandatory blue shard exists"
+        );
+    }
+
+    #[test]
+    fn mana_ability_fallback_preserves_canonical_order_without_payment_veto() {
+        let state = red_first_improvise_payment_state(
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            },
+            2,
+        );
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        assert_eq!(
+            fallback_action(&state, &config),
+            Some(mana_product(&[ManaType::Red])),
+            "mana-ability fallback follows the engine prompt order; exact-payment reachability remains the engine candidate path's authority"
         );
     }
 

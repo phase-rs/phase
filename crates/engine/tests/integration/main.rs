@@ -880,6 +880,7 @@ mod support;
 mod suppressor_skyguard_prevent_2924;
 mod surveil_rest_pile_redirect_continuation;
 mod swans_prevention_followup;
+mod swarm_combat_witness;
 mod tales_of_the_ancestors_catch_up_draw;
 mod talon_gates_from_hand_activation;
 mod teamwork_aggregate_legal_actions;

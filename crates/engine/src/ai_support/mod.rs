@@ -6,6 +6,7 @@ mod evoke;
 pub mod filter;
 mod payment_continuation;
 mod prospective_mana;
+mod swarm;
 mod targeted_exchange;
 
 use std::collections::{HashMap, HashSet};
@@ -61,6 +62,12 @@ pub use payment_continuation::{
     PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
 };
 pub use prospective_mana::{certify_fetch_then_cast, CertifiedFetchFollowUp, CertifiedFetchPrompt};
+pub use swarm::{
+    adversarial_swarm_witness, SwarmCombatWitness, SwarmWitnessIndeterminate, SwarmWitnessResult,
+    SWARM_WITNESS_MAX_DECLARATIONS,
+};
+#[cfg(feature = "test-support")]
+pub use swarm::{adversarial_swarm_witness_with_counters, SwarmWitnessCounters};
 pub use targeted_exchange::{targeted_exchange_verdict, TargetedExchangeVerdict};
 
 /// Filter `candidate_actions` down to the actions that are actually legal now.
