@@ -3907,10 +3907,19 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 }
             }
 
-            // UntilTurnBoundary: auto-submit empty attackers unless the user
-            // flagged this phase as a stop.
-            WaitingFor::DeclareAttackers { player, .. }
-                if end_of_turn_active(state, *player) && !state.phase_stop_hit(*player) =>
+            // Auto-submit empty attackers when there's nothing to choose
+            // (CR 508.1a: 0 attackers is always a legal declaration), mirroring
+            // the DeclareBlockers arm below — the turn-based action and its
+            // triggers still run via handle_empty_attackers, only the
+            // interactive prompt is elided. Also auto-submit during an
+            // UntilTurnBoundary auto-pass session even when legal attackers
+            // exist. A phase stop overrides both cases.
+            WaitingFor::DeclareAttackers {
+                player,
+                valid_attacker_ids,
+                ..
+            } if !state.phase_stop_hit(*player)
+                && (valid_attacker_ids.is_empty() || end_of_turn_active(state, *player)) =>
             {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_attackers(state, &mut events) {

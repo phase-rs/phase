@@ -625,6 +625,7 @@ mod issue_6435_mosswort_bridge_hideaway_play;
 mod issue_6437_fight_rigging_exiled_card_target;
 mod issue_6440_mockingbird_uncast_copy_ceiling;
 mod issue_6459_scheming_symmetry;
+mod issue_6463_no_eligible_attackers_skip_prompt;
 mod issue_6477_wandering_archaic_optional_payment;
 mod issue_6498_portent_of_calamity;
 mod issue_6499_flickering_ward_protection_exemption;
