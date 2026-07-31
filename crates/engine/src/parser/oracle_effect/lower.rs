@@ -6093,7 +6093,7 @@ fn parse_each_of_target_distribution(
 /// count is recorded on `ctx.pending_damage_multi_target` so the filter and the
 /// count come from ONE parse rather than from a second text scan that can
 /// disagree with it.
-fn parse_each_of_up_to_damage_target<'a>(
+pub(super) fn parse_each_of_up_to_damage_target<'a>(
     target_phrase: &'a str,
     ctx: &mut ParseContext,
 ) -> Option<(TargetFilter, &'a str)> {

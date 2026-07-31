@@ -50224,26 +50224,30 @@ fn dire_strain_anarchist_multi_authority_still_yields_up_to_one() {
     );
 }
 
-/// Claim 4.3 — CROSS-CHUNK LEAK, the test that fails if the reset at the top of
-/// `lower_imperative_clause` is omitted.
+/// Claim 4.3 — CROSS-CHUNK ISOLATION of the announced target count.
 ///
-/// Sentence 1 is a DAMAGE COMPOUND. `try_split_damage_compound` runs the
-/// "each of two target creatures" head (setting `ctx.pending_damage_multi_target`)
-/// and then EARLY-RETURNS, so `lower_imperative_clause` never reaches its
-/// `take()`. The announced count is therefore left dangling on the shared
-/// `ParseContext` — this is the residual named in the plan's blast radius, and
-/// it is exactly the state the reset exists to clear.
+/// Sentence 1 is a bare-damage CHAIN, so it is consumed by
+/// `try_parse_multi_target_damage_chain_inner`. That recognizer takes the
+/// primary head's count off `ctx` immediately after parsing it and attaches it
+/// to the clause it returns, and clears + takes each continuation segment's
+/// count the same way. Sentence 2 must therefore see a clean context.
 ///
-/// Sentence 2 is a plain single-target `DealDamage`. Its `multi_target` must be
-/// `None`: without the reset it would inherit sentence 1's `exact(2)` and
-/// silently become a two-target spell.
+/// What this pins: (a) sentence 1's "each of two target creatures" head KEEPS
+/// its `exact(2)` — a chain head must still announce two targets (CR 601.2c);
+/// (b) sentence 2, a plain single-target `DealDamage`, does NOT inherit it.
 ///
-/// Anti-vacuity: the two reach-guards below prove (a) the seam DID run in
-/// sentence 1 — `parse_each_of_up_to_damage_target` is the only producer of a
-/// `DealDamage` to a typed creature filter from an "each of" head, and it sets
-/// the side channel unconditionally — and (b) sentence 1's own `multi_target` is
-/// `None`, which is the observable signature of the early-return path (the
-/// `take()` never ran), i.e. the spec really was left dangling.
+/// NOTE on what this test does *not* prove. It no longer exercises the reset at
+/// the top of `lower_imperative_clause`: the chain parser consumes its pending
+/// count at the source, so nothing is left dangling for that reset to clear on
+/// this fixture. The isolation here is structural (take-at-source), not
+/// reset-dependent. The reset still guards the `parse_imperative_effect` call
+/// sites that never consume the field, but this is not the test that covers it —
+/// an earlier revision of this comment claimed otherwise and was wrong.
+///
+/// Anti-vacuity: the reach-guard below proves the seam DID run in sentence 1 —
+/// `parse_each_of_up_to_damage_target` is the only producer of a `DealDamage` to
+/// a typed creature filter from an "each of" head — so the `None` on sentence 2
+/// is a real absence, not a parse that never happened.
 #[test]
 fn each_of_count_head_does_not_leak_onto_a_later_sibling_clause() {
     let parsed = parse_oracle_text(
@@ -50312,5 +50316,64 @@ fn each_of_count_head_does_not_leak_onto_a_later_sibling_clause() {
     assert_eq!(
         any_target_clause.multi_target, None,
         "sentence 1's announced count must NOT leak onto sentence 2"
+    );
+}
+
+/// CR 601.2c — CHAIN CONTINUATION announced count. A continuation segment is a
+/// fresh instruction, so an "each of ⟨N⟩ ⟨noun⟩" head in the SECOND half of a
+/// bare-damage chain announces its own N targets. The primary here is a plain
+/// "any target" with no count, which isolates the assertion to the continuation.
+///
+/// Regression: `parse_bare_damage_continuation` excludes "each of " from its
+/// mass-recipient branch, so before this was wired the clause fell through to
+/// the generic `parse_target_with_ctx` fallback — whose "each of" arm discards
+/// the count — and the segment lowered as ONE mandatory target. The chain loop
+/// also had no slot to carry a per-segment count even if one had been produced.
+#[test]
+fn chain_continuation_each_of_head_keeps_its_announced_count() {
+    let parsed = parse_oracle_text(
+        "Chain Probe deals 3 damage to any target and 1 damage to each of two target creatures.",
+        "Chain Probe",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let primary = parsed
+        .abilities
+        .first()
+        .expect("the sorcery must produce an ability");
+    // Reach-guard: the primary really is the plain any-target half, so the
+    // assertion below is about the CONTINUATION and not about the head.
+    assert!(
+        matches!(
+            &*primary.effect,
+            Effect::DealDamage {
+                target: TargetFilter::Any,
+                ..
+            }
+        ),
+        "reach-guard: primary must be the plain any-target half, got {:?}",
+        primary.effect
+    );
+    assert_eq!(
+        primary.multi_target, None,
+        "reach-guard: the primary announces no count, so a count found below \
+         belongs to the continuation"
+    );
+
+    let continuation = primary
+        .sub_ability
+        .as_deref()
+        .expect("the chain must build a continuation sub-ability");
+    assert!(
+        !matches!(&*continuation.effect, Effect::DamageAll { .. }),
+        "the continuation must not collapse to mass damage, got {:?}",
+        continuation.effect
+    );
+    assert_eq!(
+        continuation.multi_target,
+        Some(MultiTargetSpec::exact(fixed_qty(2))),
+        "CR 601.2c: the continuation's \"each of two target creatures\" head must \
+         announce exactly two targets on its own sub-ability"
     );
 }

@@ -16881,7 +16881,11 @@ fn try_parse_multi_target_damage_chain_inner(
     // consumes one bare-damage segment (returning the next AbilityDefinition)
     // or aborts the entire chain — partial parses are not committed. Each
     // continuation retains its own target announcer.
-    let mut segments: Vec<(Effect, Option<TargetFilter>)> = Vec::new();
+    // CR 601.2c: each segment carries its OWN announced target count, not just
+    // its announcer. A continuation is a fresh instruction ("… and 1 damage to
+    // each of two target creatures"), so its count belongs to the sub-ability
+    // built from it, exactly as its `target_chooser` does.
+    let mut segments: Vec<(Effect, Option<TargetFilter>, Option<MultiTargetSpec>)> = Vec::new();
     let mut cursor = remainder.trim_start();
     while !cursor.is_empty() {
         let cursor_lower = cursor.to_lowercase();
@@ -16912,8 +16916,15 @@ fn try_parse_multi_target_damage_chain_inner(
         // is a distinct target phrase. Do not inherit the preceding recipient's
         // announcing-player override.
         ctx.target_chooser = None;
+        // CR 601.2c: likewise clear the pending count, so a segment without an
+        // "each of ⟨N⟩" head cannot inherit the previous segment's.
+        ctx.pending_damage_multi_target = None;
         let (segment_effect, leftover) = parse_bare_damage_continuation(after_separator, ctx)?;
-        segments.push((segment_effect, ctx.target_chooser.clone()));
+        segments.push((
+            segment_effect,
+            ctx.target_chooser.clone(),
+            ctx.pending_damage_multi_target.take(),
+        ));
         cursor = leftover.trim_start();
     }
 
@@ -16928,10 +16939,13 @@ fn try_parse_multi_target_damage_chain_inner(
     // damage-source semantics by construction (each is a `DealDamage` with
     // `damage_source: None`).
     let mut chain_tail: Option<Box<AbilityDefinition>> = None;
-    for (effect, target_chooser) in segments.into_iter().rev() {
+    for (effect, target_chooser, multi_target) in segments.into_iter().rev() {
         let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
         def.sub_ability = chain_tail.take();
         def.target_chooser = target_chooser;
+        // CR 601.2c: the segment's own announced count, so a continuation headed
+        // by "each of ⟨N⟩ …" requires and announces N targets rather than one.
+        def.multi_target = multi_target;
         chain_tail = Some(Box::new(def));
     }
 
@@ -17346,6 +17360,25 @@ fn parse_bare_damage_continuation<'a>(
                 damage_source: None,
             },
             rem_out,
+        ));
+    }
+    // CR 601.2c + CR 115.4: an "each of ⟨N⟩ ⟨noun⟩" continuation is a
+    // distribution head in its own right, not a plain recipient. Route it
+    // through the same authority the primary head uses so (a) the announced
+    // count is recorded on `ctx` — the chain loop takes it and attaches it to
+    // THIS segment's sub-ability — and (b) a bare-plural noun yields
+    // `TargetFilter::Any` rather than a typed filter. Without this the generic
+    // fallback below reaches `parse_target_with_ctx`, whose "each of" arm
+    // discards the count, and the continuation lowers as one mandatory target.
+    if let Some((target, rem)) = lower::parse_each_of_up_to_damage_target(after_to, ctx) {
+        return Some((
+            Effect::DealDamage {
+                amount,
+                target,
+                damage_source: None,
+                excess: None,
+            },
+            trim_dangling_target_word(rem),
         ));
     }
     let (target, rem) = parse_target_with_ctx(after_to, ctx);
