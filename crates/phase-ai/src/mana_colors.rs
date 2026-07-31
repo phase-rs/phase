@@ -218,6 +218,16 @@ fn sibling_native_tap_pays_demand(
                 }
                 colors.iter().any(|&c| color_is_demanded(demand, c))
             }),
+        // CR 702.51a: Convoke (unlike Improvise/Waterbend) offers a colored
+        // marker per color the creature has, alongside the Colorless one --
+        // `mana_payment_actions` emits both for the same object. A colored
+        // `TapForConvoke` on the SAME object is just as dominating a sibling
+        // as a native land/ability tap: it pays a matching colored pip, so
+        // the Colorless marker is never the only way to spend this creature.
+        GameAction::TapForConvoke {
+            object_id: sibling_id,
+            mana_type,
+        } if *sibling_id == object_id => color_is_demanded(demand, *mana_type),
         _ => false,
     }
 }

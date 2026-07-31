@@ -1385,4 +1385,104 @@ mod tests {
         let ctx = convoke_candidate_ctx(&state, &decision, &config, &context);
         assert_eq!(assess_candidate(&ctx), GateDecision::Allow);
     }
+
+    /// CR 702.51a: the production Convoke candidate path (`mana_payment_actions`
+    /// via `candidate_actions_broad`) offers a Colorless marker AND a matching
+    /// colored marker for the same creature when its color is in the cost. The
+    /// Improvise-only tests above build a synthetic native-mana sibling and
+    /// never exercise this real Convoke-generated pair -- confirmed missing by
+    /// review on #6840: `sibling_native_tap_pays_demand` didn't recognize a
+    /// colored `TapForConvoke` on the same object as a dominating sibling, so a
+    /// real Convoke spell with a colored pip could still dead-end.
+    #[test]
+    fn rejects_convoke_colorless_tap_when_real_convoke_colored_sibling_covers_demand() {
+        let mut scenario = GameScenario::new();
+        let creature = scenario.add_creature(P0, "Convoke Creature", 2, 2).id();
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.objects.get_mut(&creature).unwrap().color =
+                vec![engine::types::mana::ManaColor::Blue];
+            state.pending_cast = Some(Box::new(PendingCast::new(
+                ObjectId(900),
+                CardId(900),
+                ResolvedAbility::new(
+                    Effect::Draw {
+                        count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    ObjectId(900),
+                    P0,
+                ),
+                ManaCost::Cost {
+                    shards: vec![engine::types::mana::ManaCostShard::Blue],
+                    generic: 1,
+                },
+            )));
+            state.waiting_for = WaitingFor::ManaPayment {
+                player: P0,
+                convoke_mode: Some(engine::types::game_state::ConvokeMode::Convoke),
+            };
+        }
+        let state = runner.state();
+        let candidates = engine::ai_support::candidate_actions_broad(state);
+        let colorless = candidates
+            .iter()
+            .find(|c| {
+                matches!(
+                    c.action,
+                    GameAction::TapForConvoke {
+                        object_id,
+                        mana_type: ManaType::Colorless,
+                    } if object_id == creature
+                )
+            })
+            .expect("production candidate path must offer the Colorless convoke tap")
+            .clone();
+        let colored = candidates
+            .iter()
+            .find(|c| {
+                matches!(
+                    c.action,
+                    GameAction::TapForConvoke {
+                        object_id,
+                        mana_type: ManaType::Blue,
+                    } if object_id == creature
+                )
+            })
+            .expect("production candidate path must offer the matching colored convoke tap")
+            .clone();
+
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: candidates.clone(),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let context = AiContext::empty(&config.weights);
+
+        let colorless_ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &colorless,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&colorless_ctx), GateDecision::Reject);
+
+        let colored_ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &colored,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&colored_ctx), GateDecision::Allow);
+    }
 }
