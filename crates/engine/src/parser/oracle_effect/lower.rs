@@ -2399,6 +2399,8 @@ pub(super) fn rewrite_counter_instead_target_from_antecedent(
     if !matches!(current_target, TargetFilter::SelfRef) {
         return false;
     }
+    // CR 608.2c + CR 115.1: an instead clause later in the same instruction
+    // reuses the original chosen target rather than announcing a new target.
     // Existing attachment-host case — only when the antecedent is itself a `PutCounter`.
     // Preserved verbatim (clone the host filter) so attachment-host cards stay byte-identical.
     if let Effect::PutCounter {
@@ -2408,6 +2410,10 @@ pub(super) fn rewrite_counter_instead_target_from_antecedent(
     {
         if antecedent_target.contains_source_attachment_host() {
             *current_target = antecedent_target.clone();
+            return true;
+        }
+        if matches!(antecedent_target, TargetFilter::Typed(_)) {
+            *current_target = TargetFilter::ParentTarget;
             return true;
         }
         return false;
