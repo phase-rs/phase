@@ -6,6 +6,7 @@
 //! (`subtypes` + `abilities`) so a `GameObject` view and a `CardFace` view share
 //! a single implementation, mirroring the `*_parts` pattern in `features`.
 
+use engine::ai_support::CandidateAction;
 use engine::game::mana_payment::{land_subtype_to_mana_type, outer_cost_color_demand, ColorDemand};
 use engine::game::mana_sources::{activatable_mana_actions_for_player, mana_color_to_type};
 use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, ManaProduction};
@@ -156,6 +157,69 @@ pub(crate) fn tap_strands_demanded_color(
             }
             _ => false,
         })
+}
+
+/// CR 702.51a (Convoke) / CR 702.126a (Improvise) / Waterbend: whether tapping
+/// `object_id` for its Colorless convoke-family marker should be rejected
+/// because a currently-legal sibling candidate at this exact `ManaPayment`
+/// decision lets `object_id` instead pay a colored pip the pending cast still
+/// demands, via its own native mana ability.
+///
+/// This is zero-cost dominance, not a preference: both actions spend the SAME
+/// single tap on the SAME permanent, but the native ability can still cover
+/// the trailing generic slot once colored demand clears (or pay the colored
+/// pip directly), while the Colorless marker can never retroactively produce
+/// a stranded color. Companion to `tap_strands_demanded_color` above — that
+/// function fixed this same dead-end bug class for land tap-color selection;
+/// this is the convoke-family tap-channel-selection variant: nothing
+/// previously preferred a permanent's native colored channel over its
+/// Colorless convoke-family marker, so a dual-purpose permanent (e.g. an
+/// artifact land that also taps for a color) could be spent via the marker
+/// first, permanently stranding a colored pip and dead-ending `ManaPayment`.
+pub(crate) fn convoke_native_tap_still_demanded(
+    state: &GameState,
+    candidates: &[CandidateAction],
+    object_id: ObjectId,
+) -> bool {
+    let Some(pending_cast) = state.pending_cast.as_deref() else {
+        return false;
+    };
+    let demand = outer_cost_color_demand(&pending_cast.cost);
+    if demand == [0u32; 5] {
+        return false;
+    }
+    candidates
+        .iter()
+        .any(|c| sibling_native_tap_pays_demand(state, &c.action, object_id, demand))
+}
+
+fn sibling_native_tap_pays_demand(
+    state: &GameState,
+    action: &GameAction,
+    object_id: ObjectId,
+    demand: ColorDemand,
+) -> bool {
+    match action {
+        GameAction::TapLandForMana { selection } => {
+            selection.source.object_id == object_id
+                && color_is_demanded(demand, selection.mana_type)
+        }
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } if *source_id == object_id => state
+            .objects
+            .get(source_id)
+            .and_then(|obj| obj.abilities.get(*ability_index))
+            .is_some_and(|ability| {
+                let mut colors = Vec::new();
+                if let Effect::Mana { produced, .. } = &*ability.effect {
+                    collect_mana_production_colors(&mut colors, produced);
+                }
+                colors.iter().any(|&c| color_is_demanded(demand, c))
+            }),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
