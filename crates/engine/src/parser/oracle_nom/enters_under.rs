@@ -348,8 +348,15 @@ pub(crate) fn bind_control_clause(
             ControlAnaphorAntecedent::ContextPlayer(r),
         ) => EntersUnderSpec::Override(r),
         // Fail closed: no nameable antecedent (and, for the demonstrative, an
-        // object-owner antecedent it may not legally use).
-        (p, _) => EntersUnderSpec::UnboundAnaphor(p),
+        // object-owner antecedent it may not legally use). Keep these arms
+        // explicit so adding a possessor cannot silently inherit this result.
+        (ControlClausePossessor::TheirAnaphor, ControlAnaphorAntecedent::Unnameable) => {
+            EntersUnderSpec::UnboundAnaphor(ControlClausePossessor::TheirAnaphor)
+        }
+        (
+            ControlClausePossessor::ThatPlayerDemonstrative,
+            ControlAnaphorAntecedent::MovedObjectOwner | ControlAnaphorAntecedent::Unnameable,
+        ) => EntersUnderSpec::UnboundAnaphor(ControlClausePossessor::ThatPlayerDemonstrative),
     }
 }
 

@@ -3713,6 +3713,28 @@ pub(super) fn apply_clause_continuation(
             reveal,
             attach_host,
         } => {
+            // CR 110.2a: fail closed before touching either representation of
+            // the put step. Search lowering may already have installed a
+            // library-to-battlefield ChangeZone in the preceding definition;
+            // patching that node and merely appending an Unimplemented sibling
+            // would leave the default-controller move executable. Replacing
+            // the whole search assembly also prevents an attachment rider from
+            // surviving without the controller clause it depends on.
+            if let Some(possessor) = enters_under.unbound_possessor() {
+                let gap = AbilityDefinition::new(
+                    kind,
+                    Effect::unimplemented(
+                        "change_zone_enters_under_anaphor",
+                        possessor.printed_clause(),
+                    ),
+                );
+                if let Some(previous) = defs.last_mut() {
+                    *previous = gap;
+                } else {
+                    defs.push(gap);
+                }
+                return;
+            }
             // CR 701.23a: A multi-zone tutor ("graveyard, hand, and/or library")
             // finds the card in any searched zone, so the put-step must move it
             // from wherever it actually is (`origin: None`). A library-only
@@ -3729,14 +3751,6 @@ pub(super) fn apply_clause_continuation(
                     *existing_reveal |= reveal;
                     multi_zone_search = source_zones.iter().any(|zone| *zone != Zone::Library);
                 }
-                // CR 110.2a (docs/MagicCompRules.txt:618): ALWAYS call the
-                // chain patcher, with the COLLAPSED reference. The patcher
-                // rewrites the existing destination and tapped flag
-                // UNCONDITIONALLY and the controller only behind its own
-                // `is_some()` guard, so skipping the whole call on an unbound
-                // anaphor would silently drop the DESTINATION and TAPPED
-                // patches as well. Passing `None` reuses that existing guard to
-                // no-op exactly the controller patch.
                 apply_search_destination_to_ability_chain(
                     previous,
                     destination,
@@ -3749,28 +3763,20 @@ pub(super) fn apply_clause_continuation(
             } else {
                 Some(Zone::Library)
             };
-            // CR 110.2a: fail closed on the newly-built move. A printed
-            // control clause with no nameable antecedent must not degrade into
-            // the CR 110.2 default controller.
-            let put_effect = match enters_under.unbound_possessor() {
-                Some(p) => {
-                    Effect::unimplemented("change_zone_enters_under_anaphor", p.printed_clause())
-                }
-                None => Effect::ChangeZone {
-                    origin: put_origin,
-                    destination,
-                    target: TargetFilter::Any,
-                    owner_library: false,
-                    enter_transformed: false,
-                    enters_under: enters_under.as_controller_ref(),
-                    enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
-                    enters_attacking: false,
-                    up_to: false,
-                    enter_with_counters: vec![],
-                    conditional_enter_with_counters: vec![],
-                    face_down_profile: None,
-                    enters_modified_if: None,
-                },
+            let put_effect = Effect::ChangeZone {
+                origin: put_origin,
+                destination,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: enters_under.as_controller_ref(),
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
             };
             let mut change_zone = AbilityDefinition::new(kind, put_effect);
             if let Some(host) = attach_host {
