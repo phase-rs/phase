@@ -1323,6 +1323,44 @@ impl ManaActivationGates {
     }
 }
 
+/// CR 305.6 + CR 602.5: A land with a basic land type has the INTRINSIC
+/// ability "{T}: Add [mana symbol]" whether or not any `AbilityDefinition`
+/// object represents it — `mana_sources::land_mana_options`'s bare-subtype
+/// fallback synthesizes a `ManaSourceOption` for exactly this case. That
+/// intrinsic ability is still an activated (mana) ability, so CR 602.5
+/// activation prohibitions (CantBeActivated, CantActivateDuring — Karn/
+/// Clarion/Damping Matrix/City of Solitude class) must apply to it exactly as
+/// they would to a printed one. Builds a minimal synthetic `AbilityDefinition`
+/// (Tap cost, `Effect::Mana`) purely so the prohibition's `kind`/`exemption`
+/// axes (e.g. Damping Matrix's "unless they're mana abilities" carve-out)
+/// evaluate identically to how they would against a real mana ability, then
+/// delegates to the single-authority `is_blocked_by_cant_be_activated` /
+/// `is_blocked_by_cant_activate_during` checks — never re-implements them.
+pub(crate) fn intrinsic_land_mana_ability_blocked(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    color: ManaColor,
+) -> bool {
+    let ability_def = AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Activated,
+        Effect::Mana {
+            produced: ManaProduction::Fixed {
+                colors: vec![color],
+                contribution: crate::types::ability::ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Tap);
+
+    super::casting::is_blocked_by_cant_be_activated(state, controller, object_id, &ability_def)
+        || super::casting::is_blocked_by_cant_activate_during(state, controller, &ability_def)
+}
+
 fn mana_ability_ready_without_simulation(
     state: &GameState,
     player: PlayerId,

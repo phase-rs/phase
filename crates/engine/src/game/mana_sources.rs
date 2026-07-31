@@ -2373,18 +2373,35 @@ fn land_mana_options(
             .iter()
             .find_map(|s| mana_payment::land_subtype_to_mana_type(s))
         {
-            options.push(ManaSourceOption {
-                object_id,
-                ability_index: None,
-                mana_type,
-                source_could_produce_two_or_more_colors: source_could_produce_two_or_more_colors(
-                    state, object_id, controller,
-                ),
-                penalty: ManaSourcePenalty::None,
-                atomic_combination: None,
-                restrictions: Vec::new(),
-                taps_for_mana_overrides: Vec::new(),
-            });
+            // CR 305.6 + CR 602.5: the intrinsic "{T}: Add [mana symbol]"
+            // ability this fallback synthesizes is still an activated (mana)
+            // ability — a CantBeActivated/CantActivateDuring static (Karn,
+            // Clarion, Damping Matrix, City of Solitude) must block it exactly
+            // as it would a printed one. Mirrors the `require_current_payability`
+            // gating `is_active_tap_mana_ability` applies to a real ability: the
+            // auto-tap PLANNING pass (`require_current_payability == false`)
+            // does not consult per-source legality gates for ANY mana source,
+            // real or intrinsic, so this only fires on the interactive/
+            // legal-action path.
+            let blocked = require_current_payability
+                && mana_type_to_color(mana_type).is_some_and(|color| {
+                    mana_abilities::intrinsic_land_mana_ability_blocked(
+                        state, controller, object_id, color,
+                    )
+                });
+            if !blocked {
+                options.push(ManaSourceOption {
+                    object_id,
+                    ability_index: None,
+                    mana_type,
+                    source_could_produce_two_or_more_colors:
+                        source_could_produce_two_or_more_colors(state, object_id, controller),
+                    penalty: ManaSourcePenalty::None,
+                    atomic_combination: None,
+                    restrictions: Vec::new(),
+                    taps_for_mana_overrides: Vec::new(),
+                });
+            }
         }
     }
 

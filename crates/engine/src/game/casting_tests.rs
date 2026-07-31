@@ -31127,6 +31127,99 @@ fn karn_blocks_liquimetal_coated_forest_from_legal_mana_actions() {
     );
 }
 
+#[test]
+fn karn_blocks_bare_subtype_artifact_land_from_legal_mana_actions() {
+    // Issue #6469 follow-up: the fix above only closed the gap for a land
+    // that carries an explicit `Effect::Mana` ability. A land with NO
+    // explicit ability at all — just a basic land subtype, the genuine
+    // Urborg/Blood-Moon-class case `land_mana_options`'s fallback exists for
+    // (CR 305.6: the "{T}: Add [mana symbol]" ability is intrinsic even with
+    // no text box) — hits `land_mana_options`'s bare-subtype fallback
+    // directly, bypassing `scan_mana_abilities` entirely. That intrinsic
+    // ability is still an activated mana ability (CR 305.6 + CR 605), so
+    // CR 602.5 activation prohibitions must block it exactly like a printed
+    // one. Companion to `karn_blocks_liquimetal_coated_forest_from_legal_mana_actions`,
+    // which covers the explicit-ability half of the same fallback.
+    let mut state = setup_game_at_main_phase();
+
+    add_cant_be_activated_source(
+        &mut state,
+        PlayerId(0),
+        ProhibitionScope::AllPlayers,
+        TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+        ),
+    );
+
+    // A bare-subtype Forest: Land + "Forest" subtype, no `abilities` entry at
+    // all — the intrinsic CR 305.6 ability, made an artifact by Liquimetal
+    // Coating and controlled by Karn's opponent.
+    let forest = create_object(
+        &mut state,
+        CardId(0xF0126),
+        PlayerId(1),
+        "Bare Forest".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&forest).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Forest".to_string());
+        obj.card_types.core_types.push(CoreType::Artifact); // Liquimetal Coating
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(0);
+    }
+    assert!(
+        state.objects[&forest].abilities.is_empty(),
+        "reach-guard: this land must have no explicit AbilityDefinition, so the \
+         bare-subtype fallback (not scan_mana_abilities) is the branch under test"
+    );
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        !legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "Karn must block the coated bare-subtype Forest's intrinsic mana ability too, \
+         got {legal_actions:?}"
+    );
+}
+
+#[test]
+fn bare_subtype_land_still_offers_mana_without_a_prohibition() {
+    // Positive companion to the regression above: with no CantBeActivated
+    // static in play, the bare-subtype fallback this whole family guards
+    // must still work — an ordinary basic land (no explicit ability) is a
+    // legal mana source via its CR 305.6 intrinsic ability.
+    let mut state = setup_game_at_main_phase();
+
+    let forest = create_object(
+        &mut state,
+        CardId(0xF0127),
+        PlayerId(1),
+        "Bare Forest".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&forest).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Forest".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(0);
+    }
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "an unprohibited bare-subtype land must still offer its intrinsic mana ability, \
+         got {legal_actions:?}"
+    );
+}
+
 // === CR 605.1a: Pithing Needle mana-ability exemption gate ===
 
 /// Build a Llanowar-Elves-style mana ability: `{T}: Add {G}` (no targets, produces mana).
