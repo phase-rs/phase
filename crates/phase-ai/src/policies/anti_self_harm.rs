@@ -3697,6 +3697,8 @@ mod tests {
                     legal_targets: legal_targets.clone(),
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 target_constraints: Vec::new(),

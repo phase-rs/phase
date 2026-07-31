@@ -636,7 +636,7 @@ pub(super) fn handle_unless_payment(
     let poll_cost = cost.clone();
 
     let mut payment_failed = !pay;
-    let mut post_action_event_start = None;
+    let post_action_event_start = None;
     if pay {
         match cost {
             // CR 118.12: Pay the static mana component of the unless cost
