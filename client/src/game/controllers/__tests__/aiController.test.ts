@@ -135,7 +135,7 @@ describe("AI proposal controller", () => {
     await runOnce();
     await runOnce();
 
-    expect(getAiActionProposal).toHaveBeenCalledTimes(3);
+    expect(getAiActionProposal).toHaveBeenCalledTimes(4);
     expect(dispatchAiActionProposal).toHaveBeenCalledTimes(1);
     expect(notifyEngineLost).not.toHaveBeenCalled();
     expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
