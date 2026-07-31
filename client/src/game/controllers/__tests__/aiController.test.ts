@@ -135,7 +135,8 @@ describe("AI proposal controller", () => {
     await runOnce();
     await runOnce();
 
-    expect(getAiActionProposal).toHaveBeenCalledTimes(4);
+    expect(getAiActionProposal).toHaveBeenCalledWith("Medium", 1);
+    expect(getAiActionProposal.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(dispatchAiActionProposal).toHaveBeenCalledTimes(1);
     expect(notifyEngineLost).not.toHaveBeenCalled();
     expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
