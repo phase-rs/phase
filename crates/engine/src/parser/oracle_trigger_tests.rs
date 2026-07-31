@@ -26002,6 +26002,8 @@ fn siege_dragon_that_player_controls_binds_to_defending_player() {
     }
 }
 
+/// CR 508.5: For an ability of an attacking creature that refers to a defending
+/// player, that player is the player the creature attacks.
 /// Elder Brain: "Whenever this creature attacks a player, exile all cards
 /// from that player's hand, then they draw that many cards. ..." Unlike Smart
 /// Ass and Siege Dragon (which name "defending player" via a per-clause
