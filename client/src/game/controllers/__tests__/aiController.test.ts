@@ -38,6 +38,7 @@ let storeState: {
   isResolvingAll: boolean;
 };
 let storeSubscriber: (() => void) | null = null;
+let randomSpy: ReturnType<typeof vi.spyOn>;
 
 vi.mock("../../../stores/gameStore", () => ({
   useGameStore: {
@@ -82,6 +83,10 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  // Keep retry timing deterministic: `runOnce` advances a fixed 1s window,
+  // while production delay variance would otherwise allow a variable number
+  // of nested retries to fit inside that same window.
+  randomSpy = vi.spyOn(Math, "random").mockReturnValue(1);
   dispatchAiActionProposal.mockReset();
   notifyEngineLost.mockReset();
   attemptStateRehydrate.mockReset();
@@ -101,6 +106,7 @@ beforeEach(() => {
 
 afterEach(() => {
   storeSubscriber = null;
+  randomSpy.mockRestore();
   vi.useRealTimers();
 });
 
