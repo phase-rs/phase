@@ -5,6 +5,7 @@ mod copy;
 mod evoke;
 pub mod filter;
 mod payment_continuation;
+mod prospective_mana;
 mod targeted_exchange;
 
 use std::collections::{HashMap, HashSet};
@@ -59,6 +60,7 @@ pub use payment_continuation::{
     PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationUnsupported,
     PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
 };
+pub use prospective_mana::{certify_fetch_then_cast, CertifiedFetchFollowUp, CertifiedFetchPrompt};
 pub use targeted_exchange::{targeted_exchange_verdict, TargetedExchangeVerdict};
 
 /// Filter `candidate_actions` down to the actions that are actually legal now.

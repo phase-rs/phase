@@ -13,7 +13,9 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
+use engine::ai_support::{CertifiedFetchFollowUp, CertifiedFetchPrompt};
 use engine::game::DeckEntry;
+use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
@@ -33,6 +35,8 @@ use crate::synergy::SynergyGraph;
 /// singleton main-deck card.
 const COMMANDER_ANALYSIS_WEIGHT: u32 = 4;
 
+type ProspectiveFetchProposals = HashMap<PlayerId, Vec<(GameAction, CertifiedFetchPrompt)>>;
+
 /// Per-game cache shared by all decisions.
 #[derive(Clone, Default)]
 pub struct AiSession {
@@ -46,6 +50,17 @@ pub struct AiSession {
     /// `turn_number` + `active_player`, so stale entries from prior turns
     /// never match — no explicit invalidation needed.
     pub projection_cache: Arc<RwLock<HashMap<ProjectionKey, Arc<Projection>>>>,
+    /// Reducer-certified fetch selection armed only after this session chose
+    /// its corresponding root activation. The engine token contains no clone
+    /// or hidden terminal state and rejects any stale prompt.
+    pub(crate) prospective_fetch_prompt: Arc<RwLock<HashMap<PlayerId, CertifiedFetchPrompt>>>,
+    /// One exact cast unlocked by a redeemed prospective fetch prompt. The
+    /// engine validates the complete post-selection state before yielding it.
+    pub(crate) prospective_fetch_follow_up: Arc<RwLock<HashMap<PlayerId, CertifiedFetchFollowUp>>>,
+    /// Root-scoring proposals awaiting the same decision's final action. The
+    /// chosen proposal is moved into `prospective_fetch_prompt`; all others
+    /// are discarded immediately.
+    pub(crate) prospective_fetch_proposals: Arc<RwLock<ProspectiveFetchProposals>>,
     #[cfg(test)]
     pub(crate) policy_registry_override: Option<Arc<PolicyRegistry>>,
 }
@@ -61,6 +76,15 @@ impl std::fmt::Debug for AiSession {
             .field("synergy", &self.synergy)
             .field("memory", &self.memory)
             .field("projection_cache", &self.projection_cache)
+            .field("prospective_fetch_prompt", &self.prospective_fetch_prompt)
+            .field(
+                "prospective_fetch_follow_up",
+                &self.prospective_fetch_follow_up,
+            )
+            .field(
+                "prospective_fetch_proposals",
+                &self.prospective_fetch_proposals,
+            )
             .finish()
     }
 }
@@ -103,6 +127,9 @@ impl AiSession {
             synergy,
             memory: Arc::default(),
             projection_cache: Arc::default(),
+            prospective_fetch_prompt: Arc::default(),
+            prospective_fetch_follow_up: Arc::default(),
+            prospective_fetch_proposals: Arc::default(),
             #[cfg(test)]
             policy_registry_override: None,
         }

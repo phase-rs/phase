@@ -5,8 +5,9 @@ use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
 use engine::ai_support::{
-    build_decision_context_for_semantic_owner, targeted_exchange_verdict,
-    validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
+    build_decision_context, build_decision_context_for_semantic_owner, certify_fetch_then_cast,
+    targeted_exchange_verdict, validated_candidate_actions_for_semantic_owner,
+    AiDecisionContract, TargetedExchangeVerdict,
 };
 use engine::types::ability::{
     AbilityDefinition, ContinuousModification, Duration, Effect, StaticDefinition, TargetFilter,
@@ -17,7 +18,7 @@ use engine::types::game_state::{
     CastOfferKind, CompanionDeclaration, CostResume, GameState, ManaChoice, ManaChoicePrompt,
     MulliganDecisionPhase, PendingMulliganAction, WaitingFor,
 };
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -200,6 +201,16 @@ pub fn choose_action_with_session(
     // the dedicated scorer). The deterministic path returns the chosen
     // SelectCards directly; only fall through if it produces nothing.
     if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
+        if let Ok(mut pending) = session.prospective_fetch_prompt.write() {
+            if let Some(prompt) = pending.remove(&ai_player) {
+                if let Some(action) = prompt.action_for(state, ai_player) {
+                    if let Ok(mut follow_ups) = session.prospective_fetch_follow_up.write() {
+                        follow_ups.insert(ai_player, prompt.follow_up());
+                    }
+                    return exact_contract_action(action);
+                }
+            }
+        }
         let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
         if let Some(action) = deterministic_choice(state, ai_player, config, &[], Some(&context)) {
             return exact_contract_action(action);
@@ -239,6 +250,14 @@ pub fn choose_action_with_session(
         }
     }
 
+    if let Ok(mut follow_ups) = session.prospective_fetch_follow_up.write() {
+        if let Some(follow_up) = follow_ups.remove(&ai_player) {
+            if let Some(action) = follow_up.action_for(state, ai_player) {
+                return exact_contract_action(action);
+            }
+        }
+    }
+
     if let Some(action) = fast_priority_action(state, ai_player, config, session) {
         return exact_contract_action(action);
     }
@@ -259,6 +278,7 @@ pub fn choose_action_with_session(
         softmax_select_pairs(&scored, config.temperature, rng)
     };
     if let Some(action) = &chosen {
+        arm_certified_fetch_prompt(action, ai_player, session);
         emit_decision_trace(state, ai_player, config, action, session);
     }
     chosen.and_then(exact_contract_action)
@@ -312,16 +332,18 @@ fn fast_priority_action(
     }
 
     if large_board_main_phase_has_no_development_sources(state, ai_player) {
-        return Some(GameAction::PassPriority);
+        return (!has_certified_fetch_then_cast_route(state, ai_player))
+            .then_some(GameAction::PassPriority);
     }
 
     let actions: Vec<_> = engine::ai_support::flat_priority_actions(state)
         .into_iter()
         .filter(|action| root_action_is_allowed(state, ai_player, action))
         .collect();
-    low_value_priority_pass_from_actions(state, ai_player, &actions).or_else(|| {
+    let action = low_value_priority_pass_from_actions(state, ai_player, &actions).or_else(|| {
         large_board_main_phase_fast_action_from_actions(state, ai_player, &actions, config, session)
-    })
+    });
+    action.filter(|_| !has_certified_fetch_then_cast_route(state, ai_player))
 }
 
 /// Keep direct priority shortcuts under the same pre-cast exchange gate as the
@@ -2065,55 +2087,161 @@ fn evoke_variant_choice(state: &GameState, ai_player: PlayerId) -> Option<GameAc
     }
 }
 
-/// Rank the root beam after validation and gating, retaining an affiliated
-/// payment candidate's already-witnessed reducer successor through width
-/// truncation. This is the single production seam for root payment ranking;
-/// tests exercise it directly to prove the enabled-search beam boundary.
+/// Rank the root beam after validation and gating, retaining already-witnessed
+/// reducer continuations through width truncation. A prospective fetch route
+/// carries an independently evaluated terminal witness, while an affiliated
+/// payment route carries its first successor state; neither is a policy prior.
+/// This is the single production seam for root payment ranking; tests exercise
+/// it directly to prove the enabled-search beam boundary.
 fn rank_root_payment_candidates(
     state: &GameState,
     decision: &engine::ai_support::AiDecisionContext,
     prepared: &[PreparedCandidate],
     gated: &[crate::tactical_gate::GatedCandidate],
+    continuation_witnesses: &[(GameAction, f64)],
     services: &PlannerServices<'_>,
     max_branching: usize,
 ) -> Vec<RankedCandidate> {
     let mut ranked: Vec<RankedCandidate> = gated
         .iter()
         .map(|gated_candidate| {
-            let score = services.tactical_score(
-                state,
-                decision,
-                &gated_candidate.candidate,
-                services.ai_player,
-                SearchDepth::Root,
-            ) + gated_candidate.penalty;
-            prepared
+            let direct = score_existing_root_candidate(state, decision, gated_candidate, services);
+            let ranked = prepared
                 .iter()
                 .find(|prepared_candidate| {
                     prepared_candidate.candidate.action == gated_candidate.candidate.action
                 })
                 .and_then(|prepared_candidate| prepared_candidate.payment_successor.clone())
                 .map_or_else(
-                    || RankedCandidate::new(gated_candidate.candidate.clone(), score),
+                    || RankedCandidate::new(gated_candidate.candidate.clone(), direct),
                     |successor| {
                         RankedCandidate::with_payment_successor(
                             gated_candidate.candidate.clone(),
-                            score,
+                            direct,
                             successor,
                         )
                     },
-                )
+                );
+            if let Some((_, witness)) = continuation_witnesses
+                .iter()
+                .find(|(action, _)| action == &gated_candidate.candidate.action)
+            {
+                ranked.with_continuation_witness(*witness)
+            } else {
+                ranked
+            }
         })
         .collect();
     ranked.sort_by(|left, right| {
         right
-            .score
-            .partial_cmp(&left.score)
+            .beam_priority()
+            .partial_cmp(&left.beam_priority())
             .unwrap_or(Ordering::Equal)
             .then_with(|| left.candidate.action.cmp_stable(&right.candidate.action))
     });
     ranked.truncate(max_branching);
     ranked
+}
+
+/// Score the already validated/gated root candidate.  This intentionally stays
+/// below prospective injection: prospective terminal evaluation must not enter
+/// the root candidate pipeline again, which would recursively certify fetch
+/// routes from a simulated terminal.
+fn score_existing_root_candidate(
+    state: &GameState,
+    decision: &engine::ai_support::AiDecisionContext,
+    candidate: &crate::tactical_gate::GatedCandidate,
+    services: &PlannerServices<'_>,
+) -> f64 {
+    services.tactical_score(
+        state,
+        decision,
+        &candidate.candidate,
+        services.ai_player,
+        SearchDepth::Root,
+    ) + candidate.penalty
+}
+
+/// Add only reducer-certified fetch-then-cast terminal value to a current root
+/// candidate.  The engine owns every clone and route budget; this layer keeps
+/// just `(root action, score)` proposals, so sampled determinizations cannot
+/// cache, resume, or leak a terminal state into real play.
+fn inject_prospective_fetch_scores(
+    state: &GameState,
+    gated: &[crate::tactical_gate::GatedCandidate],
+    services: &PlannerServices<'_>,
+    proposal_session: Option<&Arc<AiSession>>,
+) -> Vec<(GameAction, f64)> {
+    let cast_bindings = hand_identity_bindings(state, services.ai_player);
+
+    let mut proposals = Vec::new();
+    let scores = gated
+        .iter()
+        .filter_map(|root| {
+            let (prompt, score) = certify_fetch_then_cast(
+                state,
+                &root.candidate,
+                &cast_bindings,
+                |terminal, _cast| services.evaluate_state(terminal),
+            )?;
+            proposals.push((root.candidate.action.clone(), prompt));
+            Some((root.candidate.action.clone(), score))
+        })
+        .collect();
+    if let Some(session) = proposal_session {
+        if let Ok(mut pending) = session.prospective_fetch_proposals.write() {
+            pending.insert(services.ai_player, proposals);
+        }
+    }
+    scores
+}
+
+fn has_certified_fetch_then_cast_route(state: &GameState, ai_player: PlayerId) -> bool {
+    let casts = hand_identity_bindings(state, ai_player);
+    !casts.is_empty()
+        && validated_candidate_actions_for_semantic_owner(state, ai_player)
+            .into_iter()
+            .any(|candidate| {
+                certify_fetch_then_cast(state, &candidate, &casts, |_, _| 0.0).is_some()
+            })
+}
+
+fn hand_identity_bindings(state: &GameState, ai_player: PlayerId) -> Vec<ObjectIdentityBinding> {
+    state.players[ai_player.0 as usize]
+        .hand
+        .iter()
+        .filter_map(|object_id| {
+            state.objects.get(object_id).and_then(|object| {
+                (object.zone == Zone::Hand).then(|| {
+                    ObjectIdentityBinding::new(
+                        ObjectIncarnationRef::from_object(object),
+                        Zone::Hand,
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
+/// Arm only the proposal that belongs to this session's selected root action.
+/// The engine token contains no simulated game state.
+fn arm_certified_fetch_prompt(action: &GameAction, ai_player: PlayerId, session: &Arc<AiSession>) {
+    let Ok(mut pending) = session.prospective_fetch_prompt.write() else {
+        return;
+    };
+    pending.remove(&ai_player);
+    if let Ok(mut proposals) = session.prospective_fetch_proposals.write() {
+        let Some(proposals) = proposals.get_mut(&ai_player) else {
+            return;
+        };
+        if let Some(index) = proposals
+            .iter()
+            .position(|(root, _)| root.cmp_stable(action) == Ordering::Equal)
+        {
+            pending.insert(ai_player, proposals.swap_remove(index).1);
+        }
+        proposals.clear();
+    }
 }
 
 /// Core scoring for a single (possibly determinized) state. Byte-identical to
@@ -2262,8 +2390,21 @@ fn score_candidates_core(
         // O(n) linear scan of `gated` per scored candidate — O(n²) overall.
         // GameAction is not Hash, so we can't key a HashMap; carrying the
         // penalty with its candidate is both cheaper and more idiomatic.
-        let ranked =
-            rank_root_payment_candidates(state, &ctx, &prepared, &gated, &services, branching);
+        let prospective_scores = inject_prospective_fetch_scores(
+            state,
+            &gated,
+            &services,
+            deadline_override.is_none().then_some(session),
+        );
+        let ranked = rank_root_payment_candidates(
+            state,
+            &ctx,
+            &prepared,
+            &gated,
+            &prospective_scores,
+            &services,
+            branching,
+        );
 
         run_iterative_deepening(state, ranked, tactical_weight, config, &mut services)
     } else {
@@ -2318,7 +2459,7 @@ fn run_iterative_deepening(
     // origin/main's zero-apply collapse exactly.
     let mut best_scored: Vec<(GameAction, f64)> = ranked
         .iter()
-        .map(|r| (r.candidate.action.clone(), r.score * tactical_weight))
+        .map(|r| (r.candidate.action.clone(), r.root_score(tactical_weight)))
         .collect();
 
     for iter_depth in 0..=ceiling {
@@ -2355,7 +2496,11 @@ fn run_iterative_deepening(
                 .or_else(|| apply_candidate(state, &r.candidate))
             {
                 let cont = planner.evaluate_after_action(&sim, services, &mut budget);
-                cont + (r.score * tactical_weight)
+                let continuation = r
+                    .continuation_witness
+                    .filter(|witness| witness.is_finite())
+                    .map_or(cont, |witness| cont.max(witness));
+                continuation + (r.score * tactical_weight)
             } else {
                 // Action failed simulation — same penalty as origin/main so the
                 // AI prefers any valid alternative.
@@ -3418,6 +3563,99 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    #[test]
+    fn prospective_fetch_choice_survives_to_the_real_search_prompt() {
+        let db = CardDatabase::from_export(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json"),
+        )
+        .expect("full card export loads");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let misty = scenario.add_real_card(P0, "Misty Rainforest", Zone::Battlefield, &db);
+        for _ in 0..3 {
+            scenario.add_real_card(P0, "Mountain", Zone::Battlefield, &db);
+        }
+        let forest = scenario.add_real_card(P0, "Forest", Zone::Library, &db);
+        let island = scenario.add_real_card(P0, "Island", Zone::Library, &db);
+        let phantom = scenario.add_real_card(P0, "Phantom Monster", Zone::Hand, &db);
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), &db);
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let session = AiSession::arc_from_game(runner.state());
+        let mut rng = SmallRng::seed_from_u64(17);
+
+        let casts = hand_identity_bindings(runner.state(), P0);
+        let certificates: Vec<_> =
+            validated_candidate_actions_for_semantic_owner(runner.state(), P0)
+                .into_iter()
+                .map(|candidate| {
+                    (
+                        candidate.action.clone(),
+                        certify_fetch_then_cast(runner.state(), &candidate, &casts, |_, _| 0.0)
+                            .is_some(),
+                    )
+                })
+                .collect();
+        assert!(
+            certificates.iter().any(|(_, certified)| *certified),
+            "Misty must be certified before root selection: {certificates:?}"
+        );
+
+        let root = choose_action_with_session(runner.state(), P0, &config, &mut rng, &session);
+        assert!(
+            matches!(
+                root,
+                Some(GameAction::ActivateAbility { source_id, .. }) if source_id == misty
+            ),
+            "the prospective route must select Misty, got {root:?}"
+        );
+        runner
+            .act(root.expect("Misty root action"))
+            .expect("root applies");
+        runner.resolve_top();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::SearchChoice { .. }
+        ));
+
+        let fetch_pick =
+            choose_action_with_session(runner.state(), P0, &config, &mut rng, &session);
+        assert_eq!(
+            fetch_pick,
+            Some(GameAction::SelectCards {
+                cards: vec![island]
+            }),
+            "the same session redeems the reducer-certified Island choice"
+        );
+
+        let fresh_session = AiSession::arc_from_game(runner.state());
+        let fresh_pick = choose_action_with_session(
+            runner.state(),
+            P0,
+            &config,
+            &mut SmallRng::seed_from_u64(17),
+            &fresh_session,
+        );
+        assert_eq!(
+            fresh_pick,
+            Some(GameAction::SelectCards {
+                cards: vec![forest]
+            }),
+            "a new session has no armed fetch plan and uses ordinary tutor ordering"
+        );
+
+        runner
+            .act(fetch_pick.expect("Island selection"))
+            .expect("selection applies");
+        let cast = choose_action_with_session(runner.state(), P0, &config, &mut rng, &session)
+            .expect("Island unlocks Phantom Monster cast");
+        assert!(matches!(cast, GameAction::CastSpell { object_id, .. } if object_id == phantom));
+        runner
+            .act(cast)
+            .expect("ordinary cast reducer commits Phantom Monster");
+        assert_eq!(runner.state().objects[&phantom].zone, Zone::Stack);
     }
 
     /// `fallback_action` under the default policy penalties. These tests assert
@@ -6132,7 +6370,8 @@ mod tests {
             &enabled,
             &services.context,
         );
-        let beam = rank_root_payment_candidates(&state, &decision, &prepared, &gated, &services, 3);
+        let beam =
+            rank_root_payment_candidates(&state, &decision, &prepared, &gated, &[], &services, 3);
         assert_eq!(
             beam.iter()
                 .map(|candidate| candidate.candidate.action.clone())
@@ -8186,6 +8425,7 @@ mod tests {
             &ctx,
             &prepared,
             &gated,
+            &[],
             services,
             services.config.search.max_branching as usize,
         )
