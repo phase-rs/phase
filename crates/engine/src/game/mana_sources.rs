@@ -2348,26 +2348,62 @@ fn land_mana_options(
         gates,
     );
 
-    // Legacy fallback for basic-land subtype-only objects (no explicit mana ability).
-    if options.is_empty() {
+    // CR 305.6 + CR 602.5: Legacy fallback for basic-land subtype-only objects that
+    // carry NO EXPLICIT mana ability at all (a nonbasic granted a basic land
+    // type by Urborg/Blood Moon-class effects with no accompanying
+    // `Effect::Mana` grant). This must NOT fire merely because
+    // `scan_mana_abilities` came back empty — it can be empty because a REAL
+    // `Effect::Mana` ability exists but was just filtered out by a legality
+    // gate (CantBeActivated, CantActivateDuring, an unsatisfied activation
+    // condition). Falling back to unconditional subtype-inferred production
+    // in that case would silently defeat the gate that filtered it (issue
+    // #6469: Karn, the Great Creator's "activated abilities of artifacts your
+    // opponents control can't be activated" stopped blocking a Liquimetal-
+    // Coating-turned-artifact land's own {T}: Add mana ability, because the
+    // ability's legitimate absence from `options` was mistaken for "no
+    // ability exists").
+    let has_explicit_mana_ability = obj
+        .abilities
+        .iter()
+        .any(|ability| matches!(*ability.effect, Effect::Mana { .. }));
+    if options.is_empty() && !has_explicit_mana_ability {
         if let Some(mana_type) = obj
             .card_types
             .subtypes
             .iter()
             .find_map(|s| mana_payment::land_subtype_to_mana_type(s))
         {
-            options.push(ManaSourceOption {
-                object_id,
-                ability_index: None,
-                mana_type,
-                source_could_produce_two_or_more_colors: source_could_produce_two_or_more_colors(
-                    state, object_id, controller,
-                ),
-                penalty: ManaSourcePenalty::None,
-                atomic_combination: None,
-                restrictions: Vec::new(),
-                taps_for_mana_overrides: Vec::new(),
-            });
+            // CR 305.6 + CR 602.5: the intrinsic "{T}: Add [mana symbol]"
+            // ability this fallback synthesizes is still an activated (mana)
+            // ability — every readiness gate a printed one is checked against
+            // (phased-out, detained, tapped/can't-tap, summoning sickness,
+            // CantBeActivated/CantActivateDuring, static activation
+            // restrictions) must apply to it too, not just the two activation-
+            // prohibition statics. Mirrors the `require_current_payability`
+            // gating `is_active_tap_mana_ability` applies to a real ability: the
+            // auto-tap PLANNING pass (`require_current_payability == false`)
+            // does not consult per-source legality gates for ANY mana source,
+            // real or intrinsic, so this only fires on the interactive/
+            // legal-action path.
+            let blocked = require_current_payability
+                && mana_type_to_color(mana_type).is_some_and(|color| {
+                    mana_abilities::intrinsic_land_mana_ability_blocked(
+                        state, controller, object_id, color, gates,
+                    )
+                });
+            if !blocked {
+                options.push(ManaSourceOption {
+                    object_id,
+                    ability_index: None,
+                    mana_type,
+                    source_could_produce_two_or_more_colors:
+                        source_could_produce_two_or_more_colors(state, object_id, controller),
+                    penalty: ManaSourcePenalty::None,
+                    atomic_combination: None,
+                    restrictions: Vec::new(),
+                    taps_for_mana_overrides: Vec::new(),
+                });
+            }
         }
     }
 

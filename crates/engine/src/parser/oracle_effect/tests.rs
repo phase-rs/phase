@@ -19144,6 +19144,63 @@ fn instead_condition_recognizes_that_permanent_is_color() {
     );
 }
 
+/// CR 608.2c + CR 115.1: a conditional counter override whose base clause
+/// targeted a creature reuses that chosen object through `ParentTarget`. The
+/// override must not turn its bare "it" into the resolving source or request a
+/// second target. Wakandan Royal Guard and Elder Cathar cover the unrestricted
+/// and controller-qualified target forms of this grammar.
+#[test]
+fn counter_instead_override_reuses_typed_antecedent_target() {
+    for effect_text in [
+        "Put a +1/+1 counter on target creature. If that creature is another Hero, put two +1/+1 counters on it instead.",
+        "Put a +1/+1 counter on target creature you control. If that creature is a Human, put two +1/+1 counters on it instead.",
+    ] {
+        let ability = parse_effect_chain(effect_text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                ability.effect.as_ref(),
+                Effect::PutCounter {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "the base counter instruction must retain its typed target for {effect_text:?}; got {:?}",
+            ability.effect
+        );
+        let override_branch = ability
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("expected counter override for {effect_text:?}"));
+        assert!(
+            matches!(
+                override_branch.condition.as_ref(),
+                Some(AbilityCondition::ConditionInstead { inner })
+                    if matches!(inner.as_ref(), AbilityCondition::TargetMatchesFilter { .. })
+            ),
+            "the override must retain a typed target-match condition for {effect_text:?}; got {:?}",
+            override_branch.condition
+        );
+        assert!(
+            matches!(
+                override_branch.effect.as_ref(),
+                Effect::PutCounter {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "the override must put two counters on the original target for {effect_text:?}; got {:?}",
+            override_branch.effect
+        );
+        assert!(
+            !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })
+                && !matches!(override_branch.effect.as_ref(), Effect::Unimplemented { .. }),
+            "both clauses must lower without Effect::Unimplemented for {effect_text:?}"
+        );
+    }
+}
+
 /// CR 117.1 + CR 400.7j + CR 608.2k + CR 614.1a: Stormscale Anarch class —
 /// the "discard a card at random" cost paid object is checked against the
 /// "multicolored" property to gate the override damage. The condition is

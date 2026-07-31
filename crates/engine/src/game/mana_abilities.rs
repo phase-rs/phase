@@ -1323,6 +1323,73 @@ impl ManaActivationGates {
     }
 }
 
+/// CR 305.6: builds the minimal synthetic `AbilityDefinition` (Tap cost,
+/// `Effect::Mana`) standing in for a land's INTRINSIC "{T}: Add [mana
+/// symbol]" ability — the ability every land with a basic land type has
+/// whether or not any `AbilityDefinition` object represents it. Used so a
+/// legality check's `kind`/`exemption`/cost axes (e.g. Damping Matrix's
+/// "unless they're mana abilities" carve-out) evaluate identically to how
+/// they would against a real, printed mana ability.
+fn intrinsic_land_mana_ability_definition(color: ManaColor) -> AbilityDefinition {
+    AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Activated,
+        Effect::Mana {
+            produced: ManaProduction::Fixed {
+                colors: vec![color],
+                contribution: crate::types::ability::ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Tap)
+}
+
+/// CR 305.6 + CR 602.5: Is a land's basic-land-type INTRINSIC mana ability
+/// currently blocked — by ANY of the gates a printed mana ability would be
+/// checked against? `mana_sources::land_mana_options`'s bare-subtype
+/// fallback synthesizes a `ManaSourceOption` for a land with no
+/// `AbilityDefinition` object at all (Urborg/Blood-Moon-class grants), but
+/// CR 305.6's intrinsic ability is still an activated mana ability, so every
+/// gate `mana_ability_ready_without_simulation_gated` applies to a real one —
+/// phased-out (CR 702.26b), detained (CR 701.35a), zone (CR 113.6), tapped/
+/// can't-tap (CR 101.2 + CR 107.5 + CR 601.2h + CR 602.2b), summoning sickness
+/// (CR 302.6), CantBeActivated/CantActivateDuring (CR 602.5), static
+/// activation restrictions (CR 604/605.3b) — must apply to it too. Routes the
+/// synthetic definition through that SAME single-authority readiness check
+/// rather than re-implementing any subset of it: the function takes an
+/// `AbilityDefinition` by reference and never indexes `obj.abilities`, so a
+/// synthesized definition with no real storage slot is exactly as valid an
+/// input as a printed one. `ability_index: 0` is inert here — the intrinsic
+/// ability carries empty `activation_restrictions` (so `ability_index` is
+/// never read by that check) and a bare `Tap` cost (whose payability check
+/// doesn't consult it either).
+pub(crate) fn intrinsic_land_mana_ability_blocked(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    color: ManaColor,
+    gates: Option<&ManaActivationGates>,
+) -> bool {
+    let ability_def = intrinsic_land_mana_ability_definition(color);
+    let ready = match gates {
+        Some(gates) => mana_ability_ready_without_simulation_gated(
+            state,
+            controller,
+            object_id,
+            0,
+            &ability_def,
+            gates,
+        ),
+        None => {
+            mana_ability_ready_without_simulation(state, controller, object_id, 0, &ability_def)
+        }
+    };
+    !ready
+}
+
 fn mana_ability_ready_without_simulation(
     state: &GameState,
     player: PlayerId,
@@ -1380,8 +1447,8 @@ fn mana_ability_ready_without_simulation_gated(
     if mana_sources::has_tap_component(&ability_def.cost) && obj.tapped {
         return false;
     }
-    // CR 701.26a + CR 508.1f: a "can't become tapped" source (e.g. a goaded mana
-    // dork) can't activate a tap-cost mana ability. A {Q} untap-cost ability is
+    // CR 101.2 + CR 107.5 + CR 601.2h + CR 602.2b: a "can't become tapped"
+    // source can't pay a tap-cost mana ability. A {Q} untap-cost ability is
     // unaffected — untapping is governed by `StaticMode::CantUntap`.
     if mana_sources::has_tap_component(&ability_def.cost)
         && crate::game::restrictions::object_cant_tap(state, source_id)
