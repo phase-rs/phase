@@ -20144,7 +20144,6 @@ mod tests {
                 source,
                 true,
             ),
-            &mut Vec::new(),
         );
         (state, source)
     }
