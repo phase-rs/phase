@@ -10421,6 +10421,281 @@ mod tests {
             assert_pt_identical(&normal, &forced, "count-anthem matching escalation");
         }
 
+        /// Build a board pairing a GREEN-keyed count magnitude with a color
+        /// wash: one enchantment carries "creatures get +X/+X, X = number of
+        /// green creatures" AND "creatures are green in addition to their other
+        /// colors" (layer 5). Two pre-existing 2/2 Bears — green via the wash,
+        /// so the count starts at 2 and both flush to 4/4.
+        fn green_count_anthem_with_color_wash_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, StaticDefinition};
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(280 + i),
+                    PlayerId(0),
+                    format!("WashBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![];
+                o.color = vec![];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(290),
+                PlayerId(0),
+                "Color Wash Count Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            // "creatures are green in addition to their other colors" (layer 5).
+            let mut wash = StaticDefinition::new(StaticMode::Continuous);
+            wash.affected = Some(TargetFilter::Typed(TypedFilter::creature()));
+            wash.modifications = vec![ContinuousModification::AddColor {
+                color: ManaColor::Green,
+            }];
+            // "creatures get +X/+X, X = number of green creatures" (layer 7c).
+            let green_creatures = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::HasColor {
+                    color: ManaColor::Green,
+                }],
+                ..Default::default()
+            });
+            let mut count = StaticDefinition::new(StaticMode::Continuous);
+            count.affected = Some(TargetFilter::Typed(TypedFilter::creature()));
+            count.modifications = vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: green_creatures.clone(),
+                        },
+                    },
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: green_creatures,
+                        },
+                    },
+                },
+            ];
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![wash.clone(), count.clone()]);
+                o.static_definitions = vec![wash, count].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// KNOWN GAP — deliberately pinned, expected to FLIP when the gap
+        /// closes. CR 613.1e + CR 613.1g: a population keyed on COLOR whose
+        /// entrant has that color rewritten by another layer is still probed
+        /// pre-layer. `population_probe_blinded_by_entrant_characteristic_change`
+        /// escalates only when an active effect rewrites an entrant's CARD
+        /// TYPES; a COLOR rewrite (`AddColor`, layer 5) is classified
+        /// non-perturbing, so the colorless entrant — green by the time the
+        /// count applies — is probed as colorless and the gate stays on the
+        /// incremental arm. No printed card in the current corpus is known to
+        /// pair a color-keyed count with a color wash (claim not exhaustively
+        /// verified — this tripwire, not corpus absence, is what holds the
+        /// line); this synthetic board pins the
+        /// resulting divergence so closing the gap (the full FilterProp-reads ×
+        /// ContinuousModification-writes characteristic-kind matrix) turns this
+        /// red and the assertions below get rewritten to escalation + identity.
+        /// See the KNOWN REMAINING GAP note on
+        /// `population_probe_blinded_by_entrant_characteristic_change`.
+        #[test]
+        fn known_gap_color_keyed_population_probes_entrant_pre_layer() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(green_count_anthem_with_color_wash_board, |s| {
+                    add_colorless_creature_entry(s, 291)
+                });
+            // Pin 1: the gate is blind to color rewrites — the incremental arm
+            // is (incorrectly, but knowingly) taken.
+            assert!(
+                !escalated,
+                "KNOWN GAP CLOSED? color-rewrite escalation now fires — rewrite \
+                 this test to assert escalation and board identity"
+            );
+            // Pin 2: the divergence itself. Pre-existing Bears keep the stale
+            // count of 2 (4/4) where a full pass counts the now-green entrant
+            // and derives 5/5.
+            let bear_pts = |state: &GameState| {
+                let mut pts: Vec<(Option<i32>, Option<i32>)> = state
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .filter(|o| o.name.starts_with("WashBear"))
+                    .map(|o| (o.power, o.toughness))
+                    .collect();
+                pts.sort();
+                pts
+            };
+            assert_eq!(
+                bear_pts(&normal),
+                vec![(Some(4), Some(4)); 2],
+                "incremental arm leaves pre-existing Bears at the stale count"
+            );
+            assert_eq!(
+                bear_pts(&forced),
+                vec![(Some(5), Some(5)); 2],
+                "full pass counts the washed entrant — the correct CR 613 board"
+            );
+        }
+
+        /// Build a board pairing a PURE layer-4 type-writer with a
+        /// condition-gated fixed anthem — the CONDITION-channel analogue of the
+        /// Ashaya CDA regression. Source A: "creatures you control are lands in
+        /// addition to their other types" (no dynamic magnitude, no
+        /// population-sensitive affected set, no entry replacement). Source B:
+        /// "creatures you control get +2/+2 as long as you control four or more
+        /// lands" (`QuantityComparison` over `ObjectCount(Land)` — the ONLY
+        /// population read on the board, and it lives in a `condition`, not in
+        /// any effect's magnitude or affected set). One pre-existing GateBear,
+        /// two plain lands: pre-entry land count = 2 lands + 1 creature-as-land
+        /// = 3, gate OFF.
+        fn type_writer_with_condition_gated_anthem_board() -> GameState {
+            use crate::types::ability::{
+                Comparator, ContinuousModification, StaticCondition, StaticDefinition,
+                TypeFilter as TF, TypedFilter as TFil,
+            };
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            let bear = create_object(
+                &mut state,
+                CardId(300),
+                PlayerId(0),
+                "GateBear".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let o = state.objects.get_mut(&bear).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+            }
+            for i in 0..2 {
+                let land = create_object(
+                    &mut state,
+                    CardId(301 + i),
+                    PlayerId(0),
+                    format!("QuietLand{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&land).unwrap();
+                o.base_card_types.core_types = vec![CoreType::Land];
+                o.card_types.core_types = vec![CoreType::Land];
+            }
+            let type_writer = create_object(
+                &mut state,
+                CardId(310),
+                PlayerId(0),
+                "Creatures Are Lands".to_string(),
+                Zone::Battlefield,
+            );
+            let mut writer_sd = StaticDefinition::new(StaticMode::Continuous);
+            writer_sd.affected = Some(TargetFilter::Typed(TFil::new(TF::Creature)));
+            writer_sd.modifications = vec![ContinuousModification::AddType {
+                core_type: CoreType::Land,
+            }];
+            {
+                let o = state.objects.get_mut(&type_writer).unwrap();
+                o.base_static_definitions = Arc::new(vec![writer_sd.clone()]);
+                o.static_definitions = vec![writer_sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(311),
+                PlayerId(0),
+                "Land Threshold Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut anthem_sd = StaticDefinition::new(StaticMode::Continuous);
+            anthem_sd.affected = Some(TargetFilter::Typed(TFil::new(TF::Creature)));
+            anthem_sd.modifications = vec![
+                ContinuousModification::AddPower { value: 2 },
+                ContinuousModification::AddToughness { value: 2 },
+            ];
+            anthem_sd.condition = Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TFil::new(TF::Land)),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            });
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![anthem_sd.clone()]);
+                o.static_definitions = vec![anthem_sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (3c) CONDITION-channel blindness — perturbing only POST-layer:
+        /// CR 611.3a + CR 613.1 + CR 613.1d. A plain creature entering is NOT a
+        /// land at gate time, so neither Axis 2a (no population-reading effect
+        /// magnitude or affected set is live) nor Axis 2b's pre-layer membership
+        /// probe fires; but the type-writer makes the entrant a land in layer 4
+        /// and the count crosses the anthem's threshold, changing PRE-EXISTING
+        /// recipients. The blindness disjunct's condition channel
+        /// (`any_active_static_condition_reads_object_population`) MUST escalate
+        /// this entry, and the board must match a forced-Full pass (GateBear
+        /// 4/4, not stale 2/2).
+        #[test]
+        fn condition_gated_anthem_entry_escalates_when_entrant_types_rewritten() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(type_writer_with_condition_gated_anthem_board, |s| {
+                    add_colorless_creature_entry(s, 320)
+                });
+            assert!(
+                escalated,
+                "entrant becomes a land in layer 4 and flips the threshold gate — must escalate"
+            );
+            assert_pt_identical(
+                &normal,
+                &forced,
+                "condition-channel type-rewrite escalation",
+            );
+            // Vacuity guard: `escalated` depends only on the classifier, so pin
+            // that the threshold gate actually flips — GateBear ends the pass
+            // at 4/4 (base 2/2 + the now-live +2/+2), not a stale 2/2.
+            let gatebear_pt = |state: &GameState| {
+                state
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .find(|o| o.name == "GateBear")
+                    .map(|o| (o.power, o.toughness))
+                    .unwrap()
+            };
+            assert_eq!(
+                gatebear_pt(&forced),
+                (Some(4), Some(4)),
+                "the entrant-turned-land crosses the GE-4 land threshold"
+            );
+        }
+
         /// (4) MEDIUM-2 — whole-board TALLY affected filter
         /// (`MostPrevalentCreatureTypeIn`). The anthem affects "creatures of the
         /// most prevalent creature type on the battlefield". A creature token

@@ -1834,8 +1834,9 @@ fn rebuild_static_index_at_top() -> bool {
 /// stops re-deriving them, and a naturally-menace creature keeps its printed
 /// menace when it stops being suspected.
 ///
-/// Called from the Step-1 reset of both the full (`evaluate_layers`) and
-/// incremental (`apply_layers_incremental`) passes, immediately after the live
+/// Called from `reset_recipient_to_base`, which both passes go through — the
+/// full one (`evaluate_layers`) board-wide, the incremental one
+/// (`prepare_incremental_flush`) over recipients — immediately after the live
 /// fields are reset to base, so the derived grant rides along with every reset.
 fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
     if !obj.is_suspected {
@@ -1862,11 +1863,12 @@ fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
 /// CR 613.1 + CR 707.2 + CR 708.2: seed live characteristics from base_*; shared
 /// by Step-1 top-of-pass reset and the CR 613.2b Layer-1b face-down re-seed.
 ///
-/// Assigns the live copiable-characteristic fields from their `base_*` baseline,
-/// exactly mirroring the Step-1 reset block field-for-field. Does NOT call
-/// `sync_missing_base_characteristics`, and does NOT touch controller, the
-/// combat-assignment flags, or `derive_suspected_abilities` — those stay inline
-/// in Step 1 (they are not part of the face-down CR 708.2a re-seed).
+/// Assigns the live copiable-characteristic fields from their `base_*` baseline.
+/// Does NOT call `sync_missing_base_characteristics`, and does NOT touch
+/// controller, the combat-assignment flags, or `derive_suspected_abilities` —
+/// those live in `reset_recipient_to_base`, which calls this as its second step
+/// (they are not part of the face-down CR 708.2a re-seed, which is why this is
+/// separable at all).
 fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameObject) {
     obj.name = obj.base_name.clone();
     obj.power = obj.base_power;
@@ -2039,23 +2041,12 @@ pub fn evaluate_layers(state: &mut GameState) {
     let mut face_down_ids: Vec<ObjectId> = Vec::new();
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            obj.sync_missing_base_characteristics();
-            seed_live_characteristics_from_base(obj);
+            reset_recipient_to_base(obj);
+            // Reset does not touch `face_down`, so this reads the same value
+            // whichever side of the reset it sits on.
             if obj.face_down {
                 face_down_ids.push(id);
             }
-            // CR 613.1b: Reset controller to the object's base controller;
-            // Layer 2 re-applies continuous control-changing effects.
-            obj.controller = obj.base_controller.unwrap_or(obj.owner);
-            // CR 613.11 + CR 510.1a: Reset combat-assignment rule flags;
-            // re-applied after object-characteristic layers are complete.
-            obj.assigns_damage_from_toughness = false;
-            obj.assigns_damage_as_though_unblocked = false;
-            obj.assigns_no_combat_damage = false;
-            // CR 701.60c: re-derive the suspected designation's menace +
-            // "can't block" onto the just-reset live fields (not base), so
-            // the grant lasts exactly as long as the designation.
-            derive_suspected_abilities(obj);
         }
     }
     // CR 702.94a + CR 400.3: Hand-zone continuous effects (Lorehold-style
@@ -3429,6 +3420,27 @@ pub fn flush_layers(state: &mut GameState) {
     }
 }
 
+/// CR 613.1: Single authority for the per-object "back to base" reset. Both
+/// arms go through here — the full pass applies it board-wide over the
+/// phased-in battlefield, the incremental arm applies it to recipients only —
+/// so the two arms cannot drift in what "base" means.
+fn reset_recipient_to_base(obj: &mut crate::game::game_object::GameObject) {
+    obj.sync_missing_base_characteristics();
+    seed_live_characteristics_from_base(obj);
+    // CR 613.1b: layer 2 control-change effects are re-applied from the base
+    // controller, not accumulated on top of the previous pass's result.
+    obj.controller = obj.base_controller.unwrap_or(obj.owner);
+    // CR 613.11 + CR 510.1a: combat-assignment rule effects are re-derived every
+    // pass, so the previous pass's grants must not persist through the reset.
+    obj.assigns_damage_from_toughness = false;
+    obj.assigns_damage_as_though_unblocked = false;
+    obj.assigns_no_combat_damage = false;
+    // CR 701.60c: re-derive the suspected designation's menace + "can't block"
+    // onto the just-reset live fields (not base), so the grant lasts exactly as
+    // long as the designation.
+    derive_suspected_abilities(obj);
+}
+
 fn prepare_incremental_flush(
     state: &mut GameState,
     entered_ids: &BTreeSet<ObjectId>,
@@ -3448,13 +3460,7 @@ fn prepare_incremental_flush(
     // and collecting the prepared effect set so local CDAs are visible again.
     for &id in &recipient_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            obj.sync_missing_base_characteristics();
-            seed_live_characteristics_from_base(obj);
-            obj.controller = obj.base_controller.unwrap_or(obj.owner);
-            obj.assigns_damage_from_toughness = false;
-            obj.assigns_damage_as_though_unblocked = false;
-            obj.assigns_no_combat_damage = false;
-            derive_suspected_abilities(obj);
+            reset_recipient_to_base(obj);
         }
     }
     crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
@@ -3467,6 +3473,11 @@ fn prepare_incremental_flush(
         return None;
     }
     if active_effects_force_incremental_escalation(state, entered_ids, &active_effects)
+        || population_probe_blinded_by_entrant_characteristic_change(
+            state,
+            entered_ids,
+            &active_effects,
+        )
         || any_active_static_condition_perturbed_by_entry(state, entered_ids)
     {
         return None;
@@ -3481,72 +3492,283 @@ fn prepare_incremental_flush(
 /// Decide whether an `EnteredObjects` flush must conservatively escalate to a
 /// full re-evaluation.
 ///
-/// Two axes, both required-clean for the fast path:
+/// SINGLE AUTHORITY: this delegates to `prepare_incremental_flush` — the exact
+/// gate `flush_layers` consults — rather than re-deriving the decision. It
+/// previously carried its own two-axis reimplementation, which had already
+/// drifted from production in two ways: it omitted the recipient-sourced-effect
+/// check, and it evaluated the active-effect axis against a board on which the
+/// recipient reset had NOT yet run (production resets first, so a stale layer-6
+/// removal could hide a recipient's live static from the test predicate but not
+/// from production). A test predicate that answers a different question than the
+/// production gate cannot certify the production gate.
 ///
-/// 1. Per-entered preconditions: the entered object must not itself be the
-///    source of a continuous effect, carry a CDA static, or carry a
-///    control-override / type-change / text-change / counter / attachment /
-///    transient effect (the entry enqueued none for a plain token).
+/// The escalation disjuncts are enumerated at the `prepare_incremental_flush`
+/// call site and documented on each disjunct's own function. This wrapper
+/// deliberately restates neither: a second enumeration here is exactly what
+/// drifted last time.
 ///
-/// 2. Board-wide escalation: no ACTIVE continuous effect may have a magnitude,
-///    affected set, or source-level enabling CONDITION that reads battlefield
-///    object population.
-///    CR 611.3a: a static-ability continuous effect isn't locked in; it applies
-///    at any moment to whatever its text indicates — so a board-population-
-///    dependent magnitude, affected set, or enabling condition re-evaluates when
-///    an object enters, changing PRE-EXISTING recipients. CR 613.7d: the entering
-///    object receives its timestamp on zone entry. CR 613.8a: dependency/timestamp
-///    ordering operates on the live set. This scan is O(active-effect-count), NOT
-///    O(battlefield).
+/// CR 611.3a: a static-ability continuous effect isn't locked in; it applies
+/// at any moment to whatever its text indicates — so a board-population-
+/// dependent magnitude, affected set, or enabling condition re-evaluates when
+/// an object enters, changing PRE-EXISTING recipients. CR 613.7d: the entering
+/// object receives its timestamp on zone entry. CR 613.8a: dependency/timestamp
+/// ordering operates on the live set.
+///
+/// Takes `&GameState` and works on a clone because `prepare_incremental_flush`
+/// mutates: after its per-entrant precondition scan it resets every recipient
+/// to base. The caller asks a question and must not have its board
+/// half-flushed by the asking.
 #[cfg(test)]
 pub(crate) fn incremental_flush_must_escalate(
     state: &GameState,
     entered_ids: &BTreeSet<ObjectId>,
 ) -> bool {
-    // Axis 1 — per-entered preconditions.
-    for &id in entered_ids {
-        let Some(obj) = state.objects.get(&id) else {
-            // The entered object already left (e.g. it was a token that died to
-            // an SBA before flush). A full pass is the safe handling.
-            return true;
-        };
-        if entered_object_blocks_incremental(state, obj) {
-            return true;
+    let mut scratch = state.clone();
+    prepare_incremental_flush(&mut scratch, entered_ids).is_none()
+}
+
+/// Does this effect read battlefield object POPULATION at all — through its
+/// dynamic magnitude or through its affected set?
+///
+/// Single authority for the unnarrowed question, consumed by
+/// `population_probe_blinded_by_entrant_characteristic_change`, whose whole
+/// point is that per-entrant narrowing is unreliable. Axis 2a
+/// (`active_effects_force_incremental_escalation`) asks the same question but
+/// needs the two channels separately to pick a narrowing, so it consumes
+/// `effect_population_reads` — the shared definition underneath — directly.
+///
+/// Effects are not the only population readers: a Continuous static's enabling
+/// `condition` reads populations too — that channel's twin is
+/// `any_active_static_condition_reads_object_population`.
+fn effect_reads_object_population(e: &ActiveContinuousEffect) -> bool {
+    let (magnitude_sensitive, affected_sensitive) = effect_population_reads(e);
+    magnitude_sensitive || affected_sensitive
+}
+
+/// The two population-read channels of a single effect, computed once:
+/// `(dynamic-magnitude sensitivity, affected-set sensitivity)`. Axis 2a needs
+/// the split to pick which per-entrant narrowing applies without walking the
+/// affected filter twice; everything else consumes the disjunction via
+/// `effect_reads_object_population`.
+fn effect_population_reads(e: &ActiveContinuousEffect) -> (bool, bool) {
+    (
+        continuous_modification_dynamic_quantity(&e.modification)
+            .is_some_and(crate::game::quantity::quantity_expr_uses_object_count),
+        crate::game::filter::affected_filter_uses_object_population(&e.affected_filter),
+    )
+}
+
+/// Condition-channel twin of `effect_reads_object_population`: does any live
+/// CONTINUOUS static definition carry an enabling `condition` that reads
+/// battlefield object population (CR 611.3a — the condition re-evaluates as the
+/// board changes)? Axis 2b (`any_active_static_condition_perturbed_by_entry`)
+/// probes such conditions per-entrant with PRE-layer characteristics, so the
+/// blindness disjunct below must treat them as population readers alongside
+/// effect magnitudes and affected sets.
+fn any_active_static_condition_reads_object_population(state: &GameState) -> bool {
+    let mut found = false;
+    for_each_static_effect_source(state, |_state, obj| {
+        if found {
+            return;
         }
-    }
+        if obj.static_definitions.iter_all().any(|def| {
+            def.mode == StaticMode::Continuous
+                && def
+                    .condition
+                    .as_ref()
+                    .is_some_and(static_condition_uses_object_population)
+        }) {
+            found = true;
+        }
+    });
+    found
+}
 
-    // Axis 2a — magnitude + affected-set over the EXISTING active effect set,
-    // NARROWED to entries that actually perturb the population input.
-    //
-    // Two-stage test per effect: the committed exhaustive classifier
-    // (`quantity_expr_uses_object_count` / `affected_filter_uses_object_population`)
-    // is the OUTER conjunct (compile-time tripwire — a future population-reading
-    // variant forces a classification). Then the entry-aware narrowing layer asks
-    // whether any ENTERED object can flip THIS effect's population input.
-    //
-    // CR 109.5: the filter's "you control" must resolve against the EFFECT
-    // SOURCE's controller, not the entered object's — so `ctx` is built per-effect
-    // from `e.source_id` + `e.controller`. Escalation is `classifier(e) &&
-    // any_entered_perturbs(e)`; both required.
-    let active_effects = collect_shared_active_continuous_effects(state);
-    if active_effects_force_incremental_escalation(state, entered_ids, &active_effects) {
-        return true;
+/// CR 613.1 + CR 613.1d + CR 613.4a: escalate when the population probes below
+/// are asking about an object whose characteristics the pass is about to change.
+/// Layers apply in order (CR 613.1), so a layer-4 type rewrite (CR 613.1d) has
+/// already happened by the time any later layer's population read — including a
+/// layer-7a CDA's P/T definition (CR 613.4a) — is evaluated; the gate's probes
+/// run BEFORE any layer.
+///
+/// `active_effects_force_incremental_escalation` asks "does the ENTERING object
+/// join this counted population?" against the entrant's characteristics as they
+/// stand at gate time — which is BEFORE any layer has applied to it. If some
+/// other active effect will change those characteristics later in the same pass,
+/// the probe answered about the wrong object. The same blindness afflicts the
+/// per-entrant probe in `any_active_static_condition_perturbed_by_entry`: a
+/// static's enabling condition (CR 611.3a) that counts a population also reads
+/// the entrant pre-layer.
+///
+/// Found by differential verification against a full re-evaluation during
+/// development, on Ashaya, Soul of the Wild: its CDA counts "lands you control"
+/// (layer 7a) while its own second static makes nontoken creatures Forest LANDS
+/// (layer 4). An entering Grizzly Bears is not a land at gate time, so the probe
+/// reported no perturbation, the incremental arm ran, and Ashaya kept a stale
+/// 1/1 where a full pass derives 2/2. Condition-channel twin of the same
+/// blindness: Life and Limb (layer 4: all Saprolings are Forest lands) plus
+/// Sylvan Advocate ("as long as you control six or more lands...") — an
+/// entering Saproling flips the Advocate's condition only post-layer. The
+/// discriminating fixture for that channel is the synthetic
+/// `condition_gated_anthem_entry_escalates_when_entrant_types_rewritten`, which
+/// is constructed to take the incremental path; the printed Life and Limb pair
+/// is pinned end-to-end separately in
+/// `tests/integration/life_and_limb_sylvan_advocate.rs`.
+///
+/// Precise on the write CLASSIFIER, conservative on the READ side. Projecting
+/// the entrant through layer 4 would need a speculative pass, transitively
+/// closed over grants that unlock further grants; instead this escalates when a
+/// population READ is live — an effect's dynamic magnitude or affected set
+/// (`effect_reads_object_population`) or a Continuous static's enabling
+/// condition (`any_active_static_condition_reads_object_population`) — AND some
+/// active effect reaching an entrant rewrites that entrant's CARD TYPES. The
+/// read side is not narrowed because a counted population is almost always
+/// keyed on card type (`ObjectCount { filter: lands you control }`), so
+/// narrowing it would buy nothing while adding a second 98-arm classifier.
+/// Note the write-side REACH probe (`matches_target_filter` below) shares the
+/// pre-layer blindness this disjunct exists to fix: a type-writer whose
+/// affected filter keys on a characteristic another layer rewrites is still
+/// missed — that is the write-side twin of the KNOWN REMAINING GAP.
+///
+/// This precision is load-bearing, not decorative: escalating on "the entrant is
+/// a recipient of anything" instead regresses the deliberately-pinned
+/// `count_anthem_nonmatching_entry_does_not_escalate_and_matches_full` and
+/// `devotion_gate_colorless_entry_does_not_escalate_and_matches_full` fast paths,
+/// where the effect reaching the entrant writes only P/T and so cannot move a
+/// type-keyed or devotion-keyed count.
+///
+/// KNOWN REMAINING GAP, same shape, other characteristics: a population keyed on
+/// COLOR, KEYWORD, NAME or P/T whose entrant has that characteristic rewritten by
+/// another layer is still probed pre-layer — on the read side (the counted
+/// filter) and on the write side (a type-writer's own affected filter keyed on
+/// a rewritten characteristic) alike. Closing it needs the full
+/// characteristic-kind matrix (which kind each `FilterProp` reads × which kind
+/// each `ContinuousModification` writes) rather than the card-type projection of
+/// it below. No printed pairing in the current corpus is known to exercise it
+/// (claim not exhaustively verified — the tripwire below, not corpus absence,
+/// is what holds the line); the gap's current behavior is pinned by
+/// `known_gap_color_keyed_population_probes_entrant_pre_layer` (stack.rs
+/// entry-flush escalation tests), which is expected to flip when the matrix
+/// lands.
+///
+/// Two further channels of the same blindness, named explicitly because neither
+/// is covered by the sentence above:
+///
+/// 1. CONTROLLER (CR 613.1b). A population keyed on controller — "creatures you
+///    control" is the overwhelmingly common shape — is read here pre-layer,
+///    while a layer-2 control-change effect (`ChangeController`, classified
+///    `false` by `modification_writes_card_types` because it writes no card
+///    type) can move the entrant between players' populations. This is NOT a
+///    subset of the paragraph above: CR 109.3 states an object's controller is
+///    not one of its characteristics, so "other characteristics" excludes it by
+///    construction. Closing it is cheaper than the full matrix — battlefield
+///    `ChangeController` is rare, so a controller-channel disjunct would cost
+///    the fast path close to nothing.
+/// 2. GRANT CHAINS. `GrantAbility` / `GrantStaticAbility` / `AddStaticMode` /
+///    `RemoveAllAbilities` all classify `false`, which is correct for the
+///    predicate "does this write card types" but leaves a second-order path the
+///    classifier cannot see: an effect that GRANTS a type-writing static (or
+///    strips a CDA) reaches the entrant without itself writing a type. The
+///    residual risk is small because `entered_object_blocks_incremental`
+///    already escalates for entrants that carry their own static or CDA, but it
+///    is not zero and it is not closed here.
+fn population_probe_blinded_by_entrant_characteristic_change(
+    state: &GameState,
+    entered_ids: &BTreeSet<ObjectId>,
+    active_effects: &[ActiveContinuousEffect],
+) -> bool {
+    // Write side first: `modification_writes_card_types` is a pure enum match,
+    // so the common board with no type-writer reaching an entrant pays neither
+    // the active-effect read scan nor the static-source condition walk (a
+    // traversal Axis 2b repeats immediately after this gate).
+    let writer_reaches_entrant = active_effects.iter().any(|e| {
+        if !modification_writes_card_types(&e.modification) {
+            return false;
+        }
+        let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
+        entered_ids
+            .iter()
+            .any(|id| matches_target_filter(state, *id, &e.affected_filter, &ctx))
+    });
+    if !writer_reaches_entrant {
+        return false;
     }
+    active_effects.iter().any(effect_reads_object_population)
+        || any_active_static_condition_reads_object_population(state)
+}
 
-    // Axis 2b — source-level enabling CONDITION over the EXISTING static-ability
-    // sources, NARROWED to entries that actually perturb the condition. Conditions
-    // remain attached to collected effects for application-time evaluation, while
-    // this source walk supplies the before/after truth comparison required for an
-    // incremental full-rebuild decision.
-    //
-    // CR 611.3a + CR 611.3b: when such a source-level enabling condition depends
-    // on board population, an object entering can flip the condition for the
-    // WHOLE recipient set, changing PRE-EXISTING recipients — so escalate to a
-    // full rebuild. The entry-aware narrowing (built per-source from the visited
-    // object, CR 109.5) skips escalation when no entered object can perturb the
-    // gate; the truth-delta refinement (below) skips escalation even when an
-    // entry perturbs the gate INPUT but does not flip its truth value.
-    any_active_static_condition_perturbed_by_entry(state, entered_ids)
+/// CR 613.1d (layer 4): does this modification rewrite an object's card types,
+/// subtypes or supertypes — the characteristics a counted population is keyed on?
+///
+/// EXHAUSTIVE and wildcard-free over `ContinuousModification`, so a future
+/// type-rewriting variant must be classified here at compile time rather than
+/// silently reopening the Ashaya divergence.
+fn modification_writes_card_types(m: &ContinuousModification) -> bool {
+    match m {
+        ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. } => true,
+        // CR 613.2a + CR 613.2c + CR 707.2: a copy effect (layer 1a) replaces
+        // the copiable values,
+        // card types among them, so it rewrites types just as surely as
+        // `SetCardTypes` does.
+        ContinuousModification::CopyValues { .. } | ContinuousModification::CopyChosen => true,
+        // Everything else writes a characteristic that is not a card type.
+        // Enumerated explicitly (no wildcard) so a future type-rewriting variant
+        // forces a decision here.
+        ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::SetStartingLoyalty { .. }
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::AddChosenKeyword
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::GrantReplacement { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::RemoveManaCost => false,
+    }
 }
 
 fn active_effects_force_incremental_escalation(
@@ -3555,14 +3777,11 @@ fn active_effects_force_incremental_escalation(
     active_effects: &[ActiveContinuousEffect],
 ) -> bool {
     active_effects.iter().any(|e| {
-        let magnitude = continuous_modification_dynamic_quantity(&e.modification);
-        let magnitude_sensitive =
-            magnitude.is_some_and(crate::game::quantity::quantity_expr_uses_object_count);
-        let affected_sensitive =
-            crate::game::filter::affected_filter_uses_object_population(&e.affected_filter);
+        let (magnitude_sensitive, affected_sensitive) = effect_population_reads(e);
         if !magnitude_sensitive && !affected_sensitive {
             return false;
         }
+        let magnitude = continuous_modification_dynamic_quantity(&e.modification);
         let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
         entered_ids.iter().any(|id| {
             let Some(entered) = state.objects.get(id) else {
@@ -3821,10 +4040,16 @@ fn effect_is_restricted_to_incremental_recipients(
 /// visibility). It does NOT clear attribution globally or touch the rest of the
 /// battlefield: pre-existing objects keep their already-derived characteristics.
 ///
-/// Caller (`flush_layers`) only reaches this path after
-/// `incremental_flush_must_escalate` returned false, which guarantees no active
-/// effect's magnitude or affected set reads board population — so re-deriving
-/// just the entered objects yields a board identical to a full pass (CR 613.1).
+/// Caller (`flush_layers`) only reaches this path when `prepare_incremental_flush`
+/// returned `Some`, i.e. none of its escalation disjuncts fired. The disjuncts are
+/// listed once, at that function; they are deliberately NOT restated here, because
+/// a second enumeration is exactly what drifted last time.
+///
+/// Within the limits those disjuncts detect, re-deriving just the entered objects
+/// yields a board identical to a full pass (CR 613.1). Note what that does and
+/// does not promise: the guarantee is "no DETECTED perturbation", not "no
+/// population read is live". The residual blind spots are enumerated on
+/// `population_probe_blinded_by_entrant_characteristic_change`.
 fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncrementalFlush) {
     let PreparedIncrementalFlush {
         recipient_ids,
