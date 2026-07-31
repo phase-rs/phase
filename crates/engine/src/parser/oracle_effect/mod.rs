@@ -20562,7 +20562,7 @@ fn rebind_anaphoric_object_scope(expr: &mut QuantityExpr, scope: ObjectScope) {
 ///
 /// This is intentionally used only by `wrap_target_subject_damage`: ordinary
 /// spell-source quantities (including an explicit `~`) retain `Source`.
-fn rebind_target_subject_object_scope(expr: &mut QuantityExpr) {
+pub(super) fn rebind_target_subject_object_scope(expr: &mut QuantityExpr) {
     match expr {
         QuantityExpr::Ref { qty } => {
             let scope = match qty {

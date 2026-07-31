@@ -3843,9 +3843,12 @@ mod tests {
         let session = Arc::new(AiSession::from_game(&state));
         let mut rng = SmallRng::seed_from_u64(7);
 
+        let scored = score_candidates_core(&state, P0, &config, &session, None);
         assert!(
-            score_candidates_core(&state, P0, &config, &session, None).is_empty(),
-            "the adverse cast must be removed before scoring"
+            scored
+                .iter()
+                .all(|(action, _)| !matches!(action, GameAction::CastSpell { .. })),
+            "the adverse cast must be removed before scoring, got {scored:#?}"
         );
 
         let action = choose_action_with_session(&state, P0, &config, &mut rng, &session)

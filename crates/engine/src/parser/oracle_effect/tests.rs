@@ -4996,19 +4996,22 @@ fn target_subject_damage_inherited_self_leg_binds_root_slot() {
         .sub_ability
         .as_ref()
         .expect("verbatim Self-Destruct must parse its first damage leg");
-    assert!(matches!(
-        first.effect.as_ref(),
-        Effect::DealDamage {
-            amount: QuantityExpr::Ref {
-                qty: QuantityRef::Power {
-                    scope: ObjectScope::Target,
+    assert!(
+        matches!(
+            first.effect.as_ref(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
                 },
-            },
-            target: TargetFilter::Typed(TypedFilter { properties, .. }),
-            damage_source: Some(DamageSource::Target),
-            ..
-        } if properties.iter().any(|property| matches!(property, FilterProp::Another))
-    ));
+                target: TargetFilter::Typed(TypedFilter { properties, .. }),
+                damage_source: Some(DamageSource::Target),
+                ..
+            } if properties.iter().any(|property| matches!(property, FilterProp::Another))
+        ),
+        "expected target-source first damage leg, got {first:#?}"
+    );
     let self_damage = first
         .sub_ability
         .as_ref()

@@ -73,8 +73,8 @@ impl RootBinding {
 }
 
 /// Preview whether every complete, supported target declaration for `root` is
-/// the strictly bad exchange where the selected friendly creature dies and the
-/// exact opposing recipient survives.
+/// the strictly bad exchange where the selected friendly creature dies and its
+/// exact recipient survives.
 ///
 /// CR 601.2c: target choices are enumerated from the current reducer-issued
 /// candidate set. CR 608.2c: after each target action, `pending_cast.ability`
@@ -448,15 +448,18 @@ fn valid_targeted_exchange_participants(
             .core_types
             .contains(&CoreType::Creature)
         && match recipient {
+            // `any other target` may legally select a friendly permanent or the
+            // controller. They must still be replayed: a source that destroys
+            // itself while that selected recipient remains is an adverse outcome,
+            // not an unsupported branch that turns the whole root indeterminate.
             TargetRef::Object(recipient) => {
                 source != *recipient
-                    && state.objects.get(recipient).is_some_and(|object| {
-                        object.zone == Zone::Battlefield && object.controller != semantic_owner
-                    })
+                    && state
+                        .objects
+                        .get(recipient)
+                        .is_some_and(|object| object.zone == Zone::Battlefield)
             }
-            TargetRef::Player(recipient) => {
-                *recipient != semantic_owner && crate::game::players::is_alive(state, *recipient)
-            }
+            TargetRef::Player(recipient) => crate::game::players::is_alive(state, *recipient),
         }
 }
 

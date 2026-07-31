@@ -10093,11 +10093,44 @@ pub(super) fn apply_where_x_ability_expression(
     if let Some(sub) = def.sub_ability.as_mut() {
         apply_where_x_ability_expression(sub, where_x_expression);
     }
+    // CR 120.1 + CR 608.2c: `wrap_target_subject_damage` has already established
+    // that this target-only picker supplies the damage source. A trailing
+    // "where X is its power" binds after that wrapper is built, and the generic
+    // where-X grammar correctly starts from its ordinary `Source` scope. Restore
+    // the target-subject meaning after the binding so both direct damage legs
+    // read the chosen creature's characteristics (Self-Destruct class).
+    if where_x_expression.is_some() && matches!(def.effect.as_ref(), Effect::TargetOnly { .. }) {
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            rebind_target_subject_damage_where_x(sub);
+        }
+    }
     if let Some(else_ability) = def.else_ability.as_mut() {
         apply_where_x_ability_expression(else_ability, where_x_expression);
     }
     for mode_ability in &mut def.mode_abilities {
         apply_where_x_ability_expression(mode_ability, where_x_expression);
+    }
+}
+
+/// CR 120.1 + CR 608.2c: Walk the target-subject damage clause emitted beneath
+/// `Effect::TargetOnly` and rebind only damage instructions whose source is the
+/// chosen target. Other chained instructions are left alone.
+fn rebind_target_subject_damage_where_x(def: &mut AbilityDefinition) {
+    match def.effect.as_mut() {
+        Effect::DealDamage {
+            amount,
+            damage_source: Some(DamageSource::Target),
+            ..
+        }
+        | Effect::DamageAll {
+            amount,
+            damage_source: Some(DamageSource::Target),
+            ..
+        } => super::rebind_target_subject_object_scope(amount),
+        _ => {}
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rebind_target_subject_damage_where_x(sub);
     }
 }
 
