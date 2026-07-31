@@ -6,9 +6,8 @@ use rand_chacha::ChaCha20Rng;
 
 use engine::ai_support::{
     build_decision_context, build_decision_context_for_semantic_owner, certify_fetch_then_cast,
-    certify_pact_plan, is_pact_payment_cast, AiDecisionContract,
-    targeted_exchange_verdict, validated_candidate_actions_for_semantic_owner,
-    TargetedExchangeVerdict,
+    certify_pact_plan, is_pact_payment_cast, targeted_exchange_verdict,
+    validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
 };
 use engine::types::ability::{
     AbilityDefinition, ContinuousModification, Duration, Effect, StaticDefinition, TargetFilter,

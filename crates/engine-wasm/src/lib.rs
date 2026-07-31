@@ -118,9 +118,8 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
 
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::{
-    choose_action_with_session, score_candidates_for_parallel_worker, select_safe_action_from_scores,
-    AiSession,
-    SessionCache,
+    choose_action_with_session, score_candidates_for_parallel_worker,
+    select_safe_action_from_scores, AiSession, SessionCache,
 };
 thread_local! {
     /// Game state uses Cell<Option<T>> with take/set to avoid RefCell borrow poisoning.
@@ -2057,12 +2056,8 @@ pub fn get_ai_action_proposal_from_scores(
         let config =
             create_config_for_players(difficulty, Platform::Wasm, state.players.len() as u8);
         let mut rng = ChaCha20Rng::seed_from_u64(rng_seed);
-        let Some(action) = select_safe_action_from_scores(
-            state,
-            &admissible_scores,
-            config.temperature,
-            &mut rng,
-        )
+        let Some(action) =
+            select_safe_action_from_scores(state, &admissible_scores, config.temperature, &mut rng)
         else {
             return Ok(JsValue::NULL);
         };
