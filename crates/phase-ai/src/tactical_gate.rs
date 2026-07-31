@@ -1485,4 +1485,146 @@ mod tests {
         };
         assert_eq!(assess_candidate(&colored_ctx), GateDecision::Allow);
     }
+
+    /// Builds an Improvise-eligible artifact with one `Activated` mana ability
+    /// producing Blue under the given `cost`, plus a `{1}{U}` pending cast, and
+    /// returns the production `ManaPayment` candidates
+    /// (`candidate_actions_broad` -> `mana_payment_actions`) for it.
+    fn improvise_artifact_with_mana_ability_candidates(
+        cost: Option<engine::types::ability::AbilityCost>,
+    ) -> (
+        engine::game::scenario::GameRunner,
+        ObjectId,
+        Vec<CandidateAction>,
+    ) {
+        let mut scenario = GameScenario::new();
+        let artifact = scenario.add_creature(P0, "Improvise Artifact", 0, 0).id();
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            let obj = state.objects.get_mut(&artifact).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let mut mana_ability = engine::types::ability::AbilityDefinition::new(
+                engine::types::ability::AbilityKind::Activated,
+                Effect::Mana {
+                    produced: engine::types::ability::ManaProduction::Fixed {
+                        colors: vec![engine::types::mana::ManaColor::Blue],
+                        contribution: engine::types::ability::ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            );
+            mana_ability.cost = cost;
+            std::sync::Arc::make_mut(&mut obj.abilities).push(mana_ability);
+
+            state.pending_cast = Some(Box::new(PendingCast::new(
+                ObjectId(900),
+                CardId(900),
+                ResolvedAbility::new(
+                    Effect::Draw {
+                        count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    ObjectId(900),
+                    P0,
+                ),
+                ManaCost::Cost {
+                    shards: vec![engine::types::mana::ManaCostShard::Blue],
+                    generic: 1,
+                },
+            )));
+            state.waiting_for = WaitingFor::ManaPayment {
+                player: P0,
+                convoke_mode: Some(engine::types::game_state::ConvokeMode::Improvise),
+            };
+        }
+        let candidates = engine::ai_support::candidate_actions_broad(runner.state());
+        (runner, artifact, candidates)
+    }
+
+    fn find_colorless_convoke_candidate(
+        candidates: &[CandidateAction],
+        object_id: ObjectId,
+    ) -> CandidateAction {
+        candidates
+            .iter()
+            .find(|c| {
+                matches!(
+                    c.action,
+                    GameAction::TapForConvoke {
+                        object_id: o,
+                        mana_type: ManaType::Colorless,
+                    } if o == object_id
+                )
+            })
+            .expect("production candidate path must offer the Colorless convoke tap")
+            .clone()
+    }
+
+    /// Review finding on #6840: a tapless mana ability (e.g. a
+    /// sacrifice-based one) on the SAME permanent as the Colorless Improvise
+    /// marker does not compete for the tap -- both can legally be used in the
+    /// same payment (Colorless first, then sacrifice the permanent for its
+    /// ability), so it must not gate the Colorless action. Drives the real
+    /// production `ManaPayment` candidate set, not a synthetic sibling.
+    #[test]
+    fn allows_colorless_improvise_tap_when_sibling_mana_ability_is_tapless() {
+        let (runner, artifact, candidates) = improvise_artifact_with_mana_ability_candidates(Some(
+            engine::types::ability::AbilityCost::Sacrifice(
+                engine::types::ability::SacrificeCost::count(TargetFilter::Any, 1),
+            ),
+        ));
+        let state = runner.state();
+        let colorless = find_colorless_convoke_candidate(&candidates, artifact);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: candidates.clone(),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &colorless,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Allow);
+    }
+
+    /// Regression guard for the fix above: a genuine tap-cost native mana
+    /// ability on the same permanent still gates the Colorless marker, via
+    /// the real production candidate path.
+    #[test]
+    fn rejects_colorless_improvise_tap_when_sibling_mana_ability_taps() {
+        let (runner, artifact, candidates) = improvise_artifact_with_mana_ability_candidates(Some(
+            engine::types::ability::AbilityCost::Tap,
+        ));
+        let state = runner.state();
+        let colorless = find_colorless_convoke_candidate(&candidates, artifact);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: candidates.clone(),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &colorless,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
 }

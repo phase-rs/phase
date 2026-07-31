@@ -9,7 +9,9 @@
 use engine::ai_support::CandidateAction;
 use engine::game::mana_payment::{land_subtype_to_mana_type, outer_cost_color_demand, ColorDemand};
 use engine::game::mana_sources::{activatable_mana_actions_for_player, mana_color_to_type};
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, ManaProduction};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, CostCategory, Effect, ManaProduction,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
@@ -204,6 +206,12 @@ fn sibling_native_tap_pays_demand(
             selection.source.object_id == object_id
                 && color_is_demanded(demand, selection.mana_type)
         }
+        // Only a tap-cost native ability actually competes for this same tap:
+        // a tapless ability (e.g. a sacrifice-based mana ability) can still be
+        // activated AFTER paying the Colorless marker, so it never strands a
+        // colored pip and must not gate the Colorless action. Use the cost's
+        // own category classification (CR 118) rather than re-matching cost
+        // shapes by hand -- it already flattens Composite costs correctly.
         GameAction::ActivateAbility {
             source_id,
             ability_index,
@@ -212,6 +220,13 @@ fn sibling_native_tap_pays_demand(
             .get(source_id)
             .and_then(|obj| obj.abilities.get(*ability_index))
             .is_some_and(|ability| {
+                let taps_self = ability
+                    .cost
+                    .as_ref()
+                    .is_some_and(|cost| cost.categories().contains(&CostCategory::TapsSelf));
+                if !taps_self {
+                    return false;
+                }
                 let mut colors = Vec::new();
                 if let Effect::Mana { produced, .. } = &*ability.effect {
                     collect_mana_production_colors(&mut colors, produced);
