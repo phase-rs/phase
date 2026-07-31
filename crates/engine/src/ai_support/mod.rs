@@ -2,6 +2,7 @@ mod candidates;
 mod combat_withdrawal;
 mod context;
 mod copy;
+mod evoke;
 pub mod filter;
 mod payment_continuation;
 mod targeted_exchange;
@@ -46,6 +47,9 @@ pub use context::{
 pub use copy::{
     copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling,
     project_copy_mana_spent_for_x,
+};
+pub use evoke::{
+    evoke_prompt_facts, EvokeImmediateOutcome, EvokePromptDescriptor, EvokePromptFacts,
 };
 pub use filter::{
     BasicLegalityFilter, CandidateFilter, FilterCost, FilterPipeline, SimulationFilter,

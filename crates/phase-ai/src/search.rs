@@ -2022,6 +2022,49 @@ fn priority_action_is_allowed_by_loop_guards(
     }
 }
 
+/// Choose Evoke only from an exact, still-live engine prompt descriptor.
+///
+/// CR 702.74a: Evoke is an alternative cost. The engine authenticates the
+/// displayed prompt and proves the immediate effect useful before the AI picks
+/// the alternative; otherwise normal is preferred when it exists.
+fn evoke_variant_choice(state: &GameState, ai_player: PlayerId) -> Option<GameAction> {
+    let facts = engine::ai_support::evoke_prompt_facts(state)?;
+    let prompt_player = match &state.waiting_for {
+        WaitingFor::AlternativeCastChoice { player, .. }
+        | WaitingFor::CastingVariantChoice { player, .. } => *player,
+        _ => return None,
+    };
+    if prompt_player != ai_player {
+        return None;
+    }
+
+    let evoke_action = match &facts.descriptor {
+        engine::ai_support::EvokePromptDescriptor::AlternativeCast { evoke_action, .. } => {
+            evoke_action.as_ref().clone()
+        }
+        engine::ai_support::EvokePromptDescriptor::CastingVariant { evoke_action, .. } => {
+            evoke_action.as_ref().clone()
+        }
+    };
+    if facts.outcome == engine::ai_support::EvokeImmediateOutcome::ProvenUseful {
+        return Some(evoke_action);
+    }
+
+    match &facts.descriptor {
+        engine::ai_support::EvokePromptDescriptor::AlternativeCast { normal_action, .. } => {
+            Some(normal_action.as_ref().clone())
+        }
+        engine::ai_support::EvokePromptDescriptor::CastingVariant {
+            normal_action: Some(normal_action),
+            ..
+        } => Some(normal_action.as_ref().clone()),
+        engine::ai_support::EvokePromptDescriptor::CastingVariant {
+            normal_action: None,
+            ..
+        } => Some(evoke_action),
+    }
+}
+
 /// Rank the root beam after validation and gating, retaining an affiliated
 /// payment candidate's already-witnessed reducer successor through width
 /// truncation. This is the single production seam for root payment ranking;
@@ -2084,6 +2127,9 @@ fn score_candidates_core(
     session: &Arc<AiSession>,
     deadline_override: Option<engine::util::Deadline>,
 ) -> Vec<(GameAction, f64)> {
+    if let Some(action) = evoke_variant_choice(state, ai_player) {
+        return vec![(action, 1.0)];
+    }
     if let Some(action) = fast_priority_action(state, ai_player, config, session) {
         return vec![(action, 1.0)];
     }
@@ -2477,6 +2523,10 @@ pub(crate) fn deterministic_choice(
     actions: &[GameAction],
     context: Option<&AiContext>,
 ) -> Option<GameAction> {
+    if let Some(action) = evoke_variant_choice(state, ai_player) {
+        return Some(action);
+    }
+
     if matches!(
         state.waiting_for,
         WaitingFor::BetweenGamesChoosePlayDraw { .. }
@@ -3320,27 +3370,34 @@ pub fn softmax_select_pairs(
 #[cfg(test)]
 mod tests {
     use engine::ai_support::build_decision_context;
+    use std::path::Path;
 
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::database::card_db::CardDatabase;
+    use engine::game::rehydrate_game_from_card_db;
     use engine::game::scenario::{GameScenario, P0};
+    use engine::game::scenario_db::GameScenarioDbExt;
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification,
         ControllerRef, Duration, Effect, EffectKind, ManaProduction, PtValue, QuantityExpr,
-        ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
+        ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+        TriggerDefinition, TypedFilter,
     };
     use engine::types::ability::{ChoiceType, ChosenAttribute};
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
     use engine::types::game_state::{
-        NamedChoiceSource, NamedChoiceSourceBinding, OpponentGuessOwner, OpponentGuessSource,
-        PromptSourceBinding, StackEntry, StackEntryKind,
+        CastPaymentMode, CastingVariant, NamedChoiceSource, NamedChoiceSourceBinding,
+        OpponentGuessOwner, OpponentGuessSource, PromptSourceBinding, StackEntry, StackEntryKind,
     };
     use engine::types::identifiers::{CardId, ObjectId};
-    use engine::types::keywords::Keyword;
+    use engine::types::keywords::{EvokeCost, Keyword};
     use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use engine::types::phase::Phase;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
@@ -3625,6 +3682,9 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.power = Some(power);
         obj.toughness = Some(toughness);
+        obj.base_card_types = obj.card_types.clone();
+        obj.base_power = obj.power;
+        obj.base_toughness = obj.toughness;
         obj.entered_battlefield_turn = Some(1);
         id
     }
@@ -5033,6 +5093,744 @@ mod tests {
                 choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Red),
                 count: 1,
             })
+        );
+    }
+
+    fn evoke_prompt_state(etb_effect: Effect, include_normal: bool) -> (GameState, ObjectId) {
+        let mut state = make_state();
+        let evoke = create_object(
+            &mut state,
+            CardId(700),
+            P0,
+            "Evoke Witness".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&evoke).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.mana_cost = ManaCost::generic(1);
+            object.base_mana_cost = object.mana_cost.clone();
+            object
+                .keywords
+                .push(Keyword::Evoke(EvokeCost::Mana(ManaCost::NoCost)));
+            object.push_printed_trigger(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield)
+                    .execute(AbilityDefinition::new(AbilityKind::Spell, etb_effect)),
+            );
+            object.sync_missing_base_characteristics();
+        }
+        if include_normal {
+            add_mana(&mut state, P0, ManaType::Colorless, 1);
+            let omniscience = create_object(
+                &mut state,
+                CardId(799),
+                P0,
+                "Evoke test Omniscience".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&omniscience)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::new(engine::types::statics::StaticMode::CastFromHandFree {
+                        frequency: engine::types::statics::CastFrequency::Unlimited,
+                        origin: engine::types::statics::CastFreeOrigin::Hand,
+                    })
+                    .affected(TargetFilter::Any),
+                );
+        }
+        if include_normal {
+            let mut events = Vec::new();
+            let waiting_for = engine::game::casting::handle_cast_spell(
+                &mut state,
+                P0,
+                evoke,
+                CardId(700),
+                &mut events,
+            )
+            .expect("the real cast pipeline offers its N-way variant prompt");
+            assert!(matches!(
+                waiting_for,
+                WaitingFor::CastingVariantChoice { .. }
+            ));
+            state.waiting_for = waiting_for;
+        } else {
+            let options =
+                engine::game::casting::current_casting_variant_choice_options(&state, P0, evoke);
+            state.waiting_for = WaitingFor::CastingVariantChoice {
+                player: P0,
+                object_id: evoke,
+                card_id: CardId(700),
+                payment_mode: CastPaymentMode::Auto,
+                options,
+            };
+        }
+        (state, evoke)
+    }
+
+    fn opponent_creature_filter() -> TargetFilter {
+        TypedFilter::creature()
+            .controller(ControllerRef::Opponent)
+            .into()
+    }
+
+    fn targeted_destroy_effect() -> Effect {
+        Effect::Destroy {
+            target: opponent_creature_filter(),
+            cant_regenerate: false,
+        }
+    }
+
+    fn ordinary_evoke_prompt_state(name: &str, etb_effect: Effect) -> (GameState, ObjectId) {
+        let mut state = make_state();
+        let evoke = create_object(&mut state, CardId(701), P0, name.to_string(), Zone::Hand);
+        {
+            let object = state.objects.get_mut(&evoke).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.mana_cost = ManaCost::generic(1);
+            object.base_mana_cost = object.mana_cost.clone();
+            object
+                .keywords
+                .push(Keyword::Evoke(EvokeCost::Mana(ManaCost::NoCost)));
+            object.push_printed_trigger(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield)
+                    .execute(AbilityDefinition::new(AbilityKind::Spell, etb_effect)),
+            );
+            object.sync_missing_base_characteristics();
+        }
+        add_mana(&mut state, P0, ManaType::Colorless, 1);
+        let mut events = Vec::new();
+        let waiting_for = engine::game::casting::handle_cast_spell(
+            &mut state,
+            P0,
+            evoke,
+            CardId(701),
+            &mut events,
+        )
+        .expect("ordinary Evoke cast is legal");
+        assert!(matches!(
+            waiting_for,
+            WaitingFor::AlternativeCastChoice {
+                keyword: engine::types::game_state::AlternativeCastKeyword::Evoke,
+                ..
+            }
+        ));
+        state.waiting_for = waiting_for;
+        (state, evoke)
+    }
+
+    fn real_solitude_evoke_prompt(target_controller: Option<PlayerId>) -> GameState {
+        let db = CardDatabase::from_export(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../engine/tests/fixtures/integration_cards.json"),
+        )
+        .expect("Solitude integration fixture loads");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        if let Some(controller) = target_controller {
+            scenario.add_creature(controller, "Evoke target", 2, 2);
+        }
+        let solitude = scenario.add_real_card(P0, "Solitude", Zone::Hand, &db);
+        scenario.add_real_card(P0, "Doomed Traveler", Zone::Hand, &db);
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), &db);
+        add_mana(runner.state_mut(), P0, ManaType::White, 5);
+        let card_id = runner.state().objects[&solitude].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: solitude,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("real Solitude reaches its Evoke prompt");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::AlternativeCastChoice {
+                keyword: engine::types::game_state::AlternativeCastKeyword::Evoke,
+                ..
+            }
+        ));
+        runner.state().clone()
+    }
+
+    #[test]
+    fn real_solitude_pipeline_evaluates_empty_opposing_and_own_targets() {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let normal = GameAction::ChooseAlternativeCast {
+            choice: AlternativeCastDecision::Normal,
+        };
+        let evoke = GameAction::ChooseAlternativeCast {
+            choice: AlternativeCastDecision::Alternative,
+        };
+
+        assert_eq!(
+            deterministic_choice(&real_solitude_evoke_prompt(None), P0, &config, &[], None),
+            Some(normal.clone()),
+            "Solitude does not evoke without a beneficial exile target"
+        );
+        assert_eq!(
+            engine::ai_support::evoke_prompt_facts(&real_solitude_evoke_prompt(Some(PlayerId(1))))
+                .expect("real Solitude prompt exposes authenticated Evoke facts")
+                .outcome,
+            engine::ai_support::EvokeImmediateOutcome::ProvenUseful,
+            "the engine target preview recognizes Solitude's live opposing target"
+        );
+        assert_eq!(
+            score_candidates(&real_solitude_evoke_prompt(Some(PlayerId(1))), P0, &config,),
+            vec![(evoke, 1.0)],
+            "Solitude's parsed exile-plus-life-rider chain recognizes an opposing creature"
+        );
+        assert_eq!(
+            deterministic_choice(
+                &real_solitude_evoke_prompt(Some(P0)),
+                P0,
+                &config,
+                &[],
+                None,
+            ),
+            Some(normal),
+            "Solitude does not treat an own creature as a beneficial exile target"
+        );
+    }
+
+    #[test]
+    fn evoke_ordinary_prompt_prefers_only_proven_immediate_value() {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let (empty_solitude, _) =
+            ordinary_evoke_prompt_state("Solitude", targeted_destroy_effect());
+        assert_eq!(
+            deterministic_choice(&empty_solitude, P0, &config, &[], None),
+            Some(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Normal,
+            })
+        );
+
+        let (mut opposing_solitude, _) =
+            ordinary_evoke_prompt_state("Solitude", targeted_destroy_effect());
+        add_creature(&mut opposing_solitude, PlayerId(1), 2, 2);
+        assert_eq!(
+            score_candidates(&opposing_solitude, P0, &config),
+            vec![(
+                (GameAction::ChooseAlternativeCast {
+                    choice: AlternativeCastDecision::Alternative,
+                }),
+                1.0
+            )]
+        );
+
+        let (mut own_solitude, _) =
+            ordinary_evoke_prompt_state("Solitude", targeted_destroy_effect());
+        add_creature(&mut own_solitude, P0, 2, 2);
+        assert_eq!(
+            deterministic_choice(&own_solitude, P0, &config, &[], None),
+            Some(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Normal,
+            })
+        );
+
+        let (mut indestructible_target, _) =
+            ordinary_evoke_prompt_state("Evoke Witness", targeted_destroy_effect());
+        let target = add_creature(&mut indestructible_target, PlayerId(1), 2, 2);
+        indestructible_target
+            .objects
+            .get_mut(&target)
+            .expect("opponent target exists")
+            .keywords
+            .push(Keyword::Indestructible);
+        assert_eq!(
+            deterministic_choice(&indestructible_target, P0, &config, &[], None),
+            Some(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Normal,
+            }),
+            "a legal but indestructible target is not a meaningful destroy payoff"
+        );
+
+        for effect in [
+            Effect::NoOp,
+            Effect::unimplemented("Evoke Witness", "unsupported ETB"),
+        ] {
+            let (state, _) = ordinary_evoke_prompt_state("Evoke Witness", effect);
+            assert_eq!(
+                deterministic_choice(&state, P0, &config, &[], None),
+                Some(GameAction::ChooseAlternativeCast {
+                    choice: AlternativeCastDecision::Normal,
+                }),
+                "no-op and unimplemented ETBs are not proven immediate value"
+            );
+        }
+
+        let (mut optional, evoke) =
+            ordinary_evoke_prompt_state("Evoke Witness", targeted_destroy_effect());
+        optional
+            .objects
+            .get_mut(&evoke)
+            .unwrap()
+            .trigger_definitions[0]
+            .definition
+            .execute
+            .as_mut()
+            .unwrap()
+            .optional = true;
+        add_creature(&mut optional, PlayerId(1), 2, 2);
+        assert_eq!(
+            deterministic_choice(&optional, P0, &config, &[], None),
+            Some(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Normal,
+            }),
+            "optional ETBs remain unknown even with an opposing target"
+        );
+
+        let (mut useful_then_unknown, evoke) =
+            ordinary_evoke_prompt_state("Evoke Witness", targeted_destroy_effect());
+        useful_then_unknown
+            .objects
+            .get_mut(&evoke)
+            .expect("live Evoke object")
+            .push_printed_trigger(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield)
+                    .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+            );
+        add_creature(&mut useful_then_unknown, PlayerId(1), 2, 2);
+        assert_eq!(
+            engine::ai_support::evoke_prompt_facts(&useful_then_unknown)
+                .expect("fresh Evoke prompt")
+                .outcome,
+            engine::ai_support::EvokeImmediateOutcome::Unknown,
+            "a later unsupported immediate effect makes an otherwise useful Evoke surface conservative"
+        );
+        assert_eq!(
+            deterministic_choice(&useful_then_unknown, P0, &config, &[], None),
+            Some(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Normal,
+            }),
+            "the normal alternative wins when useful and unknown ETB effects are mixed"
+        );
+    }
+
+    #[test]
+    fn chosen_evoke_action_runs_through_cast_target_and_resolution() {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let db = CardDatabase::from_export(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../engine/tests/fixtures/integration_cards.json"),
+        )
+        .expect("Solitude integration fixture loads");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let target = scenario
+            .add_creature(PlayerId(1), "Evoke target", 2, 2)
+            .id();
+        let evoke = scenario.add_real_card(P0, "Solitude", Zone::Hand, &db);
+        let pitch_card = scenario.add_real_card(P0, "Doomed Traveler", Zone::Hand, &db);
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), &db);
+        add_mana(runner.state_mut(), P0, ManaType::White, 5);
+        let card_id = runner.state().objects[&evoke].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: evoke,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("real Solitude reaches its Evoke prompt");
+        let action = deterministic_choice(runner.state(), P0, &config, &[], None)
+            .expect("a useful Evoke prompt produces an action");
+        assert_eq!(
+            action,
+            GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            },
+            "the AI must select the actual alternative action offered by the cast pipeline"
+        );
+
+        runner
+            .act(action)
+            .expect("the selected Evoke action must be accepted by the real cast pipeline");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost { .. }
+        ));
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![pitch_card],
+            })
+            .expect("the real Evoke additional cost must be payable through the cast pipeline");
+        runner.advance_until_stack_empty();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TriggerTargetSelection { .. }
+            ),
+            "resolving the Evoked permanent must reach its ETB target selection"
+        );
+        runner
+            .choose_first_legal_target()
+            .expect("the real ETB target selection must accept the legal opponent");
+        runner.advance_until_stack_empty();
+
+        assert_eq!(
+            runner.state().objects[&target].zone,
+            Zone::Exile,
+            "the selected ETB target is actually exiled on resolution"
+        );
+        assert_eq!(
+            runner.state().objects[&evoke].zone,
+            Zone::Graveyard,
+            "the Evoke sacrifice rider also resolves through the ordinary trigger pipeline"
+        );
+    }
+
+    #[test]
+    fn evoke_ordinary_prompt_recognizes_opposing_stack_interaction() {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let subtlety_effect = Effect::Counter {
+            target: TargetFilter::StackSpell,
+            source_rider: None,
+            countered_spell_zone: None,
+        };
+        let (empty_subtlety, _) =
+            ordinary_evoke_prompt_state("Counterspell Witness", subtlety_effect.clone());
+        assert_eq!(
+            deterministic_choice(&empty_subtlety, P0, &config, &[], None),
+            Some(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Normal,
+            })
+        );
+
+        let (mut opposing_subtlety, _) =
+            ordinary_evoke_prompt_state("Counterspell Witness", subtlety_effect.clone());
+        let spell_id = create_object(
+            &mut opposing_subtlety,
+            CardId(702),
+            PlayerId(1),
+            "Opponent spell".to_string(),
+            Zone::Stack,
+        );
+        opposing_subtlety.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(702),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        assert_eq!(
+            score_candidates(&opposing_subtlety, P0, &config),
+            vec![(
+                (GameAction::ChooseAlternativeCast {
+                    choice: AlternativeCastDecision::Alternative,
+                }),
+                1.0
+            )]
+        );
+
+        let (mut uncounterable_spell, _) = ordinary_evoke_prompt_state(
+            "Counterspell Witness",
+            Effect::Counter {
+                target: TargetFilter::StackSpell,
+                source_rider: None,
+                countered_spell_zone: None,
+            },
+        );
+        let spell_id = create_object(
+            &mut uncounterable_spell,
+            CardId(704),
+            PlayerId(1),
+            "Uncounterable opponent spell".to_string(),
+            Zone::Stack,
+        );
+        uncounterable_spell
+            .objects
+            .get_mut(&spell_id)
+            .expect("stack spell exists")
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeCountered));
+        uncounterable_spell.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(704),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        assert_eq!(
+            deterministic_choice(&uncounterable_spell, P0, &config, &[], None),
+            Some(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Normal,
+            }),
+            "a legal but uncounterable spell is not a meaningful counter payoff"
+        );
+    }
+
+    #[test]
+    fn real_subtlety_prompt_stays_conservative_against_an_opposing_creature_spell() {
+        let db = CardDatabase::from_export(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/card-data.json"),
+        )
+        .expect("full card export loads real Subtlety data");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let subtlety = scenario.add_real_card(P0, "Subtlety", Zone::Hand, &db);
+        scenario.add_real_card(P0, "Counterspell", Zone::Hand, &db);
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), &db);
+        add_mana(runner.state_mut(), P0, ManaType::Blue, 4);
+        let card_id = runner.state().objects[&subtlety].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: subtlety,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("real Subtlety reaches its Evoke prompt");
+
+        let subtlety_object = runner
+            .state()
+            .objects
+            .get(&subtlety)
+            .expect("Subtlety exists");
+        let subtlety_etb = subtlety_object
+            .trigger_definitions
+            .iter_unchecked()
+            .find(|entry| entry.definition.destination == Some(Zone::Battlefield))
+            .expect("real Subtlety has an ETB trigger");
+        assert!(matches!(
+            subtlety_etb
+                .definition
+                .execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::TargetOnly { .. })
+        ));
+        assert!(matches!(
+            subtlety_etb
+                .definition
+                .execute
+                .as_deref()
+                .and_then(|ability| ability.sub_ability.as_deref())
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::PutOnTopOrBottom { .. })
+        ));
+
+        let opposing_spell = create_object(
+            runner.state_mut(),
+            CardId(705),
+            PlayerId(1),
+            "Opponent creature spell".to_string(),
+            Zone::Stack,
+        );
+        let opposing_object = runner
+            .state_mut()
+            .objects
+            .get_mut(&opposing_spell)
+            .expect("opposing spell exists");
+        opposing_object
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        opposing_object.base_card_types = opposing_object.card_types.clone();
+        runner.state_mut().stack.push_back(StackEntry {
+            id: opposing_spell,
+            source_id: opposing_spell,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(705),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let WaitingFor::AlternativeCastChoice {
+            player,
+            object_id,
+            card_id,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("real Subtlety must retain its ordinary Evoke prompt");
+        };
+        assert!(
+            engine::game::casting::current_evoke_cast_choice_offer(
+                runner.state(),
+                *player,
+                *object_id,
+                *card_id,
+            )
+            .is_some(),
+            "the live Subtlety prompt remains an affordable, authenticated Evoke offer"
+        );
+        assert!(
+            engine::game::casting::project_evoke_entry_state(runner.state(), *player, *object_id)
+                .is_some(),
+            "the real stack position projects Subtlety through its Evoke entry"
+        );
+        assert_eq!(
+            engine::ai_support::evoke_prompt_facts(runner.state())
+                .expect("the displayed Subtlety prompt remains authenticated")
+                .outcome,
+            engine::ai_support::EvokeImmediateOutcome::Unknown,
+            "TargetOnly followed by PutOnTopOrBottom is outside the narrow positive classifier"
+        );
+        assert_eq!(
+            deterministic_choice(runner.state(), P0, &config, &[], None),
+            Some(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Normal,
+            }),
+            "real Subtlety stays conservative even with an opposing creature spell on the stack"
+        );
+    }
+
+    #[test]
+    fn evoke_uses_engine_target_facts_and_preserves_non_target_etb_value() {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+
+        let (empty_removal, _) = evoke_prompt_state(targeted_destroy_effect(), true);
+        let empty_normal = match engine::ai_support::evoke_prompt_facts(&empty_removal)
+            .expect("fresh N-way empty-removal prompt")
+            .descriptor
+        {
+            engine::ai_support::EvokePromptDescriptor::CastingVariant {
+                normal_action: Some(action),
+                ..
+            } => action.as_ref().clone(),
+            other => panic!("expected normal variant in N-way prompt, got {other:?}"),
+        };
+        assert_eq!(
+            deterministic_choice(&empty_removal, P0, &config, &[], None),
+            Some(empty_normal),
+            "an unproven immediate effect keeps the normal option in an N-way prompt"
+        );
+
+        let (mut useful_removal, _) = evoke_prompt_state(targeted_destroy_effect(), true);
+        add_creature(&mut useful_removal, PlayerId(1), 2, 2);
+        let useful_facts = engine::ai_support::evoke_prompt_facts(&useful_removal)
+            .expect("a fresh casting-variant prompt carries engine-owned Evoke facts");
+        assert_eq!(
+            useful_facts.outcome,
+            engine::ai_support::EvokeImmediateOutcome::ProvenUseful,
+            "the engine-facing boundary must recognize the live opposing creature before phase-AI selects Evoke"
+        );
+        let engine::ai_support::EvokePromptDescriptor::CastingVariant {
+            normal_action: Some(_),
+            evoke_action,
+        } = useful_facts.descriptor
+        else {
+            panic!("the casting-variant prompt must preserve its actual Evoke option index");
+        };
+        assert_eq!(
+            score_candidates(&useful_removal, P0, &config),
+            vec![(evoke_action.as_ref().clone(), 1.0)],
+            "the scored route accepts typed Evoke when engine target legality finds a target"
+        );
+
+        let draw = Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        };
+        let (draw_etb, _) = evoke_prompt_state(draw, true);
+        let draw_evoke = match engine::ai_support::evoke_prompt_facts(&draw_etb)
+            .expect("fresh N-way draw prompt")
+            .descriptor
+        {
+            engine::ai_support::EvokePromptDescriptor::CastingVariant { evoke_action, .. } => {
+                evoke_action.as_ref().clone()
+            }
+            other => panic!("expected Evoke variant in N-way prompt, got {other:?}"),
+        };
+        assert_eq!(
+            deterministic_choice(&draw_etb, P0, &config, &[], None),
+            Some(draw_evoke),
+            "an unconditional controller draw remains worth Evoking without a battlefield target"
+        );
+
+        let (mut replacement_value, evoke) = evoke_prompt_state(targeted_destroy_effect(), true);
+        let replacement = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let object = replacement_value
+            .objects
+            .get_mut(&evoke)
+            .expect("live Evoke object");
+        object.base_replacement_definitions = vec![replacement.clone()].into();
+        object.replacement_definitions.push(replacement);
+        let replacement_evoke = match engine::ai_support::evoke_prompt_facts(&replacement_value)
+            .expect("fresh N-way replacement prompt")
+            .descriptor
+        {
+            engine::ai_support::EvokePromptDescriptor::CastingVariant { evoke_action, .. } => {
+                evoke_action.as_ref().clone()
+            }
+            other => panic!("expected normal variant in N-way prompt, got {other:?}"),
+        };
+        assert_eq!(
+            deterministic_choice(&replacement_value, P0, &config, &[], None),
+            Some(replacement_evoke),
+            "an unconditional controller draw is proven immediate value even alongside an empty removal target"
+        );
+    }
+
+    #[test]
+    fn evoke_keeps_legal_no_normal_fallback_and_rejects_stale_options() {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let (no_normal, _) = evoke_prompt_state(targeted_destroy_effect(), false);
+        assert_eq!(
+            deterministic_choice(&no_normal, P0, &config, &[], None),
+            Some(GameAction::ChooseCastingVariant { index: 0 }),
+            "a legal prompt with no Normal variant still selects its typed Evoke option"
+        );
+
+        let (mut stale, evoke) = evoke_prompt_state(targeted_destroy_effect(), true);
+        let mut stale_evoke_index = None;
+        if let WaitingFor::CastingVariantChoice { options, .. } = &mut stale.waiting_for {
+            let (index, evoke) = options
+                .iter_mut()
+                .enumerate()
+                .find(|(_, option)| option.variant == CastingVariant::Evoke)
+                .expect("fresh prompt includes Evoke");
+            stale_evoke_index = Some(index);
+            evoke.mana_cost = ManaCost::generic(1);
+        }
+        let stale_evoke_index = stale_evoke_index.expect("fresh prompt records Evoke index");
+        assert_eq!(
+            evoke_variant_choice(&stale, P0),
+            None,
+            "the production helper does not emit a stale Evoke action when the full option payload changed ({evoke:?})"
+        );
+        let scored = score_candidates(&stale, P0, &config);
+        assert!(
+            scored.iter().all(|(action, _)| {
+                *action
+                    != GameAction::ChooseCastingVariant {
+                        index: stale_evoke_index,
+                    }
+            }),
+            "the scored production route never emits the stale Evoke option"
         );
     }
 
