@@ -10361,7 +10361,7 @@ fn evoke_cast_choice_eligibility(
     card_id: CardId,
 ) -> Option<EvokeCastChoiceEligibility> {
     let object = state.objects.get(&object_id)?;
-    if object.card_id != card_id || object.controller != player || object.zone != Zone::Hand {
+    if object.card_id != card_id || object.owner != player || object.zone != Zone::Hand {
         return None;
     }
 

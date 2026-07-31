@@ -7932,7 +7932,12 @@ fn migrate_legacy_continuation_firing(value: &mut serde_json::Value) -> Result<(
             }
         }
         serde_json::Value::Object(object) => {
-            if object.contains_key("chain") && object.contains_key("trigger_context") {
+            if object.contains_key("chain")
+                && (object.contains_key("trigger_context")
+                    || object.contains_key("trigger_firing")
+                    || object.contains_key("firing_classification")
+                    || object.contains_key("dispatch_origin"))
+            {
                 let canonical = object.get("trigger_firing").cloned();
                 let legacy = object
                     .remove("firing_classification")
@@ -8209,25 +8214,16 @@ pub(crate) fn migrate_legacy_delayed_trigger_provenance(
                 })
                 .map(|(index, _)| index)
                 .collect();
-            match matches.as_slice() {
-                [index] => {
-                    let provenance = migrated_commands[*index]
-                        .get("provenance")
-                        .cloned()
-                        .expect("migrated command always has private provenance");
-                    delayed
-                        .as_object_mut()
-                        .expect("delayed trigger was validated as an object")
-                        .insert("provenance".to_string(), provenance);
-                    bound_commands.insert(*index);
-                }
-                [] => {}
-                _ => {
-                    return Err(
-                        "legacy delayed trigger matches multiple durable install commands"
-                            .to_string(),
-                    );
-                }
+            if let [index, ..] = matches.as_slice() {
+                let provenance = migrated_commands[*index]
+                    .get("provenance")
+                    .cloned()
+                    .expect("migrated command always has private provenance");
+                delayed
+                    .as_object_mut()
+                    .expect("delayed trigger was validated as an object")
+                    .insert("provenance".to_string(), provenance);
+                bound_commands.insert(*index);
             }
         }
     }
@@ -18844,7 +18840,9 @@ const LOOP_DETECT_RING_CAP: usize = 16;
 /// equality. Only a true match permits a draw, so the cheap `loop_fingerprint`
 /// can never cause a wrongful draw.
 pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
-    a == b && objects_content_eq(&a.objects, &b.objects)
+    a == b
+        && a.stack_trigger_firings == b.stack_trigger_firings
+        && objects_content_eq(&a.objects, &b.objects)
 }
 
 /// CR 104.4b: per-object mutable-content equality — supplements `GameState`'s
@@ -22171,6 +22169,23 @@ mod tests {
         assert!(
             loop_states_equal(&base.normalize_for_loop(), &later.normalize_for_loop()),
             "states differing only in volatile counters must confirm as a repeat"
+        );
+    }
+
+    #[test]
+    fn loop_states_equal_distinguishes_stack_trigger_firing() {
+        let mut ordinary = GameState::new_two_player(7);
+        let mut delayed = ordinary.clone();
+        ordinary
+            .stack_trigger_firings
+            .insert(ObjectId(91), TriggerFiring::Ordinary);
+        delayed
+            .stack_trigger_firings
+            .insert(ObjectId(91), TriggerFiring::Delayed(None));
+
+        assert!(
+            !loop_states_equal(&ordinary, &delayed),
+            "ordinary and delayed stack-trigger firings must not share a loop identity"
         );
     }
 

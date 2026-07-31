@@ -9049,6 +9049,7 @@ pub(super) fn begin_pending_trigger_target_selection(
             if unavailable_modes.len() >= modal.mode_count {
                 super::stack::pop_uncommitted_pending_trigger_entry(state);
                 state.pending_trigger = None;
+                state.pending_trigger_firing = None;
                 return Ok(None);
             }
 
@@ -9164,6 +9165,7 @@ pub(super) fn begin_pending_trigger_target_selection(
         // cursor.
         super::stack::pop_uncommitted_pending_trigger_entry(state);
         state.pending_trigger = None;
+        state.pending_trigger_firing = None;
         return Ok(None);
     };
     Ok(Some(WaitingFor::TriggerTargetSelection {

@@ -244,17 +244,19 @@ pub fn choose_attackers_with_targets_with_profile(
             certified_candidates.push(id);
         }
     }
-    let certified_attacks: Vec<_> = certified_candidates
-        .iter()
-        .map(|&id| (id, AttackTarget::Player(opponents[0])))
-        .collect();
-    if matches!(
-        adversarial_swarm_witness(state, player, &certified_attacks),
-        SwarmWitnessResult::Certified(witness)
-            if witness.is_lethal && witness.binds_declaration(&certified_attacks)
-    ) {
-        emit_attack_trace(player, &candidates, &certified_attacks);
-        return certified_attacks;
+    if state.players.len() == 2 && opponents.len() == 1 {
+        let certified_attacks: Vec<_> = certified_candidates
+            .iter()
+            .map(|&id| (id, AttackTarget::Player(opponents[0])))
+            .collect();
+        if matches!(
+            adversarial_swarm_witness(state, player, &certified_attacks),
+            SwarmWitnessResult::Certified(witness)
+                if witness.is_lethal && witness.binds_declaration(state, &certified_attacks)
+        ) {
+            emit_attack_trace(player, &candidates, &certified_attacks);
+            return certified_attacks;
+        }
     }
 
     let objective = determine_attack_objective(
@@ -3497,7 +3499,7 @@ mod tests {
         };
         assert!(witness.is_lethal);
         assert_eq!(witness.resulting_life_loss, 2);
-        assert!(witness.binds_declaration(&alpha_attacks));
+        assert!(witness.binds_declaration(runner.state(), &alpha_attacks));
 
         let attacks = choose_attackers_with_targets_with_profile(
             runner.state(),
@@ -3634,7 +3636,9 @@ mod tests {
                 .collect();
         assert!(matches!(
             adversarial_swarm_witness(runner.state(), PlayerId(0), &complete_action),
-            SwarmWitnessResult::Indeterminate(_)
+            SwarmWitnessResult::Indeterminate(
+                engine::ai_support::SwarmWitnessIndeterminate::DamageChoice
+            )
         ));
 
         assert_eq!(
@@ -3825,7 +3829,9 @@ mod tests {
             .collect();
         assert!(matches!(
             adversarial_swarm_witness(runner.state(), PlayerId(0), &alpha_attacks),
-            SwarmWitnessResult::Indeterminate(_)
+            SwarmWitnessResult::Indeterminate(
+                engine::ai_support::SwarmWitnessIndeterminate::DamageChoice
+            )
         ));
 
         assert!(

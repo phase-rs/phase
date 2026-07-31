@@ -114,7 +114,7 @@ fn swarm_witness_reaches_equal_count_fliers_against_ground_blockers() {
     };
     assert_eq!(witness.resulting_life_loss, 3);
     assert!(witness.is_lethal);
-    assert!(witness.binds_declaration(&declared_attacks));
+    assert!(witness.binds_declaration(runner.state(), &declared_attacks));
     assert_eq!(
         counters,
         SwarmWitnessCounters {
@@ -149,7 +149,7 @@ fn swarm_witness_certifies_lethal_after_worst_legal_block() {
     assert_eq!(witness.defending_life_before, 5);
     assert_eq!(witness.resulting_life_loss, 6);
     assert!(witness.is_lethal);
-    assert!(witness.binds_declaration(&attacks(&attackers)));
+    assert!(witness.binds_declaration(runner.state(), &attacks(&attackers)));
     assert_eq!(witness.worst_declaration.len(), 1);
     assert_eq!(witness.worst_declaration[0].0.object_id, blocker);
     assert!(
@@ -219,6 +219,20 @@ fn swarm_witness_fails_closed_on_topology_invalid_step_and_nonplayer_target() {
     let precombat = precombat.build();
     assert_eq!(
         adversarial_swarm_witness(precombat.state(), P0, &[]),
+        SwarmWitnessResult::Indeterminate(SwarmWitnessIndeterminate::InvalidAttack)
+    );
+
+    let mut empty_declaration = GameScenario::new();
+    empty_declaration.at_phase(Phase::PreCombatMain);
+    empty_declaration.add_creature(P0, "Bear", 3, 3);
+    let mut empty_declaration = empty_declaration.build();
+    empty_declaration.advance_to_combat();
+    assert!(matches!(
+        empty_declaration.state().waiting_for,
+        engine::types::game_state::WaitingFor::DeclareAttackers { .. }
+    ));
+    assert_eq!(
+        adversarial_swarm_witness(empty_declaration.state(), P0, &[]),
         SwarmWitnessResult::Indeterminate(SwarmWitnessIndeterminate::InvalidAttack)
     );
 
@@ -332,8 +346,9 @@ fn swarm_witness_fails_closed_on_combat_tax_and_attack_trigger() {
     );
 }
 
-/// CR 614.1a: an active combat-damage replacement is a real reducer boundary,
-/// so the bounded witness abstains before it could measure unreplaced damage.
+/// CR 510.1 + CR 614.1a: combat damage is assigned after blockers, and an
+/// applicable replacement effect is a real reducer boundary, so the bounded
+/// witness abstains before it could measure unreplaced damage.
 #[test]
 fn swarm_witness_fails_closed_on_combat_damage_replacement() {
     let mut scenario = GameScenario::new();

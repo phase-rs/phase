@@ -54,9 +54,9 @@ pub struct EvokePromptFacts {
 /// value boundary.
 ///
 /// CR 702.74a: Evoke is an alternative casting cost whose sacrifice rider
-/// triggers when the permanent enters. CR 603.6a + CR 115.1d: this reads only
-/// that entering permanent's immediate triggered/replacement effects and uses
-/// the ordinary engine target authority for legal target enumeration.
+/// triggers when the permanent enters. CR 603.6a + CR 115.2 + CR 102.2: this
+/// reads only that entering permanent's immediate triggered/replacement effects
+/// and uses the ordinary engine target authority for legal target enumeration.
 pub fn evoke_prompt_facts(state: &GameState) -> Option<EvokePromptFacts> {
     let (player, object_id, descriptor) = match &state.waiting_for {
         WaitingFor::AlternativeCastChoice {
@@ -249,6 +249,7 @@ fn classify_immediate_ability(ability: &AbilityDefinition) -> Option<ImmediateEf
         Effect::Destroy { target, .. } => Some(ImmediateEffect::Destroy(target)),
         Effect::ChangeZone {
             origin: Some(Zone::Stack),
+            destination: Zone::Exile,
             target,
             ..
         } => Some(ImmediateEffect::ExileStackObject(target)),

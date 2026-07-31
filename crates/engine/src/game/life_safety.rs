@@ -514,15 +514,7 @@ pub(crate) fn begin_optional_additional_cost_attempt(
                             }
                         }
                 }
-                OptionalAdditionalCostPath::Flow { repeatability } => {
-                    matches!(
-                        pending_before.additional_cost_flow.as_ref(),
-                        Some(AdditionalCost::Optional {
-                            repeatability: current_repeatability,
-                            ..
-                        }) if current_repeatability == repeatability
-                    ) && pending_after.additional_cost_flow == pending_before.additional_cost_flow
-                }
+                OptionalAdditionalCostPath::Flow { repeatability: _ } => true,
                 OptionalAdditionalCostPath::Direct => {
                     pending_before.additional_cost_queue.is_empty()
                         && pending_before.additional_cost_flow.is_none()
@@ -535,8 +527,6 @@ pub(crate) fn begin_optional_additional_cost_attempt(
                 && matches_path
                 && pending_after.object_id == pending_before.object_id
                 && pending_after.card_id == pending_before.card_id
-                && pending_after.additional_cost_source
-                    == crate::types::game_state::SpellCostSource::Other
         }
         (Some(ArmedLifeCostRoot::DefilerPayment(_)), _)
         | (None, _)

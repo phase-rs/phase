@@ -315,8 +315,12 @@ pub struct PendingTriggerContext {
     /// Private CR 603.7 firing identity. It lives on the scheduler carrier,
     /// not `PendingTrigger`, so existing public `PendingTrigger` literals
     /// remain source-compatible.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "trigger_firing_is_unknown")]
     pub(crate) firing: TriggerFiring,
+}
+
+fn trigger_firing_is_unknown(firing: &TriggerFiring) -> bool {
+    matches!(firing, TriggerFiring::UnknownLegacy)
 }
 
 /// Public alias for the deferred-queue element type used by `GameState`.
@@ -889,57 +893,38 @@ pub fn apply_resolved_delayed_trigger(
     // The resolved-rules journal is the durable install-root authority. A
     // one-shot may already have fired and left `delayed_triggers`, but replay
     // must still never reuse its CR 603.7 identity.
-    let journal_has = |matches: &dyn Fn(DelayedTriggerProvenance) -> bool| {
-        state
-            .resolved_rules_journal
-            .entries()
-            .iter()
-            .filter_map(|entry| entry.command.as_ref())
-            .filter_map(|command| match command {
-                crate::types::resolved_commands::ResolvedRulesCommand::DelayedTriggerInstall(
-                    command,
-                ) => command.trigger.provenance,
-                _ => None,
-            })
-            .any(matches)
-    };
-    if journal_has(&|installed| installed.token == provenance.token) {
-        return Err(
-            ResolvedDelayedTriggerReplayInvariantError::DuplicateProvenanceToken {
-                token: provenance.token,
-            },
-        );
-    }
-    if journal_has(&|installed| installed.instance == provenance.instance) {
-        return Err(
-            ResolvedDelayedTriggerReplayInvariantError::DuplicateProvenanceInstance {
-                instance: provenance.instance,
-            },
-        );
-    }
-    if state
-        .delayed_triggers
+    let installed_provenances = state
+        .resolved_rules_journal
+        .entries()
         .iter()
-        .filter_map(|trigger| trigger.provenance)
-        .any(|installed| installed.token == provenance.token)
-    {
-        return Err(
-            ResolvedDelayedTriggerReplayInvariantError::DuplicateProvenanceToken {
-                token: provenance.token,
-            },
+        .filter_map(|entry| entry.command.as_ref())
+        .filter_map(|command| match command {
+            crate::types::resolved_commands::ResolvedRulesCommand::DelayedTriggerInstall(
+                command,
+            ) => command.trigger.provenance,
+            _ => None,
+        })
+        .chain(
+            state
+                .delayed_triggers
+                .iter()
+                .filter_map(|trigger| trigger.provenance),
         );
-    }
-    if state
-        .delayed_triggers
-        .iter()
-        .filter_map(|trigger| trigger.provenance)
-        .any(|installed| installed.instance == provenance.instance)
-    {
-        return Err(
-            ResolvedDelayedTriggerReplayInvariantError::DuplicateProvenanceInstance {
-                instance: provenance.instance,
-            },
-        );
+    for installed in installed_provenances {
+        if installed.token == provenance.token {
+            return Err(
+                ResolvedDelayedTriggerReplayInvariantError::DuplicateProvenanceToken {
+                    token: provenance.token,
+                },
+            );
+        }
+        if installed.instance == provenance.instance {
+            return Err(
+                ResolvedDelayedTriggerReplayInvariantError::DuplicateProvenanceInstance {
+                    instance: provenance.instance,
+                },
+            );
+        }
     }
     state.delayed_triggers.push(command.trigger.clone());
     state.next_delayed_trigger_token = state
@@ -5788,7 +5773,7 @@ fn group_is_order_independent(state: &GameState, group: &[PendingTriggerContext]
         && !crate::game::ability_scan::ability_reads_sibling_mutable(&reference);
     rest.iter().all(|ctx| {
         let t = &ctx.pending;
-        ctx.firing() == first.firing()
+        ctx.firing().is_delayed() == first.firing().is_delayed()
             && trigger_has_no_ordering_input(t)
             && t.condition == first.pending.condition
             && trigger_events_match_for_ordering(

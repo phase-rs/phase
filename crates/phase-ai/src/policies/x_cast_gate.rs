@@ -39,7 +39,7 @@ use crate::features::DeckFeatures;
 
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
-use super::self_cost::residual_effects_are_trivial_at_x_zero;
+use super::self_cost::{residual_effects_at_x_zero, ResidualVerdict};
 use super::x_reference;
 
 pub struct XCastGatePolicy;
@@ -181,13 +181,8 @@ fn no_op_at_x_zero(
         prev_was_x = false;
     }
     references_any_x
-        && residual_effects_are_trivial_at_x_zero(
-            state,
-            ai_player,
-            source_id,
-            ability,
-            &residual_effects,
-        )
+        && residual_effects_at_x_zero(state, ai_player, source_id, ability, &residual_effects)
+            == ResidualVerdict::TrivialAtXZero
 }
 
 fn gate_rejects(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
@@ -927,10 +922,12 @@ mod tests {
     // --- ETB-X-counter creature: object_level_x + Some(cast_facts) branch ---
 
     #[test]
-    fn etb_x_counter_creature_max_x_zero_rejected_via_object_level_x() {
+    fn etb_x_counter_creature_max_x_zero_abstains_for_unmodeled_residual() {
         // A Hangarback-shape {X}{X} creature that "enters with X +1/+1 counters"
         // via a Moved→Battlefield SelfRef replacement. At max X = 0 it would
-        // enter as a 0/0 and die immediately — a guaranteed no-op → Reject.
+        // enter as a 0/0 and die immediately. The object-level X reference is
+        // detected, but the residual replacement is unmodeled, so the gate must
+        // conservatively abstain rather than reject the cast.
         //
         // Unlike every other cast test (whose X payoff is a flat spell-ability
         // effect), this fixture's X reference lives on the spell OBJECT's
@@ -960,13 +957,7 @@ mod tests {
              replacement, not its spell-ability effect"
         );
 
-        // Revert-failing assertion: if the gate's spell-object X handling
-        // (Some(cast_facts) branch + object_level_x) is reverted, the NoOp
-        // spell ability carries no X and this flips to a non-reject.
-        assert_reject(
-            &verdict_for_cast_with_facts(&state, obj, card),
-            "x_cast_zero_no_op",
-        );
+        assert_not_reject(&verdict_for_cast_with_facts(&state, obj, card));
     }
 
     #[test]

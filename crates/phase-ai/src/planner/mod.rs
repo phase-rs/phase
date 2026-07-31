@@ -67,11 +67,17 @@ impl RankedCandidate {
     /// truncation must not discard a reducer-proven route before search can
     /// compare it with an ordinary continuation.
     pub(crate) fn beam_priority(&self) -> f64 {
-        self.continuation_witness.unwrap_or(0.0) + self.score
+        self.continuation_witness
+            .filter(|witness| witness.is_finite())
+            .map_or(self.score, |witness| self.score.max(witness))
     }
 
     pub(crate) fn root_score(&self, tactical_weight: f64) -> f64 {
-        self.continuation_witness.unwrap_or(0.0) + self.score * tactical_weight
+        self.continuation_witness
+            .filter(|witness| witness.is_finite())
+            .map_or(self.score * tactical_weight, |witness| {
+                (self.score * tactical_weight).max(witness)
+            })
     }
 }
 

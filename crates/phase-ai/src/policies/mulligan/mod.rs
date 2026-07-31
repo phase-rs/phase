@@ -93,12 +93,13 @@ pub(super) fn is_land_only_source(object: &engine::game::game_object::GameObject
 }
 
 /// Conservative lower-bound forecast of actions available from an opening
-/// hand through the player's first two precombat main phases. It deliberately
+/// hand through the player's first precombat main phase. It deliberately
 /// excludes draws, opponent actions, and resources not already represented in
 /// the hand: an inconclusive hand remains keepable rather than becoming a
 /// false "dead hand" positive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct OpeningHandActionForecast {
+    probed: bool,
     has_legal_land_play: bool,
     usable_nonland_mana_source: bool,
     normal_action: bool,
@@ -113,15 +114,18 @@ impl OpeningHandActionForecast {
             return Self::default();
         };
 
-        let mut forecast = Self::default();
         let player_count = state.players.len() as u32;
+        if player_count == 0 {
+            return Self::default();
+        }
+        let mut forecast = Self::default();
         let first_turn = 1
             + (u32::from(player.0) + player_count - u32::from(state.current_starting_player.0))
                 % player_count;
-        for turn_number in [first_turn, first_turn + player_count] {
+        for turn_number in [first_turn] {
             // The engine owns cast/activation legality, target availability, and
-            // payment. Each probe is one of the player's first two precombat-main
-            // priority windows, with no draw, opponent action, or speculative
+            // payment. The probe is the player's first precombat-main priority
+            // window, with no draw, opponent action, or speculative
             // resource added to the clone. A positive result is therefore a
             // conservative lower-bound witness from this opening hand.
             let mut opening_main = state.clone();
@@ -162,6 +166,7 @@ impl OpeningHandActionForecast {
                 });
         }
 
+        forecast.probed = true;
         forecast
     }
 
@@ -169,7 +174,10 @@ impl OpeningHandActionForecast {
     /// no immediately usable nonland mana source, and no normal cast or
     /// activation within this deliberately bounded model.
     pub(super) fn is_certified_dead_landless(self) -> bool {
-        !self.has_legal_land_play && !self.usable_nonland_mana_source && !self.normal_action
+        self.probed
+            && !self.has_legal_land_play
+            && !self.usable_nonland_mana_source
+            && !self.normal_action
     }
 }
 
@@ -179,6 +187,8 @@ fn is_normal_opening_hand_action(action: &GameAction, hand: &[ObjectId]) -> bool
         | GameAction::CastSpellForFree { object_id, .. }
         | GameAction::CastSpellAsMiracle { object_id, .. }
         | GameAction::CastSpellAsMadness { object_id, .. }
+        | GameAction::Foretell { object_id, .. }
+        | GameAction::PlayFaceDown { object_id, .. }
         | GameAction::ActivateAbility {
             source_id: object_id,
             ..
@@ -560,7 +570,12 @@ mod cedh_registration_tests {
     }
 
     fn add_zero_cost_mana_source(state: &mut GameState, idx: u64) -> ObjectId {
-        let object_id = add_zero_cost_action(state, idx);
+        let object_id = add_hand_card(
+            state,
+            idx,
+            "Zero-Cost Mana Source",
+            vec![CoreType::Artifact],
+        );
         let mut ability = AbilityDefinition::new(
             AbilityKind::Activated,
             engine::types::ability::Effect::Mana {
@@ -574,6 +589,7 @@ mod cedh_registration_tests {
             },
         );
         ability.cost = Some(AbilityCost::Tap);
+        ability.activation_zone = Some(Zone::Hand);
         Arc::make_mut(
             &mut state
                 .objects
@@ -854,6 +870,12 @@ mod cedh_registration_tests {
             pending: vec![],
             free_first_mulligan: false,
         };
+        let fast_mana_forecast =
+            OpeningHandActionForecast::for_hand(&[fast_mana], &fast_mana_state);
+        assert!(
+            fast_mana_forecast.usable_nonland_mana_source,
+            "the fixture must witness a hand-activatable mana source, not a castable spell"
+        );
 
         let fast_mana_decision = registry.evaluate_hand(
             &[fast_mana],

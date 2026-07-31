@@ -2010,10 +2010,12 @@ pub fn get_ai_scored_candidates(
         state.rng = ChaCha20Rng::seed_from_u64(rng_seed);
         let config =
             create_config_for_players(difficulty, Platform::Wasm, state.players.len() as u8);
+        let session = ai_session_for(state);
         Ok(to_js(&score_candidates_for_parallel_worker(
             state,
             PlayerId(player_id),
             &config,
+            Some(&session),
         )))
     })?
 }

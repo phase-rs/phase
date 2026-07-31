@@ -456,6 +456,7 @@ fn advance_pact_to_install(
     journal_start: usize,
 ) -> Option<PactReceipt> {
     let mut priority_beats = 0;
+    let mut forced_transitions = 0;
     while priority_beats < PROSPECTIVE_MAX_PRIORITY_BEATS {
         if let Some(receipt) = pact_receipt_since(state, source_id, owner, journal_start) {
             return Some(receipt);
@@ -482,6 +483,10 @@ fn advance_pact_to_install(
                 priority_beats += 1;
             }
             waiting if waiting.acting_player() == Some(owner) => {
+                if forced_transitions == PROSPECTIVE_MAX_FORCED_TRANSITIONS {
+                    return None;
+                }
+                forced_transitions += 1;
                 let mut continuations =
                     frozen_candidates(state, owner)
                         .into_iter()

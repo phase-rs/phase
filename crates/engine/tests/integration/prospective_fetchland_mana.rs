@@ -1,12 +1,8 @@
 //! Real-card regression for the reducer-backed prospective fetchland route.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
 use engine::ai_support::{
     certify_fetch_then_cast, validated_candidate_actions_for_semantic_owner, CandidateAction,
 };
-use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
@@ -14,13 +10,7 @@ use engine::types::identifiers::{ObjectId, ObjectIdentityBinding, ObjectIncarnat
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-fn full_card_db() -> &'static CardDatabase {
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    DB.get_or_init(|| {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-        CardDatabase::from_export(&path).expect("full card export should load")
-    })
-}
+use crate::support::shared_card_db;
 
 fn fetchland_state() -> (
     engine::types::game_state::GameState,
@@ -29,7 +19,7 @@ fn fetchland_state() -> (
     ObjectId,
     ObjectId,
 ) {
-    let db = full_card_db();
+    let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let misty = scenario.add_real_card(P0, "Misty Rainforest", Zone::Battlefield, db);

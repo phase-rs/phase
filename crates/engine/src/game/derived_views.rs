@@ -2753,6 +2753,8 @@ mod tests {
         .expect("serialize filtered client state");
 
         for client_state in [&client["state"], &filtered_client["state"]] {
+            serde_json::from_value::<GameState>(client_state.clone())
+                .expect("redacted client state must still deserialize");
             for private_field in [
                 "next_delayed_trigger_token",
                 "next_delayed_trigger_instance",

@@ -163,6 +163,7 @@ pub(crate) fn resolve(
                 actual_mana_spent: 0,
             },
         },
+        None,
         events,
     );
 

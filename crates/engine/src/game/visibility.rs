@@ -115,6 +115,30 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // and cost-recipient relationships. It is server authority and must not
     // expose one player's mana history to another viewer.
     filtered.resolved_rules_journal = Default::default();
+    // Delayed-trigger allocation and firing receipts are server authority.
+    // Server transport serializes this filtered state directly, so clear every
+    // root carrier here as well as in the dedicated WASM client projection.
+    filtered.next_delayed_trigger_token = 0;
+    filtered.next_delayed_trigger_instance = 0;
+    filtered.pending_trigger_firing = None;
+    filtered.stack_trigger_firings.clear();
+    filtered.resolving_trigger_firing = None;
+    for trigger in &mut filtered.delayed_triggers {
+        trigger.provenance = None;
+    }
+    for context in &mut filtered.deferred_triggers {
+        context.firing = crate::types::identifiers::TriggerFiring::UnknownLegacy;
+        context.dispatch_origin = crate::game::triggers::PendingTriggerDispatchOrigin::Normal;
+    }
+    if let Some(order) = filtered.pending_trigger_order.as_mut() {
+        for group in &mut order.groups {
+            for context in &mut group.triggers {
+                context.firing = crate::types::identifiers::TriggerFiring::UnknownLegacy;
+                context.dispatch_origin =
+                    crate::game::triggers::PendingTriggerDispatchOrigin::Normal;
+            }
+        }
+    }
     let replacement_candidate_source_ids = match &state.waiting_for {
         WaitingFor::ReplacementChoice { candidates, .. } => Some(
             candidates

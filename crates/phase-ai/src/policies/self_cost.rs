@@ -469,6 +469,12 @@ fn effect_benefit_value(
         // a replacement—or raised by its continuation—is not a zero; the policy
         // returns `None` so `BenefitAppraisal::Unpriced` fails open.
         Effect::Draw { count, .. } if recipient == RecipientClass::AiOnly => {
+            // `preview_draw_delivery` starts from its input state. A later
+            // chained draw therefore cannot be priced independently without
+            // replaying the earlier delivery; stand down rather than double-count.
+            if pricing.ai_draws_so_far > 0 {
+                return None;
+            }
             let requested = resolve_quantity(state, count, ai_player, source_id).max(0) as u32;
             match preview_draw_delivery(state, ai_player, requested) {
                 DrawDeliveryPreview::Exact { delivered } => {
@@ -552,24 +558,33 @@ pub(crate) fn chain_effect_trivialities(
         .collect()
 }
 
-/// True when the supplied residual effects are all trivial or unmodeled at
-/// X=0. The caller removes X-scaled effects before calling, so an omitted X
-/// draw cannot contribute opponent-discard churn.
-pub(crate) fn residual_effects_are_trivial_at_x_zero(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResidualVerdict {
+    TrivialAtXZero,
+    MeaningfulAtXZero,
+    Unknown,
+}
+
+/// Classifies residual effects at X=0. The caller removes X-scaled effects
+/// before calling, so an omitted X draw cannot contribute opponent-discard churn.
+pub(crate) fn residual_effects_at_x_zero(
     state: &GameState,
     ai_player: PlayerId,
     source_id: ObjectId,
     ability: &AbilityDefinition,
     effects: &[&Effect],
-) -> bool {
-    classify_effects(state, ai_player, source_id, ability, effects)
-        .into_iter()
-        .all(|(_, _, triviality)| {
-            matches!(
-                triviality,
-                EffectTriviality::Trivial | EffectTriviality::Unmodeled
-            )
-        })
+) -> ResidualVerdict {
+    let mut verdict = ResidualVerdict::TrivialAtXZero;
+    for (_, _, triviality) in classify_effects(state, ai_player, source_id, ability, effects) {
+        match triviality {
+            EffectTriviality::Trivial => {}
+            EffectTriviality::Unmodeled => return ResidualVerdict::Unknown,
+            EffectTriviality::NonTrivial | EffectTriviality::Drawback => {
+                verdict = ResidualVerdict::MeaningfulAtXZero;
+            }
+        }
+    }
+    verdict
 }
 
 fn recipient_classes(
@@ -713,6 +728,9 @@ fn effect_triviality(
     match effect {
         Effect::Draw { count, .. } => match recipient {
             RecipientClass::OpponentOnly => {
+                if count.is_up_to() {
+                    return EffectTriviality::Trivial;
+                }
                 let count = resolve_quantity(state, count, ai_player, source_id).max(0) as u32;
                 context.remaining_opponent_draw_churn =
                     context.remaining_opponent_draw_churn.saturating_add(count);

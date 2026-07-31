@@ -62,13 +62,15 @@ impl SwarmCombatWitness {
     /// reject later unions, removals, reordering, or planeswalker redirection.
     pub fn binds_declaration(
         &self,
+        state: &GameState,
         attacks: &[(crate::types::identifiers::ObjectId, AttackTarget)],
     ) -> bool {
         self.declaration.len() == attacks.len()
             && self.declaration.iter().zip(attacks).all(
                 |((attacker, defending_player), (attacker_id, target))| {
-                    attacker.object_id == *attacker_id
-                        && *defending_player == self.defending_player
+                    state.objects.get(attacker_id).is_some_and(|object| {
+                        ObjectIncarnationRef::from_object(object) == *attacker
+                    }) && *defending_player == self.defending_player
                         && *target == AttackTarget::Player(*defending_player)
                 },
             )
@@ -188,9 +190,9 @@ fn swarm_witness_inner(
     if has_unmodeled_combat_event(&attack_events) || !after_attack.stack.is_empty() {
         return indeterminate(SwarmWitnessIndeterminate::TriggerOrReplacement);
     }
-    // CR 614.1a: Once attackers are committed, the combat damage event is
-    // defined even before the defender declares blocks. Decline early rather
-    // than driving priority past a damage replacement the witness cannot choose.
+    // CR 510.1 + CR 614.1a: combat damage is assigned after blockers, and an
+    // applicable replacement is a reducer boundary. Decline early rather than
+    // driving priority past a damage replacement the witness cannot choose.
     if has_applicable_combat_damage_replacement(&after_attack) {
         return indeterminate(SwarmWitnessIndeterminate::TriggerOrReplacement);
     }
@@ -291,17 +293,23 @@ fn swarm_witness_inner(
                 failure = Some(reason);
                 return ControlFlow::Break(());
             }
-            let life_loss =
-                life_before.saturating_sub(player_life(&branch, defending_player)) as u32;
-            let bound_declaration = declaration
-                .iter()
-                .filter_map(|(blocker, attacker)| {
-                    Some((
-                        ObjectIncarnationRef::from_object(after_attack.objects.get(blocker)?),
-                        ObjectIncarnationRef::from_object(after_attack.objects.get(attacker)?),
-                    ))
-                })
-                .collect();
+            let life_loss = life_before
+                .saturating_sub(player_life(&branch, defending_player))
+                .max(0) as u32;
+            let mut bound_declaration = Vec::with_capacity(declaration.len());
+            for (blocker, attacker) in declaration {
+                let (Some(blocker), Some(attacker)) = (
+                    after_attack.objects.get(blocker),
+                    after_attack.objects.get(attacker),
+                ) else {
+                    failure = Some(SwarmWitnessIndeterminate::InvalidAttack);
+                    return ControlFlow::Break(());
+                };
+                bound_declaration.push((
+                    ObjectIncarnationRef::from_object(blocker),
+                    ObjectIncarnationRef::from_object(attacker),
+                ));
+            }
             if worst
                 .as_ref()
                 .is_none_or(|(least_loss, _)| life_loss < *least_loss)

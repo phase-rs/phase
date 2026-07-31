@@ -287,12 +287,31 @@ mod tests {
     #[test]
     fn floor_abstains_for_certified_dead_landless_hand() {
         let mut state = GameState::new_two_player(0);
+        let uncastable = create_object(
+            &mut state,
+            CardId(9001),
+            PlayerId(0),
+            "Uncastable Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let object = state
+            .objects
+            .get_mut(&uncastable)
+            .expect("just created hand card");
+        object.card_types = CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Artifact],
+            subtypes: Vec::new(),
+        };
+        object.mana_cost = ManaCost::generic(1);
+        object.base_card_types = object.card_types.clone();
+        object.base_mana_cost = object.mana_cost.clone();
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan: false,
         };
 
-        match evaluate(&state, 4) {
+        match evaluate(&state, 3) {
             MulliganScore::Score { delta, reason } => {
                 assert_eq!(delta, 0.0, "dead-hand abstention must be neutral");
                 assert_eq!(reason.kind, "mulligan_card_floor_dead_landless");

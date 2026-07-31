@@ -142,6 +142,7 @@ fn push_to_stack_with_firing(
 pub(crate) fn push_copy_to_stack(
     state: &mut GameState,
     mut entry: StackEntry,
+    copied_trigger_firing: Option<TriggerFiring>,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 701.27f: an activated or triggered ability of a permanent may transform
@@ -171,7 +172,7 @@ pub(crate) fn push_copy_to_stack(
     // different stamping is already baked into `entry`, so this records the same
     // operand set under a different origin rather than a sibling command.
     let trigger_firing = matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
-        .then_some(TriggerFiring::Ordinary);
+        .then_some(copied_trigger_firing.unwrap_or(TriggerFiring::Ordinary));
     journal_stack_push(state, &entry, trigger_firing, ResolvedStackPushOrigin::Copy);
     if let Some(firing) = trigger_firing {
         state.stack_trigger_firings.insert(entry.id, firing);
@@ -3335,7 +3336,7 @@ fn resolve_batched(
         let Some(removed) = pop_top_stack_entry(state) else {
             break;
         };
-        popped.push(removed.entry);
+        popped.push(removed);
     }
 
     // CR 603.7c: Set the trigger event context once from the (identical) top
@@ -3347,7 +3348,7 @@ fn resolve_batched(
             subject_match_count,
             die_result,
             ..
-        } = &top.kind
+        } = &top.entry.kind
         {
             state.current_trigger_event = Some(te.clone());
             state.current_trigger_events = vec![te.clone()];
@@ -3358,6 +3359,9 @@ fn resolve_batched(
             state.die_result_this_resolution = *die_result;
         }
     }
+
+    state.resolving_stack_entry = popped.first().map(|popped| popped.entry.clone());
+    state.resolving_trigger_firing = popped.first().and_then(|popped| popped.trigger_firing);
 
     // CR 608.2: Apply the effect N times through the existing per-resolution body.
     plan.execute(state, ability, events);
@@ -3371,9 +3375,9 @@ fn resolve_batched(
     state.die_result_this_resolution = None;
 
     // §5.4: one StackResolved per consumed entry.
-    for entry in &popped {
+    for popped in &popped {
         events.push(GameEvent::StackResolved {
-            object_id: entry.id,
+            object_id: popped.entry.id,
         });
     }
 
@@ -3739,6 +3743,7 @@ struct BatchRunKey<'a> {
     description: Option<&'a str>,
     paid: Option<&'a StackPaidSnapshot>,
     trigger_event: Option<&'a GameEvent>,
+    trigger_firing: Option<TriggerFiring>,
 }
 
 /// CR 111.2 + CR 109.4: `ResolvedAbility` embeds `source_id` (and nested sub/
@@ -3756,6 +3761,7 @@ impl PartialEq for BatchRunKey<'_> {
             || self.description != other.description
             || self.paid != other.paid
             || self.trigger_event != other.trigger_event
+            || self.trigger_firing != other.trigger_firing
         {
             return false;
         }
@@ -4049,6 +4055,7 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
         description: description.as_deref(),
         paid: state.stack_paid_facts.get(&entry.id),
         trigger_event: trigger_event.as_ref(),
+        trigger_firing: state.stack_trigger_firings.get(&entry.id).copied(),
     })
 }
 

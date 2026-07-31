@@ -1896,12 +1896,15 @@ pub fn score_candidates_for_parallel_worker(
     state: &GameState,
     ai_player: PlayerId,
     config: &AiConfig,
+    session: Option<&Arc<AiSession>>,
 ) -> Vec<(GameAction, f64)> {
     if has_certified_pact_root(state, ai_player) {
         return Vec::new();
     }
 
-    let session = AiSession::arc_from_game(state);
+    let session = session
+        .cloned()
+        .unwrap_or_else(|| AiSession::arc_from_game(state));
     score_candidates_with_session(state, ai_player, config, &session)
 }
 
@@ -4411,7 +4414,7 @@ mod tests {
         let session = AiSession::arc_from_game(runner.state());
 
         assert!(
-            score_candidates_for_parallel_worker(runner.state(), P0, &config).is_empty(),
+            score_candidates_for_parallel_worker(runner.state(), P0, &config, None).is_empty(),
             "a pool score vector cannot carry a certified Pact receipt into the authoritative session"
         );
 
