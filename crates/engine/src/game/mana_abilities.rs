@@ -1323,26 +1323,15 @@ impl ManaActivationGates {
     }
 }
 
-/// CR 305.6 + CR 602.5: A land with a basic land type has the INTRINSIC
-/// ability "{T}: Add [mana symbol]" whether or not any `AbilityDefinition`
-/// object represents it — `mana_sources::land_mana_options`'s bare-subtype
-/// fallback synthesizes a `ManaSourceOption` for exactly this case. That
-/// intrinsic ability is still an activated (mana) ability, so CR 602.5
-/// activation prohibitions (CantBeActivated, CantActivateDuring — Karn/
-/// Clarion/Damping Matrix/City of Solitude class) must apply to it exactly as
-/// they would to a printed one. Builds a minimal synthetic `AbilityDefinition`
-/// (Tap cost, `Effect::Mana`) purely so the prohibition's `kind`/`exemption`
-/// axes (e.g. Damping Matrix's "unless they're mana abilities" carve-out)
-/// evaluate identically to how they would against a real mana ability, then
-/// delegates to the single-authority `is_blocked_by_cant_be_activated` /
-/// `is_blocked_by_cant_activate_during` checks — never re-implements them.
-pub(crate) fn intrinsic_land_mana_ability_blocked(
-    state: &GameState,
-    controller: PlayerId,
-    object_id: ObjectId,
-    color: ManaColor,
-) -> bool {
-    let ability_def = AbilityDefinition::new(
+/// CR 305.6: builds the minimal synthetic `AbilityDefinition` (Tap cost,
+/// `Effect::Mana`) standing in for a land's INTRINSIC "{T}: Add [mana
+/// symbol]" ability — the ability every land with a basic land type has
+/// whether or not any `AbilityDefinition` object represents it. Used so a
+/// legality check's `kind`/`exemption`/cost axes (e.g. Damping Matrix's
+/// "unless they're mana abilities" carve-out) evaluate identically to how
+/// they would against a real, printed mana ability.
+fn intrinsic_land_mana_ability_definition(color: ManaColor) -> AbilityDefinition {
+    AbilityDefinition::new(
         crate::types::ability::AbilityKind::Activated,
         Effect::Mana {
             produced: ManaProduction::Fixed {
@@ -1355,10 +1344,50 @@ pub(crate) fn intrinsic_land_mana_ability_blocked(
             target: None,
         },
     )
-    .cost(AbilityCost::Tap);
+    .cost(AbilityCost::Tap)
+}
 
-    super::casting::is_blocked_by_cant_be_activated(state, controller, object_id, &ability_def)
-        || super::casting::is_blocked_by_cant_activate_during(state, controller, &ability_def)
+/// CR 305.6 + CR 602.5: Is a land's basic-land-type INTRINSIC mana ability
+/// currently blocked — by ANY of the gates a printed mana ability would be
+/// checked against? `mana_sources::land_mana_options`'s bare-subtype
+/// fallback synthesizes a `ManaSourceOption` for a land with no
+/// `AbilityDefinition` object at all (Urborg/Blood-Moon-class grants), but
+/// CR 305.6's intrinsic ability is still an activated mana ability, so every
+/// gate `mana_ability_ready_without_simulation_gated` applies to a real one —
+/// phased-out (CR 702.26b), detained (CR 701.35a), zone (CR 113.6), tapped/
+/// can't-tap (CR 106.12/602.5a, CR 701.26a+508.1f), summoning sickness
+/// (CR 302.6), CantBeActivated/CantActivateDuring (CR 602.5), static
+/// activation restrictions (CR 604/605.3b) — must apply to it too. Routes the
+/// synthetic definition through that SAME single-authority readiness check
+/// rather than re-implementing any subset of it: the function takes an
+/// `AbilityDefinition` by reference and never indexes `obj.abilities`, so a
+/// synthesized definition with no real storage slot is exactly as valid an
+/// input as a printed one. `ability_index: 0` is inert here — the intrinsic
+/// ability carries empty `activation_restrictions` (so `ability_index` is
+/// never read by that check) and a bare `Tap` cost (whose payability check
+/// doesn't consult it either).
+pub(crate) fn intrinsic_land_mana_ability_blocked(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    color: ManaColor,
+    gates: Option<&ManaActivationGates>,
+) -> bool {
+    let ability_def = intrinsic_land_mana_ability_definition(color);
+    let ready = match gates {
+        Some(gates) => mana_ability_ready_without_simulation_gated(
+            state,
+            controller,
+            object_id,
+            0,
+            &ability_def,
+            gates,
+        ),
+        None => {
+            mana_ability_ready_without_simulation(state, controller, object_id, 0, &ability_def)
+        }
+    };
+    !ready
 }
 
 fn mana_ability_ready_without_simulation(

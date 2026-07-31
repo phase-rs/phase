@@ -2375,9 +2375,11 @@ fn land_mana_options(
         {
             // CR 305.6 + CR 602.5: the intrinsic "{T}: Add [mana symbol]"
             // ability this fallback synthesizes is still an activated (mana)
-            // ability — a CantBeActivated/CantActivateDuring static (Karn,
-            // Clarion, Damping Matrix, City of Solitude) must block it exactly
-            // as it would a printed one. Mirrors the `require_current_payability`
+            // ability — every readiness gate a printed one is checked against
+            // (phased-out, detained, tapped/can't-tap, summoning sickness,
+            // CantBeActivated/CantActivateDuring, static activation
+            // restrictions) must apply to it too, not just the two activation-
+            // prohibition statics. Mirrors the `require_current_payability`
             // gating `is_active_tap_mana_ability` applies to a real ability: the
             // auto-tap PLANNING pass (`require_current_payability == false`)
             // does not consult per-source legality gates for ANY mana source,
@@ -2386,7 +2388,7 @@ fn land_mana_options(
             let blocked = require_current_payability
                 && mana_type_to_color(mana_type).is_some_and(|color| {
                     mana_abilities::intrinsic_land_mana_ability_blocked(
-                        state, controller, object_id, color,
+                        state, controller, object_id, color, gates,
                     )
                 });
             if !blocked {
