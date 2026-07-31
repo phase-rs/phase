@@ -91,13 +91,14 @@ fn pact_runner(with_payment_lands: bool) -> (GameRunner, ObjectId, ObjectId) {
             scenario.add_basic_land(P0, ManaColor::Blue);
         }
     }
-    scenario.setup(|state| {
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
         state.active_player = P1;
         state.priority_player = P1;
         state.waiting_for = WaitingFor::Priority { player: P1 };
         state.priority_passes.clear();
-    });
-    let mut runner = scenario.build();
+    }
 
     assert_eq!(runner.state().phase, Phase::PreCombatMain);
     assert_eq!(runner.state().active_player, P1);

@@ -5,9 +5,9 @@ use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
 use engine::ai_support::{
-    build_decision_context, build_decision_context_for_semantic_owner, certify_fetch_then_cast,
-    certify_pact_plan, is_pact_payment_cast, targeted_exchange_verdict,
-    validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
+    build_decision_context, certify_fetch_then_cast, certify_pact_plan, is_pact_payment_cast,
+    targeted_exchange_verdict, validated_candidate_actions_for_semantic_owner, AiDecisionContract,
+    TargetedExchangeVerdict,
 };
 use engine::types::ability::{
     AbilityDefinition, ContinuousModification, Duration, Effect, StaticDefinition, TargetFilter,
@@ -3918,13 +3918,14 @@ mod tests {
                 scenario.add_basic_land(P0, ManaColor::Blue);
             }
         }
-        scenario.setup(|state| {
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
             state.active_player = P1;
             state.priority_player = P1;
             state.waiting_for = WaitingFor::Priority { player: P1 };
             state.priority_passes.clear();
-        });
-        let mut runner = scenario.build();
+        }
         runner.cast(counterable).commit();
         runner
             .act(GameAction::PassPriority)
