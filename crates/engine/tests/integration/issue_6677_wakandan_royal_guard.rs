@@ -137,6 +137,13 @@ fn emiel_the_blessed_doubles_counters_on_the_entering_unicorn() {
     let mut runner = scenario.build();
     let outcome = runner.cast(entering_unicorn).accept_optional().resolve();
 
+    assert!(
+        outcome.state().players[P0.0 as usize]
+            .mana_pool
+            .mana
+            .is_empty(),
+        "reach-guard: accepting Emiel's optional payment must consume the supplied green mana"
+    );
     assert_eq!(
         p1p1_counters(outcome.state(), entering_unicorn),
         2,
@@ -151,5 +158,49 @@ fn emiel_the_blessed_doubles_counters_on_the_entering_unicorn() {
         p1p1_counters(outcome.state(), unrelated_unicorn),
         0,
         "an unrelated Unicorn must not satisfy the trigger-event anaphor"
+    );
+}
+
+/// CR 603.2 + CR 608.2c + CR 122.1: accepting Emiel's payment still performs
+/// the printed one-counter continuation when the entering creature does not
+/// satisfy the later Unicorn instead-condition.
+#[test]
+fn emiel_the_blessed_keeps_one_counter_on_a_nonunicorn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let emiel = scenario
+        .add_creature_from_oracle(P0, "Emiel the Blessed", 4, 4, EMIEL_THE_BLESSED_ORACLE)
+        .with_subtypes(vec!["Angel"])
+        .id();
+    let entering_cat = scenario
+        .add_creature_to_hand(P0, "Entering Cat", 2, 2)
+        .with_subtypes(vec!["Cat"])
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Green, emiel, false, vec![])],
+    );
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(entering_cat).accept_optional().resolve();
+
+    assert!(
+        outcome.state().players[P0.0 as usize]
+            .mana_pool
+            .mana
+            .is_empty(),
+        "reach-guard: accepting Emiel's optional payment must consume the supplied green mana"
+    );
+    assert_eq!(
+        p1p1_counters(outcome.state(), entering_cat),
+        1,
+        "the entering non-Unicorn must receive the paid continuation's one counter"
+    );
+    assert_eq!(
+        p1p1_counters(outcome.state(), emiel),
+        0,
+        "Emiel must not receive the entering creature's counter"
     );
 }
