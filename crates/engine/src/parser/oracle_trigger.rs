@@ -7797,10 +7797,18 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
             let keyword_and_subject = extract_keyword_and_subject(first_half);
             let second_event = second_half.original.trim();
             let second = format!("{keyword_and_subject} {second_event}");
+            // `second_half.lower` is trimmed to match `second_event` (the trimmed
+            // ORIGINAL): `extract_shared_object` derives the object offset as
+            // `original.len() - rest_lower.len()`, which is only meaningful when both
+            // views are trimmed identically. Today the condition arrives already
+            // trimmed from `find_effect_boundary`, so this is defensive rather than a
+            // live fix — but it makes the invariant hold BY CONSTRUCTION here instead
+            // of depending on an upstream caller. (Pre-existing: the base commit passed
+            // the untrimmed lower half alongside the trimmed original.)
             let first = append_shared_object_if_bare_event(
                 first_half.original.trim(),
                 first_half.lower.trim(),
-                second_half.lower,
+                second_half.lower.trim(),
                 second_event,
             );
 

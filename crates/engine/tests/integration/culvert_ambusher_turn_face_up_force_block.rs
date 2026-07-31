@@ -36,9 +36,17 @@ fn must_block_targets(runner: &GameRunner) -> Vec<ObjectId> {
                 )
             })
         })
-        .filter_map(|tce| match tce.affected {
-            TargetFilter::SpecificObject { id } => Some(id),
-            _ => None,
+        // PANIC rather than discard on an unexpected `affected` shape. Silently
+        // dropping it would make every assertion below vacuous in the one case that
+        // matters: a MustBlock effect that really did apply, to a filter this helper
+        // does not understand, would read as "no MustBlock at all" and the negative
+        // rows would pass for the wrong reason.
+        .map(|tce| match tce.affected {
+            TargetFilter::SpecificObject { id } => id,
+            ref other => panic!(
+                "ForceBlock is expected to apply to a specific object (CR 509.1c); \
+                 got affected={other:?} — this helper's assertions would be vacuous"
+            ),
         })
         .collect()
 }

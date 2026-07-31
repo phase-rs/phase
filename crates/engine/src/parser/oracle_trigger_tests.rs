@@ -21901,6 +21901,48 @@ fn state_change_head_terminates_subject_span() {
     assert_eq!(triggers[1].mode, TriggerMode::DamageReceived);
 }
 
+/// The OWED REFACTOR, captured as an executable specification rather than only as a
+/// doc comment on `parse_state_change_event_start` (CodeRabbit review on PR #6831).
+///
+/// `parse_state_change_event_start` is a closed allow-list, and it is a DETECTION
+/// list: a state-change head it does not admit makes the second branch vanish with
+/// NO `Effect::Unimplemented` and no diagnostic — the same silent-wrong signature as
+/// the bug this family was written to fix. This test documents the intended end
+/// state: detect the OPEN head shape (`becomes|is|are <participle>`) and route an
+/// unadmitted complement to a strict failure, demoting the allow-list from "what we
+/// recognize" to "what we support".
+///
+/// `#[ignore]`d deliberately — it asserts behavior the engine does NOT have yet, and
+/// nothing changes it. It is safe to leave red-when-run: zero printed cards carry any
+/// unadmitted disjunctive state-change head today (verified over the whole corpus),
+/// so this is a latent-honesty gap, not a live misparse. Un-ignore it when
+/// implementing the open-head routing.
+#[test]
+#[ignore = "documents the owed open-head refactor; the engine does not do this yet"]
+fn unadmitted_state_change_head_should_be_a_strict_failure() {
+    // An unadmitted complement ("turned face down" is not in the allow-list).
+    let triggers = parse_trigger_lines(
+        "When this creature enters or is turned face down, draw a card.",
+        "~",
+    );
+    // TODAY (the gap): one trigger, zero markers, card reports as supported.
+    // INTENDED: either two triggers, or one plus an honest strict failure for the
+    // unclaimed branch. The assertion below is the intended state.
+    assert!(
+        triggers.len() == 2
+            || triggers.iter().any(|d| {
+                d.execute
+                    .as_ref()
+                    .is_some_and(|a| format!("{:?}", a.effect).contains("Unimplemented"))
+            }),
+        "an unadmitted state-change head must not silently vanish; got {:?}",
+        triggers
+            .iter()
+            .map(|d| format!("{:?}", d.mode))
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn cross_subject_state_change_or_not_split() {
     let triggers = parse_trigger_lines(
@@ -21908,6 +21950,19 @@ fn cross_subject_state_change_or_not_split() {
         "Donna Noble",
     );
     assert_eq!(triggers.len(), 1);
+    // Positive reach-guard. `len() == 1` alone is weak: a line that never reached the
+    // cross-subject gate at all would also yield one trigger. Donna Noble is honestly
+    // `Unknown` today, and the payload is the discriminator — it must still carry the
+    // WHOLE cross-subject condition, "is dealt damage" included. Widening that gate
+    // splits the line and truncates the payload to the bare subject, so this assertion
+    // proves the input reached the gate and was declined intact.
+    match &triggers[0].mode {
+        TriggerMode::Unknown(payload) => assert!(
+            payload.contains("or a creature it's paired with is dealt damage"),
+            "the whole cross-subject condition must survive unsplit, got {payload:?}"
+        ),
+        other => panic!("expected the cross-subject line to stay Unknown, got {other:?}"),
+    }
 
     let triggers = parse_trigger_lines(
         "Whenever this token or a Gamer you control becomes tapped, remove an hour counter from this token.",
