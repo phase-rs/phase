@@ -21,23 +21,21 @@
 //!   whether any creature can actually attack.
 //! - `valid_attacker_ids` is non-empty (an untapped, non-sick creature is a
 //!   valid *candidate*) but every candidate's per-attacker legal-target list
-//!   is empty — e.g. the only opponent has protection from everything. The
-//!   aggregate `valid_attack_targets` is empty even though
-//!   `valid_attacker_ids` is not, and `has_potential_attackers` never checks
-//!   target legality, so this reaches `Phase::DeclareAttackers` through the
-//!   ordinary (trigger-free) path.
+//!   is empty — e.g. a CR 508.1c temporary attack prohibition bars attacking
+//!   the only opponent. The aggregate `valid_attack_targets` is empty even
+//!   though `valid_attacker_ids` is not, and `has_potential_attackers` never
+//!   checks target legality, so this reaches `Phase::DeclareAttackers`
+//!   through the ordinary (trigger-free) path.
+use engine::game::combat::build_declare_attackers_waiting_for;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, QuantityExpr,
-    TargetFilter, TriggerConstraint, TriggerDefinition,
+    AbilityDefinition, AbilityKind, Effect, GameRestriction, ProhibitedActivity, QuantityExpr,
+    RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TriggerConstraint, TriggerDefinition,
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::game_state::WaitingFor;
-use engine::types::identifiers::CardId;
-use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::phase::Phase;
-use engine::types::triggers::TriggerMode;
+use engine::types::triggers::{AttackTargetFilter, TriggerMode};
 use engine::types::zones::Zone;
 
 /// Drive priority forward from precombat main until either the interactive
@@ -134,8 +132,8 @@ fn declare_attackers_prompt_skipped_when_no_legal_attackers_exist() {
 }
 
 /// The candidate set can be non-empty (an untapped, non-sick creature) while
-/// every candidate's legal-target list is still empty — e.g. the sole
-/// opponent has protection from everything. Checking only
+/// every candidate's legal-target list is still empty — e.g. a temporary
+/// attack prohibition bars attacking the sole opponent. Checking only
 /// `valid_attacker_ids` misses this: it stays non-empty even though no
 /// non-empty attack declaration is actually possible. The engine must check
 /// the aggregate `valid_attack_targets` instead.
@@ -148,34 +146,56 @@ fn declare_attackers_prompt_skipped_when_every_candidate_has_no_legal_target() {
     // `has_potential_attackers` (the coarse BeginCombat gate) never checks
     // per-target legality, so this reaches Phase::DeclareAttackers through
     // the ordinary trigger-free path — no begin-of-combat trigger needed.
-    scenario.add_creature(P0, "Fyndhorn Elves", 1, 1);
+    let source = scenario.add_creature(P0, "Fyndhorn Elves", 1, 1).id();
 
     let mut runner = scenario.build();
 
-    // CR 702.16j protection from everything on the only opponent
-    // (Teferi's Protection) prevents the opponent from being an attack target
-    // for the rest of the turn. `get_valid_attack_targets`
-    // already excludes protected players (see
-    // `get_valid_attack_targets_excludes_protected_player` in combat.rs), so
-    // with a single opponent this empties the aggregate `valid_attack_targets`
-    // even though `valid_attacker_ids` stays non-empty.
-    let source = create_object(
-        runner.state_mut(),
-        CardId(999),
-        P1,
-        "Teferi's Protection".to_string(),
-        Zone::Battlefield,
-    );
-    runner.state_mut().add_transient_continuous_effect(
-        source,
-        P1,
-        Duration::UntilEndOfTurn,
-        TargetFilter::SpecificPlayer { id: P1 },
-        vec![ContinuousModification::AddKeyword {
-            keyword: Keyword::Protection(ProtectionTarget::Everything),
-        }],
-        None,
-    );
+    // CR 508.1c + CR 109.5: a temporary attack prohibition ("players can't
+    // attack P1 this turn", a `ProhibitActivity::Attack` restriction) bars
+    // declaring an attack against the only opponent. This is a per-target
+    // hard restriction consulted inside `attacker_can_attack_target`
+    // (`attack_passes_temporary_prohibition`), NOT a candidate-level gate —
+    // `creature_cant_attack_gated` (which builds `valid_attacker_ids`) never
+    // consults `state.restrictions` — so the creature remains a valid
+    // candidate while its legal-target list becomes empty. With only one
+    // opponent, that empties the aggregate `valid_attack_targets` too. See
+    // `temporary_attack_prohibition_bars_only_the_protected_player` in
+    // rules/combat.rs for the same restriction exercised directly against
+    // `DeclareAttackers` validation.
+    runner
+        .state_mut()
+        .restrictions
+        .push(GameRestriction::ProhibitActivity {
+            source,
+            affected_players: RestrictionPlayerScope::AllPlayers,
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::Attack {
+                defended: AttackTargetFilter::PlayerOrPlaneswalker,
+                protected_player: Some(P1),
+            },
+        });
+
+    // Precondition: the candidate set is non-empty but the aggregate legal-
+    // target set is empty — the exact split the fix must detect.
+    match build_declare_attackers_waiting_for(runner.state()) {
+        WaitingFor::DeclareAttackers {
+            valid_attacker_ids,
+            valid_attack_targets,
+            ..
+        } => {
+            assert!(
+                !valid_attacker_ids.is_empty(),
+                "precondition: the creature must remain a valid candidate \
+                 despite the attack prohibition"
+            );
+            assert!(
+                valid_attack_targets.is_empty(),
+                "precondition: the only opponent is barred, so no legal \
+                 attack target remains"
+            );
+        }
+        other => panic!("expected DeclareAttackers, got {other:?}"),
+    }
 
     assert_never_prompts_and_reaches_postcombat_main(&mut runner);
 }
