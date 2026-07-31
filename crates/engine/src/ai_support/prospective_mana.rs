@@ -14,15 +14,18 @@ use crate::ai_support::{
 use crate::game::engine::apply_interaction_for_simulation;
 use crate::game::turn_control::authorized_submitter_for_player;
 use crate::types::ability::{
-    AbilityCost, AbilityKind, Effect, QuantityExpr, SacrificeRequirement,
-    SearchSelectionConstraint, TargetFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect,
+    QuantityExpr, SacrificeRequirement, SearchSelectionConstraint, TargetFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::identifiers::{ObjectIdentityBinding, ObjectIncarnationRef};
+use crate::types::identifiers::{
+    DelayedTriggerProvenance, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, TriggerFiring,
+};
 use crate::types::interaction::{ActiveInteractionSlot, InteractionSessionId};
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::ResolvedRulesCommand;
 use crate::types::zones::Zone;
 
 /// The one supported prospective route request. `cast` is a pre-existing hand
@@ -33,7 +36,6 @@ struct FetchThenCastRequest {
     pub fetch: CandidateAction,
     pub cast: ObjectIdentityBinding,
 }
-
 /// A completed route, an opaque real search prompt, or a fail-closed result.
 #[derive(Debug, Clone)]
 enum ProspectiveManaResult {
@@ -99,6 +101,481 @@ pub struct CertifiedFetchFollowUp {
     cast: ObjectIdentityBinding,
 }
 
+/// Opaque reducer-certified Pact route. The delayed-trigger provenance remains
+/// engine-private and is used only to retain a live cast continuation.
+#[derive(Debug, Clone)]
+pub struct CertifiedPactPlan {
+    root: FrozenCandidate,
+    receipt: PactReceipt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PactReceipt {
+    provenance: DelayedTriggerProvenance,
+    payer: PlayerId,
+    source_id: ObjectId,
+}
+
+/// The plan deliberately exposes only its lifecycle, never the receipt or a
+/// simulated state. A dormant plan stays bound to its exact installed delayed
+/// trigger until the engine consumes it or a conflicting state invalidates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PactPlanState {
+    Dormant,
+    Expired,
+}
+
+impl CertifiedPactPlan {
+    /// Revalidate the proposed root against the exact state and legal candidate
+    /// that produced it. This is called before moving a scored draft into a
+    /// durable AI session route.
+    pub fn root_action_for(
+        &self,
+        state: &GameState,
+        semantic_owner: PlayerId,
+    ) -> Option<GameAction> {
+        (self.root.semantic_owner == semantic_owner
+            && self.root.capability.matches(state)
+            && frozen_candidates(state, semantic_owner)
+                .iter()
+                .any(|candidate| self.root.matches_candidate(candidate)))
+        .then(|| self.root.action.clone())
+    }
+
+    /// Check the exact live delayed-trigger carrier without exposing its
+    /// private provenance. A plan cannot attach to another obligation with the
+    /// same source object id.
+    pub fn state_for(&self, state: &GameState, semantic_owner: PlayerId) -> PactPlanState {
+        if semantic_owner != self.receipt.payer
+            || matches!(state.waiting_for, WaitingFor::GameOver { .. })
+        {
+            return PactPlanState::Expired;
+        }
+        if state
+            .pending_cast
+            .as_ref()
+            .is_some_and(|pending| pending.object_id == self.receipt.source_id)
+            || state.stack.iter().any(|entry| {
+                entry.id == self.receipt.source_id && entry.controller == self.receipt.payer
+            })
+            || (!matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state.resolving_stack_entry.as_ref().is_some_and(|entry| {
+                    entry.id == self.receipt.source_id && entry.controller == self.receipt.payer
+                }))
+        {
+            return PactPlanState::Dormant;
+        }
+        if state.delayed_triggers.iter().any(|trigger| {
+            trigger.provenance == Some(self.receipt.provenance)
+                && trigger.controller == self.receipt.payer
+                && trigger.source_id == self.receipt.source_id
+        }) || state.pending_trigger_order.as_ref().is_some_and(|order| {
+            order.groups.iter().any(|group| {
+                group.triggers.iter().any(|trigger| {
+                    trigger.firing == TriggerFiring::Delayed(Some(self.receipt.provenance))
+                })
+            })
+        }) || state.pending_trigger_firing
+            == Some(TriggerFiring::Delayed(Some(self.receipt.provenance)))
+            || (!matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state.resolving_trigger_firing
+                    == Some(TriggerFiring::Delayed(Some(self.receipt.provenance))))
+            || state
+                .stack_trigger_firings
+                .values()
+                .any(|firing| *firing == TriggerFiring::Delayed(Some(self.receipt.provenance)))
+        {
+            PactPlanState::Dormant
+        } else {
+            PactPlanState::Expired
+        }
+    }
+}
+
+/// Derive a Pact certificate only from the exact delayed-trigger-install
+/// journal command produced by reducing this root, then confirm that the live
+/// delayed trigger carries the same private provenance.
+pub fn certify_pact_plan(state: &GameState, root: &CandidateAction) -> Option<CertifiedPactPlan> {
+    let GameAction::CastSpell { object_id, .. } = root.action else {
+        return None;
+    };
+    if !is_pact_payment_cast(state, &root.action) {
+        return None;
+    }
+    let frozen = FrozenCandidate::capture(state, root)?;
+    if frozen.tactical_class != TacticalClass::Spell {
+        return None;
+    }
+    let journal_start = state.resolved_rules_journal.entries().len();
+    let mut projected = state.clone();
+    let events = frozen.clone().apply(&mut projected).ok()?;
+    if draws_are_opaque(&projected, &events) {
+        return None;
+    }
+    let receipt = advance_pact_to_install(
+        &mut projected,
+        frozen.semantic_owner,
+        object_id,
+        journal_start,
+    )?;
+    pact_payment_survives(&mut projected, frozen.semantic_owner, receipt).then(|| {
+        CertifiedPactPlan {
+            root: frozen,
+            receipt,
+        }
+    })
+}
+
+/// CR 603.7a + CR 118.1 + CR 104.3e: Cheap, typed prefilter for the Pact-class
+/// prospective route. This performs
+/// no candidate enumeration or reducer projection, so ordinary casts never
+/// pay the bounded prospective-simulation cost.
+pub fn is_pact_payment_cast(state: &GameState, action: &GameAction) -> bool {
+    let GameAction::CastSpell { object_id, .. } = action else {
+        return false;
+    };
+    state.objects.get(object_id).is_some_and(|source| {
+        source
+            .abilities
+            .iter()
+            .filter(|ability| ability.kind == AbilityKind::Spell)
+            .any(is_pact_payment_ability)
+    })
+}
+
+/// Recognize a next-upkeep mandatory mana payment whose failed-payment branch
+/// loses the delayed trigger's controller. The shape is card-name agnostic and
+/// intentionally excludes optional, modal, and unrelated delayed effects.
+pub fn is_pact_payment_ability(ability: &AbilityDefinition) -> bool {
+    !ability.optional
+        && ability.condition.is_none()
+        && (matches!(
+            ability.effect.as_ref(),
+            Effect::CreateDelayedTrigger {
+                condition:
+                    DelayedTriggerCondition::AtNextPhaseForPlayer {
+                        phase: crate::types::phase::Phase::Upkeep,
+                        ..
+                    },
+                effect,
+                ..
+            } if delayed_trigger_is_mandatory_mana_payment_or_loss_definition(effect)
+        ) || ability
+            .sub_ability
+            .as_deref()
+            .filter(|sub| !sub.optional && sub.condition.is_none())
+            .is_some_and(is_pact_payment_ability))
+}
+
+fn delayed_trigger_is_mandatory_mana_payment_or_loss_definition(
+    ability: &AbilityDefinition,
+) -> bool {
+    let Effect::PayCost {
+        cost: AbilityCost::Mana { cost },
+        scale: None,
+        payer: TargetFilter::Controller,
+    } = ability.effect.as_ref()
+    else {
+        return false;
+    };
+    cost.mana_value() > 0
+        && !ability.optional
+        && ability.sub_ability.as_deref().is_some_and(|failure| {
+            !failure.optional
+                && failure
+                    .condition
+                    .as_ref()
+                    .is_some_and(AbilityCondition::is_not_optional_effect_performed)
+                && matches!(
+                    failure.effect.as_ref(),
+                    Effect::LoseTheGame {
+                        target: None | Some(TargetFilter::Controller)
+                    }
+                )
+        })
+}
+
+/// Drive only deterministic turn progression after the exact delayed trigger
+/// is installed. The engine owns Pact's resolution-time mana payment: it
+/// auto-taps legal sources and either completes the mandatory payment or takes
+/// the loss branch without exposing a `ManaPayment` interaction to the AI.
+fn pact_payment_survives(state: &mut GameState, owner: PlayerId, receipt: PactReceipt) -> bool {
+    let mut observed_receipt = false;
+    for _ in 0..PROSPECTIVE_MAX_PACT_TRANSITIONS {
+        if let WaitingFor::GameOver { winner } = &state.waiting_for {
+            // CR 104.2: a completed game is a successful prospective terminal
+            // only when the Pact controller won; opponent wins and draws do
+            // not prove the obligation's safe progression.
+            return *winner == Some(owner);
+        }
+        if state.pending_trigger_order.as_ref().is_some_and(|order| {
+            order
+                .groups
+                .iter()
+                .any(|group| group.controller != owner && group.triggers.len() != 1)
+        }) {
+            // CR 603.3b: preserve the whole scheduler-owned ordering batch,
+            // not merely the currently displayed group. A competing opponent
+            // group is a strategic choice even while another group is prompted.
+            return false;
+        }
+        let receipt_is_live = pact_receipt_is_live(state, receipt);
+        observed_receipt |= receipt_is_live;
+        if observed_receipt && !receipt_is_live && pact_payment_completed(state, owner, receipt) {
+            return true;
+        }
+        match &state.waiting_for {
+            WaitingFor::Priority { player } => {
+                let player = *player;
+                let candidates = frozen_candidates(state, player);
+                if player != owner
+                    && candidates
+                        .iter()
+                        .any(|candidate| !matches!(candidate.action, GameAction::PassPriority))
+                {
+                    return false;
+                }
+                let Some(pass) = candidates
+                    .iter()
+                    .find(|candidate| matches!(candidate.action, GameAction::PassPriority))
+                    .and_then(|candidate| FrozenCandidate::capture(state, candidate))
+                else {
+                    return false;
+                };
+                if pass.apply(state).is_err() {
+                    return false;
+                }
+            }
+            WaitingFor::OrderTriggers { player, .. } => {
+                // CR 603.3b: a prospective certificate may advance an
+                // ordering prompt only when the reducer exposes one forced
+                // ordering. This applies to the Pact controller as well as
+                // opponents: choosing either order would otherwise make the
+                // certificate responsible for a strategic decision.
+                let order_candidates: Vec<_> = frozen_candidates(state, *player)
+                    .into_iter()
+                    .filter(|candidate| {
+                        matches!(candidate.action, GameAction::OrderTriggers { .. })
+                    })
+                    .collect();
+                if order_candidates.len() != 1 {
+                    return false;
+                }
+                let action = FrozenCandidate::capture(state, &order_candidates[0]);
+                let Some(action) = action else {
+                    return false;
+                };
+                if action.apply(state).is_err() {
+                    return false;
+                }
+            }
+            WaitingFor::DeclareAttackers { .. } | WaitingFor::DeclareBlockers { .. } => {
+                let Some(player) = state.waiting_for.acting_player() else {
+                    return false;
+                };
+                let candidates = frozen_candidates(state, player);
+                let candidate_count = candidates.len();
+                let neutral_actions: Vec<_> = candidates
+                    .into_iter()
+                    .filter(|candidate| match &candidate.action {
+                        GameAction::OrderTriggers { .. } => true,
+                        GameAction::DeclareAttackers { attacks, .. } => attacks.is_empty(),
+                        GameAction::DeclareBlockers { assignments } => assignments.is_empty(),
+                        _ => false,
+                    })
+                    .collect();
+                // An opponent's trigger order, attack, or block is never a
+                // prospective-route choice. Advance only when its one legal
+                // candidate is the neutral empty/identity action.
+                if player != owner
+                    && (neutral_actions.len() != 1 || neutral_actions.len() != candidate_count)
+                {
+                    return false;
+                }
+                let Some(action) = neutral_actions
+                    .into_iter()
+                    .next()
+                    .and_then(|candidate| FrozenCandidate::capture(state, &candidate))
+                else {
+                    return false;
+                };
+                if action.apply(state).is_err() {
+                    return false;
+                }
+            }
+            _ => {
+                return false;
+            }
+        }
+    }
+    false
+}
+
+/// CR 603.3b + CR 608.2c: The receipt may temporarily leave every provenance
+/// carrier while trigger ordering is being assembled. Treat it as paid only
+/// once its upkeep trigger has left the stack and reducer control has returned
+/// to priority.
+fn pact_payment_completed(state: &GameState, owner: PlayerId, receipt: PactReceipt) -> bool {
+    state.active_player == owner
+        && state.phase == crate::types::phase::Phase::Upkeep
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && !state
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == receipt.source_id)
+}
+
+fn pact_receipt_is_live(state: &GameState, receipt: PactReceipt) -> bool {
+    state.delayed_triggers.iter().any(|trigger| {
+        trigger.provenance == Some(receipt.provenance)
+            && trigger.controller == receipt.payer
+            && trigger.source_id == receipt.source_id
+    }) || state.pending_trigger_order.as_ref().is_some_and(|order| {
+        order.groups.iter().any(|group| {
+            group
+                .triggers
+                .iter()
+                .any(|trigger| trigger.firing == TriggerFiring::Delayed(Some(receipt.provenance)))
+        })
+    }) || state.pending_trigger_firing == Some(TriggerFiring::Delayed(Some(receipt.provenance)))
+        || (!matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && matches!(
+                state.resolving_trigger_firing,
+                Some(TriggerFiring::Delayed(Some(provenance))) if provenance == receipt.provenance
+            ))
+        || state
+            .stack_trigger_firings
+            .values()
+            .any(|firing| *firing == TriggerFiring::Delayed(Some(receipt.provenance)))
+}
+
+fn advance_pact_to_install(
+    state: &mut GameState,
+    owner: PlayerId,
+    source_id: ObjectId,
+    journal_start: usize,
+) -> Option<PactReceipt> {
+    let mut priority_beats = 0;
+    while priority_beats < PROSPECTIVE_MAX_PRIORITY_BEATS {
+        if let Some(receipt) = pact_receipt_since(state, source_id, owner, journal_start) {
+            return Some(receipt);
+        }
+        match &state.waiting_for {
+            WaitingFor::Priority { player } => {
+                let player = *player;
+                let candidates = frozen_candidates(state, player);
+                if player != owner
+                    && candidates
+                        .iter()
+                        .any(|candidate| !matches!(candidate.action, GameAction::PassPriority))
+                {
+                    return None;
+                }
+                let pass = candidates
+                    .into_iter()
+                    .find(|candidate| matches!(candidate.action, GameAction::PassPriority))
+                    .and_then(|candidate| FrozenCandidate::capture(state, &candidate))?;
+                let events = pass.apply(state).ok()?;
+                if draws_are_opaque(state, &events) {
+                    return None;
+                }
+                priority_beats += 1;
+            }
+            waiting if waiting.acting_player() == Some(owner) => {
+                let mut continuations =
+                    frozen_candidates(state, owner)
+                        .into_iter()
+                        .filter(|candidate| {
+                            matches!(
+                                candidate.metadata.tactical_class,
+                                TacticalClass::Target | TacticalClass::Selection
+                            )
+                        });
+                let continuation = continuations.next()?;
+                if continuations.next().is_some() {
+                    return None;
+                }
+                let continuation = FrozenCandidate::capture(state, &continuation)?;
+                let events = continuation.apply(state).ok()?;
+                if draws_are_opaque(state, &events) {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    pact_receipt_since(state, source_id, owner, journal_start)
+}
+
+fn pact_receipt_since(
+    state: &GameState,
+    source_id: ObjectId,
+    payer: PlayerId,
+    journal_start: usize,
+) -> Option<PactReceipt> {
+    state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter_map(|entry| entry.command.as_ref())
+        .filter_map(|command| match command {
+            ResolvedRulesCommand::DelayedTriggerInstall(command) => Some(command),
+            _ => None,
+        })
+        .find_map(|command| {
+            let trigger = &command.trigger;
+            let provenance = trigger.provenance?;
+            (command.token == provenance.token
+                && trigger.source_id == source_id
+                && provenance.source_id == source_id
+                && trigger.controller == payer
+                && trigger.one_shot
+                && matches!(
+                    &trigger.condition,
+                    DelayedTriggerCondition::AtNextPhaseForPlayer {
+                        phase: crate::types::phase::Phase::Upkeep,
+                        player,
+                        ..
+                    } if *player == payer
+                )
+                && delayed_trigger_is_mandatory_mana_payment_or_loss(&trigger.ability))
+            .then_some(PactReceipt {
+                provenance,
+                payer,
+                source_id,
+            })
+        })
+}
+
+fn delayed_trigger_is_mandatory_mana_payment_or_loss(
+    ability: &crate::types::ability::ResolvedAbility,
+) -> bool {
+    let Effect::PayCost {
+        cost: AbilityCost::Mana { cost },
+        scale: None,
+        payer: TargetFilter::Controller,
+    } = &ability.effect
+    else {
+        return false;
+    };
+    cost.mana_value() > 0
+        && !ability.optional
+        && ability.sub_ability.as_deref().is_some_and(|failure| {
+            !failure.optional
+                && failure
+                    .condition
+                    .as_ref()
+                    .is_some_and(AbilityCondition::is_not_optional_effect_performed)
+                && matches!(
+                    &failure.effect,
+                    Effect::LoseTheGame {
+                        target: None | Some(TargetFilter::Controller)
+                    }
+                )
+        })
+}
+
 impl CertifiedFetchFollowUp {
     /// Return the certified spell only on the exact state produced by the
     /// certified real search selection. A stale or modified state falls back
@@ -128,6 +605,7 @@ struct ProspectiveManaDecision {
 
 const PROSPECTIVE_MAX_STRATEGIC_ACTIONS: usize = 2;
 const PROSPECTIVE_MAX_PRIORITY_BEATS: usize = 2;
+const PROSPECTIVE_MAX_PACT_TRANSITIONS: usize = 96;
 const PROSPECTIVE_MAX_PAYMENT_APPLICATIONS: usize = 64;
 const PROSPECTIVE_MAX_SEARCH_BRANCHES: usize = 12;
 // Kept private because forced actionless progress is not yet part of the

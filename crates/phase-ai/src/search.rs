@@ -6,8 +6,9 @@ use rand_chacha::ChaCha20Rng;
 
 use engine::ai_support::{
     build_decision_context, build_decision_context_for_semantic_owner, certify_fetch_then_cast,
+    certify_pact_plan, is_pact_payment_cast, AiDecisionContract,
     targeted_exchange_verdict, validated_candidate_actions_for_semantic_owner,
-    AiDecisionContract, TargetedExchangeVerdict,
+    TargetedExchangeVerdict,
 };
 use engine::types::ability::{
     AbilityDefinition, ContinuousModification, Duration, Effect, StaticDefinition, TargetFilter,
@@ -146,7 +147,7 @@ pub fn choose_action(
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
     let session = AiSession::arc_from_game(state);
-    choose_action_with_session(state, ai_player, config, rng, &session)
+    choose_action_with_session_inner(state, ai_player, config, rng, &session, false)
 }
 
 /// Choose the best action using a caller-owned per-game session cache.
@@ -156,6 +157,17 @@ pub fn choose_action_with_session(
     config: &AiConfig,
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
+) -> Option<GameAction> {
+    choose_action_with_session_inner(state, ai_player, config, rng, session, true)
+}
+
+fn choose_action_with_session_inner(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    rng: &mut impl Rng,
+    session: &Arc<AiSession>,
+    durable_pact_routes: bool,
 ) -> Option<GameAction> {
     let contract = AiDecisionContract::issue(state, ai_player);
     let exact_contract_action =
@@ -176,6 +188,10 @@ pub fn choose_action_with_session(
             return None;
         }
         _ => {}
+    }
+
+    if durable_pact_routes {
+        retain_live_pact_route(state, ai_player, session);
     }
 
     if let Some(action) = random_card_predicate_guess(state, ai_player, rng) {
@@ -218,12 +234,6 @@ pub fn choose_action_with_session(
         }
     }
 
-    // CR 103.5 + TL:R 906.6: simultaneous opening-hand bottoming is resolved
-    // for one semantic owner at a time. Generic candidate validation applies
-    // actions as the first pending seat, so it cannot validate a later seat's
-    // independently sized selection. The deterministic branch uses that
-    // owner's bounded hand directly; the issued contract still verifies the
-    // selected card set before it can leave the AI.
     if matches!(
         state.waiting_for,
         WaitingFor::MulliganDecision { .. } | WaitingFor::OpeningHandBottomCards { .. }
@@ -259,16 +269,36 @@ pub fn choose_action_with_session(
         }
     }
 
-    if let Some(action) = fast_priority_action(state, ai_player, config, session) {
+    if let Some(action) = fast_priority_action(state, ai_player, config, session)
+        .filter(|action| durable_pact_routes || !is_certified_pact_root(state, ai_player, action))
+    {
+        if durable_pact_routes {
+            draft_pact_routes_for_scored_actions(
+                state,
+                ai_player,
+                std::slice::from_ref(&(action.clone(), 0.0)),
+                session,
+            );
+            arm_certified_pact_route(state, &action, ai_player, session);
+        }
         return exact_contract_action(action);
     }
 
     let mut scored = score_candidates_with_session(state, ai_player, config, session);
+    if durable_pact_routes {
+        draft_pact_routes_for_scored_actions(state, ai_player, &scored, session);
+    } else {
+        scored.retain(|(action, _)| !is_certified_pact_root(state, ai_player, action));
+    }
     if scored.is_empty() {
-        // so the game never deadlocks waiting for the AI. Root casts and
-        // activations were already rejected before scoring; applying that
-        // preference to the escape action can turn a legal recovery into None.
-        return fallback_action(state, config).and_then(exact_contract_action);
+        // No valid candidates from search — fall back to a safe escape action
+        // so the game never deadlocks waiting for the AI.
+        return fallback_action(state, config)
+            .filter(|action| root_action_is_allowed(state, ai_player, action))
+            .filter(|action| {
+                durable_pact_routes || !is_certified_pact_root(state, ai_player, action)
+            })
+            .and_then(exact_contract_action);
     }
     // Issue #4878: total order before softmax so equal scores never depend on
     // HashSet/HashMap allocation order.
@@ -280,6 +310,9 @@ pub fn choose_action_with_session(
     };
     if let Some(action) = &chosen {
         arm_certified_fetch_prompt(action, ai_player, session);
+        if durable_pact_routes {
+            arm_certified_pact_route(state, action, ai_player, session);
+        }
         emit_decision_trace(state, ai_player, config, action, session);
     }
     chosen.and_then(exact_contract_action)
@@ -657,7 +690,7 @@ fn large_board_main_phase_fast_action_from_actions(
     // the tactical registry so land sequencing and other safety policies still
     // participate. Spell mana value remains the deterministic baseline that
     // this shortcut historically used; policies may adjust or reject it.
-    let decision = build_decision_context_for_semantic_owner(state, ai_player);
+    let decision = build_decision_context(state);
     let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
     let policies = PolicyRegistry::shared();
 
@@ -729,7 +762,7 @@ fn emit_decision_trace(
         return;
     }
 
-    let ctx = build_decision_context_for_semantic_owner(state, ai_player);
+    let ctx = build_decision_context(state);
     let candidate = ctx.candidates.iter().find(|c| c.action == *action);
     let Some(candidate) = candidate else {
         // The chosen action was produced by a deterministic path (combat AI,
@@ -1846,6 +1879,30 @@ pub fn score_candidates(
     config: &AiConfig,
 ) -> Vec<(GameAction, f64)> {
     let session = AiSession::arc_from_game(state);
+    let mut scored = score_candidates_with_session(state, ai_player, config, &session);
+    remove_certified_pact_roots(state, ai_player, &mut scored);
+    scored
+}
+
+/// Score a stateless parallel-worker sample.
+///
+/// A certified Pact root carries an opaque reducer receipt that must remain in
+/// the authoritative session through its next upkeep. Pool workers deserialize
+/// independent state copies and cannot return that session capability with a
+/// score vector, so decline the entire parallel path when one is available.
+/// The caller then uses [`choose_action_with_session`] on the authoritative
+/// worker, which performs proposal drafting and route arming atomically with
+/// root selection.
+pub fn score_candidates_for_parallel_worker(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+) -> Vec<(GameAction, f64)> {
+    if has_certified_pact_root(state, ai_player) {
+        return Vec::new();
+    }
+
+    let session = AiSession::arc_from_game(state);
     score_candidates_with_session(state, ai_player, config, &session)
 }
 
@@ -1917,7 +1974,7 @@ fn finalize_mean(
 /// `determinization_samples == 0` this is byte-identical to the pre-feature
 /// single search. With `K > 0` it runs the untouched search against K
 /// determinized opponent-hidden-zone samples and means the per-action scores.
-pub fn score_candidates_with_session(
+pub(crate) fn score_candidates_with_session(
     state: &GameState,
     ai_player: PlayerId,
     config: &AiConfig,
@@ -2350,6 +2407,65 @@ fn inject_prospective_fetch_scores(
     scores
 }
 
+/// Persist only opaque Pact drafts while ranking roots. The certificate is
+/// derived by the engine from the exact delayed-trigger installation receipt;
+/// no sampled state or provenance is retained in phase-AI.
+fn draft_pact_routes_for_scored_actions(
+    state: &GameState,
+    ai_player: PlayerId,
+    scored: &[(GameAction, f64)],
+    session: &Arc<AiSession>,
+) {
+    let candidates = validated_candidate_actions_for_semantic_owner(state, ai_player);
+    let proposals: Vec<_> = scored
+        .iter()
+        .filter_map(|(action, _)| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.action.cmp_stable(action) == Ordering::Equal)
+                .and_then(|candidate| certify_pact_plan(state, candidate))
+                .map(|plan| (action.clone(), plan))
+        })
+        .collect();
+    if let Ok(mut pending) = session.pact_proposals.write() {
+        pending.insert(ai_player, proposals);
+    }
+}
+
+fn is_certified_pact_root(state: &GameState, ai_player: PlayerId, action: &GameAction) -> bool {
+    // Pact certification clones and advances the reducer. Most legal actions
+    // cannot create a Pact-class delayed trigger, so keep this guard ahead of
+    // candidate enumeration on wide priority states.
+    if !is_pact_payment_cast(state, action) {
+        return false;
+    }
+    validated_candidate_actions_for_semantic_owner(state, ai_player)
+        .iter()
+        .find(|candidate| candidate.action.cmp_stable(action) == Ordering::Equal)
+        .is_some_and(|candidate| certify_pact_plan(state, candidate).is_some())
+}
+
+fn has_certified_pact_root(state: &GameState, ai_player: PlayerId) -> bool {
+    validated_candidate_actions_for_semantic_owner(state, ai_player)
+        .iter()
+        .any(|candidate| {
+            is_pact_payment_cast(state, &candidate.action)
+                && certify_pact_plan(state, candidate).is_some()
+        })
+}
+
+/// A score vector does not carry the opaque reducer receipt that permits a
+/// certified Pact cast to survive through its next upkeep. Public stateless
+/// scoring must therefore omit it; only the canonical session chooser can
+/// draft and arm that route with root selection.
+fn remove_certified_pact_roots(
+    state: &GameState,
+    ai_player: PlayerId,
+    scored: &mut Vec<(GameAction, f64)>,
+) {
+    scored.retain(|(action, _)| !is_certified_pact_root(state, ai_player, action));
+}
+
 fn has_certified_fetch_then_cast_route(state: &GameState, ai_player: PlayerId) -> bool {
     let casts = hand_identity_bindings(state, ai_player);
     !casts.is_empty()
@@ -2398,6 +2514,49 @@ fn arm_certified_fetch_prompt(action: &GameAction, ai_player: PlayerId, session:
     }
 }
 
+/// Atomically replace this player's durable Pact route with the one certificate
+/// belonging to the selected root; every sibling draft is discarded.
+fn arm_certified_pact_route(
+    state: &GameState,
+    action: &GameAction,
+    ai_player: PlayerId,
+    session: &Arc<AiSession>,
+) {
+    let Ok(mut routes) = session.pact_routes.write() else {
+        return;
+    };
+    let Ok(mut proposals) = session.pact_proposals.write() else {
+        return;
+    };
+    if let Some(proposals) = proposals.get_mut(&ai_player) {
+        if let Some(index) = proposals.iter().position(|(root, plan)| {
+            root.cmp_stable(action) == Ordering::Equal
+                && plan
+                    .root_action_for(state, ai_player)
+                    .is_some_and(|root| root.cmp_stable(action) == Ordering::Equal)
+        }) {
+            routes.insert(ai_player, proposals.swap_remove(index).1);
+        }
+        proposals.clear();
+    }
+}
+
+/// Retain an armed certificate only while its exact root or installed delayed
+/// trigger remains live. Pact's resolution-time payment is synchronous engine
+/// work, so this route carries target/mode continuation only and never emits a
+/// synthetic payment action.
+fn retain_live_pact_route(state: &GameState, ai_player: PlayerId, session: &Arc<AiSession>) {
+    let Ok(mut routes) = session.pact_routes.write() else {
+        return;
+    };
+    let Some(plan) = routes.remove(&ai_player) else {
+        return;
+    };
+    if plan.state_for(state, ai_player) == engine::ai_support::PactPlanState::Dormant {
+        routes.insert(ai_player, plan);
+    }
+}
+
 /// Core scoring for a single (possibly determinized) state. Byte-identical to
 /// the pre-feature `score_candidates_with_session` except it threads a shared
 /// `deadline_override` into `PlannerServices` — `None` reproduces the old
@@ -2418,7 +2577,7 @@ fn score_candidates_core(
         return vec![(action, 1.0)];
     }
 
-    let ctx = build_decision_context_for_semantic_owner(state, ai_player);
+    let ctx = build_decision_context(state);
     #[cfg(test)]
     let policies = session
         .policy_registry_override
@@ -2458,15 +2617,6 @@ fn score_candidates_core(
             .map(|candidate| candidate.candidate.clone())
             .collect(),
     );
-    let candidates: Vec<_> = candidates
-        .into_iter()
-        .filter(|candidate| {
-            !matches!(
-                targeted_exchange_verdict(state, candidate),
-                TargetedExchangeVerdict::Reject
-            )
-        })
-        .collect();
     let gated = gate_candidates(
         state,
         &ctx,
@@ -3621,9 +3771,24 @@ fn local_combinations(
     result
 }
 
-/// Select an action from scored `(GameAction, f64)` pairs using softmax.
-/// Used by `choose_action` and by the WASM `select_action_from_scores` export.
-pub fn softmax_select_pairs(
+/// Select a non-Pact action from scored `(GameAction, f64)` pairs using
+/// softmax. A score vector cannot carry the opaque receipt required to arm a
+/// certified Pact cast, so score-only callers must fall back to the canonical
+/// durable session chooser when softmax lands on one.
+pub fn select_safe_action_from_scores(
+    state: &GameState,
+    scored: &[(GameAction, f64)],
+    temperature: f64,
+    rng: &mut impl Rng,
+) -> Option<GameAction> {
+    softmax_select_pairs(scored, temperature, rng)
+        .filter(|action| !is_pact_payment_cast(state, action))
+}
+
+/// Internal softmax primitive for the canonical chooser and phase-AI tests.
+/// It intentionally has no game-state context, so it must not cross the
+/// crate boundary where a Pact result could lose its durable receipt route.
+pub(crate) fn softmax_select_pairs(
     scored: &[(GameAction, f64)],
     temperature: f64,
     rng: &mut impl Rng,
@@ -3672,21 +3837,22 @@ pub fn softmax_select_pairs(
 
 #[cfg(test)]
 mod tests {
-    use engine::ai_support::build_decision_context;
     use std::path::Path;
 
     use super::*;
-    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::ai_support::{
+        ActionMetadata, AiDecisionContext, CandidateAction, CertifiedPactPlan, TacticalClass,
+    };
     use engine::database::card_db::CardDatabase;
     use engine::game::rehydrate_game_from_card_db;
-    use engine::game::scenario::{GameScenario, P0};
+    use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification,
-        ControllerRef, Duration, Effect, EffectKind, ManaProduction, PtValue, QuantityExpr,
-        ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
-        TriggerDefinition, TypedFilter,
+        ControllerRef, Duration, Effect, EffectKind, ManaProduction, PlayerFilter, PtValue,
+        QuantityExpr, ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter,
+        TargetRef, TriggerConstraint, TriggerDefinition, TypedFilter,
     };
     use engine::types::ability::{ChoiceType, ChosenAttribute};
     use engine::types::card_type::CoreType;
@@ -3710,6 +3876,320 @@ mod tests {
     use crate::policies::{DecisionKind, PolicyReason, TacticalPolicy};
     use crate::session::SessionCache;
     use crate::test_support::{context_with_plans, default_deck_plan, ramp_deck_plan};
+
+    const PACT_OF_NEGATION_ORACLE: &str =
+        "Counter target spell.\nAt the beginning of your next upkeep, pay {3}{U}{U}. If you don't, you lose the game.";
+
+    #[derive(Clone, Copy, Debug)]
+    enum PactTerminalOutcome {
+        OwnerWin,
+        OpponentWin,
+        Draw,
+    }
+
+    fn pact_route_runner(
+        with_payment_lands: bool,
+        leading_objects: usize,
+    ) -> (GameRunner, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..leading_objects {
+            scenario.add_basic_land(P0, ManaColor::Red);
+        }
+        let pact = scenario
+            .add_spell_to_hand_from_oracle(P0, "Pact of Negation", true, PACT_OF_NEGATION_ORACLE)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let counterable = scenario
+            .add_spell_to_hand_from_oracle(P1, "Counterable Test Spell", true, "Draw a card.")
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        scenario.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest", "Forest"]);
+        // The projection crosses P1's draw step. Give that opponent five
+        // uncastable cards rather than lands, so the funded baseline proves
+        // deterministic turn progression without assuming the opponent
+        // declines a newly legal main-phase land drop.
+        for _ in 0..5 {
+            scenario
+                .add_spell_to_library_top(P1, "Opponent Filler", true)
+                .with_mana_cost(ManaCost::generic(10));
+        }
+        if with_payment_lands {
+            for _ in 0..5 {
+                scenario.add_basic_land(P0, ManaColor::Blue);
+            }
+        }
+        scenario.setup(|state| {
+            state.active_player = P1;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+            state.priority_passes.clear();
+        });
+        let mut runner = scenario.build();
+        runner.cast(counterable).commit();
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P1 must pass priority to the Pact controller");
+        (runner, pact, counterable)
+    }
+
+    fn pact_root_candidate(state: &GameState, pact: ObjectId) -> CandidateAction {
+        validated_candidate_actions_for_semantic_owner(state, P0)
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == pact)
+            })
+            .expect("the reducer must issue the Pact root cast")
+    }
+
+    fn arm_pact_route(
+        state: &GameState,
+        root: &CandidateAction,
+        plan: CertifiedPactPlan,
+        session: &Arc<AiSession>,
+    ) {
+        session
+            .pact_proposals
+            .write()
+            .expect("Pact proposal store lock")
+            .insert(P0, vec![(root.action.clone(), plan)]);
+        arm_certified_pact_route(state, &root.action, P0, session);
+        assert!(
+            session
+                .pact_routes
+                .read()
+                .expect("Pact route store lock")
+                .contains_key(&P0),
+            "arming the selected reducer-legal root must retain its opaque certificate"
+        );
+    }
+
+    fn cast_certified_pact(runner: &mut GameRunner, root: &CandidateAction, pact: ObjectId) {
+        runner
+            .act(root.action.clone())
+            .expect("the certified Pact root must apply through the real cast pipeline");
+        assert!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == pact),
+            "the sole legal counterspell target is reducer-auto-selected during casting"
+        );
+        runner.resolve_top();
+        assert!(
+            runner
+                .state()
+                .delayed_triggers
+                .iter()
+                .any(|trigger| trigger.source_id == pact),
+            "resolving the real Pact must install its next-upkeep delayed trigger"
+        );
+    }
+
+    fn add_opponent_terminal_ordering_fixture(runner: &mut GameRunner) {
+        for (card_id, effect) in [
+            (CardId(99_000), Effect::WinTheGame { target: None }),
+            (
+                CardId(99_001),
+                Effect::SetLifeTotal {
+                    amount: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::AllPlayers,
+                },
+            ),
+        ] {
+            let source_id = create_object(
+                runner.state_mut(),
+                card_id,
+                P1,
+                "Opponent End-Step Terminal Trigger".to_string(),
+                Zone::Battlefield,
+            );
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&source_id)
+                .expect("opponent trigger source exists")
+                .trigger_definitions
+                .push(
+                    TriggerDefinition::new(TriggerMode::Phase)
+                        .phase(Phase::End)
+                        .execute(AbilityDefinition::new(AbilityKind::Activated, effect))
+                        .trigger_zones(vec![Zone::Battlefield]),
+                );
+        }
+    }
+
+    fn add_owner_upkeep_trigger(runner: &mut GameRunner) {
+        let source_id = create_object(
+            runner.state_mut(),
+            CardId(99_002),
+            P0,
+            "Owner Upkeep Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source_id)
+            .expect("owner trigger source exists")
+            .trigger_definitions
+            .push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::Upkeep)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .trigger_zones(vec![Zone::Battlefield]),
+            );
+    }
+
+    fn advance_to_trigger_ordering(runner: &mut GameRunner, player: PlayerId) {
+        for _ in 0..400 {
+            if matches!(
+                &runner.state().waiting_for,
+                WaitingFor::OrderTriggers {
+                    player: ordering_player,
+                    triggers,
+                } if *ordering_player == player && triggers.len() >= 2
+            ) {
+                return;
+            }
+            match runner.state().waiting_for.clone() {
+                WaitingFor::OrderTriggers { triggers, .. } => runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("earlier trigger ordering must settle"),
+                WaitingFor::Priority { .. } => runner
+                    .act(GameAction::PassPriority)
+                    .expect("phase progression pass must apply"),
+                WaitingFor::DeclareAttackers { .. } => runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("empty attack declaration must apply"),
+                WaitingFor::DeclareBlockers { .. } => runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    })
+                    .expect("empty block declaration must apply"),
+                other => panic!("unexpected waiting state before trigger ordering: {other:?}"),
+            };
+        }
+        panic!("the real turn pipeline did not reach the expected trigger ordering");
+    }
+
+    fn add_pact_terminal_trigger(runner: &mut GameRunner, outcome: PactTerminalOutcome) {
+        let controller = match outcome {
+            PactTerminalOutcome::OwnerWin => P0,
+            PactTerminalOutcome::OpponentWin | PactTerminalOutcome::Draw => P1,
+        };
+        let source_id = create_object(
+            runner.state_mut(),
+            CardId(99_001),
+            controller,
+            "Pact Terminal Fixture".to_string(),
+            Zone::Battlefield,
+        );
+        let effect = match outcome {
+            PactTerminalOutcome::OwnerWin | PactTerminalOutcome::OpponentWin => {
+                Effect::WinTheGame { target: None }
+            }
+            PactTerminalOutcome::Draw => Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 20 },
+                player_filter: PlayerFilter::All,
+            },
+        };
+        let mut trigger = TriggerDefinition::new(TriggerMode::Phase)
+            .phase(Phase::End)
+            .execute(AbilityDefinition::new(AbilityKind::Activated, effect))
+            .trigger_zones(vec![Zone::Battlefield]);
+        if matches!(outcome, PactTerminalOutcome::OwnerWin) {
+            trigger = trigger.constraint(TriggerConstraint::OnlyDuringOpponentsTurn);
+        }
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source_id)
+            .expect("terminal fixture source exists")
+            .trigger_definitions
+            .push(trigger);
+    }
+
+    fn advance_to_game_over(runner: &mut GameRunner) -> Option<PlayerId> {
+        for _ in 0..400 {
+            if let WaitingFor::GameOver { winner } = &runner.state().waiting_for {
+                return *winner;
+            }
+            match runner.state().waiting_for.clone() {
+                WaitingFor::OrderTriggers { triggers, .. } => runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("trigger ordering must settle"),
+                WaitingFor::Priority { .. } => runner
+                    .act(GameAction::PassPriority)
+                    .expect("phase progression pass must apply"),
+                WaitingFor::DeclareAttackers { .. } => runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("empty attack declaration must apply"),
+                WaitingFor::DeclareBlockers { .. } => runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    })
+                    .expect("empty block declaration must apply"),
+                other => panic!("unexpected waiting state before terminal outcome: {other:?}"),
+            };
+        }
+        panic!("the real turn pipeline did not reach the terminal fixture");
+    }
+
+    fn advance_to_pact_upkeep(runner: &mut GameRunner, pact: ObjectId) {
+        for _ in 0..400 {
+            if runner.state().phase == Phase::Upkeep
+                && runner.state().active_player == P0
+                && runner
+                    .state()
+                    .stack
+                    .iter()
+                    .any(|entry| entry.source_id == pact)
+            {
+                return;
+            }
+            match runner.state().waiting_for.clone() {
+                WaitingFor::OrderTriggers { triggers, .. } => runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("trigger ordering must settle"),
+                WaitingFor::Priority { .. } => runner
+                    .act(GameAction::PassPriority)
+                    .expect("phase progression pass must apply"),
+                WaitingFor::DeclareAttackers { .. } => runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("empty attack declaration must apply"),
+                WaitingFor::DeclareBlockers { .. } => runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    })
+                    .expect("empty block declaration must apply"),
+                other => panic!("unexpected waiting state before Pact upkeep: {other:?}"),
+            };
+        }
+        panic!("the real turn pipeline did not reach Pact's upkeep trigger");
+    }
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -3814,6 +4294,390 @@ mod tests {
             .act(cast)
             .expect("ordinary cast reducer commits Phantom Monster");
         assert_eq!(runner.state().objects[&phantom].zone, Zone::Stack);
+    }
+
+    #[test]
+    fn certified_pact_route_auto_targets_and_auto_pays_at_upkeep() {
+        let (mut runner, pact, _) = pact_route_runner(true, 0);
+        let root = pact_root_candidate(runner.state(), pact);
+        let plan = certify_pact_plan(runner.state(), &root)
+            .expect("the exact delayed trigger must survive its future auto-tap payment");
+        let session = AiSession::arc_from_game(runner.state());
+        arm_pact_route(runner.state(), &root, plan, &session);
+
+        runner
+            .act(root.action.clone())
+            .expect("the selected Pact root must begin its real cast");
+        assert!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == pact),
+            "the sole legal counterspell target is reducer-auto-selected during casting"
+        );
+        assert!(
+            session
+                .pact_routes
+                .read()
+                .expect("Pact route store lock")
+                .contains_key(&P0),
+            "the live cast remains bound to the armed Pact certificate"
+        );
+        runner.resolve_top();
+        advance_to_pact_upkeep(&mut runner, pact);
+        runner.advance_until_stack_empty();
+        assert!(
+            !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
+            "the engine-owned resolution payment must auto-tap enough sources and survive"
+        );
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| object.controller == P0 && object.tapped)
+                .count(),
+            5,
+            "the real Pact payment must auto-tap all five Islands"
+        );
+    }
+
+    #[test]
+    fn durable_session_selected_pact_stays_live_through_payment_and_expires() {
+        let (mut runner, pact, _) = pact_route_runner(true, 0);
+        let session = AiSession::arc_from_game(runner.state());
+        let config = create_config(AiDifficulty::Easy, Platform::Native);
+        let root = choose_action_with_session(
+            runner.state(),
+            P0,
+            &config,
+            &mut SmallRng::seed_from_u64(98),
+            &session,
+        );
+        assert!(
+            matches!(root, Some(GameAction::CastSpell { object_id, .. }) if object_id == pact),
+            "the public durable chooser must select and arm the certified Pact root, got {root:?}"
+        );
+        runner
+            .act(root.expect("Pact root action"))
+            .expect("the selected Pact root must apply");
+        runner.resolve_top();
+        assert!(
+            runner
+                .state()
+                .delayed_triggers
+                .iter()
+                .any(|trigger| trigger.source_id == pact),
+            "the selected root must install the reducer-owned Pact receipt"
+        );
+
+        advance_to_pact_upkeep(&mut runner, pact);
+        assert!(
+            session
+                .pact_routes
+                .read()
+                .expect("Pact route store lock")
+                .contains_key(&P0),
+            "the exact delayed receipt remains live through reducer-owned upkeep resolution"
+        );
+        runner.advance_until_stack_empty();
+        assert!(!matches!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver { .. }
+        ));
+
+        let _ = choose_action_with_session(
+            runner.state(),
+            P0,
+            &config,
+            &mut SmallRng::seed_from_u64(100),
+            &session,
+        );
+        assert!(
+            !session
+                .pact_routes
+                .read()
+                .expect("Pact route store lock")
+                .contains_key(&P0),
+            "a consumed Pact receipt must invalidate the durable session route"
+        );
+    }
+
+    #[test]
+    fn parallel_worker_pact_scores_defer_to_durable_canonical_selection() {
+        let (mut runner, pact, _) = pact_route_runner(true, 0);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let session = AiSession::arc_from_game(runner.state());
+
+        assert!(
+            score_candidates_for_parallel_worker(runner.state(), P0, &config).is_empty(),
+            "a pool score vector cannot carry a certified Pact receipt into the authoritative session"
+        );
+
+        let root = choose_action_with_session(
+            runner.state(),
+            P0,
+            &config,
+            &mut SmallRng::seed_from_u64(101),
+            &session,
+        );
+        assert!(
+            matches!(root, Some(GameAction::CastSpell { object_id, .. }) if object_id == pact),
+            "the authoritative fallback must select the same certified Pact root, got {root:?}"
+        );
+        assert!(
+            session
+                .pact_routes
+                .read()
+                .expect("Pact route store lock")
+                .contains_key(&P0),
+            "the authoritative fallback must arm the durable Pact receipt route"
+        );
+
+        runner
+            .act(root.expect("canonical Pact root"))
+            .expect("the canonical root must apply through the real reducer");
+        runner.resolve_top();
+        assert!(
+            runner
+                .state()
+                .delayed_triggers
+                .iter()
+                .any(|trigger| trigger.source_id == pact),
+            "the armed authoritative root must install Pact's reducer-owned delayed receipt"
+        );
+    }
+
+    #[test]
+    fn insufficient_pact_payment_cannot_be_certified_or_selected() {
+        let (runner, pact, _) = pact_route_runner(false, 0);
+        let root = pact_root_candidate(runner.state(), pact);
+        assert!(
+            certify_pact_plan(runner.state(), &root).is_none(),
+            "the exact delayed trigger's synchronous unpaid-loss branch must reject the root"
+        );
+        let action = choose_action(
+            runner.state(),
+            P0,
+            &create_config(AiDifficulty::Easy, Platform::Native),
+            &mut SmallRng::seed_from_u64(92),
+        );
+        assert!(
+            !matches!(action, Some(GameAction::CastSpell { object_id, .. }) if object_id == pact),
+            "a Pact that loses at its next upkeep must not remain a selectable root"
+        );
+    }
+
+    #[test]
+    fn opponent_lethal_attack_makes_pact_root_uncertifiable_and_unselectable() {
+        let (mut runner, pact, _) = pact_route_runner(true, 0);
+        add_creature(runner.state_mut(), P1, 20, 20);
+        let root = pact_root_candidate(runner.state(), pact);
+        assert!(
+            certify_pact_plan(runner.state(), &root).is_none(),
+            "the prospective route must not assume an opponent declines a lethal attack"
+        );
+        let action = choose_action(
+            runner.state(),
+            P0,
+            &create_config(AiDifficulty::Easy, Platform::Native),
+            &mut SmallRng::seed_from_u64(96),
+        );
+        assert!(
+            !matches!(action, Some(GameAction::CastSpell { object_id, .. }) if object_id == pact),
+            "an uncertifiable Pact root with an opponent attack branch must not be selected"
+        );
+    }
+
+    #[test]
+    fn pact_terminal_certification_uses_the_real_installed_receipt() {
+        for (outcome, expected_certificate, expected_winner) in [
+            (PactTerminalOutcome::OwnerWin, true, Some(P0)),
+            (PactTerminalOutcome::OpponentWin, false, Some(P1)),
+            (PactTerminalOutcome::Draw, false, None),
+        ] {
+            let (mut runner, pact, _) = pact_route_runner(true, 0);
+            add_pact_terminal_trigger(&mut runner, outcome);
+            let root = pact_root_candidate(runner.state(), pact);
+
+            let plan = certify_pact_plan(runner.state(), &root);
+            let certified = plan.is_some();
+
+            cast_certified_pact(&mut runner, &root, pact);
+            assert!(
+                runner
+                    .state()
+                    .delayed_triggers
+                    .iter()
+                    .any(|trigger| trigger.source_id == pact),
+                "the terminal check must begin after the reducer installed Pact's delayed trigger; certification binds its private provenance from the install journal"
+            );
+            if let Some(plan) = plan {
+                assert_eq!(
+                    plan.state_for(runner.state(), P0),
+                    engine::ai_support::PactPlanState::Dormant,
+                    "the real installed delayed trigger must retain the certificate bound to its exact receipt"
+                );
+            }
+            assert_eq!(
+                advance_to_game_over(&mut runner),
+                expected_winner,
+                "the real reducer terminal outcome must match {outcome:?}"
+            );
+            assert!(matches!(
+                &runner.state().waiting_for,
+                WaitingFor::GameOver { winner } if *winner == expected_winner
+            ));
+            assert_eq!(
+                certified,
+                expected_certificate,
+                "{outcome:?} must {}certify the Pact route",
+                if expected_certificate { "" } else { "not " }
+            );
+        }
+    }
+
+    #[test]
+    fn competing_opponent_trigger_order_makes_pact_root_uncertifiable_and_unselectable() {
+        let (mut runner, pact, _) = pact_route_runner(true, 0);
+        add_opponent_terminal_ordering_fixture(&mut runner);
+        let root = pact_root_candidate(runner.state(), pact);
+        assert!(
+            certify_pact_plan(runner.state(), &root).is_none(),
+            "the prospective route must not choose an opponent's competing trigger order"
+        );
+        let action = choose_action(
+            runner.state(),
+            P0,
+            &create_config(AiDifficulty::Easy, Platform::Native),
+            &mut SmallRng::seed_from_u64(97),
+        );
+        assert!(
+            !matches!(action, Some(GameAction::CastSpell { object_id, .. }) if object_id == pact),
+            "a Pact root requiring an opponent trigger-order choice must not be selected"
+        );
+        runner
+            .act(root.action.clone())
+            .expect("the real Pact cast must apply for the hostile-order fixture");
+        runner.resolve_top();
+        advance_to_trigger_ordering(&mut runner, P1);
+        assert!(matches!(
+            &runner.state().waiting_for,
+            WaitingFor::OrderTriggers { player, triggers }
+                if *player == P1 && triggers.len() == 2
+        ));
+    }
+
+    #[test]
+    fn owner_trigger_order_choice_makes_pact_root_uncertifiable() {
+        let (baseline_runner, baseline_pact, _) = pact_route_runner(true, 0);
+        let baseline_root = pact_root_candidate(baseline_runner.state(), baseline_pact);
+        assert!(
+            certify_pact_plan(baseline_runner.state(), &baseline_root).is_some(),
+            "the funded Pact baseline must certify before adding the owner's competing upkeep trigger"
+        );
+
+        let (mut runner, pact, _) = pact_route_runner(true, 0);
+        add_owner_upkeep_trigger(&mut runner);
+        let root = pact_root_candidate(runner.state(), pact);
+        let certificate = certify_pact_plan(runner.state(), &root);
+
+        runner
+            .act(root.action.clone())
+            .expect("the real Pact cast must apply for the owner-order fixture");
+        runner.resolve_top();
+        advance_to_trigger_ordering(&mut runner, P0);
+        let order_count = validated_candidate_actions_for_semantic_owner(runner.state(), P0)
+            .into_iter()
+            .filter(|candidate| matches!(candidate.action, GameAction::OrderTriggers { .. }))
+            .count();
+        assert_eq!(
+            order_count, 2,
+            "the reducer must expose both legal owner orderings that the certificate rejects"
+        );
+        assert!(
+            certificate.is_none(),
+            "a certificate must not select one of the owner's competing upkeep trigger orders"
+        );
+    }
+
+    #[test]
+    fn pact_certificate_expires_for_wrong_provenance_and_after_consumption() {
+        let (mut runner, pact, _) = pact_route_runner(true, 0);
+        let root = pact_root_candidate(runner.state(), pact);
+        let correct_plan =
+            certify_pact_plan(runner.state(), &root).expect("the funded Pact must certify");
+
+        let (other_runner, other_pact, _) = pact_route_runner(true, 1);
+        let wrong_root = pact_root_candidate(other_runner.state(), other_pact);
+        let wrong_plan = certify_pact_plan(other_runner.state(), &wrong_root)
+            .expect("the shifted funded Pact must certify");
+        assert_ne!(
+            root.action, wrong_root.action,
+            "the separate fixture must bind the wrong route to a different Pact object"
+        );
+
+        cast_certified_pact(&mut runner, &root, pact);
+        assert_eq!(
+            wrong_plan.state_for(runner.state(), P0),
+            engine::ai_support::PactPlanState::Expired,
+            "a certificate from another Pact source must not attach to this trigger"
+        );
+        assert_eq!(
+            correct_plan.state_for(runner.state(), P0),
+            engine::ai_support::PactPlanState::Dormant,
+            "the exact installed delayed trigger keeps its own certificate live"
+        );
+        advance_to_pact_upkeep(&mut runner, pact);
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            correct_plan.state_for(runner.state(), P0),
+            engine::ai_support::PactPlanState::Expired,
+            "a consumed one-shot trigger must invalidate its stale certificate"
+        );
+    }
+
+    #[test]
+    fn stateless_pact_apis_never_return_a_certified_pact_root() {
+        let (runner, pact, _) = pact_route_runner(true, 0);
+        let root = pact_root_candidate(runner.state(), pact);
+        assert!(
+            certify_pact_plan(runner.state(), &root).is_some(),
+            "the fixture must prove this is the prospective root that stateless search rejects"
+        );
+        let action = choose_action(
+            runner.state(),
+            P0,
+            &create_config(AiDifficulty::Easy, Platform::Native),
+            &mut SmallRng::seed_from_u64(95),
+        );
+        assert!(
+            !matches!(action, Some(GameAction::CastSpell { object_id, .. }) if object_id == pact),
+            "the public stateless API must not select a root that needs a durable Pact certificate"
+        );
+        let scored = score_candidates(
+            runner.state(),
+            P0,
+            &create_config(AiDifficulty::Easy, Platform::Native),
+        );
+        assert!(
+            scored.iter().all(|(action, _)| {
+                !matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == pact)
+            }),
+            "the public score vector must not expose a root that needs a durable Pact certificate"
+        );
+        let mut rng = SmallRng::seed_from_u64(102);
+        assert!(
+            select_safe_action_from_scores(
+                runner.state(),
+                &[(root.action.clone(), 1.0)],
+                1.0,
+                &mut rng,
+            )
+            .is_none(),
+            "a public score-to-action bridge must reject caller-supplied Pact actions without a durable route"
+        );
     }
 
     /// `fallback_action` under the default policy penalties. These tests assert
@@ -4180,27 +5044,6 @@ mod tests {
             .expect("the reducer must issue the test spell root cast")
     }
 
-    struct RootScoringWitnessPolicy(Arc<std::sync::atomic::AtomicUsize>);
-
-    impl TacticalPolicy for RootScoringWitnessPolicy {
-        fn id(&self) -> PolicyId {
-            PolicyId::PaymentSelection
-        }
-
-        fn decision_kinds(&self) -> &'static [DecisionKind] {
-            &[DecisionKind::CastSpell]
-        }
-
-        fn activation(&self, _: &DeckFeatures, _: &GameState, _: PlayerId) -> Option<f32> {
-            Some(1.0)
-        }
-
-        fn verdict(&self, _: &PolicyContext<'_>) -> PolicyVerdict {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            PolicyVerdict::neutral(PolicyReason::new("root_scoring_witness"))
-        }
-    }
-
     #[test]
     fn choose_action_rejects_bad_self_destruct_before_cast_and_keeps_source_in_hand() {
         let (state, spell) = self_destruct_state(2, 3);
@@ -4234,82 +5077,6 @@ mod tests {
         engine::game::engine::apply_as_current(&mut applied, action)
             .expect("chosen action must remain reducer-legal");
         assert_eq!(applied.objects[&spell].zone, Zone::Hand);
-    }
-
-    #[test]
-    fn normal_root_scoring_rejects_bad_targeted_exchange_before_tactical_policy() {
-        let (mut state, rejected_spell) = self_destruct_state(2, 3);
-        let benign_spell = add_spell_to_hand(&mut state, P0, "Benign Life Gain", 1);
-        Arc::make_mut(&mut state.objects.get_mut(&benign_spell).unwrap().abilities).push(
-            AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::GainLife {
-                    amount: QuantityExpr::Fixed { value: 1 },
-                    player: TargetFilter::Controller,
-                },
-            ),
-        );
-
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut session = AiSession::from_game(&state);
-        session.policy_registry_override =
-            Some(Arc::new(PolicyRegistry::for_tests(vec![Box::new(
-                RootScoringWitnessPolicy(Arc::clone(&calls)),
-            )])));
-        let session = Arc::new(session);
-        let mut config = create_config(AiDifficulty::Easy, Platform::Native);
-        config.search.enabled = false;
-
-        assert_eq!(
-            fast_priority_action(&state, P0, &config, &session),
-            None,
-            "the additional legal cast must keep this decision on the normal scoring path"
-        );
-        assert_eq!(
-            targeted_exchange_verdict(&state, &root_cast_candidate(&state, rejected_spell)),
-            TargetedExchangeVerdict::Reject,
-            "the 2/2 source into the opposing 3/3 is the root candidate the scoring gateway must veto"
-        );
-
-        let scored = score_candidates_core(&state, P0, &config, &session, None);
-        assert!(
-            scored.iter().any(|(action, _)| {
-                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == benign_spell)
-            }),
-            "the benign cast reaches normal scoring"
-        );
-        assert!(
-            scored.iter().all(|(action, _)| {
-                !matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == rejected_spell)
-            }),
-            "the rejected targeted exchange must be absent from normal scoring"
-        );
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "only the benign cast reaches tactical policy scoring after root validation"
-        );
-    }
-
-    #[test]
-    fn rejected_targeted_exchange_still_uses_legal_fallback_when_scoring_is_empty() {
-        let (state, _) = self_destruct_state(2, 3);
-        let mut config = create_config(AiDifficulty::Easy, Platform::Native);
-        config.search.enabled = false;
-        let session = Arc::new(AiSession::from_game(&state));
-        let mut rng = SmallRng::seed_from_u64(7);
-
-        let scored = score_candidates_core(&state, P0, &config, &session, None);
-        assert!(
-            scored
-                .iter()
-                .all(|(action, _)| !matches!(action, GameAction::CastSpell { .. })),
-            "the adverse cast must be removed before scoring, got {scored:#?}"
-        );
-
-        let action = choose_action_with_session(&state, P0, &config, &mut rng, &session)
-            .expect("a legal fallback must prevent the AI from deadlocking");
-        assert_eq!(action, GameAction::PassPriority);
     }
 
     #[test]

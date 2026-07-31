@@ -61,7 +61,10 @@ pub use payment_continuation::{
     PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationUnsupported,
     PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
 };
-pub use prospective_mana::{certify_fetch_then_cast, CertifiedFetchFollowUp, CertifiedFetchPrompt};
+pub use prospective_mana::{
+    certify_fetch_then_cast, certify_pact_plan, is_pact_payment_ability, is_pact_payment_cast,
+    CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan, PactPlanState,
+};
 pub use swarm::{
     adversarial_swarm_witness, SwarmCombatWitness, SwarmWitnessIndeterminate, SwarmWitnessResult,
     SWARM_WITNESS_MAX_DECLARATIONS,

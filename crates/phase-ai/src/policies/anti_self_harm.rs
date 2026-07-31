@@ -1,3 +1,6 @@
+#[cfg(test)]
+use engine::ai_support::is_pact_payment_ability;
+use engine::ai_support::{certify_pact_plan, is_pact_payment_cast};
 use engine::game::combat;
 use engine::game::keywords;
 use engine::game::life_safety::{preview_candidate_life_safety, CandidateLifeSafety};
@@ -5,6 +8,8 @@ use engine::game::mana_abilities;
 use engine::game::quantity::resolve_quantity;
 use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
+#[cfg(test)]
+use engine::types::ability::AbilityCondition;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, EffectScope,
     QuantityExpr, ReplacementMode, TapStateChange, TargetFilter, TargetRef,
@@ -128,6 +133,12 @@ impl TacticalPolicy for AntiSelfHarmPolicy {
 
 fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
     match &ctx.candidate.action {
+        GameAction::CastSpell { .. }
+            if is_pact_payment_cast(ctx.state, &ctx.candidate.action)
+                && certify_pact_plan(ctx.state, ctx.candidate).is_none() =>
+        {
+            Some(PolicyReason::new("anti_self_harm_next_upkeep_mana_loss"))
+        }
         GameAction::CastSpell { .. } if cast_has_unpayable_self_etb_may_cost(ctx) => {
             Some(PolicyReason::new("anti_self_harm_unpayable_etb_may_cost"))
         }
@@ -1056,6 +1067,7 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::combat::AttackTarget;
     use engine::game::zones::create_object;
+    use engine::parser::oracle::parse_oracle_text;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, AdditionalCostRepeatability,
         BounceSelection, CardSelectionMode, ContinuousModification, ControllerRef,
@@ -4566,6 +4578,53 @@ mod tests {
         id
     }
 
+    /// Mirrors the parser's Pact-cycle lowering: a separate spell ability
+    /// creates a controller-scoped next-upkeep delayed trigger whose mandatory
+    /// payment is followed by the failed-payment loss branch.
+    fn next_upkeep_payment_or_loss_spell(
+        state: &mut GameState,
+        payment: AbilityCost,
+        loss_condition: AbilityCondition,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Deferred payment specimen".to_string(),
+            Zone::Hand,
+        );
+        let failure = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseTheGame {
+                target: Some(TargetFilter::Controller),
+            },
+        )
+        .condition(loss_condition);
+        let payment = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PayCost {
+                cost: payment,
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+        )
+        .sub_ability(failure);
+        let delayed = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::Upkeep,
+                    player: PlayerId(0),
+                    gate: engine::types::ability::TurnGate::None,
+                },
+                effect: Box::new(payment),
+                uses_tracked_set: false,
+            },
+        );
+        state.objects.get_mut(&id).unwrap().abilities = Arc::new(vec![delayed]);
+        id
+    }
+
     fn mox_diamond_like_spell(state: &mut GameState) -> ObjectId {
         let id = create_object(
             state,
@@ -4695,6 +4754,101 @@ mod tests {
         assert!(matches!(
             pre_cast_verdict_for_spell(&state, spell_id),
             PolicyVerdict::Score { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_cast_creating_next_upkeep_mana_payment_or_loss_obligation() {
+        let mut state = make_state();
+        let spell_id = next_upkeep_payment_or_loss_spell(
+            &mut state,
+            AbilityCost::Mana {
+                cost: ManaCost::generic(4),
+            },
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            },
+        );
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_next_upkeep_mana_loss"
+        ));
+    }
+
+    #[test]
+    fn current_summoners_pact_parse_matches_the_structural_obligation() {
+        let parsed = parse_oracle_text(
+            "Search your library for a green creature card, reveal it, put it into your hand, then shuffle.\nAt the beginning of your next upkeep, pay {2}{G}{G}. If you don't, you lose the game.",
+            "Summoner's Pact",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+
+        assert!(
+            parsed.abilities.iter().any(is_pact_payment_ability),
+            "the current Pact Oracle parse must retain its deferred payment-or-loss structure"
+        );
+    }
+
+    #[test]
+    fn ignores_pact_shape_in_an_unchosen_modal_branch() {
+        let mut state = make_state();
+        let spell_id = next_upkeep_payment_or_loss_spell(
+            &mut state,
+            AbilityCost::Mana {
+                cost: ManaCost::generic(4),
+            },
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            },
+        );
+        let pact_branch = state.objects[&spell_id].abilities[0].clone();
+        let mut unchosen_modal = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        unchosen_modal.mode_abilities.push(pact_branch);
+        state.objects.get_mut(&spell_id).unwrap().abilities = Arc::new(vec![unchosen_modal]);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Score { delta, .. } if delta == 0.0
+        ));
+    }
+
+    #[test]
+    fn leaves_non_mana_deferred_payment_obligation_neutral() {
+        let mut state = make_state();
+        let spell_id = next_upkeep_payment_or_loss_spell(
+            &mut state,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+            },
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            },
+        );
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Score { delta, .. } if delta == 0.0
+        ));
+    }
+
+    #[test]
+    fn leaves_ambiguous_next_upkeep_mana_loss_neutral() {
+        let mut state = make_state();
+        let spell_id = next_upkeep_payment_or_loss_spell(
+            &mut state,
+            AbilityCost::Mana {
+                cost: ManaCost::generic(4),
+            },
+            AbilityCondition::effect_performed(),
+        );
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Score { delta, .. } if delta == 0.0
         ));
     }
 

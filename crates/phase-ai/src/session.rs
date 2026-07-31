@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
-use engine::ai_support::{CertifiedFetchFollowUp, CertifiedFetchPrompt};
+use engine::ai_support::{CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan};
 use engine::game::DeckEntry;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
@@ -36,6 +36,8 @@ use crate::synergy::SynergyGraph;
 const COMMANDER_ANALYSIS_WEIGHT: u32 = 4;
 
 type ProspectiveFetchProposals = HashMap<PlayerId, Vec<(GameAction, CertifiedFetchPrompt)>>;
+pub(crate) type PactRouteStore = HashMap<PlayerId, CertifiedPactPlan>;
+pub(crate) type PactPlanProposals = HashMap<PlayerId, Vec<(GameAction, CertifiedPactPlan)>>;
 
 /// Per-game cache shared by all decisions.
 #[derive(Clone, Default)]
@@ -61,6 +63,13 @@ pub struct AiSession {
     /// chosen proposal is moved into `prospective_fetch_prompt`; all others
     /// are discarded immediately.
     pub(crate) prospective_fetch_proposals: Arc<RwLock<ProspectiveFetchProposals>>,
+    /// Opaque Pact route retained only after this session selects the exact
+    /// certified root. The engine owns delayed-trigger provenance and rejects
+    /// every stale, aliased, or non-delayed redemption attempt.
+    pub(crate) pact_routes: Arc<RwLock<PactRouteStore>>,
+    /// Scoring drafts awaiting root selection. These are never durable routes:
+    /// selection atomically transfers only the chosen root's certificate.
+    pub(crate) pact_proposals: Arc<RwLock<PactPlanProposals>>,
     #[cfg(test)]
     pub(crate) policy_registry_override: Option<Arc<PolicyRegistry>>,
 }
@@ -85,6 +94,8 @@ impl std::fmt::Debug for AiSession {
                 "prospective_fetch_proposals",
                 &self.prospective_fetch_proposals,
             )
+            .field("pact_routes", &self.pact_routes)
+            .field("pact_proposals", &self.pact_proposals)
             .finish()
     }
 }
@@ -130,6 +141,8 @@ impl AiSession {
             prospective_fetch_prompt: Arc::default(),
             prospective_fetch_follow_up: Arc::default(),
             prospective_fetch_proposals: Arc::default(),
+            pact_routes: Arc::default(),
+            pact_proposals: Arc::default(),
             #[cfg(test)]
             policy_registry_override: None,
         }
