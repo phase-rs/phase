@@ -977,6 +977,39 @@ fn condition_introduces_defending_player(cond_lower: &str) -> bool {
     false
 }
 
+fn parse_if_defending_player(input: &str) -> OracleResult<'_, ()> {
+    let (rest, ()) = value((), tag::<_, _, OracleError<'_>>("if ")).parse(input)?;
+    let (rest, _) = opt(tag("the ")).parse(rest)?;
+    value((), tag("defending player")).parse(rest)
+}
+
+/// CR 506.2 + CR 508.5: An attack-trigger's effect body may name "defending
+/// player" as the subject of a per-clause conditional AFTER an intervening
+/// imperative ("Whenever ~ attacks, choose a card name. If defending player
+/// has no cards ..., they may reveal their hand." — Smart Ass), rather than in
+/// the trigger's own head condition. `condition_introduces_defending_player`
+/// only sees the head (`cond_lower` is everything before the FIRST comma —
+/// CR 603.4's `split_trigger` boundary), so it never observes a defending-
+/// player conditional buried later in the effect text. Detecting that
+/// separately lets a later "they"/"that player" anaphor in the SAME effect
+/// body resolve to `ControllerRef::DefendingPlayer`
+/// (`resolve_they_pronoun`'s dedicated arm) instead of falling through to the
+/// generic `ParentTarget` default, which has no defending-player referent to
+/// inherit.
+fn effect_body_introduces_defending_player(effect_lower: &str) -> bool {
+    let mut remaining = effect_lower;
+    while !remaining.is_empty() {
+        if parse_if_defending_player(remaining).is_ok() {
+            return true;
+        }
+        remaining = match remaining.find(' ') {
+            Some(i) => remaining[i + 1..].trim_start(),
+            None => "",
+        };
+    }
+    false
+}
+
 /// CR 508.1 + CR 603.2c: "Whenever a player attacks with [N or more] creatures,
 /// ... that player ..." introduces the ATTACKING player (TriggeringPlayer) as the
 /// relative-player anaphor for a trailing "that player"/"that player controls"
@@ -1326,6 +1359,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // split path derives the identical scope from the same condition.
     if let Some(scope) = relative_player_scope_for_condition(&cond_lower) {
         effect_ctx.relative_player_scope = Some(scope);
+    } else if effect_body_introduces_defending_player(&effect_lower) {
+        // CR 506.2 + CR 508.5: the head condition names no relative player
+        // (`cond_lower` is just "whenever ~ attacks"), but the effect body's
+        // own per-clause conditional names "defending player" later on
+        // (Smart Ass). Carry that scope through so a "they"/"that player"
+        // anaphor in the same body resolves to the combat-relative defending
+        // player instead of the generic `ParentTarget` fallback.
+        effect_ctx.relative_player_scope = Some(ControllerRef::DefendingPlayer);
     }
     // CR 701.22a + CR 603.2: The completed-scry predicate establishes the
     // provenance for its "that many" effect body. Keep this as a pure match on
