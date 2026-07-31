@@ -26001,3 +26001,54 @@ fn siege_dragon_that_player_controls_binds_to_defending_player() {
         other => panic!("expected DamageAll, got {other:?}"),
     }
 }
+
+/// Elder Brain: "Whenever this creature attacks a player, exile all cards
+/// from that player's hand, then they draw that many cards. ..." Unlike Smart
+/// Ass and Siege Dragon (which name "defending player" via a per-clause
+/// conditional buried in the effect body — the NEW
+/// `effect_body_introduces_defending_player` path), this trigger's OWN head
+/// condition is "whenever ~ attacks a player", which the PRE-EXISTING
+/// `condition_introduces_defending_player` check
+/// (`relative_player_scope_for_condition`) already recognized and stamped as
+/// `ControllerRef::DefendingPlayer` before this fix. What was still broken:
+/// `resolve_they_pronoun` had no arm reading that scope at all, so "they" in
+/// "they draw that many cards" fell through to the generic `ParentTarget`
+/// default regardless of which mechanism set the scope. This test locks in
+/// the production Oracle route through both the pre-existing head-condition
+/// detector and the new `resolve_they_pronoun` arm together, distinct from
+/// the body-conditional route the other two tests cover.
+#[test]
+fn elder_brain_they_draw_binds_to_defending_player() {
+    let def = parse_trigger_line(
+        "Whenever this creature attacks a player, exile all cards from that player's hand, then they draw that many cards. You may play lands and cast spells from among the exiled cards for as long as they remain exiled. If you cast a spell this way, you may spend mana as though it were mana of any color to cast it.",
+        "Elder Brain",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(
+        matches!(&*execute.effect, Effect::ChangeZoneAll { .. }),
+        "head effect must remain the exile-hand ChangeZoneAll, got {:?}",
+        execute.effect
+    );
+    let draw = execute
+        .sub_ability
+        .as_ref()
+        .expect("the draw must remain chained to the exile");
+    match &*draw.effect {
+        Effect::Draw { target, count } => {
+            assert_eq!(
+                target,
+                &TargetFilter::DefendingPlayer,
+                "\"they draw\" must bind to the attacked defending player, not ParentTarget"
+            );
+            assert_eq!(
+                count,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                "\"that many cards\" must read the number of cards just exiled"
+            );
+        }
+        other => panic!("expected Draw, got {other:?}"),
+    }
+}

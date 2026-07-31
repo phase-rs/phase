@@ -997,17 +997,7 @@ fn parse_if_defending_player(input: &str) -> OracleResult<'_, ()> {
 /// generic `ParentTarget` default, which has no defending-player referent to
 /// inherit.
 fn effect_body_introduces_defending_player(effect_lower: &str) -> bool {
-    let mut remaining = effect_lower;
-    while !remaining.is_empty() {
-        if parse_if_defending_player(remaining).is_ok() {
-            return true;
-        }
-        remaining = match remaining.find(' ') {
-            Some(i) => remaining[i + 1..].trim_start(),
-            None => "",
-        };
-    }
-    false
+    nom_primitives::scan_at_word_boundaries(effect_lower, parse_if_defending_player).is_some()
 }
 
 /// CR 508.1 + CR 603.2c: "Whenever a player attacks with [N or more] creatures,
