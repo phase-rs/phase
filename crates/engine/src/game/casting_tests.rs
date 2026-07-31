@@ -31293,8 +31293,8 @@ fn bare_subtype_land_phased_out_excluded_from_legal_mana_actions() {
 
 #[test]
 fn bare_subtype_land_cant_tap_excluded_from_legal_mana_actions() {
-    // CR 701.26a + CR 508.1f + CR 305.6: a permanent that can't become tapped
-    // can't pay a {T} activation cost — including a bare-subtype land's
+    // CR 101.2 + CR 107.5 + CR 601.2h + CR 602.2b + CR 305.6: a permanent that
+    // can't become tapped can't pay a {T} activation cost — including a bare-subtype land's
     // intrinsic {T}: Add mana ability.
     let mut state = setup_game_at_main_phase();
     let forest = add_bare_subtype_forest(&mut state, PlayerId(1), 0xF012A);
