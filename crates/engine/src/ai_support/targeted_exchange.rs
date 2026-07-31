@@ -266,7 +266,7 @@ fn preview_bound_exchange(
     semantic_owner: PlayerId,
 ) -> Option<TargetedExchangeVerdict> {
     if is_target_sourced_self_damage(ability) {
-        return preview_target_sourced_self_damage(state, ability);
+        return preview_target_sourced_self_damage(state, ability, semantic_owner);
     }
     let fight = find_fight_leaf(ability)?;
     preview_fight_exchange(state, ability, fight, semantic_owner)
@@ -275,8 +275,9 @@ fn preview_bound_exchange(
 fn preview_target_sourced_self_damage(
     state: &GameState,
     ability: &ResolvedAbility,
+    semantic_owner: PlayerId,
 ) -> Option<TargetedExchangeVerdict> {
-    let (source, recipient) = exchange_participants(state, ability)?;
+    let (source, recipient) = exchange_participants(state, ability, semantic_owner)?;
     let mut preview = state.clone();
     flush_layers(&mut preview);
     let source_ref = ObjectIncarnationRef::from_object(preview.objects.get(&source)?);
@@ -420,24 +421,28 @@ fn is_target_sourced_self_damage(ability: &ResolvedAbility) -> bool {
 fn exchange_participants(
     state: &GameState,
     ability: &ResolvedAbility,
+    semantic_owner: PlayerId,
 ) -> Option<(ObjectId, TargetRef)> {
     let mut targets = crate::game::ability_utils::flatten_targets_in_chain(ability).into_iter();
     let TargetRef::Object(source) = targets.next()? else {
         return None;
     };
     let recipient = targets.next()?;
-    valid_targeted_exchange_participants(state, source, &recipient).then_some((source, recipient))
+    valid_targeted_exchange_participants(state, source, &recipient, semantic_owner)
+        .then_some((source, recipient))
 }
 
 fn valid_targeted_exchange_participants(
     state: &GameState,
     source: ObjectId,
     recipient: &TargetRef,
+    semantic_owner: PlayerId,
 ) -> bool {
     let Some(source_object) = state.objects.get(&source) else {
         return false;
     };
     source_object.zone == Zone::Battlefield
+        && source_object.controller == semantic_owner
         && source_object
             .card_types
             .core_types
@@ -445,12 +450,13 @@ fn valid_targeted_exchange_participants(
         && match recipient {
             TargetRef::Object(recipient) => {
                 source != *recipient
-                    && state
-                        .objects
-                        .get(recipient)
-                        .is_some_and(|object| object.zone == Zone::Battlefield)
+                    && state.objects.get(recipient).is_some_and(|object| {
+                        object.zone == Zone::Battlefield && object.controller != semantic_owner
+                    })
             }
-            TargetRef::Player(recipient) => crate::game::players::is_alive(state, *recipient),
+            TargetRef::Player(recipient) => {
+                *recipient != semantic_owner && crate::game::players::is_alive(state, *recipient)
+            }
         }
 }
 
@@ -483,4 +489,121 @@ fn same_battlefield_incarnation(state: &GameState, reference: ObjectIncarnationR
             object.zone == Zone::Battlefield
                 && ObjectIncarnationRef::from_object(object) == reference
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::phase::Phase;
+    use std::sync::Arc;
+
+    fn add_creature(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let object_id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Exchange Test Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&object_id)
+            .expect("created creature must exist")
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        object_id
+    }
+
+    #[test]
+    fn self_damage_exchange_ignores_an_opposing_source_that_destroys_a_friendly_recipient() {
+        let mut state = GameState::new_two_player(0);
+        let opposing_source = add_creature(&mut state, PlayerId(1));
+        let friendly_recipient = add_creature(&mut state, PlayerId(0));
+
+        assert!(
+            !valid_targeted_exchange_participants(
+                &state,
+                opposing_source,
+                &TargetRef::Object(friendly_recipient),
+                PlayerId(0),
+            ),
+            "an opposing creature dying to preserve the AI's creature is favorable, so it is outside this adverse-exchange veto"
+        );
+    }
+
+    /// Root replay must retain the candidate's semantic owner while inspecting
+    /// a target-sourced damage exchange. If the selected source belongs to the
+    /// opponent and the recipient is friendly, that branch is favorable and
+    /// must never trigger the adverse-exchange veto.
+    #[test]
+    fn root_replay_does_not_reject_opposing_source_and_friendly_recipient() {
+        let mut state = GameState::new_two_player(0);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let opposing_source = add_creature(&mut state, PlayerId(1));
+        let friendly_recipient = add_creature(&mut state, PlayerId(0));
+        state.objects.get_mut(&opposing_source).unwrap().power = Some(1);
+        state.objects.get_mut(&opposing_source).unwrap().toughness = Some(1);
+        state.objects.get_mut(&friendly_recipient).unwrap().power = Some(3);
+        state
+            .objects
+            .get_mut(&friendly_recipient)
+            .unwrap()
+            .toughness = Some(3);
+        let spell = create_object(
+            &mut state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Exchange Replay Test".to_string(),
+            Zone::Hand,
+        );
+        let spell_object = state
+            .objects
+            .get_mut(&spell)
+            .expect("created spell must exist");
+        spell_object.card_types.core_types.push(CoreType::Sorcery);
+        *Arc::make_mut(&mut spell_object.abilities) = parse_oracle_text(
+            "Target creature deals 2 damage to any other target and 2 damage to itself.",
+            "Exchange Replay Test",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        )
+        .abilities;
+
+        let root = validated_candidate_actions_for_semantic_owner(&state, PlayerId(0))
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == spell)
+            })
+            .expect("the engine must issue the root cast candidate");
+
+        assert_eq!(root.metadata.semantic_owner, Some(PlayerId(0)));
+        assert!(
+            !valid_targeted_exchange_participants(
+                &state,
+                opposing_source,
+                &TargetRef::Object(friendly_recipient),
+                PlayerId(0),
+            ),
+            "reach guard: the 1/1 opposing source dies while the 3/3 friendly recipient survives, but this branch is favorable to the semantic owner"
+        );
+        assert!(
+            !matches!(
+                targeted_exchange_verdict(&state, &root),
+                TargetedExchangeVerdict::Reject
+            ),
+            "semantic-owner-aware root replay must not veto a favorable opposing-source branch"
+        );
+    }
 }

@@ -246,11 +246,10 @@ pub fn choose_action_with_session(
 
     let mut scored = score_candidates_with_session(state, ai_player, config, session);
     if scored.is_empty() {
-        // No valid candidates from search — fall back to a safe escape action
-        // so the game never deadlocks waiting for the AI.
-        return fallback_action(state, config)
-            .filter(|action| root_action_is_allowed(state, ai_player, action))
-            .and_then(exact_contract_action);
+        // so the game never deadlocks waiting for the AI. Root casts and
+        // activations were already rejected before scoring; applying that
+        // preference to the escape action can turn a legal recovery into None.
+        return fallback_action(state, config).and_then(exact_contract_action);
     }
     // Issue #4878: total order before softmax so equal scores never depend on
     // HashSet/HashMap allocation order.
@@ -2130,6 +2129,15 @@ fn score_candidates_core(
             .map(|candidate| candidate.candidate.clone())
             .collect(),
     );
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .filter(|candidate| {
+            !matches!(
+                targeted_exchange_verdict(state, candidate),
+                TargetedExchangeVerdict::Reject
+            )
+        })
+        .collect();
     let gated = gate_candidates(
         state,
         &ctx,
@@ -3320,8 +3328,8 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification,
-        ControllerRef, Duration, Effect, EffectKind, ManaProduction, PtValue, QuantityExpr, ResolvedAbility,
-        StaticDefinition, TargetFilter, TargetRef, TypedFilter,
+        ControllerRef, Duration, Effect, EffectKind, ManaProduction, PtValue, QuantityExpr,
+        ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
     };
     use engine::types::ability::{ChoiceType, ChosenAttribute};
     use engine::types::card_type::CoreType;
@@ -3717,6 +3725,23 @@ mod tests {
             .expect("the reducer must issue the test spell root cast")
     }
 
+    struct RootScoringWitnessPolicy(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl TacticalPolicy for RootScoringWitnessPolicy {
+        fn id(&self) -> PolicyId {
+            PolicyId::PaymentSelection
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            &[DecisionKind::CastSpell]
+        }
+
+        fn verdict(&self, _: &PolicyContext<'_>) -> PolicyVerdict {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            PolicyVerdict::neutral(PolicyReason::new("root_scoring_witness"))
+        }
+    }
+
     #[test]
     fn choose_action_rejects_bad_self_destruct_before_cast_and_keeps_source_in_hand() {
         let (state, spell) = self_destruct_state(2, 3);
@@ -3750,6 +3775,79 @@ mod tests {
         engine::game::engine::apply_as_current(&mut applied, action)
             .expect("chosen action must remain reducer-legal");
         assert_eq!(applied.objects[&spell].zone, Zone::Hand);
+    }
+
+    #[test]
+    fn normal_root_scoring_rejects_bad_targeted_exchange_before_tactical_policy() {
+        let (mut state, rejected_spell) = self_destruct_state(2, 3);
+        let benign_spell = add_spell_to_hand(&mut state, P0, "Benign Life Gain", 1);
+        Arc::make_mut(&mut state.objects.get_mut(&benign_spell).unwrap().abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ),
+        );
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut session = AiSession::from_game(&state);
+        session.policy_registry_override =
+            Some(Arc::new(PolicyRegistry::for_tests(vec![Box::new(
+                RootScoringWitnessPolicy(Arc::clone(&calls)),
+            )])));
+        let session = Arc::new(session);
+        let mut config = create_config(AiDifficulty::Easy, Platform::Native);
+        config.search.enabled = false;
+
+        assert_eq!(
+            fast_priority_action(&state, P0, &config, &session),
+            None,
+            "the additional legal cast must keep this decision on the normal scoring path"
+        );
+        assert_eq!(
+            targeted_exchange_verdict(&state, &root_cast_candidate(&state, rejected_spell)),
+            TargetedExchangeVerdict::Reject,
+            "the 2/2 source into the opposing 3/3 is the root candidate the scoring gateway must veto"
+        );
+
+        let scored = score_candidates_core(&state, P0, &config, &session, None);
+        assert!(
+            scored.iter().any(|(action, _)| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == benign_spell)
+            }),
+            "the benign cast reaches normal scoring"
+        );
+        assert!(
+            scored.iter().all(|(action, _)| {
+                !matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == rejected_spell)
+            }),
+            "the rejected targeted exchange must be absent from normal scoring"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "only the benign cast reaches tactical policy scoring after root validation"
+        );
+    }
+
+    #[test]
+    fn rejected_targeted_exchange_still_uses_legal_fallback_when_scoring_is_empty() {
+        let (state, _) = self_destruct_state(2, 3);
+        let mut config = create_config(AiDifficulty::Easy, Platform::Native);
+        config.search.enabled = false;
+        let session = Arc::new(AiSession::from_game(&state));
+        let mut rng = SmallRng::seed_from_u64(7);
+
+        assert!(
+            score_candidates_core(&state, P0, &config, &session, None).is_empty(),
+            "the adverse cast must be removed before scoring"
+        );
+
+        let action = choose_action_with_session(&state, P0, &config, &mut rng, &session)
+            .expect("a legal fallback must prevent the AI from deadlocking");
+        assert_eq!(action, GameAction::PassPriority);
     }
 
     #[test]

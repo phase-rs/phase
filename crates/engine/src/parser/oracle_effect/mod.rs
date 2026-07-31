@@ -16900,6 +16900,15 @@ fn try_parse_multi_target_damage_chain_inner(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
+    // A target-subject damage sentence has a target declaration for its damage
+    // source before its first recipient. Keep that declaration outside this
+    // recipient-chain parser so it becomes the sole root TargetOnly wrapper.
+    // Otherwise the generic scanner sees the full sentence, consumes the source
+    // phrase as another target declaration, and creates a nested TargetOnly.
+    if let Some(clause) = try_parse_target_subject_multi_target_damage_chain(text, ctx) {
+        return Some(clause);
+    }
+
     // CR 601.2c + CR 115.1: A bare-damage chain is a fresh instruction even
     // when reached through a compound continuation. Do not let the preceding
     // target phrase's announcing-player override leak into its first recipient.
@@ -17006,6 +17015,50 @@ fn try_parse_multi_target_damage_chain_inner(
         optional: false,
         unless_pay: None,
     })
+}
+
+/// Lowers a targeted damage source separately from a chain of damage recipients.
+///
+/// The recursive call receives only the predicate ("deals …"), so the generic
+/// multi-target parser owns recipient chaining while `wrap_target_subject_damage`
+/// remains the single authority for the source `TargetOnly` wrapper.
+fn try_parse_target_subject_multi_target_damage_chain(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let predicate_start = subject::find_predicate_start(text)?;
+    let subject_text = text[..predicate_start].trim();
+    let subject_lower = subject_text.to_lowercase();
+    // This route only owns an explicit target declaration used as the damage
+    // source. Named and self-referential sources (for example Chandra,
+    // Pyromaster) already belong to the established recipient-chain parser;
+    // sending them through the subject wrapper consumes later continuations.
+    tag::<_, _, OracleError<'_>>("target ")
+        .parse(subject_lower.as_str())
+        .ok()?;
+    let predicate = text[predicate_start..].trim();
+    let predicate_lower = predicate.to_lowercase();
+    if alt((tag::<_, _, OracleError<'_>>("deals "), tag("deal ")))
+        .parse(predicate_lower.as_str())
+        .is_err()
+    {
+        return None;
+    }
+
+    let mut tentative_ctx = ctx.clone();
+    let application = parse_subject_application(subject_text, &mut tentative_ctx)?;
+    application.target.as_ref()?;
+    let subject = SubjectPhraseAst {
+        affected: application.affected,
+        target: application.target,
+        multi_target: application.multi_target,
+        inherits_parent: application.inherits_parent,
+        is_optional: application.is_optional,
+    };
+    let clause = try_parse_multi_target_damage_chain_inner(predicate, &mut tentative_ctx)?;
+    let wrapped = wrap_target_subject_damage(clause, &subject)?;
+    *ctx = tentative_ctx;
+    Some(wrapped)
 }
 
 /// CR 122.1 + CR 608.2c: Multi-target counter placement split. A single
