@@ -2,8 +2,8 @@
 //! `WaitingFor::DeclareAttackers` prompt when the active player has no legal
 //! attack declaration available.
 //!
-//! CR 508.1a: 0 attackers is always a legal declaration, and the turn-based
-//! action still runs even when nothing can be declared — only the
+//! CR 508.1a/d: When no nonempty declaration is legal, declaring zero attackers
+//! is legal and the turn-based action still runs — only the
 //! interactive prompt should be elided (mirroring how `DeclareBlockers`
 //! already collapses when `valid_blocker_ids` is empty).
 //!
@@ -152,8 +152,9 @@ fn declare_attackers_prompt_skipped_when_every_candidate_has_no_legal_target() {
 
     let mut runner = scenario.build();
 
-    // CR 702.16e-style protection from everything on the only opponent
-    // (Teferi's Protection), for the rest of the turn. `get_valid_attack_targets`
+    // CR 702.16j protection from everything on the only opponent
+    // (Teferi's Protection) prevents the opponent from being an attack target
+    // for the rest of the turn. `get_valid_attack_targets`
     // already excludes protected players (see
     // `get_valid_attack_targets_excludes_protected_player` in combat.rs), so
     // with a single opponent this empties the aggregate `valid_attack_targets`

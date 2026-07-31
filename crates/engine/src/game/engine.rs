@@ -3907,8 +3907,9 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 }
             }
 
-            // Auto-submit empty attackers when there's nothing to choose
-            // (CR 508.1a: 0 attackers is always a legal declaration), mirroring
+            // Auto-submit empty attackers when there's nothing to choose. When no
+            // nonempty declaration is legal, declaring zero attackers satisfies
+            // CR 508.1a/d, mirroring
             // the DeclareBlockers arm below — the turn-based action and its
             // triggers still run via handle_empty_attackers, only the
             // interactive prompt is elided. `valid_attack_targets` is the
