@@ -818,11 +818,7 @@ impl PendingActivationTriggerCollection {
 /// ability as it resolved), its source, and its `ResolvedAbility` with targets
 /// chosen. This function reads only the live install position, so it cannot
 /// fail — the precondition it records is the one it just observed.
-pub fn install_delayed_trigger(
-    state: &mut GameState,
-    mut trigger: DelayedTrigger,
-    _events: &mut Vec<GameEvent>,
-) {
+pub fn install_delayed_trigger(state: &mut GameState, mut trigger: DelayedTrigger) {
     let token = DelayedTriggerToken(state.next_delayed_trigger_token);
     state.next_delayed_trigger_token = state.next_delayed_trigger_token.saturating_add(1);
     let instance = DelayedTriggerInstanceId(state.next_delayed_trigger_instance);

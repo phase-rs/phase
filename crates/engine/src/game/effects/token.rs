@@ -1020,6 +1020,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
                 controller: spec.controller,
                 source_id: spec.source_id,
                 one_shot: true,
+                provenance: None,
             };
             crate::game::triggers::install_delayed_trigger(state, sacrifice_token);
         }
@@ -1699,6 +1700,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
             controller,
             source_id,
             one_shot: true,
+            provenance: None,
         };
         crate::game::triggers::install_delayed_trigger(state, sacrifice_token);
     }

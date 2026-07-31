@@ -1310,7 +1310,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             .and_then(|a| a.context.cast_from_zone)
             .or_else(|| super::casting::spell_cast_origin(state, entry.id));
         if has_rebound && cast_from_zone == Some(Zone::Hand) {
-            super::effects::rebound::arm_rebound(state, entry.id, entry.controller, events)
+            super::effects::rebound::arm_rebound(state, entry.id, entry.controller)
         } else {
             false
         }
@@ -2305,12 +2305,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 702.109a: a dash-cast permanent gains haste and is returned to
             // its owner's hand at the beginning of the next end step.
             if casting_variant == CastingVariant::Dash {
-                crate::game::dash::install_dash_riders(state, entry.id, entry.controller, events);
+                crate::game::dash::install_dash_riders(state, entry.id, entry.controller);
             }
             // CR 702.152a: a blitz-cast permanent gains haste and a dies-draw
             // trigger, and is sacrificed at the beginning of the next end step.
             if casting_variant == CastingVariant::Blitz {
-                crate::game::blitz::install_blitz_riders(state, entry.id, entry.controller, events);
+                crate::game::blitz::install_blitz_riders(state, entry.id, entry.controller);
             }
         }
     }
