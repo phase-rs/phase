@@ -4287,7 +4287,10 @@ mod layers_incremental_flush_tests {
     /// would wrongly take the cheap path unless `static_dependency_before`/
     /// `after` itself catches it: a live static (Tarmogoyf class) whose
     /// `affected` filter reads `Zone::Graveyard` must still force `Full` when
-    /// a card leaves that zone for the battlefield.
+    /// a card leaves that zone for the battlefield. Round 4: the watcher
+    /// carries a real modification (it sources a live effect) and the fixture
+    /// is primed by a real flush, so the before arm is proven through the
+    /// INDEXED path — bucket membership asserted, no empty-index fallback.
     #[test]
     fn battlefield_entry_with_static_dependency_marks_full_via_pipeline() {
         let mut state = GameState::new_two_player(42);
@@ -4301,14 +4304,22 @@ mod layers_incremental_flush_tests {
         {
             let obj = state.objects.get_mut(&watcher).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            // Round-4 fix (maintainer, PR #6777): a real companion modification
+            // so the watcher sources a LIVE continuous effect — active effects
+            // are built by iterating `def.modifications`
+            // (`active_continuous_effects_from_static_definitions`), so an
+            // affected-filter-only def would source nothing.
             obj.static_definitions.push(
-                StaticDefinition::new(StaticMode::Continuous).affected(TargetFilter::Typed(
-                    TypedFilter::default()
-                        .with_type(TypeFilter::Creature)
-                        .properties(vec![FilterProp::InAnyZone {
-                            zones: vec![Zone::Graveyard],
-                        }]),
-                )),
+                StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard],
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
             );
         }
         let source = create_object(
@@ -4330,7 +4341,24 @@ mod layers_incremental_flush_tests {
             obj.card_types.core_types = vec![CoreType::Creature];
             obj.base_card_types = obj.card_types.clone();
         }
-        reset_clean(&mut state);
+        // Round-4 fix (maintainer, PR #6777): prime with a real flush so the
+        // live watcher is INDEXED, then prove the before arm fires through the
+        // indexed path (buckets non-empty — no empty-index fallback involved).
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert_eq!(
+            state.static_source_index.battlefield_sources.len(),
+            1,
+            "fixture premise: the live graveyard-reading watcher is indexed after the priming flush"
+        );
+        assert!(
+            crate::game::layers::static_layer_dependency_for_zone_transition(
+                &state,
+                Zone::Graveyard,
+                Zone::Battlefield
+            ),
+            "the indexed watcher must make the pre-transition dependency check true"
+        );
 
         let mut events = Vec::new();
         let _ = move_object(
@@ -4379,14 +4407,19 @@ mod layers_incremental_flush_tests {
             let obj = state.objects.get_mut(&entering_watcher).unwrap();
             obj.card_types.core_types = vec![CoreType::Creature];
             obj.base_card_types = obj.card_types.clone();
+            // Round-4 fix (maintainer, PR #6777): a real companion modification
+            // so the arriving watcher sources a LIVE continuous effect once on
+            // the battlefield (active effects iterate `def.modifications`).
             obj.static_definitions.push(
-                StaticDefinition::new(StaticMode::Continuous).affected(TargetFilter::Typed(
-                    TypedFilter::default()
-                        .with_type(TypeFilter::Creature)
-                        .properties(vec![FilterProp::InAnyZone {
-                            zones: vec![Zone::Graveyard],
-                        }]),
-                )),
+                StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard],
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
             );
         }
 
