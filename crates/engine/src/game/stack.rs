@@ -2089,7 +2089,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         .any(|k| matches!(k, crate::types::keywords::Keyword::Warp(_)))
                 });
                 if has_warp {
-                    create_warp_delayed_trigger(state, entry.id, entry.controller, events);
+                    create_warp_delayed_trigger(state, entry.id, entry.controller);
                 }
                 // CR 702.185a + CR 400.7: stamp the per-object warp marker after
                 // `reset_for_battlefield_entry` cleared it, mirroring the Evoke /
@@ -4270,7 +4270,6 @@ pub(crate) fn create_warp_delayed_trigger(
     state: &mut GameState,
     object_id: ObjectId,
     controller: crate::types::player::PlayerId,
-    events: &mut Vec<GameEvent>,
 ) {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CastingPermission, DelayedTriggerCondition, Effect,
@@ -4335,7 +4334,6 @@ pub(crate) fn create_warp_delayed_trigger(
             one_shot: true,
             provenance: None,
         },
-        events,
     );
 }
 
