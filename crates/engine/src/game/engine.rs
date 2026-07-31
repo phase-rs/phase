@@ -3911,15 +3911,23 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
             // (CR 508.1a: 0 attackers is always a legal declaration), mirroring
             // the DeclareBlockers arm below — the turn-based action and its
             // triggers still run via handle_empty_attackers, only the
-            // interactive prompt is elided. Also auto-submit during an
-            // UntilTurnBoundary auto-pass session even when legal attackers
-            // exist. A phase stop overrides both cases.
+            // interactive prompt is elided. `valid_attack_targets` is the
+            // aggregate of every candidate's per-attacker legal target list
+            // (combat.rs `AttackDeclarationConstraints::build`), so checking
+            // it rather than `valid_attacker_ids` also catches an untapped
+            // candidate that has no legal defender (e.g. every opponent is
+            // protected by a scoped CantAttack, or a defender-scoped
+            // restriction in multiplayer) — `valid_attacker_ids` alone can be
+            // non-empty in that case even though no non-empty declaration is
+            // actually possible. Also auto-submit during an UntilTurnBoundary
+            // auto-pass session even when legal attackers exist. A phase stop
+            // overrides both cases.
             WaitingFor::DeclareAttackers {
                 player,
-                valid_attacker_ids,
+                valid_attack_targets,
                 ..
             } if !state.phase_stop_hit(*player)
-                && (valid_attacker_ids.is_empty() || end_of_turn_active(state, *player)) =>
+                && (valid_attack_targets.is_empty() || end_of_turn_active(state, *player)) =>
             {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_attackers(state, &mut events) {

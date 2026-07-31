@@ -7352,6 +7352,13 @@ mod tests {
 
         // Non-sick, eligible creature (create_creature leaves summoning_sick false).
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        // A second eligible attacker that stays healthy — keeps the prompt
+        // interactive after `id` goes sick below, isolating this test's
+        // concern (the refresh drops the now-sick creature from the live
+        // snapshot) from the separate empty-declaration auto-collapse
+        // behavior (issue #6463; that path is covered by
+        // `issue_6463_no_eligible_attackers_skip_prompt`).
+        let healthy = create_creature(&mut state, PlayerId(0), "Other Bear", 2, 2);
 
         state.waiting_for = WaitingFor::DeclareAttackers {
             player: PlayerId(0),
@@ -7383,10 +7390,16 @@ mod tests {
         match &result.waiting_for {
             WaitingFor::DeclareAttackers {
                 valid_attacker_ids, ..
-            } => assert!(
-                !valid_attacker_ids.contains(&id),
-                "refreshed snapshot must drop the now-sick creature"
-            ),
+            } => {
+                assert!(
+                    !valid_attacker_ids.contains(&id),
+                    "refreshed snapshot must drop the now-sick creature"
+                );
+                assert!(
+                    valid_attacker_ids.contains(&healthy),
+                    "the still-healthy creature must remain a valid attacker"
+                );
+            }
             other => panic!("expected refreshed DeclareAttackers, got {other:?}"),
         }
     }
