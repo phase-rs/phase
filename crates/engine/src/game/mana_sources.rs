@@ -2348,8 +2348,25 @@ fn land_mana_options(
         gates,
     );
 
-    // Legacy fallback for basic-land subtype-only objects (no explicit mana ability).
-    if options.is_empty() {
+    // CR 602.5: Legacy fallback for basic-land subtype-only objects that
+    // carry NO EXPLICIT mana ability at all (a nonbasic granted a basic land
+    // type by Urborg/Blood Moon-class effects with no accompanying
+    // `Effect::Mana` grant). This must NOT fire merely because
+    // `scan_mana_abilities` came back empty — it can be empty because a REAL
+    // `Effect::Mana` ability exists but was just filtered out by a legality
+    // gate (CantBeActivated, CantActivateDuring, an unsatisfied activation
+    // condition). Falling back to unconditional subtype-inferred production
+    // in that case would silently defeat the gate that filtered it (issue
+    // #6469: Karn, the Great Creator's "activated abilities of artifacts your
+    // opponents control can't be activated" stopped blocking a Liquimetal-
+    // Coating-turned-artifact land's own {T}: Add mana ability, because the
+    // ability's legitimate absence from `options` was mistaken for "no
+    // ability exists").
+    let has_explicit_mana_ability = obj
+        .abilities
+        .iter()
+        .any(|ability| matches!(*ability.effect, Effect::Mana { .. }));
+    if options.is_empty() && !has_explicit_mana_ability {
         if let Some(mana_type) = obj
             .card_types
             .subtypes
