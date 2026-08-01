@@ -79,10 +79,17 @@ fn issue_draw(runner: &mut GameRunner, requested: u32) {
 }
 
 fn completed_delivery(mut runner: GameRunner, requested: u32) -> (usize, GameState) {
-    let hand_before = runner.state().players[P0.0 as usize].hand.len();
     issue_draw(&mut runner, requested);
     runner.advance_until_stack_empty();
-    let delivered = runner.state().players[P0.0 as usize].hand.len() - hand_before;
+    // CR 121.4 can make the player lose after a partial draw from a short library.
+    // Elimination may clear that player's hand, so the completed draw frame's
+    // delivery count is the live authority rather than the post-game zone size.
+    let delivered = runner
+        .state()
+        .last_effect_count
+        .expect("completed draw records its live delivery count")
+        .try_into()
+        .expect("draw delivery count is nonnegative");
     (delivered, runner.state().clone())
 }
 

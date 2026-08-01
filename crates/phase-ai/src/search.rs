@@ -4209,9 +4209,10 @@ mod tests {
     #[test]
     fn prospective_fetch_choice_survives_to_the_real_search_prompt() {
         let db = CardDatabase::from_export(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json"),
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../engine/tests/fixtures/integration_cards.json"),
         )
-        .expect("full card export loads");
+        .expect("fetchland integration fixture loads");
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let misty = scenario.add_real_card(P0, "Misty Rainforest", Zone::Battlefield, &db);
