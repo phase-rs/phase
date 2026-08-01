@@ -30586,8 +30586,8 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 608.2k: An `AbilityCondition` source-counter gate binds a bare
         // body pronoun to the source only when no prior clause chose a typed
         // target. This preserves the depletion-land / counter-rider class;
-        // GenericEffect static counter gates are rebound after their static
-        // definitions are finalized below.
+        // the leading bare-recipient gate is instead rebound on `condition`
+        // before lowering above.
         let binds_source_counter_pronoun =
             condition.as_ref().is_some_and(condition_refs_source_object) && !prior_typed_referent;
         let chunk_subject = if binds_source_counter_pronoun {
