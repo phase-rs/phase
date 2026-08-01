@@ -275,7 +275,7 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
         | AbilityCondition::SourceEnteredThisTurn
         | AbilityCondition::SourceIsTapped
         | AbilityCondition::SourceAttachedToCreature => true,
-        // CR 122.1 + CR 608.2k: a counter-threshold gate scoped to the SOURCE
+        // CR 122.1: a counter-threshold gate scoped to the SOURCE
         // ("if there are no mining counters on this land", "if it has six or
         // more quest counters on it") refers to the ability's own untargeted
         // source object, so a bare "it" in the gated body anaphors to the

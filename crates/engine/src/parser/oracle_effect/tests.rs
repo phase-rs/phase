@@ -29361,7 +29361,7 @@ fn resolve_it_pronoun_any_subject() {
     assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
 }
 
-/// Issue #6507 (CR 122.1 + CR 608.2k): `condition_refs_source_object` must
+/// Issue #6507 (CR 122.1): `condition_refs_source_object` must
 /// recognize a source-scoped counter-threshold `QuantityCheck` ("if there are
 /// no mining counters on this land") as source-referential — that gate is what
 /// threads `SelfRef` as the chunk subject so the rider's bare "it" binds to
@@ -29414,6 +29414,20 @@ fn condition_refs_source_object_source_counter_quantity_check() {
             counters_check(ObjectScope::Source),
         ],
     }));
+    // `QuantityCheck` must inspect both sides of the comparison, not only the
+    // customary left-hand counter threshold.
+    assert!(condition_refs_source_object(
+        &AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Fixed { value: 0 },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: None,
+                },
+            },
+        }
+    ));
 
     // Adjacent-variant hostiles: target-/recipient-scoped counter reads keep
     // their current (non-source) binding.
