@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 184,
+      "date": "2026-08-01",
+      "title": "Sacrificial mana gets a choice",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Mana sources that sacrifice themselves now pause for your confirmation, so you stay in control of how a spell is paid for\n\n🛠️ Cards That Now Work Right\n• Gemstone Mine and similar depletion lands now sacrifice themselves after their last counter is removed; Gift of Immortality returns to the saved creature at the next end step\n• Wandering Archaic correctly lets the casting opponent choose whether to pay, while the same pronoun handling now fixes related cards including Smart Ass, Siege Dragon, and Elder Brain\n• Diluvian Primordial preserves its free-cast sequence, and Riptide Gearhulk now puts each chosen opponent’s permanent into that owner’s library\n• Counterspell effects that replace an event retain their intended target\n\n⚔️ Combat & Gameplay\n• Basic-land mana and land mana granted by land types now obey activation restrictions, including effects that stop abilities, detain, phasing, and can’t-tap effects\n• Best-of-three games now offer clear options to concede the current game or the entire match; reconnecting after a timeout reliably records the resulting forfeit\n\n🖥️ Interface\n• Mana-payment prompts make self-sacrificing sources explicit instead of spending them automatically\n\n🤖 AI\n• AI avoids spending a colored mana source as colorless convoke or improvise mana when that would strand a required colored cost, and makes more reliable damage and fight decisions\n\n🌐 Multiplayer\n• Multiplayer servers preserve a single, correct forfeit result when multiple disconnected seats expire together",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1533139853225623742"
+    },
+    {
       "id": 183,
       "date": "2026-07-29",
       "title": "Repeated payments resolve correctly",
