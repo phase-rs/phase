@@ -23240,6 +23240,22 @@ fn source_counter_gate_over_prior_target_keeps_parent_not_self_ref() {
         .sub_ability
         .as_deref()
         .expect("flying/lifelink grant sub-ability");
+    assert!(
+        matches!(
+            grant.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Target,
+                        ..
+                    },
+                },
+                ..
+            })
+        ),
+        "the bare counter-condition pronoun must read the target creature, got {:?}",
+        grant.condition
+    );
     let Effect::GenericEffect {
         static_abilities,
         target,
@@ -23264,6 +23280,42 @@ fn source_counter_gate_over_prior_target_keeps_parent_not_self_ref() {
         Some(TargetFilter::ParentTarget),
         "the flying/lifelink continuous grant must affect the target creature (ParentTarget), \
          not the source Instant (SelfRef) — the #6559 regression this guard prevents"
+    );
+}
+
+/// CR 122.1 + CR 608.2c: A prior typed target does not rewrite an explicit
+/// source subject. This sibling keeps source-counter cards such as Gemstone
+/// Mine and Last Light of Durin's Day on their established Source scope.
+#[test]
+fn explicit_source_counter_gate_over_prior_target_stays_source_scoped() {
+    let parsed = parse(
+        "Target creature gets +2/+2 until end of turn. If this creature has a counter on it, \
+         it also gains flying until end of turn.",
+        "Explicit Source Counter Guard",
+        &[],
+        &["Creature"],
+        &[],
+    );
+
+    let rider = parsed.abilities[0]
+        .sub_ability
+        .as_deref()
+        .expect("conditional flying rider");
+    assert!(
+        matches!(
+            rider.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        ..
+                    },
+                },
+                ..
+            })
+        ),
+        "explicit source text must retain CountersOn(Source), got {:?}",
+        rider.condition
     );
 }
 

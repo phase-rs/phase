@@ -296,6 +296,85 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
     }
 }
 
+fn condition_reads_source_counters(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            quantity_expr_reads_source_counters(lhs) || quantity_expr_reads_source_counters(rhs)
+        }
+        AbilityCondition::PreviousEffectAmount { rhs, .. } => {
+            quantity_expr_reads_source_counters(rhs)
+        }
+        AbilityCondition::Not { condition }
+        | AbilityCondition::ConditionInstead { inner: condition } => {
+            condition_reads_source_counters(condition)
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_reads_source_counters)
+        }
+        _ => false,
+    }
+}
+
+/// CR 122.1 + CR 608.2c: Rebind a source-scoped counter read to the prior
+/// chosen target when a later leading `if it has … counter on it,` condition
+/// uses the bare recipient pronoun. Explicit source-counter conditions never
+/// reach this helper, so Gemstone Mine / Last Light source behavior is retained.
+fn rewrite_source_counter_condition_to_target(condition: &mut AbilityCondition) {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            rewrite_source_counter_quantity_expr_to_target(lhs);
+            rewrite_source_counter_quantity_expr_to_target(rhs);
+        }
+        AbilityCondition::PreviousEffectAmount { rhs, .. } => {
+            rewrite_source_counter_quantity_expr_to_target(rhs);
+        }
+        AbilityCondition::Not { condition }
+        | AbilityCondition::ConditionInstead { inner: condition } => {
+            rewrite_source_counter_condition_to_target(condition);
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for condition in conditions {
+                rewrite_source_counter_condition_to_target(condition);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Rewrites only `CountersOn { scope: Source }` through the complete
+/// `QuantityExpr` wrapper tree; every other quantity reference is unchanged.
+fn rewrite_source_counter_quantity_expr_to_target(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref { qty } => {
+            if let QuantityRef::CountersOn { scope, .. } = qty {
+                if matches!(*scope, ObjectScope::Source) {
+                    *scope = ObjectScope::Target;
+                }
+            }
+        }
+        QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. } => {
+            rewrite_source_counter_quantity_expr_to_target(inner);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                rewrite_source_counter_quantity_expr_to_target(inner);
+            }
+        }
+        QuantityExpr::UpTo { max } => rewrite_source_counter_quantity_expr_to_target(max),
+        QuantityExpr::Power { exponent, .. } => {
+            rewrite_source_counter_quantity_expr_to_target(exponent);
+        }
+        QuantityExpr::Difference { left, right } => {
+            rewrite_source_counter_quantity_expr_to_target(left);
+            rewrite_source_counter_quantity_expr_to_target(right);
+        }
+    }
+}
+
 fn condition_refs_cost_paid_object(condition: &AbilityCondition) -> bool {
     match condition {
         AbilityCondition::CostPaidObjectMatchesFilter { .. } => true,
@@ -30171,13 +30250,30 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             (None, text)
         };
-        let condition = match (condition, unless_same_name_condition) {
+        let mut condition = match (condition, unless_same_name_condition) {
             (Some(existing), Some(unless_cond)) => Some(AbilityCondition::And {
                 conditions: vec![existing, unless_cond],
             }),
             (None, Some(unless_cond)) => Some(unless_cond),
             (existing, None) => existing,
         };
+        // CR 122.1 + CR 608.2c: a preceding typed target is the antecedent of
+        // the bare recipient pronoun in "If it has … counter on it, …". The
+        // counter condition parser normally maps that pronoun to Source; retain
+        // that default for explicit source subjects and for targetless chains.
+        let prior_typed_referent = chain_has_prior_typed_referent(builder.clauses(), false);
+        if prior_typed_referent
+            && condition
+                .as_ref()
+                .is_some_and(condition_reads_source_counters)
+            && crate::parser::oracle_nom::condition::is_leading_if_bare_recipient_counter_condition(
+                normalized_text,
+            )
+        {
+            if let Some(condition) = condition.as_mut() {
+                rewrite_source_counter_condition_to_target(condition);
+            }
+        }
         // CR 701.34a + CR 122.1: keep the whole "for each kind of counter on
         // target permanent or player, give … another counter of that kind"
         // clause intact so the targeted-proliferate recognizer in
@@ -30527,8 +30623,7 @@ pub(crate) fn parse_effect_chain_ir(
         // lands / counter riders (whose prior clause is "Add mana" or "put a counter
         // on ~", not a typed target), so every intended heal is unaffected.
         let binds_source_counter_pronoun =
-            condition.as_ref().is_some_and(condition_refs_source_object)
-                && !chain_has_prior_typed_referent(builder.clauses(), false);
+            condition.as_ref().is_some_and(condition_refs_source_object) && !prior_typed_referent;
         let chunk_subject = if binds_source_counter_pronoun {
             Some(TargetFilter::SelfRef)
         } else {
@@ -30542,9 +30637,8 @@ pub(crate) fn parse_effect_chain_ir(
         // this flag when the outer chain has such a referent (Brilliance Unleashed).
         // It is false on every top-level and non-else nested parse, so this OR is a
         // no-op for all pre-existing cards.
-        let parent_target_available = ctx.parent_target_available
-            || if_you_do_anchor.is_some()
-            || chain_has_prior_typed_referent(builder.clauses(), false);
+        let parent_target_available =
+            ctx.parent_target_available || if_you_do_anchor.is_some() || prior_typed_referent;
         // CR 608.2c + CR 601.2a: a strict subset of `parent_target_available`
         // restricted to chosen-target referents (Emry), excluding impulse
         // publishers (Territorial Bruntar's `ExileFromTopUntil`). An "if you

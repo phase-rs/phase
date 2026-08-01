@@ -12,6 +12,7 @@ use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
+use super::bridge::nom_on_lower;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
@@ -2221,6 +2222,20 @@ fn parse_has_counters_axes(
     .parse(rest)?;
 
     Ok((rest, (subject, counters, minimum, maximum)))
+}
+
+/// CR 122.1 + CR 608.2c: identifies only a leading `if it has … counter on it,`
+/// condition. The generic counter-condition parser resolves bare `it` to the
+/// source by default; effect-chain parsing uses this narrow lexical fact to
+/// rebind that condition when an earlier clause established a typed referent.
+/// Explicit source subjects (`~`, `this creature`, `this land`) deliberately do
+/// not match and retain their source scope.
+pub(crate) fn is_leading_if_bare_recipient_counter_condition(input: &str) -> bool {
+    let lower = input.to_lowercase();
+    nom_on_lower(input, &lower, |i| {
+        terminated(preceded(tag("if "), parse_has_counters_axes), tag(",")).parse(i)
+    })
+    .is_some_and(|((subject, ..), _)| matches!(subject, CounterConditionSubject::RecipientPronoun))
 }
 
 /// Subject axis for counter-has conditions. Accepts the canonical
@@ -19050,6 +19065,25 @@ mod tests {
             parse_recipient_has_counters("it has a shield counter on the battlefield").is_err(),
             "non-pronoun suffix must not match the counter axis"
         );
+    }
+
+    /// CR 122.1 + CR 608.2c: effect-chain parsing may rebind only the bare
+    /// recipient-pronoun form after an earlier typed target. Explicit source
+    /// and demonstrative-recipient subjects must remain distinguishable.
+    #[test]
+    fn leading_if_bare_recipient_counter_condition_is_narrow() {
+        assert!(is_leading_if_bare_recipient_counter_condition(
+            "If it has a counter on it, it gains flying"
+        ));
+        assert!(!is_leading_if_bare_recipient_counter_condition(
+            "If this creature has a counter on it, it gains flying"
+        ));
+        assert!(!is_leading_if_bare_recipient_counter_condition(
+            "If that creature has a counter on it, it gains flying"
+        ));
+        assert!(!is_leading_if_bare_recipient_counter_condition(
+            "If it is tapped, it gains flying"
+        ));
     }
 
     /// CR 611.3a: the bound pronoun "it" in a self-referential combat-state gate
