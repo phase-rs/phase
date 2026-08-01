@@ -10135,10 +10135,20 @@ mod tests {
         /// mark layers entered. Flips no devotion / land-presence gate and matches
         /// no artifact/land filter.
         fn add_colorless_creature_entry(state: &mut GameState, card_id: u64) -> ObjectId {
+            add_colorless_creature_entry_under(state, card_id, PlayerId(0))
+        }
+
+        /// The same entrant under an explicit controller, for controller-keyed
+        /// population fixtures (CR 613.1b).
+        fn add_colorless_creature_entry_under(
+            state: &mut GameState,
+            card_id: u64,
+            controller: PlayerId,
+        ) -> ObjectId {
             let id = create_object(
                 state,
                 CardId(card_id),
-                PlayerId(0),
+                controller,
                 "Insect".to_string(),
                 Zone::Battlefield,
             );
@@ -10693,6 +10703,132 @@ mod tests {
                 gatebear_pt(&forced),
                 (Some(4), Some(4)),
                 "the entrant-turned-land crosses the GE-4 land threshold"
+            );
+        }
+
+        /// Board for the CONTROLLER channel (CR 613.1b). P0 controls two 2/2s
+        /// and an anthem whose dynamic magnitude counts "creatures you control",
+        /// plus a theft enchantment whose layer-2 `ChangeController` claims
+        /// every creature for the enchantment's controller. The theft's affected
+        /// filter is deliberately controller-FREE: a controller-keyed affected
+        /// filter would make layer 2 self-referential, and the point under test
+        /// is the counted population, not the affected set.
+        fn controller_keyed_count_anthem_with_control_theft_board() -> GameState {
+            use crate::types::ability::{
+                ContinuousModification, ControllerRef, StaticDefinition, TypeFilter as TF,
+                TypedFilter as TFil,
+            };
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(380 + i),
+                    PlayerId(0),
+                    format!("TheftBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+            }
+            let yours = TargetFilter::Typed(TFil {
+                type_filters: vec![TF::Creature],
+                controller: Some(ControllerRef::You),
+                ..Default::default()
+            });
+            let anthem = create_object(
+                &mut state,
+                CardId(385),
+                PlayerId(0),
+                "Ally Count Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut anthem_sd = StaticDefinition::new(StaticMode::Continuous);
+            anthem_sd.affected = Some(TargetFilter::Typed(TFil::new(TF::Creature)));
+            anthem_sd.modifications = vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: yours.clone(),
+                        },
+                    },
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter: yours },
+                    },
+                },
+            ];
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![anthem_sd.clone()]);
+                o.static_definitions = vec![anthem_sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            let thief = create_object(
+                &mut state,
+                CardId(386),
+                PlayerId(0),
+                "Mass Mind Control".to_string(),
+                Zone::Battlefield,
+            );
+            let mut theft_sd = StaticDefinition::new(StaticMode::Continuous);
+            theft_sd.affected = Some(TargetFilter::Typed(TFil::new(TF::Creature)));
+            theft_sd.modifications = vec![ContinuousModification::ChangeController];
+            {
+                let o = state.objects.get_mut(&thief).unwrap();
+                o.base_static_definitions = Arc::new(vec![theft_sd.clone()]);
+                o.static_definitions = vec![theft_sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (3d) CONTROLLER-channel blindness — CR 613.1b + CR 613.1 + CR 109.3.
+        /// The entrant arrives under the OPPONENT, so a pre-layer probe of
+        /// "creatures you control" says the count is unperturbed; layer 2 then
+        /// hands the entrant to the anthem's controller and the count goes
+        /// 2 -> 3, which moves PRE-EXISTING recipients. CR 109.3 puts controller
+        /// outside an object's characteristics, so this is not reachable by the
+        /// card-type disjunct — `modification_population_key_write` has to
+        /// classify `ChangeController` as a population-key write in its own
+        /// right for this entry to escalate.
+        #[test]
+        fn controller_change_entry_escalates_when_population_is_controller_keyed() {
+            let (normal, escalated, forced) = flush_entry_and_forced(
+                controller_keyed_count_anthem_with_control_theft_board,
+                |s| add_colorless_creature_entry_under(s, 390, PlayerId(1)),
+            );
+            assert!(
+                escalated,
+                "layer 2 moves the entrant into the counted population — must escalate"
+            );
+            assert_pt_identical(&normal, &forced, "controller-channel escalation");
+            // Vacuity guard: `escalated` depends only on the classifier, so pin
+            // that the stolen entrant really does move the count — TheftBears
+            // end the pass at 5/5 (base 2/2 + three creatures now controlled),
+            // not the pre-layer 4/4.
+            let theftbear_pt = |state: &GameState| {
+                state
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .find(|o| o.name == "TheftBear0")
+                    .map(|o| (o.power, o.toughness))
+                    .unwrap()
+            };
+            assert_eq!(
+                theftbear_pt(&forced),
+                (Some(5), Some(5)),
+                "the stolen entrant is counted among \"creatures you control\""
             );
         }
 

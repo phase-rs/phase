@@ -3621,10 +3621,12 @@ fn any_active_static_condition_reads_object_population(state: &GameState) -> boo
 /// population READ is live — an effect's dynamic magnitude or affected set
 /// (`effect_reads_object_population`) or a Continuous static's enabling
 /// condition (`any_active_static_condition_reads_object_population`) — AND some
-/// active effect reaching an entrant rewrites that entrant's CARD TYPES. The
-/// read side is not narrowed because a counted population is almost always
-/// keyed on card type (`ObjectCount { filter: lands you control }`), so
-/// narrowing it would buy nothing while adding a second 98-arm classifier.
+/// active effect reaching an entrant rewrites one of that entrant's POPULATION
+/// KEYS: its card types (layer 4, CR 613.1d) or its controller (layer 2,
+/// CR 613.1b). The read side is not narrowed because a counted population is
+/// almost always keyed on card type or controller (`ObjectCount { filter: lands
+/// you control }` is keyed on both at once), so narrowing it would buy nothing
+/// while adding a second 98-arm classifier.
 /// Note the write-side REACH probe (`matches_target_filter` below) shares the
 /// pre-layer blindness this disjunct exists to fix: a type-writer whose
 /// affected filter keys on a characteristic another layer rewrites is still
@@ -3651,20 +3653,21 @@ fn any_active_static_condition_reads_object_population(state: &GameState) -> boo
 /// entry-flush escalation tests), which is expected to flip when the matrix
 /// lands.
 ///
-/// Two further channels of the same blindness, named explicitly because neither
-/// is covered by the sentence above:
+/// CONTROLLER (CR 613.1b) was a channel of the same blindness and is closed
+/// here, not merely declared: a population keyed on controller — "creatures you
+/// control" is the overwhelmingly common shape — was probed pre-layer while a
+/// layer-2 `ChangeController` moved the entrant between players' populations.
+/// It is deliberately NOT a subset of the paragraph above, because CR 109.3
+/// states an object's controller is not one of its characteristics, so "other
+/// characteristics" excludes it by construction. It is classified instead as a
+/// population KEY alongside card types, by `modification_population_key_write`.
+/// The cost to the fast path is nil in practice: battlefield `ChangeController`
+/// is rare, so the extra disjunct almost never fires.
 ///
-/// 1. CONTROLLER (CR 613.1b). A population keyed on controller — "creatures you
-///    control" is the overwhelmingly common shape — is read here pre-layer,
-///    while a layer-2 control-change effect (`ChangeController`, classified
-///    `false` by `modification_writes_card_types` because it writes no card
-///    type) can move the entrant between players' populations. This is NOT a
-///    subset of the paragraph above: CR 109.3 states an object's controller is
-///    not one of its characteristics, so "other characteristics" excludes it by
-///    construction. Closing it is cheaper than the full matrix — battlefield
-///    `ChangeController` is rare, so a controller-channel disjunct would cost
-///    the fast path close to nothing.
-/// 2. GRANT CHAINS. `GrantAbility` / `GrantStaticAbility` / `AddStaticMode` /
+/// One further channel of the same blindness stays open, named explicitly
+/// because neither the sentence above nor that classifier covers it:
+///
+/// 1. GRANT CHAINS. `GrantAbility` / `GrantStaticAbility` / `AddStaticMode` /
 ///    `RemoveAllAbilities` all classify `false`, which is correct for the
 ///    predicate "does this write card types" but leaves a second-order path the
 ///    classifier cannot see: an effect that GRANTS a type-writing static (or
@@ -3677,12 +3680,12 @@ fn population_probe_blinded_by_entrant_characteristic_change(
     entered_ids: &BTreeSet<ObjectId>,
     active_effects: &[ActiveContinuousEffect],
 ) -> bool {
-    // Write side first: `modification_writes_card_types` is a pure enum match,
-    // so the common board with no type-writer reaching an entrant pays neither
-    // the active-effect read scan nor the static-source condition walk (a
-    // traversal Axis 2b repeats immediately after this gate).
+    // Write side first: `modification_population_key_write` is a pure enum
+    // match, so the common board with no population-key writer reaching an
+    // entrant pays neither the active-effect read scan nor the static-source
+    // condition walk (a traversal Axis 2b repeats immediately after this gate).
     let writer_reaches_entrant = active_effects.iter().any(|e| {
-        if !modification_writes_card_types(&e.modification) {
+        if modification_population_key_write(&e.modification).is_none() {
             return false;
         }
         let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
@@ -3697,13 +3700,28 @@ fn population_probe_blinded_by_entrant_characteristic_change(
         || any_active_static_condition_reads_object_population(state)
 }
 
-/// CR 613.1d (layer 4): does this modification rewrite an object's card types,
-/// subtypes or supertypes — the characteristics a counted population is keyed on?
+/// CR 613: the population-keying value a modification rewrites, if any.
 ///
+/// Card types and controller are not the same kind of thing — CR 109.3 states
+/// an object's controller is not one of its characteristics — and they are
+/// written in different layers. What unifies them here is the single property
+/// this gate cares about: both are read by `TargetFilter` when a population is
+/// counted, so a pre-layer probe of either can be stale by the time the
+/// counting effect applies. Both are written inside CR 613, so parameterizing
+/// on this axis stays within one rule section, and closing the remaining kinds
+/// (COLOR, KEYWORD, NAME, P/T) means adding variants here rather than growing a
+/// sibling classifier.
+enum PopulationKeyWrite {
+    /// CR 613.1d (layer 4): card types, subtypes or supertypes.
+    CardTypes,
+    /// CR 613.1b (layer 2): the object's controller.
+    Controller,
+}
+
 /// EXHAUSTIVE and wildcard-free over `ContinuousModification`, so a future
-/// type-rewriting variant must be classified here at compile time rather than
+/// key-rewriting variant must be classified here at compile time rather than
 /// silently reopening the Ashaya divergence.
-fn modification_writes_card_types(m: &ContinuousModification) -> bool {
+fn modification_population_key_write(m: &ContinuousModification) -> Option<PopulationKeyWrite> {
     match m {
         ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
@@ -3718,14 +3736,20 @@ fn modification_writes_card_types(m: &ContinuousModification) -> bool {
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::AddSupertype { .. }
-        | ContinuousModification::RemoveSupertype { .. } => true,
+        | ContinuousModification::RemoveSupertype { .. } => Some(PopulationKeyWrite::CardTypes),
         // CR 613.2a + CR 613.2c + CR 707.2: a copy effect (layer 1a) replaces
         // the copiable values,
         // card types among them, so it rewrites types just as surely as
         // `SetCardTypes` does.
-        ContinuousModification::CopyValues { .. } | ContinuousModification::CopyChosen => true,
-        // Everything else writes a characteristic that is not a card type.
-        // Enumerated explicitly (no wildcard) so a future type-rewriting variant
+        ContinuousModification::CopyValues { .. } | ContinuousModification::CopyChosen => {
+            Some(PopulationKeyWrite::CardTypes)
+        }
+        // CR 613.1b (layer 2): a control-change effect writes no characteristic
+        // at all (CR 109.3), but it moves the object between controller-keyed
+        // populations — "creatures you control" — that a later layer counts.
+        ContinuousModification::ChangeController => Some(PopulationKeyWrite::Controller),
+        // Everything else writes a characteristic that is not a population key.
+        // Enumerated explicitly (no wildcard) so a future key-rewriting variant
         // forces a decision here.
         ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
@@ -3766,8 +3790,7 @@ fn modification_writes_card_types(m: &ContinuousModification) -> bool {
         | ContinuousModification::AssignDamageFromToughness
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
-        | ContinuousModification::ChangeController
-        | ContinuousModification::RemoveManaCost => false,
+        | ContinuousModification::RemoveManaCost => None,
     }
 }
 
