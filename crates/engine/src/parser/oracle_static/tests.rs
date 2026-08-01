@@ -15,21 +15,6 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 
-#[test]
-fn source_counter_quantity_ref_rebinds_to_recipient() {
-    let counter_type = Some(CounterType::Plus1Plus1);
-    assert_eq!(
-        super::shared::rebind_source_object_quantity_ref_to_recipient(QuantityRef::CountersOn {
-            scope: ObjectScope::Source,
-            counter_type: counter_type.clone(),
-        },),
-        QuantityRef::CountersOn {
-            scope: ObjectScope::Recipient,
-            counter_type,
-        }
-    );
-}
-
 /// CR 613.1f (Layer 6) + CR 105.2: Scion of Draco — "Each creature you control has
 /// vigilance if it's white, hexproof if it's blue, lifelink if it's black, first
 /// strike if it's red, and trample if it's green." Each `if it's <color>` qualifies

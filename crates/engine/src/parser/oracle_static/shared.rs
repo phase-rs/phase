@@ -3259,13 +3259,6 @@ pub(crate) fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -
         } => QuantityRef::ObjectManaValue {
             scope: ObjectScope::Recipient,
         },
-        QuantityRef::CountersOn {
-            scope: ObjectScope::Source,
-            counter_type,
-        } => QuantityRef::CountersOn {
-            scope: ObjectScope::Recipient,
-            counter_type,
-        },
         other => other,
     }
 }

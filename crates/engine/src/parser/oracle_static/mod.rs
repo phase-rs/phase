@@ -92,9 +92,7 @@ mod shared;
 mod static_helpers;
 mod type_change;
 
-pub(crate) use shared::{
-    parse_commander_subject_filter_prefix, rebind_source_object_quantities_to_recipient,
-};
+pub(crate) use shared::parse_commander_subject_filter_prefix;
 
 pub(crate) use dispatch::is_speed_unlock_sentence;
 pub(crate) use dispatch::parse_may_look_at_face_down_filter;
