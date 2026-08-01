@@ -10508,39 +10508,31 @@ mod tests {
             state
         }
 
-        /// KNOWN GAP — deliberately pinned, expected to FLIP when the gap
-        /// closes. CR 613.1e + CR 613.1g: a population keyed on COLOR whose
-        /// entrant has that color rewritten by another layer is still probed
-        /// pre-layer. `population_probe_blinded_by_entrant_characteristic_change`
-        /// escalates only when an active effect rewrites an entrant's CARD
-        /// TYPES; a COLOR rewrite (`AddColor`, layer 5) is classified
-        /// non-perturbing, so the colorless entrant — green by the time the
-        /// count applies — is probed as colorless and the gate stays on the
-        /// incremental arm. No printed card in the current corpus is known to
-        /// pair a color-keyed count with a color wash (claim not exhaustively
-        /// verified — this tripwire, not corpus absence, is what holds the
-        /// line); this synthetic board pins the
-        /// resulting divergence so closing the gap (the full FilterProp-reads ×
-        /// ContinuousModification-writes characteristic-kind matrix) turns this
-        /// red and the assertions below get rewritten to escalation + identity.
-        /// See the KNOWN REMAINING GAP note on
-        /// `population_probe_blinded_by_entrant_characteristic_change`.
+        /// COLOR channel (CR 613.1e + CR 613.1g): a population keyed on COLOR
+        /// whose entrant has that color rewritten by another layer must
+        /// escalate. A layer-5 `AddColor` washes the colorless entrant green
+        /// before the layer-7c count applies, so a pre-layer probe would see a
+        /// colorless entrant, keep the incremental arm, and leave pre-existing
+        /// Bears at a stale 4/4 where the correct CR 613 board is 5/5.
+        /// `modification_population_key_write` classifies the color writers as
+        /// `PopulationKeyWrite::Color`, so the gate escalates and the two boards
+        /// agree.
+        ///
+        /// This is the discriminating fixture for that channel: revert the
+        /// `Color` arm of the classifier and the escalation assertion fails; keep
+        /// the arm but break the escalation plumbing and the identity assertion
+        /// fails on the Bears' derived power/toughness.
         #[test]
-        fn known_gap_color_keyed_population_probes_entrant_pre_layer() {
+        fn color_change_entry_escalates_when_population_is_color_keyed() {
             let (normal, escalated, forced) =
                 flush_entry_and_forced(green_count_anthem_with_color_wash_board, |s| {
                     add_colorless_creature_entry(s, 291)
                 });
-            // Pin 1: the gate is blind to color rewrites — the incremental arm
-            // is (incorrectly, but knowingly) taken.
             assert!(
-                !escalated,
-                "KNOWN GAP CLOSED? color-rewrite escalation now fires — rewrite \
-                 this test to assert escalation and board identity"
+                escalated,
+                "a layer-5 color wash reaching the entrant moves a color-keyed \
+                 count — the entry must escalate to a full re-evaluation"
             );
-            // Pin 2: the divergence itself. Pre-existing Bears keep the stale
-            // count of 2 (4/4) where a full pass counts the now-green entrant
-            // and derives 5/5.
             let bear_pts = |state: &GameState| {
                 let mut pts: Vec<(Option<i32>, Option<i32>)> = state
                     .battlefield
@@ -10552,16 +10544,19 @@ mod tests {
                 pts.sort();
                 pts
             };
-            assert_eq!(
-                bear_pts(&normal),
-                vec![(Some(4), Some(4)); 2],
-                "incremental arm leaves pre-existing Bears at the stale count"
-            );
+            // The washed entrant is green by the time the count applies, so the
+            // count is 3, not the pre-layer 2.
             assert_eq!(
                 bear_pts(&forced),
                 vec![(Some(5), Some(5)); 2],
                 "full pass counts the washed entrant — the correct CR 613 board"
             );
+            assert_eq!(
+                bear_pts(&normal),
+                bear_pts(&forced),
+                "escalated entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "color-keyed population escalation");
         }
 
         /// Build a board pairing a PURE layer-4 type-writer with a

@@ -3622,11 +3622,12 @@ fn any_active_static_condition_reads_object_population(state: &GameState) -> boo
 /// (`effect_reads_object_population`) or a Continuous static's enabling
 /// condition (`any_active_static_condition_reads_object_population`) — AND some
 /// active effect reaching an entrant rewrites one of that entrant's POPULATION
-/// KEYS: its card types (layer 4, CR 613.1d) or its controller (layer 2,
-/// CR 613.1b). The read side is not narrowed because a counted population is
-/// almost always keyed on card type or controller (`ObjectCount { filter: lands
-/// you control }` is keyed on both at once), so narrowing it would buy nothing
-/// while adding a second 98-arm classifier.
+/// KEYS: its card types (layer 4, CR 613.1d), its controller (layer 2,
+/// CR 613.1b) or its colors (layer 5, CR 613.1e). The read side is not narrowed
+/// because a counted population is almost always keyed on card type, controller
+/// or color (`ObjectCount { filter: lands you control }` is keyed on two of
+/// them at once), so narrowing it would buy nothing while adding a second
+/// 98-arm classifier.
 /// Note the write-side REACH probe (`matches_target_filter` below) shares the
 /// pre-layer blindness this disjunct exists to fix: a type-writer whose
 /// affected filter keys on a characteristic another layer rewrites is still
@@ -3640,29 +3641,33 @@ fn any_active_static_condition_reads_object_population(state: &GameState) -> boo
 /// type-keyed or devotion-keyed count.
 ///
 /// KNOWN REMAINING GAP, same shape, other characteristics: a population keyed on
-/// COLOR, KEYWORD, NAME or P/T whose entrant has that characteristic rewritten by
+/// KEYWORD, NAME or P/T whose entrant has that characteristic rewritten by
 /// another layer is still probed pre-layer — on the read side (the counted
 /// filter) and on the write side (a type-writer's own affected filter keyed on
 /// a rewritten characteristic) alike. Closing it needs the full
 /// characteristic-kind matrix (which kind each `FilterProp` reads × which kind
-/// each `ContinuousModification` writes) rather than the card-type projection of
+/// each `ContinuousModification` writes) rather than the per-key projection of
 /// it below. No printed pairing in the current corpus is known to exercise it
-/// (claim not exhaustively verified — the tripwire below, not corpus absence,
-/// is what holds the line); the gap's current behavior is pinned by
-/// `known_gap_color_keyed_population_probes_entrant_pre_layer` (stack.rs
-/// entry-flush escalation tests), which is expected to flip when the matrix
-/// lands.
+/// (claim not exhaustively verified — corpus absence is not what holds the
+/// line; the classifier's wildcard-free match is, because a future
+/// key-rewriting variant cannot be added without deciding this question).
 ///
-/// CONTROLLER (CR 613.1b) was a channel of the same blindness and is closed
-/// here, not merely declared: a population keyed on controller — "creatures you
-/// control" is the overwhelmingly common shape — was probed pre-layer while a
-/// layer-2 `ChangeController` moved the entrant between players' populations.
-/// It is deliberately NOT a subset of the paragraph above, because CR 109.3
-/// states an object's controller is not one of its characteristics, so "other
-/// characteristics" excludes it by construction. It is classified instead as a
-/// population KEY alongside card types, by `modification_population_key_write`.
-/// The cost to the fast path is nil in practice: battlefield `ChangeController`
-/// is rare, so the extra disjunct almost never fires.
+/// CONTROLLER (CR 613.1b) and COLOR (CR 613.1e) were channels of the same
+/// blindness and are closed here, not merely declared. A population keyed on
+/// controller — "creatures you control" is the overwhelmingly common shape —
+/// was probed pre-layer while a layer-2 `ChangeController` moved the entrant
+/// between players' populations. A population keyed on color — "green
+/// creatures" — was probed pre-layer while a layer-5 `AddColor` washed the
+/// entrant into it, so a layer-7 count that runs after both still counted the
+/// entrant's printed color. Controller is deliberately NOT a subset of the
+/// paragraph above, because CR 109.3 states an object's controller is not one
+/// of its characteristics, so "other characteristics" excludes it by
+/// construction; color is a characteristic, but it is called out here because
+/// it is now classified rather than deferred. All three are classified as
+/// population KEYS by `modification_population_key_write`. The cost to the fast
+/// path is nil in practice: the gate still requires the writer to REACH an
+/// entrant AND a live population read to exist, so the boards pinned as fast
+/// paths below — whose only effects write P/T — are untouched.
 ///
 /// One further channel of the same blindness stays open, named explicitly
 /// because neither the sentence above nor that classifier covers it:
@@ -3702,20 +3707,22 @@ fn population_probe_blinded_by_entrant_characteristic_change(
 
 /// CR 613: the population-keying value a modification rewrites, if any.
 ///
-/// Card types and controller are not the same kind of thing — CR 109.3 states
-/// an object's controller is not one of its characteristics — and they are
-/// written in different layers. What unifies them here is the single property
-/// this gate cares about: both are read by `TargetFilter` when a population is
-/// counted, so a pre-layer probe of either can be stale by the time the
-/// counting effect applies. Both are written inside CR 613, so parameterizing
-/// on this axis stays within one rule section, and closing the remaining kinds
-/// (COLOR, KEYWORD, NAME, P/T) means adding variants here rather than growing a
-/// sibling classifier.
+/// Card types, controller and color are not the same kind of thing — CR 109.3
+/// states an object's controller is not one of its characteristics — and they
+/// are written in three different layers. What unifies them here is the single
+/// property this gate cares about: each is read by `TargetFilter` when a
+/// population is counted, so a pre-layer probe of any of them can be stale by
+/// the time the counting effect applies. All three are written inside CR 613,
+/// so parameterizing on this axis stays within one rule section, and closing
+/// the remaining kinds (KEYWORD, NAME, P/T) means adding variants here rather
+/// than growing a sibling classifier.
 enum PopulationKeyWrite {
     /// CR 613.1d (layer 4): card types, subtypes or supertypes.
     CardTypes,
     /// CR 613.1b (layer 2): the object's controller.
     Controller,
+    /// CR 613.1e (layer 5): the object's colors.
+    Color,
 }
 
 /// EXHAUSTIVE and wildcard-free over `ContinuousModification`, so a future
@@ -3748,6 +3755,14 @@ fn modification_population_key_write(m: &ContinuousModification) -> Option<Popul
         // at all (CR 109.3), but it moves the object between controller-keyed
         // populations — "creatures you control" — that a later layer counts.
         ContinuousModification::ChangeController => Some(PopulationKeyWrite::Controller),
+        // CR 613.1e (layer 5): a color-changing effect rewrites the very
+        // characteristic a color-keyed population reads ("green creatures",
+        // "each white permanent"), and layer 5 runs before the layer-7 count,
+        // so the pre-layer probe sees the entrant's printed color rather than
+        // its derived one.
+        ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddChosenColor { .. } => Some(PopulationKeyWrite::Color),
         // Everything else writes a characteristic that is not a population key.
         // Enumerated explicitly (no wildcard) so a future key-rewriting variant
         // forces a decision here.
@@ -3784,9 +3799,6 @@ fn modification_population_key_write(m: &ContinuousModification) -> Option<Popul
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
-        | ContinuousModification::SetColor { .. }
-        | ContinuousModification::AddColor { .. }
-        | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::AssignDamageFromToughness
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
