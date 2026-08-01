@@ -132,6 +132,38 @@ impl<'a> PolicyContext<'a> {
         }
     }
 
+    /// First *already-chosen* object target of an in-flight target selection.
+    ///
+    /// CR 120.1 + CR 120.3: for a `DamageSource::Target` effect ("Target creature
+    /// deals X damage to ..."), the first object target IS the damage source. In
+    /// a cast/activation multi-slot selection that source is committed to
+    /// `selected_slots` before the later recipient slots are offered, so it is
+    /// resolvable here while the AI is still choosing the recipient — which is
+    /// what lets the removal-lethality term use the source's power/keywords
+    /// instead of bailing to `Unresolved`. Returns `None` when the leading slot
+    /// has not been picked yet or is not an object.
+    ///
+    /// SCOPE: this reads only the ordinary `WaitingFor::TargetSelection` path
+    /// (spells/activated abilities). It deliberately returns `None` for
+    /// `TriggerTargetSelection` (event-bound source, CR 120.7) and for the bulk
+    /// `MultiTargetSelection` path, because the source there is not resolvable
+    /// from a single recipient slot — so `DamageSource::Target` in those flow
+    /// contexts stays `Unresolved` in the removal-lethality term rather than
+    /// being silently ranked on a guess.
+    pub fn first_selected_object_target(&self) -> Option<ObjectId> {
+        let selected_slots = match &self.decision.waiting_for {
+            WaitingFor::TargetSelection { selection, .. } => Some(&selection.selected_slots),
+            WaitingFor::TriggerTargetSelection { .. } => None,
+            _ => None,
+        };
+        selected_slots.and_then(|slots| {
+            slots.iter().find_map(|slot| match slot {
+                Some(TargetRef::Object(id)) => Some(*id),
+                _ => None,
+            })
+        })
+    }
+
     pub fn effects(&self) -> Vec<&'a Effect> {
         // If we're casting/activating, get effects from the source object
         match &self.candidate.action {

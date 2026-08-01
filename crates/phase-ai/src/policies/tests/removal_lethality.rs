@@ -15,14 +15,15 @@ use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, Tac
 use engine::game::game_object::GameObject;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, EffectKind, QuantityExpr,
-    ResolvedAbility, TargetFilter, TargetRef,
+    DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, EffectKind, ObjectScope,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    GameState, PendingCast, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
+    GameState, PendingCast, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
+    WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
@@ -554,4 +555,177 @@ fn batch_damage_effects_stay_neutral() {
             "{name} must leave the target ranking untouched"
         );
     }
+}
+
+// ─── DamageSource::Target with a pre-chosen source (Self-Destruct-style) ─────
+
+/// Build a pending cast of a `DamageSource::Target` burn effect at the RECIPIENT
+/// slot, with a pre-chosen first target (`source`) already committed to
+/// `selected_slots[0]`. CR 120.1 + CR 120.3 binds that first object target as the
+/// damage source, so its power/keywords must resolve the recipient's lethality —
+/// the exact condition that was previously `Unresolved` and left Self-Destruct
+/// ranked purely by threat value.
+fn with_pending_source<R>(
+    source_power: i32,
+    source_deathtouch: bool,
+    body: Body,
+    probe: impl FnOnce(&PolicyContext<'_>, ObjectId, &GameObject) -> R,
+) -> R {
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    let spell = create_object(&mut state, CardId(1), AI, "Removal".into(), Zone::Stack);
+    let source = create_object(
+        &mut state,
+        CardId(2),
+        AI,
+        "Source".into(),
+        Zone::Battlefield,
+    );
+    let target = create_object(&mut state, CardId(3), OPP, "Body".into(), Zone::Battlefield);
+    shape_body(&mut state, target, body);
+    {
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types = CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Creature],
+            subtypes: Vec::new(),
+        };
+        obj.power = Some(source_power);
+        obj.toughness = Some(3);
+        if source_deathtouch {
+            obj.keywords.push(Keyword::Deathtouch);
+            obj.base_keywords.push(Keyword::Deathtouch);
+        }
+    }
+
+    // The effect: the source deals X (= Power{Target}, which reads targets[0] =
+    // the source) to "any other target" — a Self-Destruct-style recipient hit.
+    let ability = ResolvedAbility::new(
+        Effect::DealDamage {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            },
+            target: TargetFilter::Any,
+            damage_source: Some(DamageSource::Target),
+            excess: None,
+        },
+        vec![TargetRef::Object(source)],
+        spell,
+        AI,
+    );
+    let pending = PendingCast::new(spell, CardId(1), ability, ManaCost::zero());
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::TargetSelection {
+            player: AI,
+            pending_cast: Box::new(pending),
+            target_slots: vec![TargetSelectionSlot {
+                legal_targets: vec![TargetRef::Object(target)],
+                optional: false,
+                chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
+            }],
+            mode_labels: Vec::new(),
+            selection: TargetSelectionProgress {
+                current_slot: 1,
+                selected_slots: vec![Some(TargetRef::Object(source))],
+                current_legal_targets: vec![TargetRef::Object(target)],
+            },
+        },
+        candidates: Vec::new(),
+    };
+    let candidate = CandidateAction {
+        action: GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        },
+        metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Target),
+    };
+    let config = AiConfig::default();
+    let aicontext = AiContext::empty(&config.weights);
+    let ctx = PolicyContext {
+        state: &state,
+        decision: &decision,
+        candidate: &candidate,
+        ai_player: AI,
+        config: &config,
+        context: &aicontext,
+        cast_facts: None,
+        search_depth: SearchDepth::Root,
+    };
+    let target_obj = state.objects.get(&target).unwrap();
+    probe(&ctx, target, target_obj)
+}
+
+#[test]
+fn target_sourced_damage_resolves_the_prechosen_source() {
+    // A 2-power source on a 3/3 recipient: resolving the pre-chosen source makes
+    // the damage amount concrete (2 marked damage), so lethality is computable and
+    // the non-lethal hit is flagged as a waste — the #6582 signal Self-Destruct
+    // previously lost by staying Unresolved.
+    let (pending, bonus) = with_pending_source(2, false, Body::new(3), |ctx, id, target| {
+        (
+            pending_damage_to_object(ctx, id, target),
+            lethality_bonus(ctx, id, target),
+        )
+    });
+    assert_eq!(
+        pending,
+        PendingDamage::Dealt(DamageOutcome {
+            marked: 2,
+            minus_counters: 0,
+            deathtouch: false,
+        }),
+        "the pre-chosen 2-power source must resolve 2 marked damage on the recipient"
+    );
+    assert!(
+        bonus < 0.0,
+        "a 2-damage source on a 3/3 must read as a non-lethal waste, got {bonus}"
+    );
+
+    // An unassisted 3/3 is a clean kill: lethal bonus.
+    let (pending, bonus) = with_pending_source(3, false, Body::new(3), |ctx, id, target| {
+        (
+            pending_damage_to_object(ctx, id, target),
+            lethality_bonus(ctx, id, target),
+        )
+    });
+    assert_eq!(
+        pending,
+        PendingDamage::Dealt(DamageOutcome {
+            marked: 3,
+            minus_counters: 0,
+            deathtouch: false,
+        }),
+        "a 3-power source must resolve 3 marked damage"
+    );
+    assert!(
+        (bonus - LETHAL_BONUS).abs() < 1e-9,
+        "a 3-power source on an untouched 3/3 must read as a clean kill, got {bonus}"
+    );
+}
+
+#[test]
+fn target_sourced_deathtouch_source_is_lethal_anyway() {
+    // CR 702.2b + CR 704.5h: a deathtouch source makes even 1 marked damage
+    // lethal on any-sized body. Resolving the source's keywords must surface this.
+    let (pending, bonus) = with_pending_source(1, true, Body::new(7), |ctx, id, target| {
+        (
+            pending_damage_to_object(ctx, id, target),
+            lethality_bonus(ctx, id, target),
+        )
+    });
+    assert_eq!(
+        pending,
+        PendingDamage::Dealt(DamageOutcome {
+            marked: 1,
+            minus_counters: 0,
+            deathtouch: true,
+        }),
+        "a 1-power deathtouch source must resolve 1 deathtouch-marked damage"
+    );
+    assert!(
+        (bonus - LETHAL_BONUS).abs() < 1e-9,
+        "any deathtouch marked damage is lethal, got {bonus}"
+    );
 }

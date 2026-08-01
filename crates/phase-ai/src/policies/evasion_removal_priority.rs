@@ -215,8 +215,8 @@ mod tests {
     use engine::game::scenario::{GameScenario, P0};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, EffectKind, PtValue, QuantityExpr, ResolvedAbility,
-        TargetFilter, TargetRef, TypedFilter,
+        AbilityDefinition, AbilityKind, DamageSource, Effect, EffectKind, PtValue, QuantityExpr,
+        ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
     };
     use engine::types::format::FormatConfig;
     use engine::types::game_state::{
@@ -570,6 +570,194 @@ mod tests {
                 target: Some(TargetRef::Object(unkillable)),
             }),
             "Very Hard must not spend a 3-damage burn spell on a 7/7 it cannot kill"
+        );
+    }
+
+    /// Self-Destruct-style `DamageSource::Target` regression guard for #6582.
+    ///
+    /// `Self-Destruct` ("Target creature you control deals X damage to any other
+    /// target and X damage to itself, where X is its power") parses its two
+    /// damage effects with `DamageSource::Target` — the *targeted creature* is
+    /// the damage source, not the spell. The removal-lethality term must resolve
+    /// that source (from the already-chosen first target) so the recipient slot
+    /// is scored by whether the damage actually destroys the body, exactly as the
+    /// #6582 fix does for default-sourced burn.
+    ///
+    /// Before the fix, `removal_lethality` returned `Unresolved` for
+    /// `DamageSource::Target`, so lethality was inert and the AI ranked the
+    /// recipient purely by threat value — repeating the #6582 misplay (pointing
+    /// non-lethal damage at the biggest body it cannot kill) for
+    /// `Self-Destruct`-style spells. This test drives the PRODUCTION path — a
+    /// real Self-Destruct cast through `TargetSelection`, then the registered
+    /// `EvasionRemovalPriorityPolicy` verdict and the `lethality_bonus` it feeds
+    /// — and asserts the corrected preference for the killable body, pinning the
+    /// fix to observable behaviour.
+    #[test]
+    fn target_sourced_damage_prefers_the_killable_body() {
+        const SELF_DESTRUCT_ORACLE: &str =
+            "Target creature you control deals X damage to any other target and X damage to itself, where X is its power.";
+
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let self_destruct = scenario
+            .add_spell_to_hand_from_oracle(P0, "Self-Destruct", true, SELF_DESTRUCT_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            })
+            .id();
+        // The damage source: the AI's own 2/2, the only "creature you control"
+        // (and therefore the forced slot-1 target). Its power (2) is the damage
+        // amount, so 2 damage reaches the recipient.
+        let bird = scenario.add_creature(P0, "Bird", 2, 2).id();
+        // The killable recipient — 2 damage destroys a 2/2. Low threat.
+        let killable = scenario
+            .add_creature(PlayerId(1), "Scrappy Skirmisher", 1, 2)
+            .id();
+        // The unkillable high-threat recipient — 2 damage cannot destroy a 3/3.
+        let unkillable = scenario
+            .add_creature(PlayerId(1), "Cloud of Darkness", 3, 3)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+        );
+
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&self_destruct].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: self_destruct,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the real Self-Destruct fixture should reach target selection");
+
+        // Self-Destruct has two target slots: slot 1 is "creature you control"
+        // (the source; here the forced Bird), slot 2 is "any other target" (the
+        // recipient — where the non-lethal-vs-lethal decision actually lives).
+        // Drive the runner through slot 1 so `ResolvedAbility.targets` carries the
+        // already-chosen source and the decision context is at the recipient slot.
+        let first_slot = match &runner.state().waiting_for {
+            WaitingFor::TargetSelection { target_slots, .. } => &target_slots[0],
+            other => panic!("expected Self-Destruct target selection, got {other:?}"),
+        };
+        assert!(
+            first_slot.legal_targets.contains(&TargetRef::Object(bird)),
+            "slot 1 (creature you control) must legally be the Bird source"
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bird)),
+            })
+            .expect("choosing the Bird for slot 1 should advance to the recipient slot");
+
+        let (pending_cast, target_slots, selection) = match &runner.state().waiting_for {
+            WaitingFor::TargetSelection {
+                pending_cast,
+                target_slots,
+                selection,
+                ..
+            } => (pending_cast, target_slots, selection),
+            other => panic!("expected Self-Destruct recipient slot, got {other:?}"),
+        };
+        let effects = crate::policies::context::collect_ability_effects(&pending_cast.ability);
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::DealDamage {
+                    damage_source: Some(DamageSource::Target),
+                    ..
+                }
+            )),
+            "reach guard: Self-Destruct must parse as DamageSource::Target damage"
+        );
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::Unimplemented { .. })),
+            "the regression fixture must not silently drop an unsupported clause"
+        );
+        // The source (Bird, power 2) is ALREADY chosen in slot 1 and locked into
+        // the selection progress before the recipient slot is presented — so its
+        // power, and hence the damage amount, is knowable during recipient choice.
+        assert!(
+            selection
+                .selected_slots
+                .first()
+                .is_some_and(|slot| *slot == Some(TargetRef::Object(bird))),
+            "the Bird source must already be chosen (selected_slots[0]) before the \
+             recipient slot, so its power is knowable"
+        );
+        // The recipient slot (slot 2, "any other target") offers both the killable
+        // 2/2 and the unkillable 3/3.
+        assert!(target_slots
+            .iter()
+            .any(|slot| slot.legal_targets.contains(&TargetRef::Object(killable))));
+        assert!(target_slots
+            .iter()
+            .any(|slot| slot.legal_targets.contains(&TargetRef::Object(unkillable))));
+
+        let state = runner.state();
+        let decision = build_decision_context(state);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(42);
+
+        // The #6582 fix now covers `DamageSource::Target`: the lethality term
+        // resolves the source (the already-chosen Bird, power 2) and scores a
+        // recipient by whether that damage destroys it. So the registered removal
+        // policy must rank the KILLABLE 2/2 above the unkillable 3/3 the 2 damage
+        // cannot destroy — the exact #6582 preference, now extended to
+        // Self-Destruct-style spells.
+        let killable_delta = registry_delta(state, &decision, killable, &config);
+        let unkillable_delta = registry_delta(state, &decision, unkillable, &config);
+        assert!(
+            killable_delta > unkillable_delta,
+            "Self-Destruct recipient ranking must prefer the body the 2 damage kills \
+             (killable 2/2) over the 3/3 it only tickles: \
+             killable 2/2={killable_delta}, unkillable 3/3={unkillable_delta}"
+        );
+
+        // And pin the underlying signal directly: the 2-damage source is provably
+        // lethal to the 2/2 (+LETHAL_BONUS) and non-lethal to the 3/3 (a negative
+        // waste penalty). This is the exact arithmetic the #6582 fix added for
+        // default-sourced burn, now extended to the resolved `DamageSource::Target`
+        // source.
+        let state_ref = runner.state();
+        let kil_obj = state_ref.objects.get(&killable).unwrap();
+        let unk_obj = state_ref.objects.get(&unkillable).unwrap();
+        let aicontext = crate::context::AiContext::empty(&config.weights);
+
+        let lethal_bonus_for =
+            |target: ObjectId, target_obj: &engine::game::game_object::GameObject| {
+                let candidate = CandidateAction {
+                    action: GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    },
+                    metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Target),
+                };
+                let ctx = crate::policies::context::PolicyContext {
+                    state: state_ref,
+                    decision: &decision,
+                    candidate: &candidate,
+                    ai_player: P0,
+                    config: &config,
+                    context: &aicontext,
+                    cast_facts: None,
+                    search_depth: crate::policies::context::SearchDepth::Root,
+                };
+                crate::policies::removal_lethality::lethality_bonus(&ctx, target, target_obj)
+            };
+
+        let killable_bonus = lethal_bonus_for(killable, kil_obj);
+        let unkillable_bonus = lethal_bonus_for(unkillable, unk_obj);
+        assert!(
+            (killable_bonus - crate::policies::removal_lethality::LETHAL_BONUS).abs() < 1e-9,
+            "the 2-damage source must read as a clean kill on the 2/2, got {killable_bonus}"
+        );
+        assert!(
+            unkillable_bonus < 0.0,
+            "the 2-damage source must read as a wasted non-lethal on the 3/3, got {unkillable_bonus}"
         );
     }
 

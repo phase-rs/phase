@@ -46,8 +46,8 @@
 
 use engine::game::game_object::GameObject;
 use engine::game::keywords::object_has_effective_keyword_kind;
-use engine::game::quantity::resolve_quantity;
-use engine::types::ability::{DamageSource, Effect};
+use engine::game::quantity::{resolve_quantity, resolve_quantity_with_targets_slice};
+use engine::types::ability::{DamageSource, Effect, TargetRef};
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
@@ -77,20 +77,44 @@ enum EffectDamageSource {
     Object(ObjectId),
     /// The source depends on information this policy does not have yet:
     ///
-    /// * [`DamageSource::Target`] — the first object target *is* the source and
-    ///   is excluded from the recipient slice
-    ///   (`effects::deal_damage::resolve_effect_recipients`), so the object
-    ///   being scored may be the source rather than a recipient.
     /// * [`DamageSource::EachTarget`] — every leading target is an independent
     ///   source with its own keywords and its own re-resolved amount.
     /// * [`DamageSource::TriggeringSource`] — bound to the triggering event's
     ///   object; the engine's `targeting::extract_source_from_event` authority
     ///   is crate-private, and re-deriving that mapping in the AI layer would
     ///   duplicate engine logic.
+    ///
+    /// [`DamageSource::Target`] is NOT here: its source is the first *already
+    /// chosen* object target, which the policy can resolve from the in-flight
+    /// selection, so it resolves to `Object`.
     Unresolved,
 }
 
 /// CR 120.3: resolve which object deals one `DealDamage` effect's damage.
+///
+/// `Target` (CR 120.1 + CR 120.3: "that creature deals damage...") has its
+/// source bound to the FIRST object target of the ability — the creature chosen
+/// in the leading slot, not the spell. That selection is committed to the
+/// ongoing `TargetSelectionProgress` *before* the later (recipient) slots are
+/// offered, so while a recipient is being chosen the source is already knowable
+/// and the lethality of the damage it will deal can be computed (its power for
+/// the amount, plus wither/infect/deathtouch from its keywords). Resolving it
+/// here is what lets the #6582 lethality term cover `Self-Destruct`-style
+/// spells.
+///
+/// When the first target has not been chosen yet (e.g. the very first slot of a
+/// `DamageSource::Target` spell, or a target the engine has not exposed), the
+/// result is `Unresolved` and the caller stays neutral rather than guessing.
+///
+/// SCOPE: this resolves the source only on the ordinary cast/activation
+/// `TargetSelection` path. A `DamageSource::Target` effect reached from a
+/// triggered ability (`TriggerTargetSelection`, event-bound source per CR 120.7)
+/// or from the bulk `MultiTargetSelection` flow stays `Unresolved` — that source
+/// is not resolvable from a single recipient slot — so those card classes are
+/// not ranked by this term (not a regression; `Target` was always `Unresolved`
+/// before). The boundary is stated here (and on
+/// [`PolicyContext::first_selected_object_target`]) so the coverable surface is
+/// explicit rather than implied.
 fn effect_damage_source(
     ctx: &PolicyContext<'_>,
     damage_source: Option<&DamageSource>,
@@ -102,7 +126,17 @@ fn effect_damage_source(
             .map_or(EffectDamageSource::Unresolved, |object| {
                 EffectDamageSource::Object(object.id)
             }),
-        Some(DamageSource::Target | DamageSource::EachTarget | DamageSource::TriggeringSource) => {
+        // CR 120.1 + CR 120.3: "Target creature deals X damage to ..." — the first
+        // resolved object target is the damage source (see deal_damage.rs, which
+        // binds `targets[0]` as the source and damages `targets[1..]`). Resolve it
+        // from the already-chosen leading slot so its power/keywords are known.
+        Some(DamageSource::Target) => ctx
+            .first_selected_object_target()
+            .map_or(EffectDamageSource::Unresolved, EffectDamageSource::Object),
+        // CR 120.1: multi-source batches (EachTarget: every leading target is an
+        // independent source) and event-bound sources are not resolvable from the
+        // recipient slot alone.
+        Some(DamageSource::EachTarget | DamageSource::TriggeringSource) => {
             EffectDamageSource::Unresolved
         }
     }
@@ -172,10 +206,34 @@ pub(crate) fn pending_damage_to_object(
                     return PendingDamage::Unresolved;
                 };
                 found = true;
-                let dealt = u32::try_from(
-                    resolve_quantity(ctx.state, amount, ctx.ai_player, source_id).max(0),
-                )
-                .unwrap_or(u32::MAX);
+                // CR 608.2h + CR 208.1: the damage amount for a
+                // `DamageSource::Target` effect ("target creature deals X damage,
+                // where X is its power") reads the SOURCE creature's current power
+                // when the effect resolves. That is `targets[0]` at resolution
+                // (`deal_damage.rs` binds the first object target as the source and
+                // damages `targets[1..]`), so mirror the engine by resolving the
+                // amount against a targets slice whose first entry is the source.
+                // Without this, a `Power { scope: Target }` amount reads an empty
+                // targets list and resolves to 0 — silently scoring a Self-Destruct
+                // as dealing no damage at all.
+                let dealt = if matches!(damage_source, Some(DamageSource::Target)) {
+                    u32::try_from(
+                        resolve_quantity_with_targets_slice(
+                            ctx.state,
+                            amount,
+                            ctx.ai_player,
+                            source_id,
+                            &[TargetRef::Object(source_id)],
+                        )
+                        .max(0),
+                    )
+                    .unwrap_or(u32::MAX)
+                } else {
+                    u32::try_from(
+                        resolve_quantity(ctx.state, amount, ctx.ai_player, source_id).max(0),
+                    )
+                    .unwrap_or(u32::MAX)
+                };
                 // CR 120.3d + CR 702.80a + CR 702.90c: wither/infect damage to a
                 // creature is dealt as -1/-1 counters and is never marked.
                 if is_creature
