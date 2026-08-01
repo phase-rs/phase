@@ -633,6 +633,7 @@ mod issue_654_stridehangar_automaton;
 mod issue_6566_granted_leave_exile;
 mod issue_6634_aven_courier;
 mod issue_6643_party_dude_opponents_attacked;
+mod issue_6677_wakandan_royal_guard;
 mod issue_6678_captain_america_shield_tap_defender;
 mod issue_680_shalai_and_hallar_forgotten_ancient;
 mod issue_680_shalai_upkeep_move;

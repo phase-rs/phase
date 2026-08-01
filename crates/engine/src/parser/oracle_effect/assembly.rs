@@ -1625,9 +1625,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         // 1 runs as printed, then the tail runs from
                         // `else_ability`. Single-clause bases collapse to the
                         // prior shape (empty tail → no `else_ability`).
-                        // U6-C2: `Instead` is the ONLY handler that binds FirstEmitted
-                        // (CR 608.2c — the override replaces the FIRST printed
-                        // instruction). Do not unify it with the `Last*` selectors.
+                        // U6-C2: `Instead` is the ONLY handler that begins from
+                        // FirstEmitted. Its one structural refinement is an optional
+                        // payment: there, the override replaces the immediate
+                        // `IfYouDo` continuation, not the payment instruction.
+                        // Do not unify it with the `Last*` selectors.
                         let bound = env.resolve(
                             &defs,
                             AntecedentSelector::FirstEmitted,
@@ -1649,21 +1651,51 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 append_to_deepest_sub_ability(&mut root, Some(Box::new(next)));
                             }
                             let mut instead = *instead_def.clone();
-                            // CR 702.33d + CR 707.10: Resolve "create N of those
-                            // tokens" anaphor against the root (the antecedent
-                            // for a multi-clause base is the first printed clause).
-                            rewrite_those_tokens_from_antecedent(&mut instead.effect, &root.effect);
-                            if rewrite_counter_instead_target_from_antecedent(
-                                &mut instead.effect,
-                                &root.effect,
-                            ) {
-                                instead.target_choice_timing = root.target_choice_timing;
+                            if instead_replaces_optional_payment_continuation(&root) {
+                                // CR 608.2c: after "you may pay ... If you do, X",
+                                // a later "Y instead" modifies X, not the preceding
+                                // payment instruction. Keep the payment as the root
+                                // and attach the override to its paid continuation.
+                                let continuation = root
+                                    .sub_ability
+                                    .as_deref_mut()
+                                    .expect("the optional-payment continuation was checked");
+                                rewrite_those_tokens_from_antecedent(
+                                    &mut instead.effect,
+                                    &continuation.effect,
+                                );
+                                if rewrite_counter_instead_target_from_antecedent(
+                                    &mut instead.effect,
+                                    &continuation.effect,
+                                ) {
+                                    instead.target_choice_timing =
+                                        continuation.target_choice_timing;
+                                }
+                                if has_explicit_player_target(continuation.effect.as_ref()) {
+                                    rewrite_player_anaphor_targets_in_definition(&mut instead);
+                                }
+                                instead.else_ability = continuation.sub_ability.take();
+                                continuation.sub_ability = Some(Box::new(instead));
+                            } else {
+                                // CR 702.33d + CR 707.10: Resolve "create N of those
+                                // tokens" anaphor against the root (the antecedent
+                                // for a multi-clause base is the first printed clause).
+                                rewrite_those_tokens_from_antecedent(
+                                    &mut instead.effect,
+                                    &root.effect,
+                                );
+                                if rewrite_counter_instead_target_from_antecedent(
+                                    &mut instead.effect,
+                                    &root.effect,
+                                ) {
+                                    instead.target_choice_timing = root.target_choice_timing;
+                                }
+                                if has_explicit_player_target(root.effect.as_ref()) {
+                                    rewrite_player_anaphor_targets_in_definition(&mut instead);
+                                }
+                                instead.else_ability = root.sub_ability.take();
+                                root.sub_ability = Some(Box::new(instead));
                             }
-                            if has_explicit_player_target(root.effect.as_ref()) {
-                                rewrite_player_anaphor_targets_in_definition(&mut instead);
-                            }
-                            instead.else_ability = root.sub_ability.take();
-                            root.sub_ability = Some(Box::new(instead));
                             defs.push(root);
                             if let Some(id) = root_id {
                                 env.arena.reinstate(id);
@@ -2895,6 +2927,19 @@ fn rebind_condition_instead_damage_anaphor(
         return bind_anaphoric_damage_subject_keep_recipient(chain.effect.as_mut());
     }
     false
+}
+
+/// CR 608.2c: identify the structural "you may pay ... If you do, X" form
+/// whose immediate paid continuation, rather than the payment itself, can be
+/// modified by a following "Y instead" clause.
+fn instead_replaces_optional_payment_continuation(root: &AbilityDefinition) -> bool {
+    matches!(root.effect.as_ref(), Effect::PayCost { .. })
+        && root.sub_ability.as_ref().is_some_and(|continuation| {
+            continuation
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed)
+        })
 }
 
 #[cfg(test)]

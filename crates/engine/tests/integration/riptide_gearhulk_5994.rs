@@ -114,3 +114,72 @@ fn riptide_selects_one_opponent_target_and_declines_the_other() {
     // The declined opponent's permanent is untouched.
     outcome.assert_zone(&[p2_perm], Zone::Battlefield);
 }
+
+/// Issue #6565: "for each opponent, put up to one target nonland permanent THAT
+/// PLAYER controls ..." scopes each per-opponent target to the iterated
+/// opponent's permanents — never the caster's own. Offering the caster's own
+/// permanent as the sole target intent must leave it untouched (it is not a legal
+/// target for the opponent's slot), and the ability still resolves.
+#[test]
+fn riptide_per_opponent_slot_excludes_the_casters_own_permanents() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, riptide_mana());
+
+    let my_perm = scenario.add_creature(P0, "My Own Bear", 2, 2).id();
+    let opp_perm = scenario.add_creature(P1, "Opp Bear", 2, 2).id();
+    let riptide = scenario
+        .add_creature_to_hand_from_oracle(P0, "Riptide Gearhulk", 4, 4, RIPTIDE_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Offer ONLY the caster's own permanent as target intent. It is not a legal
+    // target for the opponent's per-opponent slot, so that slot is declined.
+    let outcome = runner
+        .cast(riptide)
+        .target_players(&[P1])
+        .target_objects(&[my_perm])
+        .resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the ETB must resolve to priority, got {:?}",
+        outcome.final_waiting_for()
+    );
+    // The caster's own permanent is not controlled by the opponent, so it can
+    // never be chosen for the opponent's slot — it stays on the battlefield.
+    outcome.assert_zone(&[my_perm], Zone::Battlefield);
+    outcome.assert_zone(&[opp_perm], Zone::Battlefield);
+}
+
+/// Issue #6565: each opponent's own permanent is legal only for that opponent's
+/// per-opponent slot. Selecting both opponents independently moves both targets
+/// to their owners' libraries while the caster's own permanent remains untouched.
+#[test]
+fn riptide_per_opponent_slots_target_each_opponents_permanent() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, riptide_mana());
+    scenario.add_card_to_library_top(P1, "P1 Library Card");
+    scenario.add_card_to_library_top(P2, "P2 Library Card");
+
+    let my_perm = scenario.add_creature(P0, "My Own Bear", 2, 2).id();
+    let p1_perm = scenario.add_creature(P1, "Opp1 Bear", 2, 2).id();
+    let p2_perm = scenario.add_creature(P2, "Opp2 Bear", 2, 2).id();
+    let riptide = scenario
+        .add_creature_to_hand_from_oracle(P0, "Riptide Gearhulk", 4, 4, RIPTIDE_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .cast(riptide)
+        .target_players(&[P1, P2])
+        .target_objects(&[p1_perm, p2_perm])
+        .resolve();
+
+    outcome.assert_zone(&[p1_perm, p2_perm], Zone::Library);
+    outcome.assert_zone(&[my_perm], Zone::Battlefield);
+    outcome.assert_zone(&[riptide], Zone::Battlefield);
+}

@@ -152,6 +152,31 @@ fn assess_candidate(ctx: &PolicyContext<'_>) -> GateDecision {
             }
         }
         GameAction::ChooseTarget { target: None } => GateDecision::Allow,
+        // CR 702.51a (Convoke) / CR 702.126a (Improvise) / Waterbend: a
+        // dual-purpose permanent's Colorless convoke-family marker must not be
+        // taken while a sibling candidate for the SAME object could still pay
+        // an outstanding colored pip via its native mana ability — spending
+        // the Colorless marker first permanently strands that pip and
+        // dead-ends `ManaPayment` (the Metallic Rebuke bug:
+        // `search::fallback_action`'s "can_cast_object_now has a gap" panic).
+        // Zero-cost dominance, not a scoring preference: the native ability
+        // can always still cover the trailing generic slot afterward.
+        GameAction::TapForConvoke {
+            object_id,
+            mana_type: ManaType::Colorless,
+        } => {
+            if matches!(ctx.decision.waiting_for, WaitingFor::ManaPayment { .. })
+                && crate::mana_colors::convoke_native_tap_still_demanded(
+                    ctx.state,
+                    &ctx.decision.candidates,
+                    *object_id,
+                )
+            {
+                GateDecision::Reject
+            } else {
+                GateDecision::Allow
+            }
+        }
         GameAction::SelectTargets { targets } => {
             for target in targets {
                 if let Some(rejection) = reject_futile_target(ctx, target) {

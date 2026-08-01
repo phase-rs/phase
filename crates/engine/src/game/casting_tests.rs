@@ -30955,6 +30955,367 @@ fn cant_be_activated_aura_blocks_enchanted_creature_not_others() {
     );
 }
 
+#[test]
+fn karn_blocks_liquimetal_coated_opponent_land() {
+    // Issue #6469: Karn's `TargetFilter::Typed(Artifact)` filter must apply to
+    // a permanent that becomes an artifact via a continuous type-changing
+    // effect (Liquimetal Coating's "becomes an artifact in addition to its
+    // other types until end of turn"), not just to permanents that are
+    // printed artifacts. Exercises the real GenericEffect -> transient
+    // continuous effect -> layer-4 AddType pipeline rather than hand-setting
+    // `card_types`, so a regression in that pipeline would be caught here too.
+    let mut state = setup_game_at_main_phase();
+
+    add_cant_be_activated_source(
+        &mut state,
+        PlayerId(0),
+        ProhibitionScope::AllPlayers,
+        TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+        ),
+    );
+
+    let coating = create_object(
+        &mut state,
+        CardId(0x1157),
+        PlayerId(0),
+        "Liquimetal Coating".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&coating)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Artifact);
+
+    let land = create_object(
+        &mut state,
+        CardId(0x1a2d),
+        PlayerId(1),
+        "Utility Land".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(0);
+        Arc::make_mut(&mut obj.abilities).push(
+            crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Activated,
+                crate::types::ability::Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+    }
+    let land_ability = state.objects[&land].abilities[0].clone();
+
+    assert!(
+        !is_blocked_by_cant_be_activated(&state, PlayerId(1), land, &land_ability),
+        "reach-guard: an uncoated land must not be blocked by Karn"
+    );
+
+    let ability = ResolvedAbility::new(
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![ContinuousModification::AddType {
+                    core_type: CoreType::Artifact,
+                }])],
+            duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
+            target: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
+            end_cost: None,
+        },
+        vec![TargetRef::Object(land)],
+        coating,
+        PlayerId(0),
+    );
+
+    let mut events = Vec::new();
+    crate::game::effects::effect::resolve(&mut state, &ability, &mut events).unwrap();
+    crate::game::layers::evaluate_layers(&mut state);
+
+    assert!(
+        state.objects[&land]
+            .card_types
+            .core_types
+            .contains(&CoreType::Artifact),
+        "Liquimetal Coating must make the land an artifact; core_types = {:?}",
+        state.objects[&land].card_types.core_types
+    );
+    assert!(
+        is_blocked_by_cant_be_activated(&state, PlayerId(1), land, &land_ability),
+        "Karn must block a Coating-turned-artifact land controlled by an opponent"
+    );
+}
+
+#[test]
+fn karn_blocks_liquimetal_coated_forest_from_legal_mana_actions() {
+    // Issue #6469: the ROOT CAUSE — `land_mana_options`'s basic-land-subtype
+    // fallback (`mana_sources.rs`) fired whenever `scan_mana_abilities` came
+    // back empty, without checking WHY it was empty. Karn correctly filters
+    // the coated Forest's real {T}: Add {G} ability out of `scan_mana_abilities`
+    // (confirmed by the reach-guard below), but the fallback then mistook that
+    // legitimate filtering for "no mana ability exists" and re-added an
+    // unconditional `ability_index: None` option for it, letting the opponent
+    // tap the Karn-blocked land for mana anyway. Exercises
+    // `activatable_mana_actions_for_player`, the real legal-action surface
+    // behind both the manual "tap for mana" UI and AI candidate generation.
+    let mut state = setup_game_at_main_phase();
+
+    add_cant_be_activated_source(
+        &mut state,
+        PlayerId(0),
+        ProhibitionScope::AllPlayers,
+        TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+        ),
+    );
+
+    // A real Forest: Land + "Forest" subtype + an explicit {T}: Add {G} ability
+    // (mirrors card-data.json's actual parsed Forest, not a bare subtype).
+    let forest = create_object(
+        &mut state,
+        CardId(0xF0125),
+        PlayerId(1),
+        "Forest".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&forest).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Forest".to_string());
+        obj.card_types.core_types.push(CoreType::Artifact); // Liquimetal Coating
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(0);
+        Arc::make_mut(&mut obj.abilities).push(
+            crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Activated,
+                crate::types::ability::Effect::Mana {
+                    produced: crate::types::ability::ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+    }
+    let forest_ability = state.objects[&forest].abilities[0].clone();
+
+    assert!(
+        is_blocked_by_cant_be_activated(&state, PlayerId(1), forest, &forest_ability),
+        "reach-guard: Karn must block the coated Forest's own {{T}}: Add {{G}} ability"
+    );
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        !legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "Karn must remove the coated Forest from P1's legal mana actions, got {legal_actions:?}"
+    );
+}
+
+#[test]
+fn karn_blocks_bare_subtype_artifact_land_from_legal_mana_actions() {
+    // Issue #6469 follow-up: the fix above only closed the gap for a land
+    // that carries an explicit `Effect::Mana` ability. A land with NO
+    // explicit ability at all — just a basic land subtype, the genuine
+    // Urborg/Blood-Moon-class case `land_mana_options`'s fallback exists for
+    // (CR 305.6: the "{T}: Add [mana symbol]" ability is intrinsic even with
+    // no text box) — hits `land_mana_options`'s bare-subtype fallback
+    // directly, bypassing `scan_mana_abilities` entirely. That intrinsic
+    // ability is still an activated mana ability (CR 305.6 + CR 605), so
+    // CR 602.5 activation prohibitions must block it exactly like a printed
+    // one. Companion to `karn_blocks_liquimetal_coated_forest_from_legal_mana_actions`,
+    // which covers the explicit-ability half of the same fallback.
+    let mut state = setup_game_at_main_phase();
+
+    add_cant_be_activated_source(
+        &mut state,
+        PlayerId(0),
+        ProhibitionScope::AllPlayers,
+        TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+        ),
+    );
+
+    // A bare-subtype Forest: Land + "Forest" subtype, no `abilities` entry at
+    // all — the intrinsic CR 305.6 ability, made an artifact by Liquimetal
+    // Coating and controlled by Karn's opponent.
+    let forest = create_object(
+        &mut state,
+        CardId(0xF0126),
+        PlayerId(1),
+        "Bare Forest".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&forest).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Forest".to_string());
+        obj.card_types.core_types.push(CoreType::Artifact); // Liquimetal Coating
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(0);
+    }
+    assert!(
+        state.objects[&forest].abilities.is_empty(),
+        "reach-guard: this land must have no explicit AbilityDefinition, so the \
+         bare-subtype fallback (not scan_mana_abilities) is the branch under test"
+    );
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        !legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "Karn must block the coated bare-subtype Forest's intrinsic mana ability too, \
+         got {legal_actions:?}"
+    );
+}
+
+#[test]
+fn bare_subtype_land_still_offers_mana_without_a_prohibition() {
+    // Positive companion to the regression above: with no CantBeActivated
+    // static in play, the bare-subtype fallback this whole family guards
+    // must still work — an ordinary basic land (no explicit ability) is a
+    // legal mana source via its CR 305.6 intrinsic ability.
+    let mut state = setup_game_at_main_phase();
+
+    let forest = create_object(
+        &mut state,
+        CardId(0xF0127),
+        PlayerId(1),
+        "Bare Forest".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&forest).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Forest".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(0);
+    }
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "an unprohibited bare-subtype land must still offer its intrinsic mana ability, \
+         got {legal_actions:?}"
+    );
+}
+
+/// Build a bare-subtype Forest (Land + "Forest" subtype, no explicit
+/// `abilities` entry) under `controller`, so `land_mana_options`'s
+/// bare-subtype fallback — not `scan_mana_abilities` — is the branch under
+/// test. Shared by the three sibling-gate regressions below.
+fn add_bare_subtype_forest(state: &mut GameState, controller: PlayerId, card_id: u64) -> ObjectId {
+    let forest = create_object(
+        state,
+        CardId(card_id),
+        controller,
+        "Bare Forest".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&forest).unwrap();
+    obj.card_types.core_types.push(CoreType::Land);
+    obj.card_types.subtypes.push("Forest".to_string());
+    obj.base_card_types = obj.card_types.clone();
+    obj.entered_battlefield_turn = Some(0);
+    forest
+}
+
+#[test]
+fn bare_subtype_land_detained_excluded_from_legal_mana_actions() {
+    // CR 701.35a + CR 305.6: a detained permanent's activated abilities can't
+    // be activated — including a bare-subtype land's intrinsic mana ability,
+    // which `intrinsic_land_mana_ability_blocked` must route through the same
+    // `mana_ability_ready_without_simulation_gated` readiness authority a
+    // printed mana ability uses, not just the two activation-prohibition
+    // statics (issue #6469 follow-up).
+    let mut state = setup_game_at_main_phase();
+    let forest = add_bare_subtype_forest(&mut state, PlayerId(1), 0xF0128);
+    state
+        .objects
+        .get_mut(&forest)
+        .unwrap()
+        .detained_by
+        .insert(PlayerId(0));
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        !legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "a detained bare-subtype land must not offer its intrinsic mana ability, \
+         got {legal_actions:?}"
+    );
+}
+
+#[test]
+fn bare_subtype_land_phased_out_excluded_from_legal_mana_actions() {
+    // CR 702.26b + CR 305.6: a phased-out permanent is treated as though it
+    // doesn't exist and can't activate abilities — including a bare-subtype
+    // land's intrinsic mana ability.
+    let mut state = setup_game_at_main_phase();
+    let forest = add_bare_subtype_forest(&mut state, PlayerId(1), 0xF0129);
+    state.objects.get_mut(&forest).unwrap().phase_status =
+        crate::game::game_object::PhaseStatus::PhasedOut {
+            cause: crate::game::game_object::PhaseOutCause::Directly,
+        };
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        !legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "a phased-out bare-subtype land must not offer its intrinsic mana ability, \
+         got {legal_actions:?}"
+    );
+}
+
+#[test]
+fn bare_subtype_land_cant_tap_excluded_from_legal_mana_actions() {
+    // CR 101.2 + CR 107.5 + CR 601.2h + CR 602.2b + CR 305.6: a permanent that
+    // can't become tapped can't pay a {T} activation cost — including a bare-subtype land's
+    // intrinsic {T}: Add mana ability.
+    let mut state = setup_game_at_main_phase();
+    let forest = add_bare_subtype_forest(&mut state, PlayerId(1), 0xF012A);
+    state
+        .objects
+        .get_mut(&forest)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::CantTap).affected(TargetFilter::SelfRef));
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        !legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "a can't-tap bare-subtype land must not offer its intrinsic mana ability, \
+         got {legal_actions:?}"
+    );
+}
+
 // === CR 605.1a: Pithing Needle mana-ability exemption gate ===
 
 /// Build a Llanowar-Elves-style mana ability: `{T}: Add {G}` (no targets, produces mana).
