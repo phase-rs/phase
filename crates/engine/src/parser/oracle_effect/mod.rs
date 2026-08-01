@@ -19104,7 +19104,21 @@ fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
 /// amount must be retargeted to `Anaphoric` (resolved to `targets[0]` by the
 /// runtime one-sided-fight fallback in `game/quantity.rs`), keeping the export
 /// in sync with the Oracle "its".
-fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope) {
+#[derive(Clone, Copy)]
+enum SourceRefRebind {
+    AllObjectRefs,
+    PowerOrToughness,
+}
+
+fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope, rebind: SourceRefRebind) {
+    if matches!(rebind, SourceRefRebind::PowerOrToughness)
+        && !matches!(
+            qty,
+            QuantityRef::Power { .. } | QuantityRef::Toughness { .. }
+        )
+    {
+        return;
+    }
     let scope = match qty {
         QuantityRef::Power { scope }
         | QuantityRef::Toughness { scope }
@@ -19123,9 +19137,9 @@ fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope) {
 
 /// `QuantityExpr` walker for `rebind_source_ref` (mirrors
 /// `rebind_anaphoric_object_scope`'s recursion).
-fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope) {
+fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope, rebind: SourceRefRebind) {
     match expr {
-        QuantityExpr::Ref { qty } => rebind_source_ref(qty, target),
+        QuantityExpr::Ref { qty } => rebind_source_ref(qty, target, rebind),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -19133,15 +19147,15 @@ fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope) {
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
             exponent: inner, ..
-        } => rebind_source_amount(inner, target),
+        } => rebind_source_amount(inner, target, rebind),
         QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
-                rebind_source_amount(inner, target);
+                rebind_source_amount(inner, target, rebind);
             }
         }
         QuantityExpr::Difference { left, right } => {
-            rebind_source_amount(left, target);
-            rebind_source_amount(right, target);
+            rebind_source_amount(left, target, rebind);
+            rebind_source_amount(right, target, rebind);
         }
         QuantityExpr::Fixed { .. } => {}
     }
@@ -19173,7 +19187,11 @@ fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope) {
 fn restore_this_way_trigger_anaphor(effect: &mut Effect) {
     match effect {
         Effect::DealDamage { amount, .. } | Effect::DamageEachPlayer { amount, .. } => {
-            rebind_source_amount(amount, ObjectScope::Anaphoric);
+            rebind_source_amount(
+                amount,
+                ObjectScope::Anaphoric,
+                SourceRefRebind::AllObjectRefs,
+            );
         }
         _ => {}
     }
@@ -19238,7 +19256,11 @@ fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     // gated inside this fresh-opponent branch so it can't touch unrelated
     // Source-amount cards. Anaphoric amounts are already correct and untouched.
     if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } = effect {
-        rebind_source_amount(amount, ObjectScope::Anaphoric);
+        rebind_source_amount(
+            amount,
+            ObjectScope::Anaphoric,
+            SourceRefRebind::AllObjectRefs,
+        );
     }
     true
 }
@@ -20838,50 +20860,6 @@ fn rebind_anaphoric_ref(qty: &mut QuantityRef, target: ObjectScope) {
     }
 }
 
-/// CR 208.1 + issue #6208: Retarget a residual `Source`-scoped "its power" /
-/// "its toughness" leaf to `target`. Only the target-subject damage path uses
-/// this: "target creature deals damage equal to TWICE its power" lowers "its
-/// power" via the multiplier CDA path to `Power{Source}` (unlike the singular
-/// form's rebindable `Anaphoric`), which reads the spell — power 0 — so the
-/// clause deals nothing. In that path the subject is the target creature, never
-/// the spell, so the source-scoped characteristic must follow the subject.
-///
-/// Restricted to `Power`/`Toughness` (the "its power/toughness" anaphor) so a
-/// legitimate `ObjectManaValue{Source}` / color-count "this spell's ..." ref is
-/// left intact. Self-subject damage (Duggan) is a bare `DealDamage` never routed
-/// through the target-subject wrapper, so its `Power{Source}` is never reached.
-fn retarget_source_power_toughness(expr: &mut QuantityExpr, target: ObjectScope) {
-    match expr {
-        QuantityExpr::Ref { qty } => {
-            if let QuantityRef::Power { scope } | QuantityRef::Toughness { scope } = qty {
-                if *scope == ObjectScope::Source {
-                    *scope = target;
-                }
-            }
-        }
-        QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::UpTo { max: inner }
-        | QuantityExpr::Power {
-            exponent: inner, ..
-        } => {
-            retarget_source_power_toughness(inner, target);
-        }
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            for inner in exprs {
-                retarget_source_power_toughness(inner, target);
-            }
-        }
-        QuantityExpr::Difference { left, right } => {
-            retarget_source_power_toughness(left, target);
-            retarget_source_power_toughness(right, target);
-        }
-        QuantityExpr::Fixed { .. } => {}
-    }
-}
-
 /// CR 120.1: True when a damage clause already carries the multi-source
 /// `EachTarget` marker (set by the parser for "their power" forms). Used to keep
 /// `wrap_target_subject_damage` from collapsing it to the single-source `Target`.
@@ -21077,7 +21055,11 @@ fn wrap_target_subject_damage(
         if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } =
             &mut clause.effect
         {
-            retarget_source_power_toughness(amount, ObjectScope::Target);
+            rebind_source_amount(
+                amount,
+                ObjectScope::Target,
+                SourceRefRebind::PowerOrToughness,
+            );
         }
     } else {
         return None;

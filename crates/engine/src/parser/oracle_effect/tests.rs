@@ -4979,6 +4979,60 @@ fn target_subject_damage_equal_to_its_power_uses_target_source_power() {
     );
 }
 
+#[test]
+fn source_power_toughness_rebind_preserves_other_source_refs() {
+    let mut amount = QuantityExpr::Sum {
+        exprs: vec![
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Source,
+                },
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Source,
+                },
+            },
+        ],
+    };
+
+    rebind_source_amount(
+        &mut amount,
+        ObjectScope::Target,
+        SourceRefRebind::PowerOrToughness,
+    );
+
+    assert!(matches!(
+        amount,
+        QuantityExpr::Sum { exprs }
+            if matches!(
+                exprs.as_slice(),
+                [
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Target,
+                        },
+                    },
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::Target,
+                        },
+                    },
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                ]
+            )
+    ));
+}
+
 /// Self-Destruct's second damage instruction inherits the target creature from
 /// the first subject clause; it must not resolve against the spell source.
 #[test]
