@@ -23196,9 +23196,9 @@ fn typed_trigger_source_counter_rider_binds_self_ref_not_triggering_source() {
 /// (Instant): "Target creature gets +2/+2 until end of turn. If it has a counter
 /// on it, it also gains flying and lifelink until end of turn." Both bare "it"
 /// pronouns anaphor to the TARGET creature, but the intervening-if condition
-/// mis-scopes the bare "it" to `CountersOn { scope: Source }`. Binding the gated
-/// grant to the source (SelfRef) would drop flying/lifelink onto the one-shot
-/// Instant — the card would lose its second sentence (an `engine_regress`).
+/// must be recipient-scoped instead of source-scoped. Binding the gated grant
+/// to the source (SelfRef) would drop flying/lifelink onto the one-shot Instant
+/// — the card would lose its second sentence (an `engine_regress`).
 /// `chain_has_prior_typed_referent` sees the prior "Target creature gets +2/+2"
 /// clause and suppresses the source binding, so the grant stays on the parent
 /// (target) creature. CR 608.2k only licenses a source anaphor when the ability's
@@ -23240,22 +23240,6 @@ fn source_counter_gate_over_prior_target_keeps_parent_not_self_ref() {
         .sub_ability
         .as_deref()
         .expect("flying/lifelink grant sub-ability");
-    assert!(
-        matches!(
-            grant.condition,
-            Some(AbilityCondition::QuantityCheck {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CountersOn {
-                        scope: ObjectScope::Target,
-                        ..
-                    },
-                },
-                ..
-            })
-        ),
-        "the bare counter-condition pronoun must read the target creature, got {:?}",
-        grant.condition
-    );
     let Effect::GenericEffect {
         static_abilities,
         target,
@@ -23281,6 +23265,14 @@ fn source_counter_gate_over_prior_target_keeps_parent_not_self_ref() {
         "the flying/lifelink continuous grant must affect the target creature (ParentTarget), \
          not the source Instant (SelfRef) — the #6559 regression this guard prevents"
     );
+    assert!(
+        matches!(
+            &static_abilities[0].condition,
+            Some(StaticCondition::RecipientHasCounters { .. })
+        ),
+        "the bare counter-condition pronoun must gate the recipient, got {:?}",
+        static_abilities[0].condition
+    );
 }
 
 /// CR 122.1 + CR 608.2c: A prior typed target does not rewrite an explicit
@@ -23301,21 +23293,23 @@ fn explicit_source_counter_gate_over_prior_target_stays_source_scoped() {
         .sub_ability
         .as_deref()
         .expect("conditional flying rider");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = rider.effect.as_ref()
+    else {
+        panic!(
+            "explicit source-counter rider must be a GenericEffect, got {:?}",
+            rider.effect
+        );
+    };
+    assert_eq!(static_abilities.len(), 1);
     assert!(
         matches!(
-            rider.condition,
-            Some(AbilityCondition::QuantityCheck {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CountersOn {
-                        scope: ObjectScope::Source,
-                        ..
-                    },
-                },
-                ..
-            })
+            &static_abilities[0].condition,
+            Some(StaticCondition::HasCounters { .. })
         ),
-        "explicit source text must retain CountersOn(Source), got {:?}",
-        rider.condition
+        "explicit source text must retain HasCounters, got {:?}",
+        static_abilities[0].condition
     );
 }
 

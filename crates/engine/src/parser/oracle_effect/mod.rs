@@ -296,82 +296,44 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
     }
 }
 
-fn condition_reads_source_counters(condition: &AbilityCondition) -> bool {
-    match condition {
-        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
-            quantity_expr_reads_source_counters(lhs) || quantity_expr_reads_source_counters(rhs)
-        }
-        AbilityCondition::PreviousEffectAmount { rhs, .. } => {
-            quantity_expr_reads_source_counters(rhs)
-        }
-        AbilityCondition::Not { condition }
-        | AbilityCondition::ConditionInstead { inner: condition } => {
-            condition_reads_source_counters(condition)
-        }
-        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
-            conditions.iter().any(condition_reads_source_counters)
-        }
-        _ => false,
-    }
+fn generic_effect_has_source_counter_condition(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect {
+            static_abilities,
+            ..
+        } if static_abilities.iter().any(|definition| {
+            matches!(&definition.condition, Some(StaticCondition::HasCounters { .. }))
+        })
+    )
 }
 
-/// CR 122.1 + CR 608.2c: Rebind a source-scoped counter read to the prior
-/// chosen target when a later leading `if it has … counter on it,` condition
-/// uses the bare recipient pronoun. Explicit source-counter conditions never
-/// reach this helper, so Gemstone Mine / Last Light source behavior is retained.
-fn rewrite_source_counter_condition_to_target(condition: &mut AbilityCondition) {
-    match condition {
-        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
-            rewrite_source_counter_quantity_expr_to_target(lhs);
-            rewrite_source_counter_quantity_expr_to_target(rhs);
-        }
-        AbilityCondition::PreviousEffectAmount { rhs, .. } => {
-            rewrite_source_counter_quantity_expr_to_target(rhs);
-        }
-        AbilityCondition::Not { condition }
-        | AbilityCondition::ConditionInstead { inner: condition } => {
-            rewrite_source_counter_condition_to_target(condition);
-        }
-        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
-            for condition in conditions {
-                rewrite_source_counter_condition_to_target(condition);
-            }
-        }
-        _ => {}
-    }
-}
+/// CR 122.1 + CR 608.2c: The bare recipient pronoun in a leading
+/// `if it has … counter on it,` gate follows the prior chosen target. This is
+/// the sole authority for that lexical form after its static definitions have
+/// been finalized; explicit source subjects never reach this helper.
+fn rewrite_generic_effect_source_counter_condition_to_recipient(effect: &mut Effect) {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        return;
+    };
 
-/// Rewrites only `CountersOn { scope: Source }` through the complete
-/// `QuantityExpr` wrapper tree; every other quantity reference is unchanged.
-fn rewrite_source_counter_quantity_expr_to_target(expr: &mut QuantityExpr) {
-    match expr {
-        QuantityExpr::Ref { qty } => {
-            if let QuantityRef::CountersOn { scope, .. } = qty {
-                if matches!(*scope, ObjectScope::Source) {
-                    *scope = ObjectScope::Target;
-                }
-            }
-        }
-        QuantityExpr::Fixed { .. } => {}
-        QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Offset { inner, .. } => {
-            rewrite_source_counter_quantity_expr_to_target(inner);
-        }
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            for inner in exprs {
-                rewrite_source_counter_quantity_expr_to_target(inner);
-            }
-        }
-        QuantityExpr::UpTo { max } => rewrite_source_counter_quantity_expr_to_target(max),
-        QuantityExpr::Power { exponent, .. } => {
-            rewrite_source_counter_quantity_expr_to_target(exponent);
-        }
-        QuantityExpr::Difference { left, right } => {
-            rewrite_source_counter_quantity_expr_to_target(left);
-            rewrite_source_counter_quantity_expr_to_target(right);
-        }
+    for definition in static_abilities {
+        let Some(StaticCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        }) = &definition.condition
+        else {
+            continue;
+        };
+        definition.condition = Some(StaticCondition::RecipientHasCounters {
+            counters: counters.clone(),
+            minimum: *minimum,
+            maximum: *maximum,
+        });
     }
 }
 
@@ -30250,30 +30212,14 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             (None, text)
         };
-        let mut condition = match (condition, unless_same_name_condition) {
+        let condition = match (condition, unless_same_name_condition) {
             (Some(existing), Some(unless_cond)) => Some(AbilityCondition::And {
                 conditions: vec![existing, unless_cond],
             }),
             (None, Some(unless_cond)) => Some(unless_cond),
             (existing, None) => existing,
         };
-        // CR 122.1 + CR 608.2c: a preceding typed target is the antecedent of
-        // the bare recipient pronoun in "If it has … counter on it, …". The
-        // counter condition parser normally maps that pronoun to Source; retain
-        // that default for explicit source subjects and for targetless chains.
         let prior_typed_referent = chain_has_prior_typed_referent(builder.clauses(), false);
-        if prior_typed_referent
-            && condition
-                .as_ref()
-                .is_some_and(condition_reads_source_counters)
-            && crate::parser::oracle_nom::condition::is_leading_if_bare_recipient_counter_condition(
-                normalized_text,
-            )
-        {
-            if let Some(condition) = condition.as_mut() {
-                rewrite_source_counter_condition_to_target(condition);
-            }
-        }
         // CR 701.34a + CR 122.1: keep the whole "for each kind of counter on
         // target permanent or player, give … another counter of that kind"
         // clause intact so the targeted-proliferate recognizer in
@@ -30611,17 +30557,11 @@ pub(crate) fn parse_effect_chain_ir(
         }
         .or_else(|| ctx.actor.clone());
         let if_you_do_anchor = if_you_do_object_anchor(builder.clauses(), &condition);
-        // CR 608.2k: A source-scoped counter gate rebinds a bare "it" in the gated
-        // body to the ability's own source ONLY when that source is the pronoun's
-        // real antecedent — i.e. the ability's cost/trigger named it and no earlier
-        // clause introduced a chosen target. When a prior clause DID choose a typed
-        // target ("Target creature gets +2/+2 …"), the gated body's "it" anaphors to
-        // that target, not the source — Revelation of Power ("… If it has a counter
-        // on it, it also gains flying and lifelink") mis-scopes its bare "it" to
-        // CountersOn{Source}, and binding it to the source would drop the grant onto
-        // the Instant. `chain_has_prior_typed_referent` is false for the depletion
-        // lands / counter riders (whose prior clause is "Add mana" or "put a counter
-        // on ~", not a typed target), so every intended heal is unaffected.
+        // CR 608.2k: An `AbilityCondition` source-counter gate binds a bare
+        // body pronoun to the source only when no prior clause chose a typed
+        // target. This preserves the depletion-land / counter-rider class;
+        // GenericEffect static counter gates are rebound after their static
+        // definitions are finalized below.
         let binds_source_counter_pronoun =
             condition.as_ref().is_some_and(condition_refs_source_object) && !prior_typed_referent;
         let chunk_subject = if binds_source_counter_pronoun {
@@ -31196,6 +31136,14 @@ pub(crate) fn parse_effect_chain_ir(
         // carries the caster default (Controller). Per D-04, this is parse-time
         // pronoun resolution that belongs in IR production.
         let mut clause = clause;
+        if prior_typed_referent
+            && generic_effect_has_source_counter_condition(&clause.effect)
+            && crate::parser::oracle_nom::condition::is_leading_if_bare_recipient_counter_condition(
+                normalized_text,
+            )
+        {
+            rewrite_generic_effect_source_counter_condition_to_recipient(&mut clause.effect);
+        }
         // CR 608.2c: Bind a bare anaphoric "the difference" count placeholder in
         // this clause against the two operands its own leading `QuantityCheck`
         // condition established ("If the discovered card's mana value is less than
