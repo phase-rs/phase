@@ -3136,6 +3136,401 @@ scryfall_oracle_id = "33ec3894-6ec2-4038-bed4-85e5b9cfe182"
 preset_id = "02dd9f56-d7d1-53e3-9819-b3029e8adbd6"
 
 [[token]]
+id = "02de53f1-cef2-51b6-b98e-93dfed407d19"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Alchemist's Talent",
+    "Alicia Masters, Skilled Sculptor",
+    "An Offer You Can't Refuse",
+    "Ancestors' Aid",
+    "Ancient Adamantoise",
+    "Ancient Copper Dragon",
+    "Ant-Man's Army",
+    "Ant-Man, Elusive Avenger",
+    "Ashling's Command",
+    "Atsushi, the Blazing Sky",
+    "Avengers: Under Siege",
+    "Axgard Artisan",
+    "Baeloth Barrityl, Entertainer",
+    "Bank Job",
+    "Battle Angels of Tyr",
+    "Beamtown Beatstick",
+    "Beza, the Bounding Spring",
+    "Big Score",
+    "Big Spender",
+    "Bilbo, Retired Burglar",
+    "Bill Ferny, Bree Swindler",
+    "Black Market Connections",
+    "Black Market Tycoon",
+    "Blood Money",
+    "Bloodroot Apothecary",
+    "Blooming Blast",
+    "Bonehoard Dracosaur",
+    "Boneyard Desecrator",
+    "Bootleggers' Stash",
+    "Bottle-Cap Blast",
+    "Boxing Ring",
+    "Brass's Bounty",
+    "Brazen Freebooter",
+    "Breeches, Eager Pillager",
+    "Bucknard's Everfull Purse",
+    "Burakos, Party Leader",
+    "Burdened Aerialist",
+    "Buy Your Silence",
+    "Captain Lannery Storm",
+    "Careening Mine Cart",
+    "Casey & Raph, Hotheads",
+    "Cataclysmic Prospecting",
+    "Cavern-Hoard Dragon",
+    "Centrifuge",
+    "Charming Scoundrel",
+    "City of Death",
+    "Cloud, Ex-SOLDIER",
+    "Coin of Mastery",
+    "Collector's Vault",
+    "Common Crook",
+    "Contested Game Ball",
+    "Contract Hero",
+    "Contract Killing",
+    "Corsair Captain",
+    "Covetous Elegy",
+    "Crack Open",
+    "Creative Outburst",
+    "Crossover Collaboration",
+    "Culmination of Studies",
+    "Currency Converter",
+    "Cutthroat Negotiator",
+    "Daily Bugle Newspaper",
+    "Deadeye Plunderers",
+    "Deadly Derision",
+    "Deadly Dispute",
+    "Death to Our Enemies",
+    "Decadent Dragon // Expensive Taste",
+    "Depths of Desire",
+    "Descent into Avernus",
+    "Diamond Pick-Axe",
+    "Dihada, Binder of Wills",
+    "Dire Fleet Hoarder",
+    "Discerning Financier",
+    "Dockside Extortionist",
+    "Don Andres, the Renegade",
+    "Done for the Day",
+    "Dungeon of the Mad Mage",
+    "Dungeoneer's Pack",
+    "Edward Kenway",
+    "Elemental Masterpiece",
+    "Emissary Green",
+    "Enterprising Scallywag",
+    "Erestor of the Council",
+    "Evin, Waterdeep Opportunist",
+    "Excavation Technique",
+    "Exhibition Magician",
+    "Exit Through the Grift Shop",
+    "Fable of the Mirror-Breaker // Reflection of Kiki-Jiki",
+    "Fae Offering",
+    "Fain, the Broker",
+    "Fake Your Own Death",
+    "Flamekin Gildweaver",
+    "Flick a Coin",
+    "Forging the Tyrite Sword",
+    "Forsworn Paladin",
+    "Fountainport",
+    "Furnace Reins",
+    "Gadrak, the Crown-Scourge",
+    "Gala Greeters",
+    "Galadriel, Gift-Giver",
+    "Galazeth Prismari",
+    "Ganax, Astral Hunter",
+    "Gemcutter Buccaneer",
+    "Generous Plunderer",
+    "Gilded Ghoda",
+    "Gilded Pinions",
+    "Gimli of the Glittering Caves",
+    "Gleaming Barrier",
+    "Glittermonger",
+    "Gluntch, the Bestower",
+    "Glóin, Dwarf Emissary",
+    "Goblin Airbrusher",
+    "Goblin Glasswright // Craft with Pride",
+    "Goblin Shaman",
+    "Gold Pan",
+    "Gold Rush",
+    "Goldlust Triad",
+    "Goldspan Dragon",
+    "Goldvein Hydra",
+    "Goldvein Pick",
+    "Gonti, Night Minister",
+    "Gorbag of Minas Morgul",
+    "Grabby Giant // That's Mine",
+    "Great Train Heist",
+    "Greedy Freebooter",
+    "Grim Bounty",
+    "Grim Hireling",
+    "Guild Artisan",
+    "Halo Scarab",
+    "Heap Gate",
+    "Heartless Pillage",
+    "Hell to Pay",
+    "Henry Wu, InGen Geneticist",
+    "Herald of Hadar",
+    "Heroes for Hire",
+    "Hit the Mother Lode",
+    "Hoard Hauler",
+    "Hoard Robber",
+    "Hoarding Ogre",
+    "Hornswoggle",
+    "Hullbreacher",
+    "Ignacio of Myra's Marvels",
+    "Impetuous Lootmonger",
+    "Improvised Weaponry",
+    "Impulsive Pilferer",
+    "Indulge // Excess",
+    "Ingenious Mastery",
+    "Inspired Tinkering",
+    "Instrument of the Bards",
+    "Invasion of Ergamon // Truga Cliffcharger",
+    "Involuntary Employment",
+    "Iron Man, Titan of Innovation",
+    "J. Jonah Jameson",
+    "Jan Jansen, Chaos Crafter",
+    "Jared Carthalion",
+    "Jewel Thief",
+    "Jewel-Eyed Cobra",
+    "Jolene, Plundering Pugilist",
+    "Jolene, the Plunder Queen",
+    "Kain, Traitorous Dragoon",
+    "Kalain, Reclusive Painter",
+    "Kamachal, Ship's Mascot",
+    "Kellogg, Dangerous Mind",
+    "Kerblam! Warehouse",
+    "Kheru Goldkeeper",
+    "Killmonger, Ruthless Usurper",
+    "Kingpin, Wilson Fisk",
+    "Knuckles the Echidna",
+    "Korvold and the Noble Thief",
+    "Lara Croft, Tomb Raider",
+    "Life Insurance",
+    "Lobelia Sackville-Baggins",
+    "Locke, Treasure Hunter",
+    "Loot Dispute",
+    "Lost Mine of Phandelver",
+    "Lotho, Corrupt Shirriff",
+    "Luck Bobblehead",
+    "Luke Cage, Hero for Hire",
+    "Luxurious Locomotive",
+    "Magda, Brazen Outlaw",
+    "Magda, the Hoardmaster",
+    "Magic Pot",
+    "Magma Opus",
+    "Magmatic Galleon",
+    "Mahadi, Emporium Master",
+    "Malcolm, Keen-Eyed Navigator",
+    "Malik, Grim Manipulator",
+    "Marching Duodrone",
+    "Mari, the Killing Quill",
+    "Marut",
+    "Mary Read and Anne Bonny",
+    "Master of Ceremonies",
+    "Mastermind Plum",
+    'Meet and Greet "Sisay"',
+    "Megaton's Fate",
+    "Meticulous Artisan",
+    "Mine Raider",
+    "Mines of Moria",
+    "Misfortune Teller",
+    "Monologue Tax",
+    "Monument to Endurance",
+    "Most Wanted",
+    "Mr. House, President and CEO",
+    "My Wealth Will Bury You",
+    "Namazu Trader",
+    "New New York",
+    "Noble's Purse",
+    "Noggle Robber",
+    "North Pole Research Base",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Ognis, the Dragon's Lash",
+    "Old Gnawbone",
+    "Old Rutstein",
+    "Olivia, Opulent Outlaw",
+    "Orochi Soul-Reaver",
+    "Pain Distributor",
+    "Patient Naturalist",
+    "Patron of the Arts",
+    "Petty Larceny",
+    "Pick-a-Beeble",
+    "Pictures of Spider-Man",
+    "Piggy Bank",
+    "Pinkie Pie",
+    "Pirate's Pillage",
+    "Pirate's Prize",
+    "Pitiless Plunderer",
+    "Plundering Barbarian",
+    "Plundering Pirate",
+    "Poetic Ingenuity",
+    "Prismari Command",
+    "Prized Statue",
+    "Prizefight",
+    "Professional Face-Breaker",
+    "Professional Wrestler",
+    "Prompto Argentum",
+    "Prosper, Tome-Bound",
+    "Prosperous Bandit",
+    "Prosperous Innkeeper",
+    "Prosperous Partnership",
+    "Prosperous Pirates",
+    "Prosperous Thief",
+    "Prying Blade",
+    "Puppet Master, String Puller",
+    "RMS Titanic",
+    "Racketeer Boss",
+    "Ragavan, Nimble Pilferer",
+    "Rain of Riches",
+    "Ramirez DePietro, Pillager",
+    "Rankle and Torbran",
+    "Rapacious Dragon",
+    "Rashmi and Ragavan",
+    "Reckless Endeavor",
+    "Reckless Lackey",
+    "Reckless Ransacking",
+    "Reckoner Bankbuster // Reckoner Bankbuster",
+    "Redcap Thief",
+    "Redrock Sentinel",
+    "Relic Retriever",
+    "Rev, Tithe Extractor",
+    "Revel in Riches",
+    "Riveteers Requisitioner",
+    "Rocketeer Boostbuggy",
+    "Rose Room Treasurer",
+    "Ruthless Knave",
+    "Ruthless Technomancer",
+    "Safana, Calimport Cutthroat",
+    "Sailor of Means",
+    "Sanar, Unfinished Genius // Wild Idea",
+    "Sarkhan, Dragon Ascendant",
+    "Scion of Opulence",
+    "Scuzzback Scrounger",
+    "Season of the Bold",
+    "Seize the Spoils",
+    "Seize the Spotlight",
+    "Setzer, Wandering Gambler",
+    "Shambling Ghast",
+    "Shiny Impetus",
+    "Sidequest: Hunt the Mark // Yiazmat, Ultimate Mark",
+    "Skullport Merchant",
+    "Smashing Success",
+    "Smaug",
+    "Smoke Blessing",
+    "Smoke Spirits' Aid",
+    "Smothering Tithe",
+    "Smuggler's Share",
+    "Song of Eärendil",
+    "Sonic the Hedgehog",
+    "Spectrox Mines",
+    "Spell Swindle",
+    "Spiked Pit Trap",
+    "Spiteful Banditry",
+    "Spiteful Repossession",
+    "Stark Industries Executive",
+    "Sticky Fingers",
+    "Stimulus Package",
+    "Storm the Vault // Vault of Catlacan",
+    "Storm-Kiln Artist",
+    "Strike It Rich",
+    "Sudden Breakthrough",
+    "Summon: Yojimbo",
+    "Surly Badgersaur",
+    "Swarming of Moria",
+    "Swashbuckler Extraordinaire",
+    "Sword of Wealth and Power",
+    "Tataru Taru",
+    "Tavern Scoundrel",
+    "Tempting Contract",
+    "Teval's Judgment",
+    "The Balrog of Moria",
+    "The Belligerent",
+    "The Ghoul, Gunslinger",
+    "The Gold Saucer",
+    "The Golden City of Orazca",
+    "The Matrix of Time",
+    "The Reaver Cleaver",
+    "The Third Doctor",
+    "The Western Cloud",
+    "There and Back Again",
+    "Thieves' Tools",
+    "Ticket Tortoise",
+    "Tireless Provisioner",
+    "Tivit, Seller of Secrets",
+    "Tokka & Rahzar, Unsupervised",
+    "Treasure Chest",
+    "Treasure Dredger",
+    "Treasure Map // Treasure Cove",
+    "Treasure Vault",
+    "Trove of Temptation",
+    "Typhoid Mary, Fractured",
+    "Ultimate Green Goblin",
+    "Undercity // The Initiative",
+    "Undercity Dire Rat",
+    "Undercity Scrounger",
+    "Unexpected Windfall",
+    "Urabrask // The Great Work",
+    "Vaan, Street Thief",
+    "Vault 21: House Gambit",
+    "Vault Robber",
+    "Vazi, Keen Negotiator",
+    "Village Pillagers",
+    "Visions of Ruin",
+    "Volatile Fault",
+    "Vraska, Relic Seeker",
+    "Wanted Scoundrels",
+    "Warren Soultrader",
+    "Widespread Thieving",
+    "Wily Goblin",
+    "Wish Good Luck",
+    "Xorn",
+    "You Find a Cursed Idol",
+    "You've Been Caught Stealing",
+    "Young Red Dragon // Bathe in Gold",
+    "Zhentarim Bandit",
+    "Ziatora, the Incinerator",
+    "Zidane, Tantalus Thief",
+]
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "13"
+released_at = "2026-08-14"
+type_line = "Token Artifact — Treasure"
+rules_text = "{T}, Sacrifice this token: Add one mana of any color."
+
+[token.category.PredefinedArtifact]
+kind = "Treasure"
+
+[token.body]
+display_name = "Treasure"
+core_types = ["Artifact"]
+subtypes = ["Treasure"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Pitiless Plunderer"
+scryfall_oracle_id = "a784481f-eccb-4112-bb38-04a659319660"
+scryfall_id = "6a4b4679-6ca9-49e1-a7ee-2b7a30e3e06c"
+
+[[token.source_card_refs]]
+card_name = "Hullbreacher"
+scryfall_oracle_id = "2f533667-e29b-4bec-897a-e7a9eee08314"
+scryfall_id = "c2a0530f-7b72-4a33-8eec-bcd75d9c3045"
+
+[token.token_image_ref]
+scryfall_id = "d1892b78-7663-4cbd-a732-9a4b0b18d4c8"
+scryfall_oracle_id = "3c549374-6c37-42e0-8d88-a8555d46732d"
+preset_id = "02de53f1-cef2-51b6-b98e-93dfed407d19"
+
+[[token]]
 id = "02eda719-658b-52e3-8f94-b66dda715865"
 fidelity = "Full"
 source_card_names = [
@@ -10184,7 +10579,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -11272,7 +11666,6 @@ source_card_names = [
     "Ravenform",
     "Riku of Many Paths",
     "The Raven's Warning",
-    "Wolf",
 ]
 set_code = "30A"
 set_name = "30th Anniversary Edition"
@@ -14088,7 +14481,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -14530,7 +14922,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -15932,7 +16323,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -17376,7 +17766,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -21786,6 +22175,35 @@ scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
 preset_id = "17c6893a-8119-5836-9b3d-bd0a5e30a264"
 
 [[token]]
+id = "1807fddd-eb99-5c9c-9f3d-acc8bc0cce4f"
+category = "Creature"
+fidelity = "Full"
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "1"
+released_at = "2026-08-14"
+type_line = "Token Creature — Bird Soldier"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Bird Soldier"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Bird",
+    "Soldier",
+]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[token.token_image_ref]
+scryfall_id = "9ed2d2f3-e1b0-41e0-a29d-31624e5e9004"
+scryfall_oracle_id = "9e44ccd6-134d-483f-a98c-222012e30af5"
+preset_id = "1807fddd-eb99-5c9c-9f3d-acc8bc0cce4f"
+
+[[token]]
 id = "1822997f-1ab6-5ff4-81ce-5d9fce80086e"
 category = "Creature"
 fidelity = "Full"
@@ -24504,7 +24922,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -29594,6 +30011,32 @@ scryfall_id = "1dd64b1d-bcef-476c-bf0b-3ac7df7cbed3"
 scryfall_id = "1f5fc2cb-a172-418a-a0f3-1a63a5f1aa2c"
 scryfall_oracle_id = "ccaaaaf6-2e86-41d6-b9d4-4e32fa16ff5b"
 preset_id = "22dbcfbd-79aa-5d9e-b5ee-ab3ef77529db"
+
+[[token]]
+id = "23037e23-edb0-5399-b5cd-4f1a209b22dd"
+category = "Equipment"
+fidelity = "PartialMissingAbilities"
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "10"
+released_at = "2026-08-14"
+type_line = "Token Artifact — Equipment"
+rules_text = """
+Equipped creature gets +1/+0.
+Equip {2} ({2}: Attach to target creatre you control. Equip only as a sorcery.)"""
+
+[token.body]
+display_name = "Axe"
+core_types = ["Artifact"]
+subtypes = ["Equipment"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "6f7a3999-e341-43bb-9b8f-6c1a05b98906"
+scryfall_oracle_id = "3ac207f4-0510-4b6a-8579-93dfba830537"
+preset_id = "23037e23-edb0-5399-b5cd-4f1a209b22dd"
 
 [[token]]
 id = "2303a4a8-1b9b-52e8-87be-c293fee84ffd"
@@ -38062,6 +38505,73 @@ scryfall_oracle_id = "19b91a3f-d886-4df0-9069-27cc3e1e9bf5"
 preset_id = "2e65d6d5-6d8b-5dbd-a0a0-97c2bffc38fc"
 
 [[token]]
+id = "2e66947f-1d43-5b4c-be28-5eede67607d0"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Arlinn Kord // Arlinn, Embraced by the Moon",
+    "Arlinn, Voice of the Pack",
+    "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
+    "Bestial Menace",
+    "Child of the Pack // Savage Packmate",
+    "Cult of the Waxing Moon",
+    "Elturgard Ranger",
+    "Fable of Wolf and Owl",
+    "Faldorn, Dread Wolf Herald",
+    "Feed the Pack",
+    "Ferocious Pup",
+    "Garruk Relentless // Garruk, the Veil-Cursed",
+    "Hollowhenge Overlord",
+    "Howl of the Night Pack",
+    "Howling Giant",
+    "Howling Moon",
+    "Huntmaster of the Fells // Ravager of the Fells",
+    "Journey to the Lost City",
+    "Kessig Cagebreakers",
+    "Mantle of the Wolf",
+    "Master of the Wild Hunt",
+    "Mayor of Avabruck // Howlpack Alpha",
+    "Nightpack Ambusher",
+    "Pack Guardian",
+    "Predator's Howl",
+    "Raised by Wolves",
+    "Ranger Class",
+    "Silverfur Partisan",
+    "Somberwald Beastmaster",
+    "Sword of Body and Mind",
+    "Tovolar's Huntmaster // Tovolar's Packleader",
+    "Turntimber Ranger",
+    "Varis, Silverymoon Ranger",
+    "Wolf-Skull Shaman",
+    "Wolfbriar Elemental",
+    "Wolfcaller's Howl",
+    "Wolfkin Bond",
+    "Wolfrider's Saddle",
+    "Wolfwillow Haven",
+    "Wren's Run Packmaster",
+]
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "9"
+released_at = "2026-08-14"
+type_line = "Token Creature — Wolf"
+
+[token.body]
+display_name = "Wolf"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Wolf"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "e07312b9-f3c1-4e36-88fc-b29cde581eb6"
+scryfall_oracle_id = "b2224843-8274-4872-a7ca-2adf69cc066b"
+preset_id = "2e66947f-1d43-5b4c-be28-5eede67607d0"
+
+[[token]]
 id = "2e7a8472-b64e-5e06-9904-ff8e394c7072"
 category = "Creature"
 fidelity = "Full"
@@ -38698,6 +39208,41 @@ scryfall_id = "038b1aa1-60de-4047-a927-1a7e62209041"
 scryfall_id = "964b7e7f-af5d-495a-80a6-2fc87e35e358"
 scryfall_oracle_id = "40c64f08-ab2f-4933-8e0e-d1a1c729008f"
 preset_id = "2f6c908a-f5d8-5f28-ac4b-5538518828e6"
+
+[[token]]
+id = "2f6f0b98-9299-5623-a8f3-6db6a05e81e4"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Mega Flare",
+    "Utvara Hellkite",
+]
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "5"
+released_at = "2026-08-14"
+type_line = "Token Creature — Dragon"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Dragon"
+power = 6
+toughness = 6
+core_types = ["Creature"]
+subtypes = ["Dragon"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Utvara Hellkite"
+scryfall_oracle_id = "05a6a571-643e-429e-8e5c-1c3f8b0dc746"
+scryfall_id = "61243a31-6608-451f-9ba1-4f8ecc5aaad1"
+
+[token.token_image_ref]
+scryfall_id = "1e4408fa-8037-42f1-989e-2da84867f76c"
+scryfall_oracle_id = "606c46d7-18a5-4cce-9975-029899b82b34"
+preset_id = "2f6f0b98-9299-5623-a8f3-6db6a05e81e4"
 
 [[token]]
 id = "2f870f14-6517-5fcc-8656-66db0fedf25e"
@@ -51360,16 +51905,6 @@ scryfall_oracle_id = "62648946-1708-48f4-ba40-c057563ab11b"
 scryfall_id = "b29c9e4f-7b98-4610-a681-ae6297e8fc72"
 
 [[token.source_card_refs]]
-card_name = "Bearscape"
-scryfall_oracle_id = "7e481e22-4122-4259-8978-4727eb307195"
-scryfall_id = "d8855d65-98fc-4b5f-bd68-95d2fda6345f"
-
-[[token.source_card_refs]]
-card_name = "Grizzly Fate"
-scryfall_oracle_id = "f3073e4f-ca7e-4fde-88a4-bd7b6ebfbc8c"
-scryfall_id = "a86f5a84-cdb0-499a-9bf1-029695b7d060"
-
-[[token.source_card_refs]]
 card_name = "Fade from History"
 scryfall_oracle_id = "533767ca-7208-4c88-b160-375479b68285"
 scryfall_id = "92646d9a-67ea-40b0-9b92-c8e1cbd31e4b"
@@ -51406,11 +51941,6 @@ scryfall_oracle_id = "7aae0a3d-8882-4485-a126-f06ea6593dcb"
 scryfall_id = "854c29a0-b7ea-433f-b342-a3228de0e092"
 
 [[token.source_card_refs]]
-card_name = "Path to the World Tree"
-scryfall_oracle_id = "a933f443-dd53-4805-8446-72693a27cb56"
-scryfall_id = "eadb3a01-f610-4df1-972b-7dd8c8bccdb7"
-
-[[token.source_card_refs]]
 card_name = "Titania's Command"
 scryfall_oracle_id = "7aae0a3d-8882-4485-a126-f06ea6593dcb"
 scryfall_id = "753567c7-c484-4c0d-8128-7710e23c428f"
@@ -51419,11 +51949,6 @@ scryfall_id = "753567c7-c484-4c0d-8128-7710e23c428f"
 card_name = "Titania's Command"
 scryfall_oracle_id = "7aae0a3d-8882-4485-a126-f06ea6593dcb"
 scryfall_id = "a158c1c7-5a03-42b8-ba94-92b11af3d89e"
-
-[[token.source_card_refs]]
-card_name = "Grizzly Fate"
-scryfall_oracle_id = "f3073e4f-ca7e-4fde-88a4-bd7b6ebfbc8c"
-scryfall_id = "75d22bb3-824e-4699-8352-42392af307d1"
 
 [token.token_image_ref]
 scryfall_id = "772dac39-269b-4a35-aad3-320279af833f"
@@ -52796,7 +53321,6 @@ source_card_names = [
     "Ravenform",
     "Riku of Many Paths",
     "The Raven's Warning",
-    "Wolf",
 ]
 set_code = "OTJ"
 set_name = "Outlaws of Thunder Junction"
@@ -53526,11 +54050,6 @@ keywords = ["Flying"]
 card_name = "Utvara Hellkite"
 scryfall_oracle_id = "05a6a571-643e-429e-8e5c-1c3f8b0dc746"
 scryfall_id = "df459109-d6ab-4b1d-9570-c7677ff4a014"
-
-[[token.source_card_refs]]
-card_name = "Utvara Hellkite"
-scryfall_oracle_id = "05a6a571-643e-429e-8e5c-1c3f8b0dc746"
-scryfall_id = "61243a31-6608-451f-9ba1-4f8ecc5aaad1"
 
 [[token.source_card_refs]]
 card_name = "Utvara Hellkite"
@@ -56006,7 +56525,6 @@ source_card_names = [
     "Ravenform",
     "Riku of Many Paths",
     "The Raven's Warning",
-    "Wolf",
 ]
 set_code = "MPR"
 set_name = "Magic Player Rewards 2001"
@@ -59620,7 +60138,6 @@ source_card_names = [
     "Ravenform",
     "Riku of Many Paths",
     "The Raven's Warning",
-    "Wolf",
 ]
 set_code = "EVE"
 set_name = "Eventide"
@@ -59796,7 +60313,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -65500,7 +66016,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -67718,6 +68233,35 @@ keywords = []
 scryfall_id = "e7c76857-f5bc-4624-9916-f109cdd6dea0"
 scryfall_oracle_id = "02d1dc2f-625e-4be3-9daf-e48c44bc9bf7"
 preset_id = "520736fb-7998-53cb-9bc3-40b0fd5853e7"
+
+[[token]]
+id = "520907cb-1acb-5fa9-890d-ca6a35d7ae5a"
+category = "Creature"
+fidelity = "Full"
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "11"
+released_at = "2026-08-14"
+type_line = "Token Artifact Creature — Wall"
+rules_text = "Defender"
+
+[token.body]
+display_name = "Stone Boulder"
+power = 3
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Wall"]
+supertypes = []
+colors = []
+keywords = ["Defender"]
+
+[token.token_image_ref]
+scryfall_id = "3440e247-a733-4609-9d80-d4a5fc58ae46"
+scryfall_oracle_id = "48871e9a-e08b-4d4d-b8ab-635ea7299e6e"
+preset_id = "520907cb-1acb-5fa9-890d-ca6a35d7ae5a"
 
 [[token]]
 id = "524e2513-4a49-53bf-a5fa-150dc718c5f1"
@@ -69990,7 +70534,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -71092,7 +71635,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -72269,7 +72811,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -80947,6 +81488,34 @@ scryfall_oracle_id = "180881c9-5ae7-4810-a17a-06b5994a48a1"
 preset_id = "5f94537e-fc38-5705-9ad7-753043780a24"
 
 [[token]]
+id = "5fca848a-7a6d-5b89-b3d7-03a66249a27c"
+category = "Creature"
+fidelity = "Full"
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "3"
+released_at = "2026-08-14"
+type_line = "Token Creature — Goblin Army"
+
+[token.body]
+display_name = "Goblin Army"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = [
+    "Goblin",
+    "Army",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "2e2028b1-34c0-40b6-8f65-79f79a279996"
+scryfall_oracle_id = "50592393-8998-4929-b6fb-eaaa6294d0a9"
+preset_id = "5fca848a-7a6d-5b89-b3d7-03a66249a27c"
+
+[[token]]
 id = "5fce24a2-3695-5bd7-b8a7-2c9fd21162d0"
 category = "Creature"
 fidelity = "Full"
@@ -81882,7 +82451,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -85821,7 +86389,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -101101,6 +101668,65 @@ scryfall_oracle_id = "41014a6a-0f5b-48ae-8cb8-9a89f0f0180f"
 preset_id = "767c5ca7-495a-5d46-83a5-97d8e520d679"
 
 [[token]]
+id = "76b41f36-3ec5-59c4-ae11-8f87dd4f0411"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Argoth, Sanctum of Nature",
+    "Ayula's Influence",
+    "Bearscape",
+    "Caller of the Claw",
+    "Fade from History",
+    "Flaxen Intruder // Welcome Home",
+    "Grizzly Fate",
+    "Kamahl's Summons",
+    "Mother Bear",
+    "Path to the World Tree",
+    "Titania's Command",
+    "Words of Wilding",
+]
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "7"
+released_at = "2026-08-14"
+type_line = "Token Creature — Bear"
+
+[token.body]
+display_name = "Bear"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Bear"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Bearscape"
+scryfall_oracle_id = "7e481e22-4122-4259-8978-4727eb307195"
+scryfall_id = "d8855d65-98fc-4b5f-bd68-95d2fda6345f"
+
+[[token.source_card_refs]]
+card_name = "Grizzly Fate"
+scryfall_oracle_id = "f3073e4f-ca7e-4fde-88a4-bd7b6ebfbc8c"
+scryfall_id = "a86f5a84-cdb0-499a-9bf1-029695b7d060"
+
+[[token.source_card_refs]]
+card_name = "Path to the World Tree"
+scryfall_oracle_id = "a933f443-dd53-4805-8446-72693a27cb56"
+scryfall_id = "eadb3a01-f610-4df1-972b-7dd8c8bccdb7"
+
+[[token.source_card_refs]]
+card_name = "Grizzly Fate"
+scryfall_oracle_id = "f3073e4f-ca7e-4fde-88a4-bd7b6ebfbc8c"
+scryfall_id = "75d22bb3-824e-4699-8352-42392af307d1"
+
+[token.token_image_ref]
+scryfall_id = "31661af9-a40a-418c-82e3-b74aa14cc7c4"
+scryfall_oracle_id = "a62a374d-ccdd-418d-9bcd-5ca8bf9b05e8"
+preset_id = "76b41f36-3ec5-59c4-ae11-8f87dd4f0411"
+
+[[token]]
 id = "76ce65a3-028f-555a-8294-afe5c9e769e2"
 category = "Creature"
 fidelity = "Full"
@@ -111994,7 +112620,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -112640,7 +113265,7 @@ released_at = "2026-08-14"
 type_line = "Token Creature — Goblin Army"
 
 [token.body]
-display_name = "Goblin Army Token"
+display_name = "Goblin Army"
 power = 0
 toughness = 0
 core_types = ["Creature"]
@@ -112998,7 +113623,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -138939,7 +139563,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -140275,7 +140898,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -153990,7 +154612,6 @@ source_card_names = [
     "Arlinn, the Pack's Hope",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -156187,7 +156808,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -156570,7 +157190,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -157015,7 +157634,6 @@ source_card_names = [
     "Ravenform",
     "Riku of Many Paths",
     "The Raven's Warning",
-    "Wolf",
 ]
 set_code = "KHM"
 set_name = "Kaldheim"
@@ -169543,6 +170161,114 @@ scryfall_oracle_id = "bd45764a-b4e9-4975-996d-944c7eb30c0f"
 preset_id = "c39bbf40-9bf9-5400-8be3-0fb961f0a643"
 
 [[token]]
+id = "c3a0f2b3-5555-54bd-b968-64b11c4af64b"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Aragorn, the Uniter",
+    "Bastion of Remembrance",
+    "Call the Coppercoats",
+    "Commanding Presence",
+    "Cosmogrand Zenith",
+    "Daysquad Marshal",
+    "Denethor, Ruling Steward",
+    "Dinosaur",
+    "Elspeth, Sun's Nemesis",
+    "Faramir, Field Commander",
+    "Faramir, Prince of Ithilien",
+    "Faramir, Steward of Gondor",
+    "Forbidden Friendship",
+    "Garrison Cat",
+    "General's Enforcer",
+    "Hero of the Nyxborn",
+    "Honored Knight-Captain",
+    "Horn of Gondor",
+    "Jirina Kudro",
+    "Knight Luminary",
+    "Lossarnach Captain",
+    "Nightsquad Commando",
+    "Oath of Eorl",
+    "Omen of the Sun",
+    "Prince Imrahil the Fair",
+    "Protector of Gondor",
+    "Quarrel's End",
+    "Rally at the Hornburg",
+    "Rayblade Trooper",
+    "Reverent Hoplite",
+    "Riders of the Mark",
+    "Sigarda, Heron's Grace",
+    "Siona, Captain of the Pyleas",
+    "Strength of Arms",
+    "The First Iroan Games",
+    "Thraben Standard Bearer",
+    "Trynn, Champion of Freedom",
+    "Ulvenwald Mysteries",
+    "Valiant Rescuer",
+    "Vault 101: Birthday Party",
+    "Vault 11: Voter's Dilemma",
+    "White Glove Gourmand",
+    "Éomer of the Riddermark",
+]
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "2"
+released_at = "2026-08-14"
+type_line = "Token Creature — Human Soldier"
+
+[token.body]
+display_name = "Human Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Soldier",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Omen of the Sun"
+scryfall_oracle_id = "08740dda-0629-4b6f-bbcc-c8088105b5e7"
+scryfall_id = "b3733812-32e5-407d-82f0-089983777e09"
+
+[[token.source_card_refs]]
+card_name = "Bastion of Remembrance"
+scryfall_oracle_id = "c7f33cea-2ec8-4081-9208-a5b1d86721b3"
+scryfall_id = "6fe6ccad-e303-48f9-9dfa-0db7c1878031"
+
+[[token.source_card_refs]]
+card_name = "Thraben Standard Bearer"
+scryfall_oracle_id = "679d5a1d-8da8-4142-924b-97b359f55309"
+scryfall_id = "12d4c34b-7ab7-4022-a43b-7c7e73a56864"
+
+[[token.source_card_refs]]
+card_name = "Reverent Hoplite"
+scryfall_oracle_id = "8cb6dbb5-9ea2-4c19-8173-148080fb898e"
+scryfall_id = "b4836c47-ba54-46a5-a186-92c1efbda4f8"
+
+[[token.source_card_refs]]
+card_name = "Ulvenwald Mysteries"
+scryfall_oracle_id = "6588ea9a-658f-40d9-a64b-3a418ab81183"
+scryfall_id = "460c1bc0-e420-4c38-9460-cd4ee13d5396"
+
+[[token.source_card_refs]]
+card_name = "General's Enforcer"
+scryfall_oracle_id = "8e953251-aa5c-4aa3-8e69-1ff1f609f3ff"
+scryfall_id = "3fa2050a-711f-4c6e-8b01-5353bd2a4234"
+
+[[token.source_card_refs]]
+card_name = "Bastion of Remembrance"
+scryfall_oracle_id = "c7f33cea-2ec8-4081-9208-a5b1d86721b3"
+scryfall_id = "7ad20d37-575d-490e-bf04-91323a35e89d"
+
+[token.token_image_ref]
+scryfall_id = "6007af81-4541-4b55-90ea-03d365362ae5"
+scryfall_oracle_id = "a4095286-d51b-4527-b6ce-23aa539fc23a"
+preset_id = "c3a0f2b3-5555-54bd-b968-64b11c4af64b"
+
+[[token]]
 id = "c3d66281-ae22-519a-a8f5-52ffd695fc8b"
 category = "Creature"
 fidelity = "Full"
@@ -169838,7 +170564,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -170701,6 +171426,31 @@ scryfall_id = "6445b690-71ce-4371-ae9c-bac0e70dda81"
 scryfall_id = "f8845523-62d5-451c-aa20-780c64bb44b3"
 scryfall_oracle_id = "84c0752e-4def-4a72-b6a4-54ee16ad18fa"
 preset_id = "c4d111a1-ea24-5c7c-b7cc-e0b542aa92cc"
+
+[[token]]
+id = "c4d3d6e7-c30e-528d-9585-019a539d575f"
+category = "Creature"
+fidelity = "Full"
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "8"
+released_at = "2026-08-14"
+type_line = "Token Creature — Elf"
+
+[token.body]
+display_name = "Elf"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elf"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "761c7c31-c6c5-44e2-a845-f590542b6eda"
+scryfall_oracle_id = "998df8c1-ef16-4ae2-b34b-125f1c16223b"
+preset_id = "c4d3d6e7-c30e-528d-9585-019a539d575f"
 
 [[token]]
 id = "c4e2d5df-1fae-57ae-846d-64a97ab38011"
@@ -180232,7 +180982,6 @@ source_card_names = [
     "Ravenform",
     "Riku of Many Paths",
     "The Raven's Warning",
-    "Wolf",
 ]
 set_code = "LCC"
 set_name = "The Lost Caverns of Ixalan Commander"
@@ -180615,7 +181364,6 @@ source_card_names = [
     "Arlinn, the Pack's Hope",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
@@ -184497,7 +185245,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -184795,7 +185542,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -185306,7 +186052,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -188217,7 +188962,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -188557,7 +189301,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -192476,7 +193219,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -196742,6 +197484,7 @@ source_card_names = [
     "Tireless Provisioner",
     "Tivit, Seller of Secrets",
     "Tokka & Rahzar, Unsupervised",
+    "Treasure",
     "Treasure Chest",
     "Treasure Dredger",
     "Treasure Map // Treasure Cove",
@@ -196792,16 +197535,6 @@ subtypes = ["Treasure"]
 supertypes = []
 colors = []
 keywords = []
-
-[[token.source_card_refs]]
-card_name = "Pitiless Plunderer"
-scryfall_oracle_id = "a784481f-eccb-4112-bb38-04a659319660"
-scryfall_id = "6a4b4679-6ca9-49e1-a7ee-2b7a30e3e06c"
-
-[[token.source_card_refs]]
-card_name = "Hullbreacher"
-scryfall_oracle_id = "2f533667-e29b-4bec-897a-e7a9eee08314"
-scryfall_id = "c2a0530f-7b72-4a33-8eec-bcd75d9c3045"
 
 [token.token_image_ref]
 scryfall_id = "c6e096bb-ad9e-4a8b-8b42-26852fa32c1d"
@@ -206994,7 +207727,7 @@ released_at = "2026-08-14"
 type_line = "Token Creature — Dwarf"
 
 [token.body]
-display_name = "Dwarf Token"
+display_name = "Dwarf"
 power = 2
 toughness = 2
 core_types = ["Creature"]
@@ -210389,34 +211122,9 @@ scryfall_oracle_id = "792da586-a687-428c-a10e-75431249df5b"
 scryfall_id = "c08c7bf9-a2ed-45c6-8b48-15122d9d9e37"
 
 [[token.source_card_refs]]
-card_name = "Omen of the Sun"
-scryfall_oracle_id = "08740dda-0629-4b6f-bbcc-c8088105b5e7"
-scryfall_id = "b3733812-32e5-407d-82f0-089983777e09"
-
-[[token.source_card_refs]]
-card_name = "Bastion of Remembrance"
-scryfall_oracle_id = "c7f33cea-2ec8-4081-9208-a5b1d86721b3"
-scryfall_id = "6fe6ccad-e303-48f9-9dfa-0db7c1878031"
-
-[[token.source_card_refs]]
 card_name = "Honored Knight-Captain"
 scryfall_oracle_id = "69741d3b-1259-43f5-897f-6f4c3ca0844b"
 scryfall_id = "05a6ab03-f0b9-4738-a5f9-5d95bb22de75"
-
-[[token.source_card_refs]]
-card_name = "Thraben Standard Bearer"
-scryfall_oracle_id = "679d5a1d-8da8-4142-924b-97b359f55309"
-scryfall_id = "12d4c34b-7ab7-4022-a43b-7c7e73a56864"
-
-[[token.source_card_refs]]
-card_name = "Reverent Hoplite"
-scryfall_oracle_id = "8cb6dbb5-9ea2-4c19-8173-148080fb898e"
-scryfall_id = "b4836c47-ba54-46a5-a186-92c1efbda4f8"
-
-[[token.source_card_refs]]
-card_name = "Ulvenwald Mysteries"
-scryfall_oracle_id = "6588ea9a-658f-40d9-a64b-3a418ab81183"
-scryfall_id = "460c1bc0-e420-4c38-9460-cd4ee13d5396"
 
 [[token.source_card_refs]]
 card_name = "Knight Luminary"
@@ -210432,16 +211140,6 @@ scryfall_id = "d68d891d-333f-46c9-b5a3-3b1d4d3e4563"
 card_name = "Cosmogrand Zenith"
 scryfall_oracle_id = "e2cd65f6-7cbc-497c-bdc9-698ff17da31e"
 scryfall_id = "b3c1e5e3-4e6b-456a-958c-7a75c38f8183"
-
-[[token.source_card_refs]]
-card_name = "General's Enforcer"
-scryfall_oracle_id = "8e953251-aa5c-4aa3-8e69-1ff1f609f3ff"
-scryfall_id = "3fa2050a-711f-4c6e-8b01-5353bd2a4234"
-
-[[token.source_card_refs]]
-card_name = "Bastion of Remembrance"
-scryfall_oracle_id = "c7f33cea-2ec8-4081-9208-a5b1d86721b3"
-scryfall_id = "7ad20d37-575d-490e-bf04-91323a35e89d"
 
 [token.token_image_ref]
 scryfall_id = "631c2c16-132d-4607-ab7e-207a6af188e5"
@@ -220740,7 +221438,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
@@ -224531,7 +225228,6 @@ source_card_names = [
     "Arlinn, Voice of the Pack",
     "Arlinn, the Pack's Hope // Arlinn, the Moon's Fury",
     "Bestial Menace",
-    "Bird",
     "Child of the Pack // Savage Packmate",
     "Cult of the Waxing Moon",
     "Elturgard Ranger",
